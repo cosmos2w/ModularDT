@@ -18,18 +18,10 @@ import random
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
-from tqdm.auto import tqdm
-
-from channelthermal.data.datasets import (
-    GlobalModuleAlignmentDataset,
-    H5Normalizer,
-    LocalModuleDataset,
-    fit_local_normalizer,
-)
+from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import (
     autocast_context,
     count_parameters,
@@ -45,7 +37,16 @@ from honf_runtime.compat import (
     strip_module_prefix,
     write_json,
 )
-from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_runtime.run_layout import RunLayout
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from tqdm.auto import tqdm
+
+from channelthermal.data.datasets import (
+    GlobalModuleAlignmentDataset,
+    H5Normalizer,
+    LocalModuleDataset,
+    fit_local_normalizer,
+)
 from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
 
 
@@ -478,8 +479,9 @@ def save_local_loss_curve(
     output_path: Path,
     *,
     include_smoothness: bool = False,
+    validation_label: str = "Validation",
 ) -> None:
-    """Plot the primary Stage-A losses without crowding the figure.
+    """Plot training and held-out losses in separate, clearly named panels.
 
     Smoothness is a small auxiliary regularizer and remains in loss_history.csv
     for diagnostics, but it is omitted from the figure unless explicitly
@@ -502,31 +504,35 @@ def save_local_loss_curve(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    keys = [
-        "loss_total",
-        "val_loss_total",
-        "loss_internal",
-        "val_loss_internal",
-        "loss_interface",
-        "val_loss_interface",
+    panels = [
+        ("Total loss\nWeighted sum of configured terms", "loss_total", "val_loss_total"),
+        ("Internal temperature loss\nSquared temperature prediction error", "loss_internal", "val_loss_internal"),
+        ("Module boundary loss\nSquared interface prediction error", "loss_interface", "val_loss_interface"),
     ]
     if include_smoothness:
-        keys.extend(["loss_smoothness", "val_loss_smoothness"])
+        panels.append(("Boundary smoothness loss\nPenalty on neighboring-point differences", "loss_smoothness", "val_loss_smoothness"))
 
-    fig, ax = plt.subplots(figsize=(7.0, 4.0), constrained_layout=True)
-    for key in keys:
-        if key not in names:
-            continue
-        values = np.asarray(rows[key], dtype=float)
-        if np.any(np.isfinite(values)):
-            ax.plot(rows["epoch"], values, label=key)
-    ax.set_yscale("log")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("loss")
-    ax.set_title("Local Module Surrogate Loss")
-    ax.grid(True, alpha=0.25)
-    ax.legend(fontsize=8)
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.8 * len(panels), 4.2), constrained_layout=True)
+    for ax, (title, train_key, validation_key) in zip(np.atleast_1d(axes), panels):
+        for key, label, color, linestyle in (
+            (train_key, "Train", "#4477AA", "-"),
+            (validation_key, validation_label, "#EE7733", "--"),
+        ):
+            if key not in names:
+                continue
+            values = np.asarray(rows[key], dtype=float)
+            if np.any(np.isfinite(values)):
+                ax.plot(rows["epoch"], values, label=label, color=color, linestyle=linestyle, linewidth=1.8)
+        ax.set_yscale("log")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Objective value (log scale)")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.25)
+        if ax.lines:
+            ax.legend(fontsize=8)
+    fig.suptitle("ThermalChannel Local Surrogate: Training and Held-Out History", fontsize=12)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(output_path.with_suffix(".pdf")))
     fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
@@ -653,7 +659,11 @@ def run_from_config(
     cfg["Run_ID"] = run_id
     resume_checkpoint = resolve_demo_path(resume_value) if resume_value else None
     if resume_checkpoint is not None:
-        run_dir = ensure_dir(resume_checkpoint.parent)
+        run_dir = ensure_dir(
+            resume_checkpoint.parent.parent
+            if resume_checkpoint.parent.name == "checkpoints"
+            else resume_checkpoint.parent
+        )
         if run_dir_override is not None and Path(run_dir_override).resolve() != run_dir:
             raise ValueError("Resume checkpoint and requested run directory do not match.")
     elif run_dir_override is not None:
@@ -662,8 +672,10 @@ def run_from_config(
         run_suffix = sanitize_run_suffix(args.run_name or training_cfg.get("run_name"))
         run_name = f"Run_{run_id}_{run_suffix}_{current_timestamp()}" if run_suffix else f"Run_{run_id}_{current_timestamp()}"
         run_dir = ensure_dir(saved_root / run_name)
-    write_json(run_dir / "resolved_train_config.json", cfg)
-    history_path = run_dir / "loss_history.csv"
+    layout = RunLayout(run_dir)
+    layout.ensure()
+    write_json(layout.write_path("configs/resolved_train_config.json"), cfg)
+    history_path = layout.write_path("metrics/loss_history.csv")
     history_fields = [
         "epoch",
         "loss_total",
@@ -680,11 +692,9 @@ def run_from_config(
     else:
         with history_path.open("w", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=history_fields).writeheader()
-    loss_plot_path = (
-        run_dir / "plots" / "training" / "loss_curve.png"
-        if (run_dir / "run_manifest.json").is_file()
-        else run_dir / "loss_curve.png"
-    )
+    loss_plot_path = layout.read_path("plots/training/loss_curve.png")
+    if not loss_plot_path.is_file():
+        loss_plot_path = layout.write_path("plots/training/loss_curve.png")
     loss_plot_path.parent.mkdir(parents=True, exist_ok=True)
 
     best_metric = math.inf
@@ -757,7 +767,7 @@ def run_from_config(
         if math.isfinite(metric) and metric < best_metric:
             best_metric = metric
             save_checkpoint(
-                run_dir / "best_model.pt",
+                layout.write_path("best_model.pt"),
                 model=model,
                 model_config=model_config,
                 train_config=cfg,
@@ -769,7 +779,7 @@ def run_from_config(
             )
             print("Improved! Saving best model.")
         save_checkpoint(
-            run_dir / "latest_model.pt",
+            layout.write_path("latest_model.pt"),
             model=model,
             model_config=model_config,
             train_config=cfg,
@@ -785,6 +795,11 @@ def run_from_config(
                 history_path,
                 loss_plot_path,
                 include_smoothness=bool(loss_cfg.get("plot_smoothness_loss", False)),
+                validation_label=(
+                    "Validation (source test split)"
+                    if str(dataset_cfg.get("val_split", "test")).lower() == "test"
+                    else "Validation (source validation split)"
+                ),
             )
         print(
             f"[epoch {epoch:04d}] loss={row['loss_total']:.4e} "
@@ -793,7 +808,7 @@ def run_from_config(
         )
 
     write_json(
-        run_dir / "summary.json",
+        layout.write_path("metrics/summary.json"),
         {
             "stage": "channelthermal_local_module",
             "run_dir": str(run_dir),

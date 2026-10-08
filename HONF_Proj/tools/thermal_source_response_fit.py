@@ -24,11 +24,27 @@ import numpy as np
 import torch
 from channelthermal.data.collation import ChannelThermalBatchCollator
 from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
-from channelthermal.data.development_split import development_case_ids, resolve_development_manifest
-from channelthermal.source_response import SOURCE_RESPONSE_CAPABILITY, SOURCE_RESPONSE_ID, ThermalSourceResponse
-from channelthermal.source_response_residual import DiscreteThermalBalance, module_grid_ids
-from channelthermal.training.checkpoints import _file_sha256, atomic_save_checkpoint_payload
+from channelthermal.data.development_split import (
+    development_case_ids,
+    resolve_development_manifest,
+)
+from channelthermal.source_response import (
+    SOURCE_RESPONSE_CAPABILITY,
+    SOURCE_RESPONSE_ID,
+    ThermalSourceResponse,
+)
+from channelthermal.source_response_residual import (
+    DiscreteThermalBalance,
+    module_grid_ids,
+)
+from channelthermal.training.checkpoints import (
+    _file_sha256,
+    atomic_save_checkpoint_payload,
+)
 from channelthermal.training.stop_request import acknowledge_stop, stop_requested
+from honf_runtime.compat import load_trusted_checkpoint, recursive_to_device, set_seed
+from honf_runtime.run_layout import RunLayout
+from honf_runtime.run_store import atomic_write_json
 from thermal_development import validate_generated_output
 from thermal_formal_profile import (
     FORMAL_TRAIN_SCOPE,
@@ -42,9 +58,6 @@ from thermal_formal_profile import (
     validate_formal_bindings,
     validate_formal_milestones,
 )
-
-from honf_runtime.compat import load_trusted_checkpoint, recursive_to_device, set_seed
-from honf_runtime.run_store import atomic_write_json
 
 TRAIN_FAMILIES = ("0001", "0318", "0333", "0348")
 MANIFEST_FINGERPRINT = "933b0138ba2f8447a1ecadfe31fd0bb2cb4a05607d3ac3d9f0dc79419f196044"
@@ -532,6 +545,7 @@ def run_formal(args, start, started):
     if args.mode not in (None, "direct"):
         raise ValueError("The maintained full-TRAIN recipe permits R-direct only.")
     output = initialize_formal_output(validate_generated_output(args.output), prepare_only=args.prepare_only)
+    layout = RunLayout(output)
     parent_path = Path(args.parent).resolve()
     flow_path = Path(args.flow_checkpoint).resolve()
     parent = load_trusted_checkpoint(parent_path, map_location="cpu")
@@ -663,6 +677,7 @@ def run_formal(args, start, started):
     }
 
     if args.prepare_only:
+        layout.ensure()
         set_seed(int(profile["seed"]))
         model = construct_profiled("direct", profile["architecture"], int(profile["seed"]))
         calibration = calibrate({"direct": model}, cases, families, stats, balances, use_operator, budget,
@@ -672,12 +687,12 @@ def run_formal(args, start, started):
         recipe["adapter_config"] = model.adapter_config()
         recipe["parameters"] = sum(parameter.numel() for parameter in model.parameters())
         recipe["calibration_case_ids"] = calibration["calibration_case_ids"]
-        atomic_write_json(output / "formal_recipe.json", recipe)
+        atomic_write_json(layout.write_path("formal_recipe.json"), recipe)
         optimizer = torch.optim.AdamW(model.parameters(), lr=schedule["initial_lr"],
             weight_decay=recipe["weight_decay"])
         payload = formal_checkpoint_payload(model, optimizer, flow, train_config, recipe, 0, float("inf"), [], 0.)
-        atomic_save_checkpoint_payload(output / "latest_model.pt", payload)
-        atomic_write_json(output / "formal_profile_binding.json", {"profile": profile_value,
+        atomic_save_checkpoint_payload(layout.write_path("latest_model.pt"), payload)
+        atomic_write_json(layout.write_path("formal_profile_binding.json"), {"profile": profile_value,
             "dataset_binding": flow_dataset_binding, "normalization_binding": normalization_binding,
             "normalization_stats_sha256": stats_sha256(stats), "case_count": len(cases),
             "validation_case_ids": recipe["validation_case_ids"],
@@ -704,6 +719,7 @@ def run_formal(args, start, started):
     if saved.get("fit_identity") != {"recipe": recipe, "mode": "direct"}:
         raise ValueError("Strict formal same-arm resume rejects changed profile, data, flow, or schedule identity.")
     ensure_formal_resume_identity(output, "formal_recipe.json", recipe)
+    layout.ensure()
     begin, best, history = int(saved["epoch"]), saved["best_metric"], list(saved["history"])
     stop_after = int(args.stop_after if args.stop_after is not None else
         (profile["data"]["startup_validation"]["maximum_new_epochs"] if args.startup_benchmark else recipe["horizon"]))
@@ -734,7 +750,7 @@ def run_formal(args, start, started):
         "validation_scope": validation_scope, "startup_benchmark": bool(args.startup_benchmark),
         "case_visits": 0, "optimizer_updates": 0, "training_seconds": 0.,
         "validation_seconds": 0., "save_seconds": 0.}
-    atomic_write_json(output / "active_process.json", receipt)
+    atomic_write_json(layout.write_path("active_process.json"), receipt)
     calibration = recipe["calibration"]
     train_count = len(cases)
     effective_cases = int(budget["effective_cases"])
@@ -847,28 +863,28 @@ def run_formal(args, start, started):
                 row["compatibility_five_field_standardized_mse"] = compatibility_summary["standardized_five_field_mse"]
                 row["compatibility_physical_rmse_by_channel"] = compatibility_summary["physical_rmse_by_channel"]
             save_start = perf_counter()
-            atomic_write_json(output / f"validation_epoch_{epoch:04d}.json",
+            atomic_write_json(layout.write_path(f"validation_epoch_{epoch:04d}.json"),
                 {"primary": primary_summary, "compatibility": compatibility_summary,
                  "rows": validation_rows, "flow_component_age": int(flow["epoch"]),
                  "normalization_stats_sha256": stats_sha256(stats)})
         history.append(row)
         save_seconds = 0.
         if epoch == 10 and not review:
-            plot_history(history, output / "thermal_learning.pdf")
+            plot_history(history, layout.write_path("thermal_learning.pdf"))
         if review:
             improved = score < best and epoch % int(profile["checkpointing"]["monitoring_interval_epochs"]) == 0
             if epoch % int(profile["checkpointing"]["monitoring_interval_epochs"]) == 0:
                 best = min(best, score)
             payload = formal_checkpoint_payload(model, optimizer, flow, train_config, recipe, epoch, best, history,
                 saved.get("aggregate_process_seconds", 0.) + perf_counter() - start)
-            atomic_save_checkpoint_payload(output / "latest_model.pt", payload)
+            atomic_save_checkpoint_payload(layout.write_path("latest_model.pt"), payload)
             milestone_epochs = {int(value) for value in profile["checkpointing"]["milestone_epochs"]}
             if epoch in milestone_epochs:
-                atomic_save_checkpoint_payload(output / f"epoch_{epoch:04d}_model.pt", payload)
+                atomic_save_checkpoint_payload(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
             if improved and bool(profile["checkpointing"]["save_best_field"]):
-                atomic_save_checkpoint_payload(output / "best_by_field_mse_model.pt", payload)
-            atomic_write_json(output / "history.json", history)
-            plot_history(history, output / "thermal_learning.pdf")
+                atomic_save_checkpoint_payload(layout.write_path("best_by_field_mse_model.pt"), payload)
+            atomic_write_json(layout.write_path("history.json"), history)
+            plot_history(history, layout.write_path("thermal_learning.pdf"))
             save_seconds = perf_counter() - save_start
             row["save_seconds"] = save_seconds
             history[-1]["save_seconds"] = save_seconds
@@ -881,20 +897,20 @@ def run_formal(args, start, started):
         receipt["save_seconds"] += save_seconds
         receipt["completed_epoch"] = epoch
         receipt["peak_allocated_memory_bytes"] = max(int(receipt.get("peak_allocated_memory_bytes", 0)), peak_memory)
-        atomic_write_json(output / "history.json", history)
-        atomic_write_json(output / "active_process.json", receipt)
+        atomic_write_json(layout.write_path("history.json"), history)
+        atomic_write_json(layout.write_path("active_process.json"), receipt)
         print(json.dumps(row, sort_keys=True), flush=True)
         if requested_stop:
             acknowledge_stop(output, epoch=epoch)
             break
     receipt.update(status="stopped_resumable" if requested_stop else "completed", ended_unix=time(),
         process_seconds=perf_counter() - start)
-    atomic_write_json(output / "active_process.json", receipt)
-    sessions_path = output / "resource_sessions.json"
+    atomic_write_json(layout.write_path("active_process.json"), receipt)
+    sessions_path = layout.read_path("resource_sessions.json")
     sessions = json.loads(sessions_path.read_text()) if sessions_path.exists() else []
     sessions.append(receipt)
-    atomic_write_json(sessions_path, sessions)
-    atomic_write_json(output / "fit_summary.json", {**receipt,
+    atomic_write_json(layout.write_path("resource_sessions.json"), sessions)
+    atomic_write_json(layout.write_path("fit_summary.json"), {**receipt,
         "best_metric": best, "new_case_visits": receipt["case_visits"],
         "new_optimizer_updates": receipt["optimizer_updates"],
         "new_primary_fluid_queries": sum(int(row["fluid_reconstruction_queries"]) for row in history if row["epoch"] > begin),
@@ -935,6 +951,8 @@ def main(argv=None):
     if args.stop_after is None:
         args.stop_after = 100
     output = validate_generated_output(args.output); output.mkdir(parents=True, exist_ok=True)
+    layout = RunLayout(output)
+    layout.ensure()
     parent_path, flow_path = Path(args.parent).resolve(), Path(args.flow_checkpoint).resolve()
     parent = load_trusted_checkpoint(parent_path, map_location="cpu")
     flow = load_trusted_checkpoint(flow_path, map_location="cpu")
@@ -975,12 +993,14 @@ def main(argv=None):
             "parameters": {mode: sum(p.numel() for p in models[mode].parameters()) for mode in models},
             "common_initial_tensors_exact_equal": equal, "operator_rows_training_only": True,
             "new_solver_attempts": 0, "prepare_seconds": perf_counter() - start}
-        atomic_write_json(output / "paired_recipe.json", recipe)
+        atomic_write_json(layout.write_path("paired_recipe.json"), recipe)
         for mode, model in models.items():
             arm = output / f"R-{mode}"; arm.mkdir(exist_ok=True)
             optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
             payload = checkpoint_payload(model, optimizer, parent, recipe, mode, 0, float("inf"), [], 0.)
-            atomic_save_checkpoint_payload(arm / "latest_model.pt", payload)
+            arm_layout = RunLayout(arm)
+            arm_layout.ensure()
+            atomic_save_checkpoint_payload(arm_layout.write_path("latest_model.pt"), payload)
         print(json.dumps(recipe), flush=True)
         return 0
     if args.mode is None or args.recipe is None or args.resume is None:
@@ -1005,7 +1025,7 @@ def main(argv=None):
         raise ValueError("Declared stop must follow saved age and remain within sealed horizon.")
     receipt = {"pid": os.getpid(), "started_unix": started, "device": str(device),
         "CUDA_VISIBLE_DEVICES": os.getenv("CUDA_VISIBLE_DEVICES"), "begin_epoch": begin, "status": "running"}
-    atomic_write_json(output / "active_process.json", receipt)
+    atomic_write_json(layout.write_path("active_process.json"), receipt)
     calibration = recipe["calibration"]
     for epoch in range(begin + 1, args.stop_after + 1):
         epoch_start = perf_counter()
@@ -1063,10 +1083,10 @@ def main(argv=None):
             model.eval(); validation_start = perf_counter()
             score, rows = validate(model, validation, parent["global_normalization_stats"], device)
             row.update(validation_thermal_selector=score, validation_seconds=perf_counter() - validation_start)
-            atomic_write_json(output / f"validation_epoch_{epoch:04d}.json", {"score": score, "rows": rows})
+            atomic_write_json(layout.write_path(f"validation_epoch_{epoch:04d}.json"), {"score": score, "rows": rows})
         history.append(row); print(json.dumps(row), flush=True)
         if epoch == 10:
-            atomic_write_json(output / "first10_forecast.json", {"epochs": 10,
+            atomic_write_json(layout.write_path("first10_forecast.json"), {"epochs": 10,
                 "complete_training_seconds": sum(r["train_seconds"] for r in history if r["epoch"] <= 10),
                 "mean_complete_epoch_seconds": float(np.mean([r["train_seconds"] for r in history if r["epoch"] <= 10])),
                 "projected2500_training_seconds": 2500 * float(np.mean([r["train_seconds"] for r in history if r["epoch"] <= 10])),
@@ -1077,20 +1097,20 @@ def main(argv=None):
             best = min(best, score) if epoch % 100 == 0 else best
             payload = checkpoint_payload(model, optimizer, parent, recipe, args.mode, epoch, best, history,
                 saved["aggregate_process_seconds"] + perf_counter() - start)
-            atomic_save_checkpoint_payload(output / "latest_model.pt", payload)
-            if epoch % 100 == 0: atomic_save_checkpoint_payload(output / f"epoch_{epoch:04d}_model.pt", payload)
-            if improved: atomic_save_checkpoint_payload(output / "best_by_field_mse_model.pt", payload)
-            atomic_write_json(output / "history.json", history)
-            plot_history(history, output / "thermal_learning.pdf")
+            atomic_save_checkpoint_payload(layout.write_path("latest_model.pt"), payload)
+            if epoch % 100 == 0: atomic_save_checkpoint_payload(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
+            if improved: atomic_save_checkpoint_payload(layout.write_path("best_by_field_mse_model.pt"), payload)
+            atomic_write_json(layout.write_path("history.json"), history)
+            plot_history(history, layout.write_path("thermal_learning.pdf"))
         if requested_stop:
             acknowledge_stop(output, epoch=epoch); break
     receipt.update(status="completed" if not requested_stop else "stopped_resumable", ended_unix=time(),
         process_seconds=perf_counter() - start, completed_epoch=epoch)
-    atomic_write_json(output / "active_process.json", receipt)
-    sessions_path = output / "resource_sessions.json"
+    atomic_write_json(layout.write_path("active_process.json"), receipt)
+    sessions_path = layout.read_path("resource_sessions.json")
     sessions = json.loads(sessions_path.read_text()) if sessions_path.exists() else []
-    sessions.append(receipt); atomic_write_json(sessions_path, sessions)
-    atomic_write_json(output / "fit_summary.json", {**receipt, "best_metric": best,
+    sessions.append(receipt); atomic_write_json(layout.write_path("resource_sessions.json"), sessions)
+    atomic_write_json(layout.write_path("fit_summary.json"), {**receipt, "best_metric": best,
         "new_case_visits": (epoch - begin) * 150, "new_optimizer_updates": (epoch - begin) * 4,
         "new_primary_fluid_queries": (epoch - begin) * 153600})
     return 0

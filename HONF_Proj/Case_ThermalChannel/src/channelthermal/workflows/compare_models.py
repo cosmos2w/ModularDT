@@ -26,13 +26,28 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_runtime.compat import (
+    current_timestamp,
+    load_trusted_checkpoint,
+    resolve_demo_path,
+    select_device,
+    write_json,
+)
+from honf_runtime.run_layout import resolve_checkpoint
 from matplotlib.patches import Circle, Rectangle
 from tqdm.auto import tqdm
 
-from channelthermal.data.datasets import CHANNEL_ORDER, GlobalChannelThermalDataset, H5Normalizer
-from channelthermal.evaluation_tools.plots import error_metrics, module_and_fluid_masks, module_radius_from_sample
-from honf_runtime.compat import current_timestamp, load_trusted_checkpoint, resolve_demo_path, select_device, write_json
-from honf_runtime.checkpoints import validate_checkpoint_identity
+from channelthermal.data.datasets import (
+    CHANNEL_ORDER,
+    GlobalChannelThermalDataset,
+    H5Normalizer,
+)
+from channelthermal.evaluation_tools.plots import (
+    error_metrics,
+    module_and_fluid_masks,
+    module_radius_from_sample,
+)
 from channelthermal.workflows.evaluate_forward import (
     checkpoint_file_name,
     denormalize_predictions,
@@ -42,7 +57,6 @@ from channelthermal.workflows.evaluate_forward import (
     load_model,
     predict_case,
 )
-
 
 EPS = 1.0e-12
 PALETTE = [
@@ -152,15 +166,20 @@ def resolve_model_specs(args: argparse.Namespace) -> List[Dict[str, Any]]:
     specs: List[Dict[str, Any]] = []
     for run_id in args.run_ids:
         run_dir = latest_run_dir(saved_root, run_id)
-        checkpoint_path = (run_dir / checkpoint_file_name(args.checkpoint_selector)).resolve()
+        checkpoint_path = resolve_checkpoint(run_dir, checkpoint_file_name(args.checkpoint_selector))
         if not checkpoint_path.exists() and args.checkpoint_selector == "best_predicted" and args.allow_checkpoint_fallback:
-            fallback = (run_dir / "best_model.pt").resolve()
+            fallback = resolve_checkpoint(run_dir, "best_model.pt")
             print(f"[warning] {checkpoint_path.name} not found; falling back to {fallback.name}.")
             checkpoint_path = fallback
         specs.append({"source": f"Run_ID:{run_id}", "run_id": str(run_id), "run_dir": run_dir, "checkpoint_path": checkpoint_path})
     for raw_path in args.checkpoint_path:
         checkpoint_path = resolve_demo_path(raw_path)
-        specs.append({"source": f"path:{raw_path}", "run_id": "", "run_dir": checkpoint_path.parent, "checkpoint_path": checkpoint_path})
+        checkpoint_run_dir = (
+            checkpoint_path.parent.parent
+            if checkpoint_path.parent.name == "checkpoints"
+            else checkpoint_path.parent
+        )
+        specs.append({"source": f"path:{raw_path}", "run_id": "", "run_dir": checkpoint_run_dir, "checkpoint_path": checkpoint_path})
     if not specs:
         raise ValueError("Provide at least one --Run_ID or --checkpoint-path.")
     if len(args.label) > len(specs):
@@ -208,7 +227,7 @@ def fallback_checkpoint_candidates(spec: Dict[str, Any]) -> List[Path]:
     ]
     candidates: List[Path] = []
     for name in names:
-        path = (run_dir / name).resolve()
+        path = resolve_checkpoint(run_dir, name)
         if path.exists() and path not in candidates:
             candidates.append(path)
     return candidates

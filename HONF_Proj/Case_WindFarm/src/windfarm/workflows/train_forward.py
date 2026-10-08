@@ -6,6 +6,7 @@ import copy
 import csv
 import json
 import math
+import os
 import random
 import time
 from collections.abc import Mapping
@@ -14,11 +15,15 @@ from typing import Any
 
 import numpy as np
 import torch
-from honf_forward_core.interface_fields.checkpoint_warm_start import warm_start_three_term_full_access
+from torch.utils.data import DataLoader
+
+from honf_forward_core.interface_fields.checkpoint_warm_start import (
+    warm_start_three_term_full_access,
+)
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import load_trusted_checkpoint, select_device, set_seed
 from honf_runtime.paths import resolve_path
-from torch.utils.data import DataLoader
+from honf_runtime.run_layout import RunLayout
 
 from ..data import (
     COMPACT_GEOMETRY_KEYS,
@@ -378,6 +383,35 @@ def _save_checkpoint(
     temporary.replace(path)
 
 
+def _atomic_checkpoint_alias(alias_path: Path, checkpoint_path: Path) -> None:
+    """Atomically point a compatibility filename at its canonical checkpoint."""
+
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = alias_path.with_name(f".{alias_path.name}.{os.getpid()}.tmp")
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(os.path.relpath(checkpoint_path, alias_path.parent))
+    temporary.replace(alias_path)
+
+
+def _save_best_checkpoint(layout: RunLayout, **checkpoint_kwargs: Any) -> None:
+    """Save the field-selected checkpoint once, retaining the ``best`` name.
+
+    New canonical runs use a relative symlink for ``best_model.pt`` because
+    WindFarm's total and field selectors share the same selection metric. An
+    unmarked legacy run keeps its two historical root-level checkpoint files.
+    """
+
+    best_path = layout.write_path("best_by_field_mse_model.pt")
+    compatibility_path = layout.write_path("best_model.pt")
+    if layout.canonical_writes:
+        _save_checkpoint(best_path, **checkpoint_kwargs)
+        _atomic_checkpoint_alias(compatibility_path, best_path)
+        return
+
+    _save_checkpoint(compatibility_path, **checkpoint_kwargs)
+    _save_checkpoint(best_path, **checkpoint_kwargs)
+
+
 def _write_history(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
@@ -696,6 +730,8 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
     model.materialize(first_batch)
     run_dir = Path(run_dir_override or cfg.get("paths", {}).get("saved_model_dir", "Trained_Results")).expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    layout = RunLayout(run_dir)
+    layout.ensure()
     if initialize_payload is not None:
         source_wrapper_state = initialize_payload.get("model_state_dict")
         if not isinstance(source_wrapper_state, Mapping) or not source_wrapper_state:
@@ -725,7 +761,7 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
             "target_architecture": model.architecture,
             "target_common_head": "fresh initialization; requires WindFarm refit",
         }
-        _json_write(run_dir / "initialization_inventory.json", initialization_inventory)
+        _json_write(layout.write_path("configs/initialization_inventory.json"), initialization_inventory)
         cfg["initialization"] = {
             "checkpoint_path": str(initialize_path),
             "run_uuid": initialize_source_run_uuid or None,
@@ -744,11 +780,11 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
     )
     epochs = int(getattr(request, "epochs", None) or training_cfg.get("epochs", 500))
     cfg.setdefault("training", {})["epochs"] = epochs
-    _json_write(run_dir / "config_resolved.json", cfg)
+    _json_write(layout.write_path("configs/config_resolved.json"), cfg)
     normalization_sidecar = normalizer.to_dict()
     if profile is not None:
         normalization_sidecar["vertical_profile_baseline"] = profile.to_dict()
-    _json_write(run_dir / "normalization.json", normalization_sidecar)
+    _json_write(layout.write_path("configs/normalization.json"), normalization_sidecar)
     max_train_batches = getattr(request, "max_train_batches", None)
     if max_train_batches is None:
         max_train_batches = training_cfg.get("max_train_batches_per_epoch")
@@ -778,7 +814,11 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
         _restore_rng_state(resume_payload.get("rng_state", {}))
 
     channel_weights = torch.as_tensor(cfg.get("loss", {}).get("channel_weights", [1.0, 1.0, 1.0]), dtype=torch.float32, device=device)
-    history: list[dict[str, Any]] = _read_history(run_dir / "metrics.csv") if resume_payload is not None else []
+    metrics_path = layout.write_path("metrics/metrics.csv")
+    loss_plot_path = layout.read_path("plots/training/loss_history.png")
+    if not loss_plot_path.is_file():
+        loss_plot_path = layout.write_path("plots/training/loss_history.png")
+    history: list[dict[str, Any]] = _read_history(metrics_path) if resume_payload is not None else []
     receiver_chunk_size = int(
         dataset_cfg.get(
             "receiver_chunk_size",
@@ -827,21 +867,8 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
             if metric < best_metric:
                 best_metric = metric
                 best_epoch = epoch
-                _save_checkpoint(
-                    run_dir / "best_model.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    epoch=epoch,
-                    best_metric=best_metric,
-                    best_epoch=best_epoch,
-                    config=cfg,
-                    normalizer=normalizer,
-                    split=split,
-                    profile=profile,
-                    update_count=update_count,
-                )
-                _save_checkpoint(
-                    run_dir / "best_by_field_mse_model.pt",
+                _save_best_checkpoint(
+                    layout,
                     model=model,
                     optimizer=optimizer,
                     epoch=epoch,
@@ -855,7 +882,7 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
                 )
         if epoch % int(cfg.get("checkpointing", {}).get("save_latest_every_epochs", 10)) == 0 or epoch == epochs:
             _save_checkpoint(
-                run_dir / "latest_model.pt",
+                layout.write_path("latest_model.pt"),
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
@@ -872,7 +899,7 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
         }
         if epoch in milestones:
             _save_checkpoint(
-                run_dir / f"epoch_{epoch:04d}_model.pt",
+                layout.write_path(f"epoch_{epoch:04d}_model.pt"),
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
@@ -910,12 +937,12 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
             "batch_wall_seconds": train_metrics["batch_wall_seconds"],
         }
         history.append(row)
-        _write_history(run_dir / "metrics.csv", history)
+        _write_history(metrics_path, history)
         plot_every = int(training_cfg.get("plot_every_epochs", 50))
         if epoch == 1 or (plot_every > 0 and epoch % plot_every == 0) or epoch == epochs:
             render_loss_history(
                 history,
-                run_dir / "plots" / "training" / "loss_history.png",
+                loss_plot_path,
                 title=f"{run_dir.name}: WindFarm loss history through epoch {epoch}",
             )
         print(
@@ -923,7 +950,7 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
             f"val_volume={val_metrics.get('volume_mse', float('nan')):.6g} updates={update_count}"
         )
     _json_write(
-        run_dir / "summary.json",
+        layout.write_path("metrics/summary.json"),
         {
             "best_val_volume_mse": best_metric,
             "best_epoch": best_epoch,

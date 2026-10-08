@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from windfarm.workflows.evaluate_forward import (
+    _default_evaluation_root,
+    _select_evaluation_rows,
+)
 
-from windfarm.workflows.evaluate_forward import _select_evaluation_rows
+
+def test_default_evaluation_root_handles_canonical_and_legacy_checkpoints(tmp_path):
+    for checkpoint in (tmp_path / "latest_model.pt", tmp_path / "checkpoints/latest_model.pt"):
+        assert _default_evaluation_root(checkpoint, "validation") == tmp_path / "evaluations/validation"
 
 
 def test_explicit_evaluation_rows_preserve_requested_order_and_split_membership() -> None:

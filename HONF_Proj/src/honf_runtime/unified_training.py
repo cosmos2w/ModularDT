@@ -16,7 +16,6 @@ import json
 import math
 import os
 import random
-import shutil
 import sys
 import tempfile
 import time
@@ -29,6 +28,10 @@ import numpy as np
 import torch
 from torch import nn
 from tqdm.auto import tqdm
+
+from .paths import PROJECT_ROOT
+from .reproducibility import environment_snapshot, source_state_snapshot
+from .run_layout import RunLayout, resolve_checkpoint
 
 
 def _exclusive_training_run(function):
@@ -242,52 +245,349 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
 
 
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str) -> None:
-    """Replace two small log-scale curve aliases; never render native fields during training."""
+    """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
-    def log_values(values: Sequence[Any]) -> tuple[np.ma.MaskedArray, int]:
+    def objective_at(row: Mapping[str, Any]) -> Mapping[str, Any]:
+        objective = row.get("validation_objective")
+        if not isinstance(objective, Mapping):
+            validation = row.get("validation", {})
+            objective = validation.get("loss_objective") if isinstance(validation, Mapping) else None
+        return objective if isinstance(objective, Mapping) else {}
+
+    def term_group(name: str) -> int:
+        if name in {"operator_residual", "response"}:
+            return 1
+        if name in {"base_loss", "router_importance_loss", "expected_work"}:
+            return 2
+        if name == "reconstruction" or name.startswith("native_role/"):
+            return 0
+        return 2
+
+    def term_label(name: str) -> str:
+        if name == "reconstruction":
+            return "Field prediction loss"
+        if name == "response":
+            return "Response prediction loss"
+        if name == "operator_residual":
+            return "Heat-balance residual loss"
+        if name == "base_loss":
+            return "Coarse-vs-fine prediction loss"
+        if name == "router_importance_loss":
+            return "Router probability loss"
+        if name == "expected_work":
+            return "Expected selected-read penalty"
+        if name.startswith("native_role/"):
+            role = name.split("/", 1)[1]
+            role_labels = {
+                "downstream_envelope": "Downstream-region",
+                "hub_slab": "Hub-height slab",
+                "near_turbine": "Near-turbine hub-slab",
+                "volume": "Full-volume",
+                "background": "Background-region",
+            }
+            return f"{role_labels.get(role, role.replace('_', ' ').title())} velocity loss"
+        return name.replace("_", " ")
+
+    wind_role_regions = {
+        "volume": "All sampled native-volume cells; D is the reference rotor diameter.",
+        "hub_slab": "Native cells within 0.5D vertically of hub height: |z - z_hub| <= 0.5D; D is the reference rotor diameter.",
+        "downstream_envelope": (
+            "Geometry-defined sampling region from each active hub: 0 < dx <= 10D and "
+            "sqrt(dy^2 + dz^2) <= 1.5D; D is the reference rotor diameter. This is not a physical wake label."
+        ),
+        "near_turbine": (
+            "Native cells within 1.5D horizontal x-y distance of an active hub and within the hub-height slab; "
+            "D is the reference rotor diameter."
+        ),
+        "background": "Complement of the downstream region and hub-height slab; D is the reference rotor diameter.",
+    }
+
+    def term_definition(name: str) -> dict[str, str]:
+        if name == "reconstruction":
+            return {
+                "panel": "native_prediction",
+                "label": term_label(name),
+                "unit": "dimensionless weighted scaled squared-error contribution",
+                "formula": "Per case: mean of the scaled fluid, surface, and material mean-square errors, plus 0.05 times scaled q-proxy mean-square error. Adaptive TRAIN may blend 75% main-path loss and 25% already-computed fine-path loss; hard VALIDATION uses the main path only.",
+                "weight": "Overall provider weight 1.0; q-proxy coefficient 0.05.",
+            }
+        if name == "response":
+            return {
+                "panel": "physics",
+                "label": term_label(name),
+                "unit": "dimensionless weighted scaled squared-error contribution",
+                "formula": "Mean-square response prediction error on eligible TRAIN response targets; no response target is available in exposed VALIDATION.",
+                "weight": "Recipe response_coefficient.",
+            }
+        if name == "operator_residual":
+            return {
+                "panel": "physics",
+                "label": term_label(name),
+                "unit": "dimensionless weighted normalized squared-residual contribution",
+                "formula": "Mean-square discrete heat-balance residual normalized by the fixed TRAIN temperature scale; stored residual supervision is TRAIN-only.",
+                "weight": "Recipe operator_coefficient.",
+            }
+        if name == "base_loss":
+            return {
+                "panel": "routing",
+                "label": term_label(name),
+                "unit": "dimensionless weighted prediction squared-error contribution",
+                "formula": "Mean-square error between coarse-path and fine-path predictions, normalized by the fixed TRAIN scale; omitted on hard VALIDATION because no extra fine reference is computed.",
+                "weight": "Configured approximation coefficient 0.1 divided by the squared fixed TRAIN scale.",
+            }
+        if name == "router_importance_loss":
+            return {
+                "panel": "routing",
+                "label": term_label(name),
+                "unit": "dimensionless weighted probability squared-error contribution",
+                "formula": "Mean-square router probability error against detached residual-importance targets; omitted on hard VALIDATION because target construction requires fine-detail values.",
+                "weight": "0.01.",
+            }
+        if name == "expected_work":
+            return {
+                "panel": "routing",
+                "label": term_label(name),
+                "unit": "dimensionless weighted expected selected-read fraction",
+                "formula": "Expected selected fine reads divided by active receiver-source pairs, multiplied by the calibrated TRAIN penalty weight.",
+                "weight": "TRAIN-calibrated coefficient, capped by the provider configuration.",
+            }
+        if name.startswith("native_role/"):
+            role = name.split("/", 1)[1]
+            role_region = wind_role_regions.get(role, "fixed native role sample; see task recipe")
+            return {
+                "panel": "native_prediction",
+                "label": term_label(name),
+                "unit": "dimensionless weighted normalized velocity squared-error contribution",
+                "formula": "Mean-square xyz velocity error divided by the squared fixed TRAIN scale s_role^2 (s_role is in m/s); hard VALIDATION uses the deployed main path without fine-path replay. "
+                          "Adaptive TRAIN blends 75% main and 25% fine-path losses outside warmup.",
+                "weight": "0.2 per native role.",
+                "role_region": role_region,
+            }
+        return {
+            "panel": "routing",
+            "label": term_label(name),
+            "unit": "provider-defined weighted loss contribution",
+            "formula": "Provider objective term; see run configuration for its specific prediction, residual, or routing definition.",
+            "weight": "Provider-defined; validation weights by epoch are listed separately.",
+        }
+
+    def value_at(row: Mapping[str, Any], name: str, source: str) -> float | None:
+        if source == "train":
+            value = row.get("train_losses", {}).get(name)
+        else:
+            value = objective_at(row).get("terms", {}).get(name)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def plot_series(
+        axis: Any, epochs: Sequence[Any], values: Sequence[Any], *, label: str,
+        color: Any = None, linestyle: str = "-", marker: str = ".",
+    ) -> int:
         numeric = np.asarray(values, dtype=np.float64)
         invalid = ~np.isfinite(numeric) | (numeric <= 0.0)
-        return np.ma.masked_where(invalid, numeric), int(invalid.sum())
-
-    def plot_log_series(axis: Any, epochs: Sequence[Any], values: Sequence[Any]) -> None:
-        series, masked_count = log_values(values)
+        masked_count = int(invalid.sum())
         axis.set_yscale("log")
         if masked_count < len(values):
-            axis.plot(epochs, series, ".-")
-        else:
-            # An all-masked log series has no data limits from which to autoscale.
+            axis.plot(epochs, np.ma.masked_where(invalid, numeric), linestyle=linestyle,
+                      marker=marker, label=label, color=color)
+        elif len(values):
             axis.set_ylim(1.0, 10.0)
-        if masked_count:
-            axis.text(
-                0.02, 0.98,
-                f"{masked_count} nonpositive/nonfinite value(s) masked\n(raw history unchanged)",
-                ha="left", va="top", transform=axis.transAxes,
-            )
+        return masked_count
 
-    names = sorted({name for row in history for name in row["train_losses"]})
-    figure = Figure(figsize=(12, 2.8 * math.ceil((len(names) + 1) / 2)), constrained_layout=True)
+    names: set[str] = set()
+    for row in history:
+        names.update(str(name) for name in row.get("train_losses", {}))
+        names.update(str(name) for name in objective_at(row).get("terms", {}))
+    all_names = sorted(names)
+    figure = Figure(figsize=(15.5, 8.2), constrained_layout=True)
     FigureCanvasAgg(figure)
-    axes = figure.subplots(math.ceil((len(names) + 1) / 2), 2, squeeze=False).ravel()
-    for axis, name in zip(axes, names):
-        rows = [row for row in history if name in row["train_losses"]]
-        plot_log_series(axis, [row["epoch"] for row in rows], [row["train_losses"][name] for row in rows])
-        axis.set(title=name, xlabel="Completed epoch", ylabel="Native objective term (log scale)")
-        axis.grid(alpha=0.2)
-    validation = [row for row in history if field_metric in row.get("validation", {})]
-    axis = axes[len(names)]
-    if validation:
-        plot_log_series(axis, [row["epoch"] for row in validation],
-                        [row["validation"][field_metric] for row in validation])
+    axes = figure.subplots(2, 3, squeeze=False).ravel()
+    colors = {name: f"C{index % 10}" for index, name in enumerate(all_names)}
+    masked_count_total = 0
+
+    def set_panel_title(axis: Any, heading: str, explanation: str, *, fontsize: float = 9.5) -> None:
+        axis.set_title(f"{heading}\n{explanation}", fontsize=fontsize, linespacing=1.1, pad=5)
+
+    def plot_term_group(axis: Any, group_index: int) -> None:
+        nonlocal masked_count_total
+        group_names = [name for name in all_names if term_group(name) == group_index]
+        for name in group_names:
+            color = colors[name]
+            for source, series_label in (("train", "TRAIN"), ("validation", "HELD-OUT VALIDATION")):
+                points = [(int(row["epoch"]), value_at(row, name, source)) for row in history
+                          if type(row.get("epoch")) is int and value_at(row, name, source) is not None]
+                if points:
+                    masked_count_total += plot_series(
+                        axis, [item[0] for item in points], [item[1] for item in points],
+                        label=f"{series_label}: {term_label(name)}", color=color,
+                        linestyle="-" if source == "train" else "--",
+                        marker="." if source == "train" else "o",
+                    )
+        axis.set_xlabel("Completed epoch")
+        axis.grid(alpha=0.25, which="both")
+        if axis.lines:
+            axis.legend(fontsize=7.0, loc="best", frameon=False)
+        else:
+            axis.set_yscale("log")
+            axis.set_ylim(1.0, 10.0)
+            empty_message = {
+                0: "No prediction losses saved",
+                1: "No physics or response losses saved",
+                2: "No approximation or routing losses saved",
+            }.get(group_index, "No losses saved for this group")
+            axis.text(0.5, 0.5, empty_message, ha="center", va="center",
+                      transform=axis.transAxes)
+
+    # The objective subtotal compares exactly the terms recorded on both sides.
+    total_axis = axes[0]
+    comparable_rows = []
+    for row in history:
+        objective = objective_at(row)
+        if objective.get("matched_terms") and type(row.get("epoch")) is int:
+            comparable_rows.append((int(row["epoch"]), objective))
+    if comparable_rows:
+        for key, label, color, style, marker in (
+            ("training_matched_total", "TRAIN shared-name sum", "C0", "-", "."),
+            ("validation_matched_total", "HELD-OUT VALIDATION shared-name sum", "C1", "--", "o"),
+        ):
+            points = [(epoch, objective.get(key)) for epoch, objective in comparable_rows
+                      if objective.get(key) is not None]
+            if points:
+                masked_count_total += plot_series(
+                    total_axis, [point[0] for point in points], [point[1] for point in points],
+                    label=label, color=color, linestyle=style, marker=marker,
+                )
+        if total_axis.lines:
+            total_axis.legend(fontsize=8, loc="best", frameon=False)
     else:
-        axis.text(0.5, 0.5, "Validation not yet scheduled", ha="center", va="center", transform=axis.transAxes)
-        axis.set_yscale("log")
-        axis.set_ylim(1.0, 10.0)
-    axis.set(title=f"Exposed validation {field_metric}", xlabel="Completed epoch", ylabel=f"{field_metric} (log scale)")
-    axis.grid(alpha=0.2)
-    for axis in axes[len(names) + 1:]:
-        axis.set_visible(False)
+        total_axis.set_yscale("log")
+        total_axis.set_ylim(1.0, 10.0)
+        no_validation_objective = all(not objective_at(row).get("terms") for row in history)
+        total_axis.text(
+            0.5, 0.5,
+            ("Held-out loss was not recorded in this history."
+             if no_validation_objective else "No shared held-out loss terms were saved."),
+            ha="center", va="center", transform=total_axis.transAxes,
+        )
+    adaptive_run = any(str(row.get("arm", "")) == "adaptive_detail" for row in history)
+    train_validation_path_note = (
+        "TRAIN: mean of per-update means\nVALIDATION: pooled valid-element mean\n"
+        "Adaptive TRAIN: 25% fine-path loss replay\nVALIDATION: hard main path"
+        if adaptive_run else
+        "TRAIN: mean of per-update means\nVALIDATION: pooled valid-element mean\n"
+        "TRAIN: phase-specific optimization path\nVALIDATION: hard main path"
+    )
+    set_panel_title(
+        total_axis, "Shared-name loss summaries",
+        f"{train_validation_path_note}",
+        fontsize=8.2,
+    )
+    total_axis.set_xlabel("Completed epoch")
+    total_axis.set_ylabel("Shared-name weighted loss sum (dimensionless)")
+    total_axis.grid(alpha=0.25, which="both")
+
+    native_axis, physics_axis, selector_axis, routing_axis, work_axis = axes[1:]
+    plot_term_group(native_axis, 0)
+    wind_role_names = [name for name in all_names if name.startswith("native_role/")]
+    if wind_role_names:
+        set_panel_title(
+            native_axis, "Wind velocity losses by sampled region",
+            "Hub slab: |z-z_hub|<=0.5D; downstream: 0<dx<=10D\n"
+            "Downstream yz radius<=1.5D; D = reference rotor diameter",
+            fontsize=8.2,
+        )
+    else:
+        set_panel_title(native_axis, "Prediction losses", "Prediction vs reference; scaled squared error")
+    native_axis.set_ylabel("Weighted loss contribution (dimensionless)")
+    plot_term_group(physics_axis, 1)
+    set_panel_title(physics_axis, "Physics and response losses",
+                    "Discrete stored-flow residual; response prediction")
+    physics_axis.set_ylabel("Weighted loss contribution (dimensionless)")
+    plot_term_group(routing_axis, 2)
+    set_panel_title(
+        routing_axis, "Approximation and routing losses",
+        "Coarse/fine prediction mismatch; router probability error vs residual-importance target\n"
+        "Penalty on expected selected fine reads",
+        fontsize=8.9,
+    )
+    routing_axis.set_ylabel("Weighted loss contribution (dimensionless)")
+
+    selector_points = []
+    for row in history:
+        validation = row.get("validation", {})
+        value = validation.get(field_metric) if isinstance(validation, Mapping) else None
+        try:
+            selector_points.append((int(row["epoch"]), float(value)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if selector_points:
+        selector_label = ("HELD-OUT VALIDATION: Held-out field prediction error"
+                          if field_metric == "field_score" else f"HELD-OUT VALIDATION: {field_metric}")
+        masked_count_total += plot_series(
+            selector_axis, [point[0] for point in selector_points], [point[1] for point in selector_points],
+            label=selector_label, color="C0", linestyle="-", marker="o",
+        )
+        selector_axis.legend(fontsize=8, loc="best", frameon=False)
+    else:
+        selector_axis.set_yscale("log")
+        selector_axis.set_ylim(1.0, 10.0)
+        selector_axis.text(0.5, 0.5, "No saved validation selector metric", ha="center", va="center",
+                           transform=selector_axis.transAxes)
+    selector_explanation = ("Normalized field MSE for checkpoint selection; not a loss"
+                            if field_metric == "field_score"
+                            else "Checkpoint selector, shown separately from loss")
+    set_panel_title(selector_axis, "Held-out field prediction error" if field_metric == "field_score"
+                    else "Held-out checkpoint metric", selector_explanation)
+    selector_axis.set_xlabel("Completed epoch")
+    selector_axis.set_ylabel(
+        "Normalized mean-square field error (dimensionless)" if field_metric == "field_score"
+        else "Provider-defined metric units")
+    selector_axis.grid(alpha=0.25, which="both")
+
+    work_definitions = {
+        "active_pairs": "Active receiver-source pairs processed",
+        "fine_rows": "Fine detail-head rows executed",
+        "selected_detail_rows": "Rows selected by the detail route",
+        "cheap_rows": "Cheap-path rows evaluated",
+        "gate_rows": "Router gate rows evaluated",
+        "operator_rows": "Discrete thermal residual rows evaluated",
+    }
+    work_keys = sorted({key for row in history for key in row.get("work_counts", {})}
+                       & set(work_definitions))
+    for index, key in enumerate(work_keys):
+        points = []
+        for row in history:
+            try:
+                points.append((int(row["epoch"]), float(row["work_counts"][key])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if points:
+            masked_count_total += plot_series(
+                work_axis, [point[0] for point in points], [point[1] for point in points],
+                label=f"{work_definitions[key]} (TRAIN)", color=f"C{index % 10}",
+            )
+    if work_keys and work_axis.lines:
+        work_axis.legend(fontsize=7.0, loc="best", frameon=False)
+    else:
+        work_axis.set_yscale("log")
+        work_axis.set_ylim(1.0, 10.0)
+        work_axis.text(0.5, 0.5, "No recorded work counters", ha="center", va="center",
+                       transform=work_axis.transAxes)
+    set_panel_title(work_axis, "Recorded TRAIN work counters",
+                    "Counter sums; not measured executor time or savings")
+    work_axis.set_xlabel("Completed epoch")
+    work_axis.set_ylabel("Provider counter sum (rows or pairs / epoch)")
+    work_axis.grid(alpha=0.25, which="both")
+    if masked_count_total:
+        routing_axis.text(
+            0.02, 0.02,
+            f"{masked_count_total} nonpositive/nonfinite values masked for log display; history unchanged.",
+            ha="left", va="bottom", fontsize=8, transform=routing_axis.transAxes,
+        )
     arms = sorted({str(row["arm"]) for row in history if row.get("arm")})
     case_counts = sorted({int(row["case_visits"]) for row in history if row.get("case_visits") is not None})
     scope = ""
@@ -295,18 +595,56 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         scope = f"{case_counts[0]} TRAIN cases/epoch"
     elif case_counts:
         scope = f"{case_counts[0]}–{case_counts[-1]} TRAIN cases/epoch"
-    arm_label = ", ".join(arms) if arms else "training"
-    title_parts = [arm_label]
+    title_parts = [", ".join(arms) if arms else "training"]
     if scope:
         title_parts.append(scope)
-    figure.suptitle(" | ".join(title_parts) + "; equal macro-update loss means; validation is separate")
+    title_parts.append("TRAIN optimization vs exposed VALIDATION hard inference")
+    figure.suptitle(" | ".join(title_parts), fontsize=13)
+    epochs = sorted({int(row["epoch"]) for row in history if type(row.get("epoch")) is int})
+    if epochs:
+        limits = (epochs[0] - 0.5, epochs[-1] + 0.5) if len(epochs) == 1 else (epochs[0], epochs[-1])
+        for axis in axes:
+            axis.set_xlim(*limits)
+
+    validation_weights: dict[str, dict[str, float]] = {}
+    for row in history:
+        objective = objective_at(row)
+        try:
+            epoch = int(row["epoch"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for name, weight in objective.get("term_weights", {}).items():
+            validation_weights.setdefault(str(name), {})[str(epoch)] = float(weight)
+    metadata = {
+        "figure": "loss_curves",
+        "layout": "2x3 grouped overview",
+        "panel_definitions": {
+        "shared_name_loss_summary": "Sum same-named weighted loss terms recorded in both TRAIN and hard VALIDATION; this summary is not directly comparable because TRAIN uses a mean of macro-update means and validation pools valid elements. Adaptive TRAIN may include 25% fine-path loss replay; validation uses hard main-path loss only.",
+            "native_prediction": "Visible note: prediction versus reference, scaled squared error. Validation uses the deployed hard-route main prediction and omits full-detail replay.",
+            "physics": "Visible note: discrete heat-balance residual and response prediction losses. Thermal response and residual targets are TRAIN-only when absent from the exposed validation batch.",
+            "field_selector": f"Visible note: normalized mean-square field error for {field_metric}; held-out selector used for checkpoint selection, shown separately from loss.",
+            "routing": "Visible note: coarse-versus-fine prediction error, router probability error against residual-importance targets, and penalty on expected selected fine reads. Fine references and importance targets are unavailable on hard validation.",
+            "train_work": "Visible note: TRAIN counter sums only, not measured executor time or savings. These counts do not establish sparse executor savings. Training includes full-detail replay where configured; validation work is not recorded.",
+        },
+        "term_definitions": {name: term_definition(name) for name in all_names},
+        "validation_objective_weights_by_epoch": validation_weights,
+        "recorded_value_convention": "TRAIN curves show weighted macro-update mean loss contributions. Validation curves apply the recorded provider weight after summing numerators and valid-element denominators over exposed validation batches.",
+        "selector_metric_unit": "dimensionless normalized mean-square field error for field_score; otherwise provider-defined units",
+        "training_loss_weight_note": "Each term definition lists its formula and fixed or calibrated provider weight. Validation objective weights by epoch are listed separately. TRAIN histories record already-weighted contributions.",
+        "training_reduction": "Arithmetic mean of weighted macro-update means; each optimizer update has equal weight, including a partial final update.",
+        "validation_reduction": "Pooled numerator divided by pooled valid-element denominator, then multiplied by provider term weight.",
+        "prediction_path_comparison": "TRAIN follows the phase-specific optimization path and may include 25% fine-path loss replay; held-out loss uses deployed hard inference on the main prediction only.",
+        "directly_comparable": False,
+        "work_counter_definitions": {key: work_definitions[key] for key in work_keys},
+        "validation_scope": "exposed held-out validation with hard inference; not an independent TEST result",
+    }
+    _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"
         temporary = output / f".loss_curves.{os.getpid()}.tmp.{suffix}"
-        figure.savefig(temporary, format=suffix, dpi=120)
+        figure.savefig(temporary, format=suffix, dpi=140)
         os.replace(temporary, destination)
     figure.clear()
-
 
 @dataclass(frozen=True)
 class SelectionPolicy:
@@ -350,6 +688,10 @@ class TaskProvider(Protocol):
     def validation_metrics(self, predictions: Any, targets: Any, auxiliary_state: Any) -> Mapping[str, Any]: ...
 
     def reduce_native_metrics(self, records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]: ...
+
+    def validation_loss_terms(
+        self, predictions: Any, targets: Any, auxiliary_state: Any, *, batch: TaskBatch, arm: str,
+    ) -> Mapping[str, LossTerm]: ...
 
     def optimizer_groups(self, model: nn.Module, arm: str, stage: str) -> Sequence[OptimizerGroupSpec]: ...
 
@@ -455,18 +797,6 @@ def _atomic_json(path: Path, payload: Any) -> None:
     os.replace(temporary, path)
 
 
-def _atomic_checkpoint_copy(source: Path, destination: Path) -> None:
-    """Keep a byte-identical rolling checkpoint as a regular file, never a symlink."""
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
-    os.close(fd)
-    temporary = Path(temporary_name)
-    try:
-        shutil.copyfile(source, temporary)
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def _read_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
     request_path = output / name
     if not request_path.is_file():
@@ -479,13 +809,13 @@ def _read_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
     return request
 
 
-def _consume_acknowledged_clean_stop(output: Path, name: str) -> None:
+def _consume_acknowledged_clean_stop(output: Path, name: str, layout: RunLayout) -> None:
     """Remove only a leftover request whose exact identity was already acked."""
 
     request = _read_clean_stop_request(output, name)
     if request is None:
         return
-    acknowledgement_path = output / "clean_stop_acknowledged.json"
+    acknowledgement_path = layout.read_path("clean_stop_acknowledged.json")
     if not acknowledgement_path.is_file():
         return
     acknowledgement = json.loads(acknowledgement_path.read_text(encoding="utf-8"))
@@ -493,7 +823,7 @@ def _consume_acknowledged_clean_stop(output: Path, name: str) -> None:
             or acknowledgement.get("request_id") != request["request_id"]):
         return
     request_tag = hashlib.sha256(request["request_id"].encode("utf-8")).hexdigest()[:16]
-    _atomic_json(output / f"clean_stop_consumed_{request_tag}.json", {
+    _atomic_json(layout.write_path(f"clean_stop_consumed_{request_tag}.json"), {
         "request": request,
         "acknowledgement": acknowledgement,
         "consumed_on_resume": True,
@@ -740,24 +1070,83 @@ class TrainingEngine:
     def _evaluate(
         self, model: nn.Module, provider: TaskProvider, arm: str, phase: str, epoch: int,
     ) -> dict[str, Any]:
+        del phase
         previous_mode = model.training
-        model.eval()
+        rng_state = capture_rng_state()
         records: list[Mapping[str, Any]] = []
-        for batch in provider.validation_batches():
-            scene = provider.make_scene(batch.scene_inputs)
-            # The candidate's deployed hard route is always measured here; a
-            # warmup/open or soft training phase must not leak into validation.
-            predictions, auxiliary_state = provider.predict_native(
-                model, scene, batch.receivers, arm, "hard", epoch=epoch,
-                temperature=self.config.temperature_for_epoch(epoch))
-            records.append(provider.validation_metrics(predictions, batch.targets, auxiliary_state))
-        result = dict(provider.reduce_native_metrics(records))
-        extra_metrics = getattr(provider, "extra_validation_metrics", None)
-        if callable(extra_metrics):
-            result.update(extra_metrics(model, arm, "hard"))
+        loss_totals: dict[str, dict[str, float]] = {}
+        loss_batch_counts: dict[str, int] = {}
+        batch_count = 0
+        model.eval()
+        try:
+            for batch in provider.validation_batches():
+                batch_count += 1
+                scene = provider.make_scene(batch.scene_inputs)
+                # The candidate's deployed hard route is always measured here; a
+                # warmup/open or soft training phase must not leak into validation.
+                predictions, auxiliary_state = provider.predict_native(
+                    model, scene, batch.receivers, arm, "hard", epoch=epoch,
+                    temperature=self.config.temperature_for_epoch(epoch))
+                records.append(provider.validation_metrics(predictions, batch.targets, auxiliary_state))
+                validation_loss_fn = getattr(provider, "validation_loss_terms", None)
+                if callable(validation_loss_fn):
+                    state_reader = getattr(provider, "training_state_dict", None)
+                    state_restorer = getattr(provider, "load_training_state_dict", None)
+                    provider_state = copy.deepcopy(state_reader()) if callable(state_reader) else None
+                    try:
+                        terms = validation_loss_fn(
+                            predictions, batch.targets, auxiliary_state, batch=batch, arm=arm)
+                    finally:
+                        if provider_state is not None and callable(state_restorer):
+                            state_restorer(provider_state)
+                    if not isinstance(terms, Mapping):
+                        raise TypeError("validation_loss_terms must return a mapping of names to LossTerm values.")
+                    for name, term in terms.items():
+                        if not isinstance(name, str) or not name:
+                            raise ValueError("Validation loss term names must be nonempty strings.")
+                        if not isinstance(term, LossTerm) or not torch.is_tensor(term.numerator) or term.numerator.numel() != 1:
+                            raise ValueError(f"Validation loss {name!r} must be a scalar LossTerm.")
+                        weight = float(term.weight)
+                        denominator = _denominator(term.denominator)
+                        numerator = float(term.numerator.detach())
+                        if not math.isfinite(weight) or not math.isfinite(numerator):
+                            raise FloatingPointError(f"Validation loss {name!r} is nonfinite.")
+                        if denominator == 0:
+                            if numerator != 0.0:
+                                raise ValueError(f"Validation loss {name!r} has a nonzero numerator with no valid elements.")
+                            continue
+                        aggregate = loss_totals.setdefault(
+                            name, {"numerator": 0.0, "denominator": 0.0, "weight": weight})
+                        if not math.isclose(aggregate["weight"], weight, rel_tol=0.0, abs_tol=1.0e-12):
+                            raise ValueError(f"Validation objective weight for {name!r} changed across batches.")
+                        aggregate["numerator"] += numerator
+                        aggregate["denominator"] += denominator
+                        loss_batch_counts[name] = loss_batch_counts.get(name, 0) + 1
+            if batch_count == 0:
+                raise ValueError("The task provider returned no exposed validation batches.")
+            if any(count != batch_count for count in loss_batch_counts.values()):
+                raise ValueError("Each validation objective term must be present in every validation batch.")
+            result = dict(provider.reduce_native_metrics(records))
+            extra_metrics = getattr(provider, "extra_validation_metrics", None)
+            if callable(extra_metrics):
+                result.update(extra_metrics(model, arm, "hard"))
+            if loss_totals:
+                result["validation_loss_terms"] = {
+                    name: (values["numerator"] / values["denominator"]) * values["weight"]
+                    for name, values in loss_totals.items()
+                }
+                result["validation_loss_term_weights"] = {
+                    name: values["weight"] for name, values in loss_totals.items()
+                }
+                result["validation_loss_aggregation"] = (
+                    "sum of numerators divided by sum of valid elements across exposed validation batches, "
+                    "then multiplied by the provider objective weight"
+                )
+        finally:
+            model.train(previous_mode)
+            restore_rng_state(rng_state)
         result["validation_execution_mode"] = arm
         result["validation_route_phase"] = "hard"
-        model.train(previous_mode)
         return result
 
     def _checkpoint_payload(
@@ -814,12 +1203,27 @@ class TrainingEngine:
 
         output = Path(output_dir).resolve()
         output.mkdir(parents=True, exist_ok=True)
+        layout = RunLayout(output)
+        layout.ensure()
         if resume_checkpoint is None:
-            markers = ("latest_model.pt", "last.pt", "history.json", "fit_summary.json", "active_process.json")
-            if any((output / name).exists() for name in markers) or any(output.glob("epoch_*_model.pt")):
+            markers = (
+                "latest_model.pt",
+                "last.pt",
+                "history.json",
+                "fit_summary.json",
+                "active_process.json",
+                "progress.json",
+            )
+            has_epoch_checkpoints = any((output / "checkpoints").glob("epoch_*_model.pt")) or any(
+                output.glob("epoch_*_model.pt")
+            )
+            if any(layout.read_path(name).exists() for name in markers) or has_epoch_checkpoints:
                 raise ValueError("A new fit requires a fresh run directory; use exact resume for existing history.")
-        elif Path(resume_checkpoint).resolve() != (output / "latest_model.pt").resolve():
-            raise ValueError("Exact resume requires this run's current latest_model.pt; historical checkpoints cannot rewind history.")
+        else:
+            requested_latest = resolve_checkpoint(output, resume_checkpoint)
+            current_latest = resolve_checkpoint(output, "latest")
+            if requested_latest != current_latest:
+                raise ValueError("Exact resume requires this run's current latest checkpoint; historical checkpoints cannot rewind history.")
         identity = dict(identity)
         provider_identity = dict(provider.identity_payload())
         if "provider_identity" in identity and identity["provider_identity"] != provider_identity:
@@ -830,8 +1234,13 @@ class TrainingEngine:
             raise ValueError("A run cannot be both an exact resume and a new branch.")
         if allow_microbatch_change and resume_checkpoint is None:
             raise ValueError("A microbatch amendment requires an existing run's latest checkpoint.")
-        source_path = Path(resume_checkpoint or branch_from_checkpoint).resolve() if (
-            resume_checkpoint is not None or branch_from_checkpoint is not None) else None
+        source_path = (
+            resolve_checkpoint(output, resume_checkpoint)
+            if resume_checkpoint is not None
+            else resolve_checkpoint(output, branch_from_checkpoint)
+            if branch_from_checkpoint is not None
+            else None
+        )
         source_payload: Mapping[str, Any] | None = None
         restored_rng: Mapping[str, Any] | None = None
         if source_path is not None:
@@ -876,7 +1285,7 @@ class TrainingEngine:
             if callable(restore_provider_state):
                 restore_provider_state(source_payload.get("provider_training_state", {}))
         if resume_checkpoint is not None:
-            _consume_acknowledged_clean_stop(output, clean_stop_name)
+            _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
         if resume_checkpoint is not None:
@@ -899,7 +1308,7 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
-            _atomic_json(output / f"microbatch_amendment_epoch_{start_epoch:04d}.json", amendment)
+            _atomic_json(layout.write_path(f"microbatch_amendment_epoch_{start_epoch:04d}.json"), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = None
@@ -923,7 +1332,23 @@ class TrainingEngine:
         }
         if resume_amendments:
             active["resume_amendments"] = resume_amendments
-        _atomic_json(output / "active_process.json", active)
+        if resume_checkpoint is None and layout.canonical_writes:
+            identity_path = layout.path("experiment_identity.json")
+            marker_path = layout.path("artifact_layout.json")
+            if not marker_path.exists():
+                _atomic_json(marker_path, {
+                    "artifact_layout_version": 1,
+                    "run_dir": str(output),
+                })
+            if not identity_path.exists():
+                _atomic_json(identity_path, sealed_identity)
+            software_path = layout.path("software.json")
+            if not software_path.exists():
+                _atomic_json(software_path, environment_snapshot())
+            source_state_path = layout.path("source_state.json")
+            if not source_state_path.exists():
+                _atomic_json(source_state_path, source_state_snapshot(PROJECT_ROOT))
+        _atomic_json(layout.write_path("active_process.json"), active)
         if resume_checkpoint is not None:
             restored = {"event": "checkpoint_restored", "source_epoch": start_epoch - 1,
                 "next_epoch": start_epoch, "microbatch_cases": self.config.microbatch_cases,
@@ -958,7 +1383,7 @@ class TrainingEngine:
                             model=model, arm=arm, epoch=epoch, phase=phase,
                             temperature=self.config.temperature_for_epoch(epoch))
                     if stage_receipt is not None:
-                        _atomic_json(output / f"stage_receipt_epoch_{epoch:04d}_{phase}.json", stage_receipt)
+                        _atomic_json(layout.write_path(f"stage_receipt_epoch_{epoch:04d}_{phase}.json"), stage_receipt)
                 # A stage callback may run calibration/evaluation in no-grad mode.
                 # Reassert training mode after it and before any optimizer work.
                 model.train(True)
@@ -1010,7 +1435,7 @@ class TrainingEngine:
                             "lr": lr_values, "phase": phase,
                         }, refresh=False)
                         progress.update(len(update_cases))
-                        _atomic_json(output / "progress.json", {
+                        _atomic_json(layout.write_path("progress.json"), {
                             "status": "training", "epoch_in_progress": epoch, "completed_epoch": epoch - 1,
                             "phase": phase, "updates_this_epoch": len(update_rows),
                             "case_visits_this_epoch": sum(item["case_count"] for item in update_rows),
@@ -1054,6 +1479,60 @@ class TrainingEngine:
                 if review:
                     validation_started = time.perf_counter()
                     metrics = self._evaluate(model, provider, arm, phase, epoch)
+                    validation_terms = dict(metrics.pop("validation_loss_terms", {}))
+                    validation_weights = dict(metrics.pop("validation_loss_term_weights", {}))
+                    aggregation = metrics.pop("validation_loss_aggregation", None)
+                    train_terms = dict(row["train_losses"])
+                    matched_terms = sorted(set(train_terms) & set(validation_terms))
+                    training_only_terms = sorted(set(train_terms) - set(validation_terms))
+                    validation_only_terms = sorted(set(validation_terms) - set(train_terms))
+                    training_reduction = (
+                        "arithmetic mean of macro-update means; each optimizer update has equal weight, "
+                        "including any partial final update"
+                    )
+                    validation_reduction = aggregation or "No held-out objective losses were recorded by this provider."
+                    objective = {
+                        "scope": "exposed VALIDATION panel evaluated with deployed hard inference",
+                        "training_phase": phase,
+                        "validation_route_phase": "hard",
+                        "training_reduction": training_reduction,
+                        "validation_reduction": validation_reduction,
+                        "training_prediction_mode": (
+                            "phase-specific optimization forward; provider loss terms may blend main and fine paths"
+                        ),
+                        "validation_prediction_mode": (
+                            "deployed hard inference; validation terms use the provider-defined hard-route outputs"
+                        ),
+                        "directly_comparable": False,
+                        "comparability_note": (
+                            "Shared term names do not imply identical predictions or reductions: TRAIN losses are "
+                            "averaged per optimizer update over changing model states; VALIDATION losses pool "
+                            "valid elements at the review epoch using hard inference."
+                        ),
+                        "terms": validation_terms,
+                        "term_weights": validation_weights,
+                        "matched_terms": matched_terms,
+                        "training_only_terms": training_only_terms,
+                        "validation_only_terms": validation_only_terms,
+                        "training_matched_total": (sum(train_terms[name] for name in matched_terms)
+                                                   if matched_terms else None),
+                        "validation_matched_total": (sum(validation_terms[name] for name in matched_terms)
+                                                     if matched_terms else None),
+                        "is_full_training_objective": not training_only_terms and not validation_only_terms,
+                        "is_full_training_objective_note": (
+                            "This flag reports term-name coverage only; directly_comparable separately describes "
+                            "whether values use the same prediction path and reduction."
+                        ),
+                        "aggregation": aggregation,
+                        "definition": (
+                            "Shared-name subtotal includes only terms measured on both sides, using the provider's "
+                            "objective weights. It is not a directly comparable objective: reductions differ and "
+                            "provider prediction paths may differ. Hard validation omits full-detail replay and any "
+                            "train-only PDE or auxiliary terms."
+                        ),
+                    }
+                    row["validation_objective"] = objective
+                    metrics["loss_objective"] = objective
                     row["validation"] = metrics
                     row["validation_seconds"] = time.perf_counter() - validation_started
                     field_score = float(metrics[self.selection.field_metric])
@@ -1092,16 +1571,16 @@ class TrainingEngine:
                         provider_training_state=getattr(provider, "training_state_dict", dict)())
                     if resume_amendments:
                         payload["resume_amendments"] = resume_amendments
-                    _atomic_json(output / "history.json", history)
+                    _atomic_json(layout.write_path("history.json"), history)
                     if milestone:
-                        _atomic_torch_save(output / f"epoch_{epoch:04d}_model.pt", payload)
+                        _atomic_torch_save(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
                     if review:
-                        _atomic_json(output / f"validation_epoch_{epoch:04d}.json", row["validation"])
+                        _atomic_json(layout.write_path(f"validation_epoch_{epoch:04d}.json"), row["validation"])
                         if improved_field:
-                            _atomic_torch_save(output / "best_by_field_mse_model.pt", payload)
+                            _atomic_torch_save(layout.write_path("best_by_field_mse_model.pt"), payload)
                         if improved_guarded:
-                            selected_checkpoint = output / f"epoch_{epoch:04d}_model.pt"
-                            _atomic_json(output / "best_by_response_guarded_selection.json", {
+                            selected_checkpoint = layout.write_path(f"epoch_{epoch:04d}_model.pt")
+                            _atomic_json(layout.write_path("best_by_response_guarded_selection.json"), {
                                 "selector": "response_guarded_field_score",
                                 "field_metric": self.selection.field_metric,
                                 "field_score": field_score,
@@ -1109,24 +1588,27 @@ class TrainingEngine:
                                 "guard_value": float(metrics[guard_key]),
                                 "maximum_guard_ratio": self.selection.maximum_response_ratio,
                                 "epoch": int(epoch),
-                                "checkpoint": selected_checkpoint.name,
+                                "checkpoint": str(selected_checkpoint.relative_to(output)),
                                 "checkpoint_sha256": hashlib.sha256(selected_checkpoint.read_bytes()).hexdigest(),
                             })
                     # Advance the resume cursor only after required milestone
                     # and selector artifacts exist, including the terminal age.
-                    _atomic_torch_save(output / "last.pt", payload)
-                    _atomic_checkpoint_copy(output / "last.pt", output / "latest_model.pt")
+                    _atomic_torch_save(layout.write_path("latest_model.pt"), payload)
                     latest_epoch = epoch
                 if curve_due:
-                    _atomic_json(output / "history.json", history)
+                    _atomic_json(layout.write_path("history.json"), history)
                     curve_rng = capture_rng_state()
                     try:
-                        _render_loss_curves(history, output, self.selection.field_metric)
+                        _render_loss_curves(
+                            history,
+                            layout.write_path("loss_curves.png").parent,
+                            self.selection.field_metric,
+                        )
                     finally:
                         restore_rng_state(curve_rng)
                 completed_visits += len(ordered_cases)
                 completed_updates += len(update_rows)
-                _atomic_json(output / "progress.json", {
+                _atomic_json(layout.write_path("progress.json"), {
                     "status": "epoch_completed", "completed_epoch": epoch, "phase": phase,
                     "completed_case_visits": completed_visits, "completed_optimizer_updates": completed_updates,
                     "latest_checkpoint_epoch": latest_epoch, "updated_unix": time.time(),
@@ -1141,9 +1623,9 @@ class TrainingEngine:
                         "epoch": epoch,
                         "phase": phase,
                     }
-                    _atomic_json(output / "clean_stop_acknowledged.json", acknowledgement)
+                    _atomic_json(layout.write_path("clean_stop_acknowledged.json"), acknowledgement)
                     request_tag = hashlib.sha256(clean_stop_request["request_id"].encode("utf-8")).hexdigest()[:16]
-                    _atomic_json(output / f"clean_stop_consumed_{request_tag}.json", {
+                    _atomic_json(layout.write_path(f"clean_stop_consumed_{request_tag}.json"), {
                         "request": clean_stop_request,
                         "acknowledgement": acknowledgement,
                         "consumed_on_resume": False,
@@ -1155,9 +1637,9 @@ class TrainingEngine:
             active.update(status="clean_stopped" if clean_stopped else "completed",
                           completed_epoch=stopped_at, ended_unix=time.time(), engine_seconds=elapsed,
                           process_seconds=max(0.0, time.time() - float(active["started_unix"])))
-            _atomic_json(output / "active_process.json", active)
+            _atomic_json(layout.write_path("active_process.json"), active)
             guarded_summary = best_guarded if math.isfinite(best_guarded) else None
-            _atomic_json(output / "fit_summary.json", {
+            _atomic_json(layout.write_path("fit_summary.json"), {
                 **active,
                 "case_visits": sum(int(item["case_visits"]) for item in history if int(item["epoch"]) >= start_epoch),
                 "optimizer_updates": sum(int(item["optimizer_updates"]) for item in history if int(item["epoch"]) >= start_epoch),
@@ -1177,7 +1659,7 @@ class TrainingEngine:
                           process_seconds=max(0.0, time.time() - float(active["started_unix"])),
                           exception_type=type(exc).__name__, exception_message=str(exc))
             try:
-                _atomic_json(output / "active_process.json", active)
+                _atomic_json(layout.write_path("active_process.json"), active)
             except OSError:
                 pass  # Preserve the original failure when its receipt cannot be written.
             raise

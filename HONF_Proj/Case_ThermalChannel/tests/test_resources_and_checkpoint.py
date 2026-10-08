@@ -1,34 +1,37 @@
 from __future__ import annotations
 
-import json
 import copy
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pytest
 import torch
-import h5py
-
-from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
-from channelthermal.resources import DatasetRegistry
-from channelthermal.plugin import ThermalChannelPlugin
-from honf_runtime.compat import load_trusted_checkpoint, strip_module_prefix
-from honf_runtime.paths import PROJECT_ROOT
-from honf_runtime.config_loader import load_config_bundle
-from honf_runtime.run_store import RunStore
-from honf_runtime.registry import load_object
-from channelthermal.local_surrogate.spec import THERMAL_DISK_SPEC
-from channelthermal.workflows.train_local import save_checkpoint
-from channelthermal.workflows.evaluate_forward import latest_run_dir, resolve_checkpoint_arg
-from channelthermal.workflows import evaluate_forward
 from channelthermal.config import ChannelThermalHONFConfig
-from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.environment import ChannelThermalEnvironmentBuilder
-from honf_forward_core.decoder import rectangular_boundary_features
+from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
+from channelthermal.local_surrogate.spec import THERMAL_DISK_SPEC
+from channelthermal.model import ChannelThermalHONFModel
+from channelthermal.plugin import ThermalChannelPlugin
+from channelthermal.resources import DatasetRegistry
+from channelthermal.workflows import evaluate_forward, evaluate_local
+from channelthermal.workflows.compare_models import resolve_model_specs
+from channelthermal.workflows.evaluate_forward import (
+    latest_run_dir,
+    resolve_checkpoint_arg,
+)
+from channelthermal.workflows.train_local import save_checkpoint
 from honf_forward_core.config import UnifiedForwardConfig
+from honf_forward_core.decoder import rectangular_boundary_features
+from honf_runtime.compat import load_trusted_checkpoint, strip_module_prefix
+from honf_runtime.config_loader import load_config_bundle
+from honf_runtime.paths import PROJECT_ROOT
+from honf_runtime.registry import load_object
+from honf_runtime.run_store import RunStore
 
 
 def test_routed_module_retention_aggregation_is_pair_weighted_across_chunks() -> None:
@@ -273,6 +276,36 @@ def test_forward_checkpoint_resolution_requires_explicit_fallback(tmp_path) -> N
     assert resolve_checkpoint_arg(args).name == "best_predicted_model.pt"
     args.allow_checkpoint_fallback = True
     assert resolve_checkpoint_arg(args) == (run / "best_model.pt").resolve()
+
+
+def test_forward_and_local_selectors_prefer_checkpoints_directory(tmp_path) -> None:
+    run = tmp_path / "Run_0002_20260101_000000_fixture"
+    checkpoint = run / "checkpoints" / "best_by_field_mse_model.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"canonical best field")
+    args = SimpleNamespace(
+        checkpoint="best_by_field_mse",
+        run_id="0002",
+        saved_root=str(tmp_path),
+        allow_checkpoint_fallback=False,
+    )
+    assert resolve_checkpoint_arg(args) == checkpoint.resolve()
+
+    local_args = SimpleNamespace(
+        checkpoint="best",
+        run_id="0002",
+        saved_root=str(tmp_path),
+    )
+    # Local checkpoint naming retains its own best/latest selectors.
+    local_checkpoint = run / "checkpoints" / "best_model.pt"
+    local_checkpoint.write_bytes(b"canonical local best")
+    assert evaluate_local.resolve_checkpoint_arg(local_args) == local_checkpoint.resolve()
+
+    comparison = resolve_model_specs(
+        SimpleNamespace(run_ids=[], checkpoint_path=[str(checkpoint)], label=[], saved_root=str(tmp_path))
+    )
+    assert comparison[0]["checkpoint_path"] == checkpoint.resolve()
+    assert comparison[0]["run_dir"] == run.resolve()
 
 
 def test_forward_run_lookup_rejects_ambiguous_ids(tmp_path) -> None:

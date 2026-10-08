@@ -19,7 +19,13 @@ from honf_runtime.compat import load_trusted_checkpoint, select_device
 from honf_runtime.paths import resolve_path
 from torch.utils.data import DataLoader
 
-from ..data import COMPACT_GEOMETRY_KEYS, WindFarmNativeDataset, WindFarmNativeView, case_batch, collate_windfarm
+from ..data import (
+    COMPACT_GEOMETRY_KEYS,
+    WindFarmNativeDataset,
+    WindFarmNativeView,
+    case_batch,
+    collate_windfarm,
+)
 from ..geometry import ENV_TOKEN_SHAPE
 from ..model import WindFarmForwardModel, build_windfarm_forward_config
 from ..normalization import VelocityNormalizer, VerticalProfileBaseline
@@ -567,6 +573,12 @@ def evaluate_rows(
     return summary
 
 
+def _default_evaluation_root(checkpoint: str | Path, kind: str) -> Path:
+    checkpoint_path = Path(checkpoint).expanduser().resolve()
+    run_dir = checkpoint_path.parent.parent if checkpoint_path.parent.name == "checkpoints" else checkpoint_path.parent
+    return run_dir / "evaluations" / kind
+
+
 def _write_results(output_dir: Path, result: Mapping[str, Any]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "metrics.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -672,7 +684,7 @@ def evaluate_cli(
                 device=device,
                 output_dir=(
                     output_dir
-                    or Path(checkpoint).expanduser().resolve().parent / "evaluations" / "w2_library"
+                    or _default_evaluation_root(checkpoint, "w2_library")
                 ),
             )
         )
@@ -715,7 +727,7 @@ def evaluate_cli(
                 volume_path=volume_path,
                 derived_view=derived_view,
                 device=select_device(device),
-                output_dir=output_dir or checkpoint_path.parent / "evaluations" / args.study_mode,
+                output_dir=output_dir or _default_evaluation_root(checkpoint_path, args.study_mode),
                 mode=args.study_mode,
                 compact_path=compact_path,
                 env_token_shape=token_shape,
@@ -875,7 +887,7 @@ def evaluate_cli(
             },
         }
     )
-    target = Path(output_dir).expanduser().resolve() if output_dir else checkpoint_path.parent / "evaluations" / selected_split
+    target = Path(output_dir).expanduser().resolve() if output_dir else _default_evaluation_root(checkpoint_path, selected_split)
     _write_results(target, result)
     print(f"[windfarm-eval] split={selected_split} rows={result['rows']} output={target}")
     return 0

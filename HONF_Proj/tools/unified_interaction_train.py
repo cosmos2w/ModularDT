@@ -112,7 +112,11 @@ def _model_state_sha256(model: Any) -> str:
 
 
 def _profile(task: str, seed: int):
-    from honf_runtime.unified_training import EngineConfig, SelectionPolicy, TrainingEngine
+    from honf_runtime.unified_training import (
+        EngineConfig,
+        SelectionPolicy,
+        TrainingEngine,
+    )
 
     microbatch, effective = (8, 48) if task == "thermal" else (4, 24)
     config = EngineConfig(
@@ -232,7 +236,9 @@ def _command_resume(args: argparse.Namespace) -> int:
     model, provider, optimizer_seed, engine, identity = _build(args)
     output = Path(args.output_dir).expanduser().resolve() if args.output_dir else _output_dir(
         args.task, args.run_id, args.arm)
-    checkpoint = Path(args.checkpoint).expanduser().resolve() if args.checkpoint else output / "latest_model.pt"
+    from honf_runtime.run_layout import resolve_checkpoint
+
+    checkpoint = resolve_checkpoint(output, args.checkpoint or "latest")
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Exact-resume checkpoint does not exist: {checkpoint}")
     result = engine.fit(
@@ -251,9 +257,13 @@ def _command_resume(args: argparse.Namespace) -> int:
 
 def _command_status(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir).expanduser().resolve()
+    _add_import_paths()
+    from honf_runtime.run_layout import RunLayout
+
+    layout = RunLayout(run_dir)
     result = {"run_dir": str(run_dir)}
     for name in ("active_process.json", "fit_summary.json"):
-        path = run_dir / name
+        path = layout.read_path(name)
         if path.is_file():
             result[name.removesuffix(".json")] = _read_json(path)
     active = result.get("active_process")
@@ -273,7 +283,7 @@ def _command_status(args: argparse.Namespace) -> int:
                                                         else "running_receipt_liveness_unknown")
         else:
             result["status"] = active.get("status")
-    history = run_dir / "history.json"
+    history = layout.read_path("history.json")
     if history.is_file():
         rows = json.loads(history.read_text(encoding="utf-8"))
         result["history"] = {
@@ -285,11 +295,12 @@ def _command_status(args: argparse.Namespace) -> int:
     request = run_dir / "CLEAN_STOP_REQUEST.json"
     if request.is_file():
         result["clean_stop_requested"] = _read_json(request)
-    acknowledged = run_dir / "clean_stop_acknowledged.json"
+    acknowledged = layout.read_path("clean_stop_acknowledged.json")
     if acknowledged.is_file():
         result["clean_stop_acknowledged"] = _read_json(acknowledged)
     result["consumed_clean_stop_receipts"] = [
-        str(path) for path in sorted(run_dir.glob("clean_stop_consumed_*.json"))
+        str(path) for path in sorted({*run_dir.glob("clean_stop_consumed_*.json"),
+                                     *(run_dir / "logs").glob("clean_stop_consumed_*.json")})
     ]
     if len(result) == 1:
         result["status"] = "no runner receipt in this directory"

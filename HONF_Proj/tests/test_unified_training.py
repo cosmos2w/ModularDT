@@ -7,12 +7,11 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import honf_runtime.unified_training as runtime
 import numpy as np
 import pytest
 import torch
-from torch import nn
-
-import honf_runtime.unified_training as runtime
+from honf_runtime.run_layout import RunLayout, resolve_checkpoint
 from honf_runtime.unified_training import (
     EngineConfig,
     LossTerm,
@@ -23,6 +22,7 @@ from honf_runtime.unified_training import (
     TaskBatch,
     TrainingEngine,
 )
+from torch import nn
 
 
 class _ToyProvider:
@@ -113,26 +113,43 @@ def _sparse_config():
                    checkpoint_epochs=(2, 6, 10), latest_every=2, curve_every=2)
 
 
+def _artifact(run_dir: Path, name: str) -> Path:
+    return RunLayout(run_dir).read_path(name)
+
+
+def _checkpoint(run_dir: Path, selector: str = "latest") -> Path:
+    return resolve_checkpoint(run_dir, selector)
+
+
+def _tree_hash(run_dir: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(run_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
+
+
 def test_sparse_outputs_keep_only_milestones_and_update_real_curves(tmp_path):
     provider = _ToyProvider()
     output = tmp_path / "sparse"
     engine = TrainingEngine(_sparse_config(), device="cpu")
     engine.fit(nn.Linear(1, 1), provider, output, identity={"run": "sparse"},
                arm="adaptive_detail", stop_after=10)
-    history = json.loads((output / "history.json").read_text())
+    history = json.loads(_artifact(output, "history.json").read_text())
     assert [row["epoch"] for row in history if "validation" in row] == [2, 4, 8, 10]
-    assert {path.name for path in output.glob("epoch_*_model.pt")} == {
+    assert {path.name for path in (output / "checkpoints").glob("epoch_*_model.pt")} == {
         "epoch_0002_model.pt", "epoch_0006_model.pt", "epoch_0010_model.pt"}
-    for name in ("loss_curves.pdf", "loss_curves.png", "best_by_field_mse_model.pt"):
-        assert (output / name).stat().st_size > 0
-    progress = json.loads((output / "progress.json").read_text())
+    for name in ("loss_curves.pdf", "loss_curves.png"):
+        assert _artifact(output, name).stat().st_size > 0
+    assert _checkpoint(output, "best_field").stat().st_size > 0
+    progress = json.loads(_artifact(output, "progress.json").read_text())
     assert progress["completed_epoch"] == progress["latest_checkpoint_epoch"] == 10
     assert progress["completed_case_visits"] == 50
     assert progress["completed_optimizer_updates"] == 20
-    assert not (output / "last.pt").is_symlink()
-    assert (output / "last.pt").read_bytes() == (output / "latest_model.pt").read_bytes()
-    assert torch.load(output / "last.pt", map_location="cpu", weights_only=False)["epoch"] == 10
-    summary = json.loads((output / "fit_summary.json").read_text())
+    assert not (output / "last.pt").exists()
+    assert not (output / "checkpoints" / "last.pt").exists()
+    assert torch.load(_checkpoint(output), map_location="cpu", weights_only=False)["epoch"] == 10
+    summary = json.loads(_artifact(output, "fit_summary.json").read_text())
     assert summary["cumulative_microbatches"] == 30
     assert summary["cumulative_partial_update_cases"] == 10
 
@@ -171,14 +188,14 @@ def test_curve_rng_is_preserved_and_sparse_resume_is_exact(tmp_path, monkeypatch
     torch.rand(9)
     np.random.rand(9)
     engine.fit(interrupted, StochasticProvider(), output, identity={"run": "sparse"},
-               arm="adaptive_detail", stop_after=10, resume_checkpoint=output / "latest_model.pt")
+               arm="adaptive_detail", stop_after=10, resume_checkpoint=_checkpoint(output))
     assert torch.equal(torch.get_rng_state(), expected_rng)
     actual_numpy_rng = np.random.get_state()
     assert np.array_equal(actual_numpy_rng[1], expected_numpy_rng[1])
     assert actual_numpy_rng[2:] == expected_numpy_rng[2:]
     for name, value in uninterrupted.state_dict().items():
         assert torch.equal(value, interrupted.state_dict()[name])
-    summary = json.loads((output / "fit_summary.json").read_text())
+    summary = json.loads(_artifact(output, "fit_summary.json").read_text())
     assert summary["case_visits"] == 30
     assert summary["cumulative_case_visits"] == 50
 
@@ -193,10 +210,10 @@ def test_sparse_nonmilestone_clean_stop_saves_latest_without_extra_snapshot(tmp_
     receipt = engine.fit(model, _ToyProvider(), output, identity={"run": "sparse-clean"},
                          arm="adaptive_detail", stop_after=10)
     assert receipt["completed_epoch"] == 1 and receipt["status"] == "clean_stopped"
-    assert not list(output.glob("epoch_*_model.pt"))
-    assert (output / "latest_model.pt").exists()
+    assert not list((output / "checkpoints").glob("epoch_*_model.pt"))
+    assert _checkpoint(output).exists()
     resumed = engine.fit(model, _ToyProvider(), output, identity={"run": "sparse-clean"},
-                         arm="adaptive_detail", stop_after=2, resume_checkpoint=output / "latest_model.pt")
+                         arm="adaptive_detail", stop_after=2, resume_checkpoint=_checkpoint(output))
     assert resumed["completed_epoch"] == 2
 
 
@@ -222,14 +239,14 @@ def test_failed_terminal_sidecar_does_not_advance_latest_past_recoverable_age(tm
     with pytest.raises(OSError, match="injected terminal"):
         engine.fit(model, _ToyProvider(), output, identity={"run": "recover"},
                    arm="adaptive_detail", stop_after=10)
-    saved = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+    saved = torch.load(_checkpoint(output), map_location="cpu", weights_only=False)
     assert saved["epoch"] == 8
     monkeypatch.setattr(runtime, "_atomic_torch_save", original_save)
     result = engine.fit(model, _ToyProvider(), output, identity={"run": "recover"},
-                        arm="adaptive_detail", stop_after=10, resume_checkpoint=output / "latest_model.pt")
+                        arm="adaptive_detail", stop_after=10, resume_checkpoint=_checkpoint(output))
     assert result["completed_epoch"] == 10
-    for name in ("latest_model.pt", "epoch_0010_model.pt", "best_by_field_mse_model.pt"):
-        assert torch.load(output / name, map_location="cpu", weights_only=False)["epoch"] == 10
+    for selector in ("latest", "epoch_0010_model.pt", "best_field"):
+        assert torch.load(_checkpoint(output, selector), map_location="cpu", weights_only=False)["epoch"] == 10
 
 
 def test_schedule_hits_declared_warmup_endpoints_and_cosine_final():
@@ -245,7 +262,7 @@ def _fit_warmup(tmp_path: Path):
     model = nn.Linear(1, 1)
     engine = TrainingEngine(_config(), device="cpu", selection=SelectionPolicy())
     engine.fit(model, _ToyProvider(), tmp_path / "warmup", identity={"run": "test"}, arm="warmup", stop_after=2)
-    return model, tmp_path / "warmup" / "latest_model.pt"
+    return model, _checkpoint(tmp_path / "warmup")
 
 
 def test_engine_uses_actual_final_macro_denominator_and_records_visits(tmp_path):
@@ -254,16 +271,16 @@ def test_engine_uses_actual_final_macro_denominator_and_records_visits(tmp_path)
     engine = TrainingEngine(_config(), device="cpu", selection=SelectionPolicy())
     receipt = engine.fit(model, provider, tmp_path / "warmup", identity={"run": "test"}, arm="warmup",
                          stop_after=2)
-    history = torch.load(tmp_path / "warmup" / "latest_model.pt", map_location="cpu", weights_only=False)["history"]
+    history = torch.load(_checkpoint(tmp_path / "warmup"), map_location="cpu", weights_only=False)["history"]
     assert receipt["completed_epoch"] == 2
     assert history[0]["case_visits"] == 5
     assert history[0]["optimizer_updates"] == 2
     assert history[0]["microbatches"] == 3
     assert history[0]["partial_update_cases"] == 1
     assert history[0]["work_counts"]["query_rows"] == 5
-    assert (tmp_path / "warmup" / "epoch_0001_model.pt").is_file()
+    assert _checkpoint(tmp_path / "warmup", "epoch_0001_model.pt").is_file()
     assert not (tmp_path / "warmup" / "best_by_response_guarded_model.pt").exists()
-    summary = json.loads((tmp_path / "warmup" / "fit_summary.json").read_text())
+    summary = json.loads(_artifact(tmp_path / "warmup", "fit_summary.json").read_text())
     assert summary["best_response_guarded_score"] is None
 
 
@@ -278,13 +295,13 @@ def test_guarded_selector_is_a_verified_pointer_to_a_monitoring_checkpoint(tmp_p
     output = tmp_path / "guarded"
     receipt = engine.fit(model, _GuardedToyProvider(), output, identity={"run": "guarded"},
                          arm="warmup", stop_after=2)
-    payload = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+    payload = torch.load(_checkpoint(output), map_location="cpu", weights_only=False)
     rows = payload["history"]
     expected = min(
         (row for row in rows if row["validation"]["response_guard_max_ratio"] <= 1.1),
         key=lambda row: row["validation"]["field_score"],
     )
-    pointer_path = output / "best_by_response_guarded_selection.json"
+    pointer_path = _artifact(output, "best_by_response_guarded_selection.json")
     pointer = json.loads(pointer_path.read_text())
     selected = output / pointer["checkpoint"]
     assert receipt["best_response_guarded_score"] == expected["validation"]["field_score"]
@@ -303,35 +320,66 @@ def test_engine_rejects_a_denominator_that_does_not_match_the_target_prepass(tmp
     with pytest.raises(ValueError, match="differs from prepass"):
         engine.fit(model, _ToyProvider(bad_prepass=True), tmp_path / "bad", identity={"run": "bad"},
                    arm="warmup", stop_after=1)
-    failed = json.loads((tmp_path / "bad" / "active_process.json").read_text())
+    failed = json.loads(_artifact(tmp_path / "bad", "active_process.json").read_text())
     assert failed["status"] == "failed"
     assert failed["completed_epoch"] == 0
     assert failed["exception_type"] == "ValueError"
     assert failed["pid"] > 0
     assert failed["process_start_ticks"]
-    assert not (tmp_path / "bad" / "latest_model.pt").exists()
+    assert not _checkpoint(tmp_path / "bad").exists()
 
 
 def test_new_fit_cannot_overwrite_existing_history(tmp_path):
     _, latest = _fit_warmup(tmp_path)
-    output = latest.parent
-    before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir()}
+    output = latest.parent.parent
+    before = _tree_hash(output)
     engine = TrainingEngine(_config(), device="cpu")
     with pytest.raises(ValueError, match="fresh run directory"):
         engine.fit(nn.Linear(1, 1), _ToyProvider(), output, identity={"run": "test"},
                    arm="warmup", stop_after=2)
-    assert before == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir()}
+    assert before == _tree_hash(output)
 
 
 def test_exact_resume_cannot_rewind_to_an_old_monitoring_checkpoint(tmp_path):
     _, latest = _fit_warmup(tmp_path)
-    output = latest.parent
-    before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir()}
+    output = latest.parent.parent
+    before = _tree_hash(output)
     engine = TrainingEngine(_config(), device="cpu")
-    with pytest.raises(ValueError, match="current latest_model.pt"):
+    with pytest.raises(ValueError, match="current latest checkpoint"):
         engine.fit(nn.Linear(1, 1), _ToyProvider(), output, identity={"run": "test"},
-                   arm="warmup", stop_after=3, resume_checkpoint=output / "epoch_0001_model.pt")
-    assert before == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir()}
+                   arm="warmup", stop_after=3, resume_checkpoint=_checkpoint(output, "epoch_0001_model.pt"))
+    assert before == _tree_hash(output)
+
+
+def test_legacy_exact_resume_uses_root_latest_over_stale_checkpoint_alias(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    output = tmp_path / "legacy_resume"
+    engine = TrainingEngine(_config(), device="cpu")
+    model = nn.Linear(1, 1)
+    engine.fit(model, _ToyProvider(), output, identity={"run": "legacy"}, arm="warmup", stop_after=2)
+
+    latest = _checkpoint(output)
+    latest_payload = torch.load(latest, map_location="cpu", weights_only=False)
+    torch.load(_checkpoint(output, "epoch_0001_model.pt"), map_location="cpu", weights_only=False)
+    (output / "artifact_layout.json").unlink()
+    (output / "latest_model.pt").write_bytes(latest.read_bytes())
+    (output / "checkpoints" / "latest.pt").write_bytes(b"stale alias")
+
+    assert resolve_checkpoint(output, "latest") == output / "latest_model.pt"
+    resumed = engine.fit(
+        model,
+        _ToyProvider(),
+        output,
+        identity={"run": "legacy"},
+        arm="warmup",
+        stop_after=3,
+        resume_checkpoint=output / "latest_model.pt",
+    )
+
+    assert latest_payload["epoch"] == 2
+    assert resumed["completed_epoch"] == 3
+    assert torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)["epoch"] == 3
+    assert (output / "checkpoints" / "latest.pt").read_bytes() == b"stale alias"
 
 
 def test_another_process_lock_prevents_concurrent_checkpoint_writers(tmp_path):
@@ -343,8 +391,8 @@ def test_another_process_lock_prevents_concurrent_checkpoint_writers(tmp_path):
         with pytest.raises(ValueError, match="Another training process"):
             engine.fit(nn.Linear(1, 1), _ToyProvider(), output, identity={"run": "locked"},
                        arm="warmup", stop_after=1)
-    assert not (output / "active_process.json").exists()
-    assert not (output / "latest_model.pt").exists()
+    assert not _artifact(output, "active_process.json").exists()
+    assert not _checkpoint(output).exists()
     # Releasing the owner's kernel lock permits the same new output to start.
     assert engine.fit(nn.Linear(1, 1), _ToyProvider(), output, identity={"run": "locked"},
                       arm="warmup", stop_after=1)["completed_epoch"] == 1
@@ -376,7 +424,7 @@ def test_clean_stop_is_consumed_before_exact_resume(tmp_path):
     assert stopped["status"] == "clean_stopped"
     assert stopped["completed_epoch"] == 1
     assert not (output / "CLEAN_STOP_REQUEST.json").exists()
-    acknowledgement = json.loads((output / "clean_stop_acknowledged.json").read_text())
+    acknowledgement = json.loads(_artifact(output, "clean_stop_acknowledged.json").read_text())
     assert acknowledgement["request_id"] == request["request_id"]
     assert acknowledgement["epoch"] == 1
     assert acknowledgement["phase"] == "warmup"
@@ -386,11 +434,11 @@ def test_clean_stop_is_consumed_before_exact_resume(tmp_path):
     (output / "CLEAN_STOP_REQUEST.json").write_text(json.dumps(request) + "\n", encoding="utf-8")
 
     resumed = engine.fit(model, provider, output, identity={"run": "clean-stop"}, arm="warmup", stop_after=2,
-                         resume_checkpoint=output / "latest_model.pt")
+                         resume_checkpoint=_checkpoint(output))
     assert resumed["completed_epoch"] == 2
     assert resumed["status"] == "completed"
     assert not (output / "CLEAN_STOP_REQUEST.json").exists()
-    consumed = list(output.glob("clean_stop_consumed_*.json"))
+    consumed = list((output / "logs").glob("clean_stop_consumed_*.json"))
     assert len(consumed) == 1
     consumed_payload = json.loads(consumed[0].read_text())
     assert consumed_payload["request"] == request
@@ -412,7 +460,7 @@ def test_shared_warmup_branches_and_exact_resume_reproduce_same_endpoint(tmp_pat
     resumed = nn.Linear(1, 1)
     engine.fit(resumed, _ToyProvider(), tmp_path / "adaptive", identity=identity,
                arm="adaptive_detail", stop_after=4,
-               resume_checkpoint=tmp_path / "adaptive" / "latest_model.pt")
+               resume_checkpoint=_checkpoint(tmp_path / "adaptive"))
 
     uninterrupted = nn.Linear(1, 1)
     engine.fit(uninterrupted, _ToyProvider(), tmp_path / "full", identity=identity,
@@ -420,9 +468,9 @@ def test_shared_warmup_branches_and_exact_resume_reproduce_same_endpoint(tmp_pat
     for key, value in uninterrupted.state_dict().items():
         assert torch.equal(value, resumed.state_dict()[key])
     assert all(torch.equal(warm_state[key], warm_model.state_dict()[key]) for key in warm_state)
-    resumed_history = torch.load(tmp_path / "adaptive" / "latest_model.pt", map_location="cpu",
+    resumed_history = torch.load(_checkpoint(tmp_path / "adaptive"), map_location="cpu",
                                  weights_only=False)["history"]
-    full_history = torch.load(tmp_path / "full" / "latest_model.pt", map_location="cpu",
+    full_history = torch.load(_checkpoint(tmp_path / "full"), map_location="cpu",
                               weights_only=False)["history"]
     assert [row["query_sampling_sha256"] for row in resumed_history] == [
         row["query_sampling_sha256"] for row in full_history
@@ -453,7 +501,7 @@ def test_validation_always_uses_hard_route_during_open_training(tmp_path):
     engine.fit(model, provider, tmp_path / "warmup", identity={"run": "test"}, arm="warmup", stop_after=1)
     assert provider.validation_phases
     assert all(phase == "hard" for phase, _mode, _epoch, _temperature in provider.validation_phases)
-    saved = torch.load(tmp_path / "warmup" / "latest_model.pt", map_location="cpu", weights_only=False)
+    saved = torch.load(_checkpoint(tmp_path / "warmup"), map_location="cpu", weights_only=False)
     assert saved["history"][0]["validation"]["validation_route_phase"] == "hard"
     assert provider.training_mode_seen
     assert all(provider.training_mode_seen)
@@ -489,7 +537,7 @@ def test_microbatch_amendment_preserves_weights_moments_history_and_future_exact
     identity = {"run": "preserved"}
     TrainingEngine(config, device="cpu").fit(model, _ToyProvider(), output,
         identity=identity, arm="adaptive_detail", stop_after=4)
-    source = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+    source = torch.load(_checkpoint(output), map_location="cpu", weights_only=False)
     new_engine = TrainingEngine(replace(config, microbatch_cases=4), device="cpu")
     initial_steps = []
     original_optimizer = new_engine._make_optimizer
@@ -508,25 +556,25 @@ def test_microbatch_amendment_preserves_weights_moments_history_and_future_exact
     monkeypatch.setattr(new_engine, "_make_optimizer", inspect_optimizer)
     with pytest.raises(ValueError, match="identity, engine config"):
         new_engine.fit(model, _ToyProvider(), output, identity=identity,
-            arm="adaptive_detail", stop_after=6, resume_checkpoint=output / "latest_model.pt")
+            arm="adaptive_detail", stop_after=6, resume_checkpoint=_checkpoint(output))
     new_engine.fit(model, _ToyProvider(), output, identity=identity, arm="adaptive_detail", stop_after=6,
-        resume_checkpoint=output / "latest_model.pt", allow_microbatch_change=True)
+        resume_checkpoint=_checkpoint(output), allow_microbatch_change=True)
     assert initial_steps == [8, 8]
-    amended = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+    amended = torch.load(_checkpoint(output), map_location="cpu", weights_only=False)
     assert amended["history"][:4] == source["history"]
     assert amended["history"][4]["microbatches"] == 2
     record = amended["resume_amendments"][0]
     assert record["source_epoch"] == 4 and record["next_epoch"] == 5
     assert record["preserved_case_visits"] == 20 and record["preserved_optimizer_updates"] == 8
     assert record["source_microbatch_cases"] == 2 and record["microbatch_cases"] == 4
-    assert json.loads((output / "microbatch_amendment_epoch_0005.json").read_text()) == record
+    assert json.loads(_artifact(output, "microbatch_amendment_epoch_0005.json").read_text()) == record
     for state in amended["optimizer_state_by_name"]["state_by_name"].values():
         assert int(state["step"].item()) == 12
     # The next continuation is exact under the amended identity; no further exception is needed.
     engine = TrainingEngine(replace(config, microbatch_cases=4), device="cpu")
     engine.fit(model, _ToyProvider(), output, identity=identity, arm="adaptive_detail", stop_after=10,
-        resume_checkpoint=output / "latest_model.pt")
-    final = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+        resume_checkpoint=_checkpoint(output))
+    final = torch.load(_checkpoint(output), map_location="cpu", weights_only=False)
     assert final["resume_amendments"] == amended["resume_amendments"]
     assert sum(row["case_visits"] for row in final["history"]) == 50
     assert sum(row["optimizer_updates"] for row in final["history"]) == 20

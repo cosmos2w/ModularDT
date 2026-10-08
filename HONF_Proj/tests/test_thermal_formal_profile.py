@@ -17,7 +17,9 @@ from thermal_formal_profile import (
     formal_train_config,
     validate_formal_bindings,
 )
-from thermal_source_response_fit import validate_formal_profile as validate_thermal_profile
+from thermal_source_response_fit import (
+    validate_formal_profile as validate_thermal_profile,
+)
 
 _PROFILE_DIR = Path(__file__).resolve().parents[1] / "src/config_core/forward/thermal_source_response"
 
@@ -105,7 +107,7 @@ def test_formal_resume_binds_existing_output_identity_before_writes(tmp_path):
     output = tmp_path / "empty_run"
     output.mkdir()
     ensure_formal_resume_identity(output, "fit_identity.json", identity)
-    assert json.loads((output / "fit_identity.json").read_text()) == {
+    assert json.loads((output / "configs" / "fit_identity.json").read_text()) == {
         **identity, "flow_reader_config": {"heat_columns": [4]}}
     ensure_formal_resume_identity(output, "fit_identity.json", identity)
     with pytest.raises(ValueError, match="different run identity"):

@@ -10,6 +10,7 @@ case-specific workflow.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import traceback
 from dataclasses import replace
@@ -20,6 +21,7 @@ from honf_runtime.config_loader import load_config_bundle
 from honf_runtime.launch_summary import confirm_launch, print_launch_summary
 from honf_runtime.paths import resolve_path
 from honf_runtime.registry import load_case_plugin, require_model_family
+from honf_runtime.run_layout import RunLayout
 from honf_runtime.run_store import RunStore
 
 DEFAULT_CONFIG = "project://src/config_core/forward/enhanced_honf_pairwise.json"
@@ -204,14 +206,16 @@ def main() -> int:
     except BaseException as exc:
         if (Path(run_dir) / "run_manifest.json").exists():
             last_completed_epoch = None
+            layout = RunLayout(run_dir)
             for history_name in ("metrics.csv", "loss_history.csv"):
-                history_path = Path(run_dir) / history_name
+                history_path = layout.read_path(history_name)
                 if history_path.is_file():
                     try:
-                        lines = [line for line in history_path.read_text(encoding="utf-8").splitlines()[1:] if line]
-                        if lines:
-                            last_completed_epoch = int(float(lines[-1].split(",", 1)[0]))
-                    except (OSError, ValueError):
+                        with history_path.open("r", newline="", encoding="utf-8") as stream:
+                            rows = list(csv.DictReader(stream))
+                        if rows and rows[-1].get("epoch"):
+                            last_completed_epoch = int(float(rows[-1]["epoch"]))
+                    except (OSError, csv.Error, TypeError, ValueError):
                         pass
                     break
             RunStore.update_status(

@@ -10,8 +10,8 @@ from typing import Any
 import numpy as np
 from channelthermal.data.datasets import H5Normalizer, fit_global_normalizer
 from channelthermal.data.development_split import read_case_catalog
-
 from honf_runtime.compat import resolve_demo_path
+from honf_runtime.run_layout import RunLayout
 from honf_runtime.run_store import atomic_write_json
 
 FORMAL_TRAIN_SCOPE = "formal_full_train_v1"
@@ -47,7 +47,8 @@ def ensure_formal_resume_identity(path: str | Path, filename: str,
     if filename not in {"fit_identity.json", "formal_recipe.json"}:
         raise ValueError("Unsupported formal output identity filename.")
     output = Path(path)
-    identity_path = output / filename
+    layout = RunLayout(output)
+    identity_path = layout.read_path(filename)
     # JSON round-trips tuple-valued reader settings as lists. Compare the exact
     # serialized identity while checkpoint-to-checkpoint checks keep their types.
     serialized_expected = json.loads(json.dumps(dict(expected)))
@@ -57,7 +58,7 @@ def ensure_formal_resume_identity(path: str | Path, filename: str,
         return
     if next(output.iterdir(), None) is not None:
         raise ValueError("Formal resume refuses a nonempty output directory without its prepared identity.")
-    atomic_write_json(identity_path, dict(expected))
+    atomic_write_json(layout.write_path(filename), dict(expected))
 
 
 def _canonical_sha256(value: Any) -> str:

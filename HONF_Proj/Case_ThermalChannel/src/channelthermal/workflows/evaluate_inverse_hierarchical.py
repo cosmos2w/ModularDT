@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from honf_inverse_core.models.hierarchical_inverse import HierarchicalInverseDesigner
 from honf_inverse_core.config import validate_config_keys
+from honf_inverse_core.models.hierarchical_inverse import HierarchicalInverseDesigner
 from honf_inverse_core.normalization import ScalarStats, VectorStats
 from honf_inverse_core.sampling.serialization import write_json_atomic
 from honf_inverse_core.training.checkpointing import load_inverse_checkpoint
@@ -132,7 +132,8 @@ def run_evaluation(config: Mapping[str, Any]) -> dict[str, Any]:
         "artifacts": inventory,
     }
     write_json_atomic(output / "evaluation_manifest.json", manifest)
-    RunStore.record_evaluation(inverse_path.parent, output)
+    inverse_run_dir = inverse_path.parent.parent if inverse_path.parent.name == "checkpoints" else inverse_path.parent
+    RunStore.record_evaluation(inverse_run_dir, output)
     return {"output_dir": str(output), "evaluation_manifest": manifest, **summary}
 
 

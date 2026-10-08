@@ -8,7 +8,7 @@ from channelthermal.evaluation.results import summarize
 from channelthermal.training.reporting import _read_metric_history
 from channelthermal.workflows import evaluate_forward, evaluate_local
 from channelthermal.workflows.train_forward import save_global_loss_plots
-
+from channelthermal.workflows.train_local import save_local_loss_curve
 from honf_runtime.artifact_layout import EvaluationArtifactLayout
 
 
@@ -30,8 +30,9 @@ def test_managed_forward_training_writes_only_canonical_plot_tree(tmp_path) -> N
     run_dir = tmp_path / "Run_0001_fixture"
     (run_dir / "plots" / "training").mkdir(parents=True)
     (run_dir / "plots" / "diagnostics").mkdir(parents=True)
-    (run_dir / "run_manifest.json").write_text("{}\n", encoding="utf-8")
-    metrics_path = run_dir / "metrics.csv"
+    (run_dir / "run_manifest.json").write_text('{"artifact_layout_version":1}\n', encoding="utf-8")
+    metrics_path = run_dir / "metrics" / "metrics.csv"
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "epoch",
         "loss_total",
@@ -55,20 +56,36 @@ def test_managed_forward_training_writes_only_canonical_plot_tree(tmp_path) -> N
     save_global_loss_plots(metrics_path, run_dir)
 
     assert (run_dir / "plots" / "training" / "loss_curve.png").is_file()
+    assert (run_dir / "plots" / "training" / "loss_curve.pdf").is_file()
     assert (run_dir / "plots" / "diagnostics" / "loss_total_curve.png").is_file()
     assert not (run_dir / "loss_curve.png").exists()
     assert not (run_dir / "diagnostic_plots").exists()
 
 
+def test_local_training_curve_separates_train_and_validation(tmp_path) -> None:
+    history = tmp_path / "metrics.csv"
+    history.write_text(
+        "epoch,loss_total,val_loss_total,loss_internal,val_loss_internal,loss_interface,val_loss_interface\n"
+        "1,1.0,1.2,0.5,0.6,0.4,0.5\n2,0.8,1.0,0.4,0.5,0.3,0.4\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "plots" / "training" / "loss_curve.png"
+    save_local_loss_curve(history, output, validation_label="Validation (source test split)")
+    assert output.is_file() and output.stat().st_size > 0
+    assert output.with_suffix(".pdf").is_file() and output.with_suffix(".pdf").stat().st_size > 0
+
+
 def test_group_control_activity_history_stays_aligned_across_resume(tmp_path) -> None:
     run_dir = tmp_path / "Run_1406_fixture"
     run_dir.mkdir(parents=True)
-    (run_dir / "run_manifest.json").write_text("{}\n", encoding="utf-8")
-    (run_dir / "config_resolved.json").write_text(
+    (run_dir / "run_manifest.json").write_text('{"artifact_layout_version":1}\n', encoding="utf-8")
+    (run_dir / "configs").mkdir(parents=True, exist_ok=True)
+    (run_dir / "configs" / "config_resolved.json").write_text(
         '{"model":{"core_honf":{"forward_architecture":"group_control_pairwise_honf"}}}\n',
         encoding="utf-8",
     )
-    metrics_path = run_dir / "metrics.csv"
+    metrics_path = run_dir / "metrics" / "metrics.csv"
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "epoch",
         "loss_total",

@@ -12,6 +12,7 @@ from typing import Any
 
 from honf_forward_core.training.diagnostics import HONF_DIAGNOSTIC_KEYS
 from honf_runtime.compat import read_json
+from honf_runtime.run_layout import RunLayout
 
 
 def write_metrics_row(path: Path, fieldnames: Iterable[str], row: dict[str, Any]) -> None:
@@ -131,6 +132,7 @@ def _plot_metric_group(
     log_scale: bool = True,
     y_min_zero: bool = False,
     reference_lines: tuple[tuple[float, str], ...] = (),
+    validation_label: str = "Validation",
 ) -> None:
     """Perform the plot metric group operation used by this module."""
 
@@ -139,14 +141,30 @@ def _plot_metric_group(
         values = history.get(key)
         if not values or not any(math.isfinite(value) for value in values):
             continue
+        is_validation = key.startswith("val_")
         base_key = key.removeprefix("val_")
-        label = {
+        metric_label = {
+            "loss_total": "total loss",
+            "loss_field": "field prediction loss",
+            "field_mse": "field MSE",
+            "loss_internal_temperature": "internal temperature prediction loss",
+            "loss_interface": "module boundary matching loss",
+            "loss_port_condition": "port boundary-condition loss",
+            "loss_port_global_consistency": "cross-module port consistency loss",
+            "loss_predicted_consistency": "predicted-port agreement loss",
+            "temperature_mse": "temperature MSE",
+            "predicted_loss_total": "predicted-port total objective",
+            "selected_edge_count": "selected H-edges",
+            "functional_edge_count": "functional H-edges",
+            "soft_functional_edge_count": "soft functional H-edges",
             "interaction_module_group_incidence_count": "module->group incidences",
             "interaction_environment_group_incidence_count": "environment->group incidences",
             "interaction_group_read_degree_mean": "query->group degree",
         }.get(base_key, base_key.removeprefix("loss_"))
-        if key.startswith("val_"):
-            label = f"val {label}"
+        phase = validation_label if is_validation else "Train"
+        if base_key == "loss_total" and "predicted" in key:
+            phase = f"{validation_label} (predicted ports)"
+        label = f"{phase}: {metric_label}"
         ax.plot(epochs[: len(values)], values, label=label)
     if epochs:
         for index, (reference_y, reference_label) in enumerate(reference_lines):
@@ -175,7 +193,7 @@ def _plot_metric_group(
 def _resolved_active_edge_references(run_dir: Path) -> tuple[tuple[float, str], ...]:
     """Return configured candidate/selection references for activity plots."""
 
-    config_path = run_dir / "config_resolved.json"
+    config_path = RunLayout(run_dir).read_path("configs/config_resolved.json")
     if not config_path.exists():
         return ()
     try:
@@ -197,7 +215,7 @@ def _resolved_active_edge_references(run_dir: Path) -> tuple[tuple[float, str], 
 def _resolved_forward_architecture(run_dir: Path) -> str:
     """Return the managed run's architecture for plot-panel selection."""
 
-    config_path = run_dir / "config_resolved.json"
+    config_path = RunLayout(run_dir).read_path("configs/config_resolved.json")
     if not config_path.exists():
         return ""
     try:
@@ -305,26 +323,27 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
     # Managed runs write directly to the canonical tree.  The legacy fallback
     # keeps direct case-workflow invocations compatible without mirroring one
     # plot into both ``diagnostic_plots`` and ``plots/diagnostics``.
-    managed_run = (run_dir / "run_manifest.json").is_file()
-    training_dir = run_dir / "plots" / "training" if managed_run else run_dir
-    diagnostics_dir = run_dir / "plots" / "diagnostics" if managed_run else run_dir / "diagnostic_plots"
+    layout = RunLayout(run_dir)
+    layout.ensure()
+    training_plot = layout.read_path("plots/training/loss_curve.png")
+    if not training_plot.is_file():
+        training_plot = layout.write_path("plots/training/loss_curve.png")
+    diagnostics_plot = layout.read_path("plots/diagnostics/loss_total_curve.png")
+    if not diagnostics_plot.is_file():
+        diagnostics_plot = layout.write_path("plots/diagnostics/loss_total_curve.png")
+    training_dir = training_plot.parent
+    diagnostics_dir = diagnostics_plot.parent
     training_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     active_edge_references = _resolved_active_edge_references(run_dir)
-    stale_root_plots = [
-        "loss_curves.png",
-        "loss_total_curve.png",
-        "loss_field_curve.png",
-        "loss_local_coupling_curve.png",
-        "loss_port_condition_curve.png",
-        "honf_entropy_activity_curve.png",
-        "honf_context_curve.png",
-    ]
-    for filename in stale_root_plots:
-        stale_path = training_dir / filename
-        if stale_path.exists():
-            stale_path.unlink()
-
+    validation_label = "Validation"
+    config_path = layout.read_path("configs/config_resolved.json")
+    if config_path.is_file():
+        try:
+            split = str(read_json(config_path).get("dataset", {}).get("val_split", "validation")).lower()
+            validation_label = "Validation (source test split)" if split == "test" else "Validation (source validation split)"
+        except (OSError, TypeError, ValueError):
+            pass
     architecture = _resolved_forward_architecture(run_dir)
     if architecture == "group_control_pairwise_honf":
         activity_panel = (
@@ -357,23 +376,23 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             True,
         )
     panels = [
-        ("Total", ("loss_total", "val_loss_total", "val_predicted_loss_total"), "loss", True, False),
-        ("Global Field", ("loss_field", "val_loss_field", "field_mse", "val_field_mse"), "loss / mse", True, False),
+        ("Total loss\nWeighted sum of configured loss terms", ("loss_total", "val_loss_total", "val_predicted_loss_total"), "loss", True, False),
+        ("Field prediction loss\nError over predicted physical fields", ("loss_field", "val_loss_field", "field_mse", "val_field_mse"), "loss / mse", True, False),
         (
-            "Local/Internal Coupling",
+            "Internal and boundary losses\nModule temperature and interface matching",
             ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface"),
             "loss",
             True,
             False,
         ),
         (
-            "Port and Consistency",
+            "Port consistency losses\nBoundary conditions and cross-module agreement",
             ("loss_port_condition", "val_loss_port_condition", "loss_port_global_consistency", "val_loss_port_global_consistency"),
             "loss",
             True,
             False,
         ),
-        ("Temperature", ("temperature_mse", "val_temperature_mse"), "mse", True, False),
+        ("Temperature prediction error\nMean squared temperature error", ("temperature_mse", "val_temperature_mse"), "mse", True, False),
         activity_panel,
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15.5, 7.4), constrained_layout=True)
@@ -387,8 +406,10 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             log_scale=log_scale,
             y_min_zero=y_min_zero,
             reference_lines=active_edge_references if y_min_zero else (),
+            validation_label=validation_label,
         )
-    fig.suptitle("HONF-CL Training Overview", fontsize=13)
+    fig.suptitle(f"HONF-CL Training and {validation_label} History", fontsize=13)
+    fig.savefig(str(training_dir / "loss_curve.pdf"))
     fig.savefig(str(training_dir / "loss_curve.png"), dpi=160)
     plt.close(fig)
 
@@ -500,6 +521,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             log_scale=log_scale,
             y_min_zero=y_min_zero,
             reference_lines=active_edge_references if y_min_zero else (),
+            validation_label=validation_label,
         )
         fig.savefig(str(diagnostics_dir / filename), dpi=160)
         plt.close(fig)

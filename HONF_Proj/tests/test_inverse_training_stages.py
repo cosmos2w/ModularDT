@@ -7,10 +7,9 @@ import json
 from pathlib import Path
 
 import pytest
-
 from honf_inverse_core.models.hierarchical_inverse import HierarchicalInverseDesigner
-from honf_inverse_core.training.stages import TRAINING_STAGES, configure_stage
 from honf_inverse_core.training.checkpointing import load_inverse_checkpoint
+from honf_inverse_core.training.stages import TRAINING_STAGES, configure_stage
 from honf_inverse_core.training.trainer import InverseTrainer
 
 
@@ -79,17 +78,19 @@ def test_trainer_publishes_live_metrics_plot_status_and_checkpoint_messages(
     trainer.mark_training_complete([result.__dict__])
 
     assert result.best_epoch == 1
-    assert (tmp_path / "latest_model.pt").is_file()
-    assert (tmp_path / "best_plan_model.pt").is_file()
-    assert (tmp_path / "loss_curve.png").stat().st_size > 0
-    with (tmp_path / "metrics.csv").open(newline="", encoding="utf-8") as stream:
+    latest_checkpoint = tmp_path / "checkpoints" / "latest_model.pt"
+    assert latest_checkpoint.is_file()
+    assert (tmp_path / "checkpoints" / "best_plan_model.pt").is_file()
+    assert (tmp_path / "plots" / "training" / "loss_curve.png").stat().st_size > 0
+    assert (tmp_path / "plots" / "training" / "loss_curve.pdf").stat().st_size > 0
+    with (tmp_path / "metrics" / "metrics.csv").open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
     assert len(rows) == 2
     assert rows[-1]["is_best"] == "1"
-    status = json.loads((tmp_path / "training_status.json").read_text())
+    status = json.loads((tmp_path / "logs" / "training_status.json").read_text())
     assert status["status"] == "complete"
     assert status["global_step"] == 6
-    assert load_inverse_checkpoint(tmp_path / "latest_model.pt")["epoch"] == 1
+    assert load_inverse_checkpoint(latest_checkpoint)["epoch"] == 1
     output = capsys.readouterr().out
     assert "[epoch] stage_plan 2/2" in output
     assert "[checkpoint:latest]" in output
@@ -110,7 +111,7 @@ def test_trainer_records_failure_context(tmp_path: Path, monkeypatch: pytest.Mon
         trainer.train_stage(
             "stage_plan", [object()], [object()], epochs=1, learning_rate=1.0e-4
         )
-    status = json.loads((tmp_path / "training_status.json").read_text())
+    status = json.loads((tmp_path / "logs" / "training_status.json").read_text())
     assert status["status"] == "failed"
     assert status["stage"] == "stage_plan"
     assert status["epoch"] == 1

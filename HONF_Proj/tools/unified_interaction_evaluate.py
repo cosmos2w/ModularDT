@@ -4,8 +4,8 @@ The evaluator reconstructs the sealed Thermal/Wind task providers, validates
 checkpoint ages and normalization/source identities, and keeps inference inputs
 separate from native targets. Detailed maps are limited to the fixed
 representatives; complete development metrics use the providers' exact
-DEV22/DEV24 reducers. Outputs are one-time evidence under the ignored
-``diagnostics/generated/unified_refinement_20261007`` tree.
+DEV22/DEV24 reducers. Default outputs live under each source run
+``evaluations/unified`` tree; an explicit output root supports comparison exports.
 """
 
 from __future__ import annotations
@@ -453,9 +453,8 @@ def _expected_literal_age(label: str) -> int | None:
 
 def _load_task(task: str, device: str):
     _add_import_paths()
-    from unified_interaction_train import _factory, _model_state_sha256, _profile
-
     from honf_runtime.reproducibility import seed_all
+    from unified_interaction_train import _factory, _model_state_sha256, _profile
 
     seed = 0 if task == "thermal" else 42
     seed_all(seed)
@@ -556,9 +555,11 @@ def _load_training_validation_cache(
         return None
     expected_directory = (runs_root / task / run_id / arm).resolve()
     resolved_checkpoint = checkpoint_path.resolve()
-    if resolved_checkpoint.parent != expected_directory or not resolved_checkpoint.is_file():
+    if resolved_checkpoint.parent not in (expected_directory, expected_directory / "checkpoints") or not resolved_checkpoint.is_file():
         return None
-    cache_path = expected_directory / f"validation_epoch_{epoch:04d}.json"
+    from honf_runtime.run_layout import RunLayout
+
+    cache_path = RunLayout(expected_directory).read_path(f"validation_epoch_{epoch:04d}.json")
     if not cache_path.is_file() or cache_path.stat().st_mtime_ns < resolved_checkpoint.stat().st_mtime_ns:
         return None
     cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -888,7 +889,10 @@ def _thermal_representative(
     temperature: float,
 ) -> tuple[dict[str, np.ndarray], Any, Any, Any]:
     import torch
-    from channelthermal.training.unified_task import ThermalReceivers, ThermalSceneInputs
+    from channelthermal.training.unified_task import (
+        ThermalReceivers,
+        ThermalSceneInputs,
+    )
 
     context_structure = _thermal_context_tensors(case["structure"], provider.device)
     scene = provider.make_scene(ThermalSceneInputs(context_structure))
@@ -1643,7 +1647,10 @@ def _wind_complete_fine_export(
 
 
 def _wind_partition(provider: Any, row: int) -> dict[str, Any]:
-    from windfarm.training.unified_task import DEFAULT_DERIVED_ROOT, _load_original_split
+    from windfarm.training.unified_task import (
+        DEFAULT_DERIVED_ROOT,
+        _load_original_split,
+    )
 
     split = _load_original_split(provider.view, DEFAULT_DERIVED_ROOT)
     if row in set(map(int, split.train.tolist())):
@@ -2186,7 +2193,7 @@ def evaluate_checkpoint(
     engine_config: Any,
     selection: Any,
     initial_state_sha256: str,
-    output_root: Path,
+    output_root: Path | None,
     runs_root: Path = DEFAULT_RUNS_ROOT,
     detailed: bool = False,
     field_only: bool = False,
@@ -2280,7 +2287,8 @@ def evaluate_checkpoint(
             model, provider, arm=arm, epoch=age, temperature=temperature
         )
     elapsed = time.perf_counter() - started
-    output_dir = output_root / task / label
+    run_dir = checkpoint_path.parent.parent if checkpoint_path.parent.name == "checkpoints" else checkpoint_path.parent
+    output_dir = output_root / task / label if output_root is not None else run_dir / "evaluations" / "unified" / label
     validation_path = output_dir / "development_validation_metrics.json"
     _atomic_json(validation_path, {"metrics": metrics, "source": validation_source})
     representative_path = output_dir / "representative_native_arrays.npz"
@@ -2340,6 +2348,9 @@ def evaluate_checkpoint(
     }
     summary_path = output_dir / "evaluation_summary.json"
     _atomic_json(summary_path, summary)
+    from honf_runtime.run_store import RunStore
+
+    RunStore.record_evaluation(run_dir, output_dir)
     return {"summary_path": str(summary_path), **summary}
 
 
@@ -2356,7 +2367,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Re-evaluate all22/all24 even when the exact same-run hard-route monitor cache is available.")
     parser.add_argument("--device", default="cpu", help="Default is CPU; GPU use requires separate authorization.")
     parser.add_argument("--runs-root", type=Path, default=DEFAULT_RUNS_ROOT)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="Explicit comparison/export root; default: each source run evaluations/unified/LABEL.")
     return parser
 
 
@@ -2377,7 +2389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if set(args.detailed_label) & set(args.field_label):
         raise ValueError("A checkpoint label cannot request both detailed and field-only exports.")
     model, provider, engine_config, selection, initial_sha = _load_task(args.task, args.device)
-    output_root = args.output_dir.expanduser().resolve()
+    output_root = args.output_dir.expanduser().resolve() if args.output_dir is not None else None
     results = []
     for label, path in specs:
         results.append(evaluate_checkpoint(
@@ -2409,7 +2421,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             for result in results
         ],
     }
-    index_path = output_root / args.task / "evaluation_index.json"
+    if output_root is not None:
+        index_path = output_root / args.task / "evaluation_index.json"
+    else:
+        first_path = specs[0][1]
+        first_run = first_path.parent.parent if first_path.parent.name == "checkpoints" else first_path.parent
+        index_path = first_run / "comparisons" / "unified_evaluation_index.json"
     _atomic_json(index_path, index)
     print(json.dumps({"index": str(index_path), **index}, indent=2, sort_keys=True))
     return 0

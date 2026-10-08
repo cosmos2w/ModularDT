@@ -20,10 +20,17 @@ from typing import Any
 
 import numpy as np
 import torch
+from honf_forward_core.interface_fields.interaction_refinement import (
+    RefinedSourceResponseOperator,
+)
+from honf_runtime.unified_training import (
+    LossTerm,
+    OptimizerGroupSpec,
+    SamplingKey,
+    ScheduleSpec,
+    TaskBatch,
+)
 from torch import nn
-
-from honf_forward_core.interface_fields.interaction_refinement import RefinedSourceResponseOperator
-from honf_runtime.unified_training import LossTerm, OptimizerGroupSpec, SamplingKey, ScheduleSpec, TaskBatch
 
 from ..source_response import CONTEXT_KEYS, ThermalSourceResponse
 
@@ -1150,6 +1157,37 @@ class ThermalRefinementTask:
         auxiliary_state["base_auxiliary"] = aux
         return result
 
+    def validation_loss_terms(
+        self,
+        predictions: ThermalPredictions,
+        targets: ThermalTargets,
+        auxiliary_state: Mapping[str, Any],
+        *,
+        batch: TaskBatch,
+        arm: str,
+    ) -> Mapping[str, LossTerm]:
+        """Measure validation terms available from the deployed hard route only."""
+        del auxiliary_state, batch
+        reconstruction = self._case_reconstruction(
+            predictions.native_main, predictions.native_prepared, targets)["reconstruction"]
+        result: dict[str, LossTerm] = {
+            "reconstruction": LossTerm(reconstruction.sum(), len(targets.case_ids), 1.0),
+        }
+        if arm == "adaptive_detail" and self._expected_work_calibration is not None:
+            response = getattr(predictions.native_prepared, "response", None)
+            route = getattr(response, "refinement_aux", {})
+            probability = route.get("probability") if isinstance(route, Mapping) else None
+            protected = route.get("protected") if isinstance(route, Mapping) else None
+            present = predictions.native_prepared.source_present
+            if torch.is_tensor(probability) and torch.is_tensor(protected) and torch.is_tensor(present):
+                active = (present[:, None, :] > 0).expand_as(probability)
+                protected_active = protected.bool() & active
+                eligible = active & ~protected_active
+                numerator = (probability * eligible).sum() + protected_active.sum()
+                result["expected_work"] = LossTerm(
+                    numerator, active.sum(), float(self._expected_work_weight))
+        return result
+
     def validation_batches(self):
         for start in range(0, len(self.validation_cases), int(self.budget["microbatch_cases"])):
             indices = range(start, min(start + int(self.budget["microbatch_cases"]), len(self.validation_cases)))
@@ -1453,9 +1491,8 @@ class ThermalRefinementTask:
 def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, ThermalRefinementTask, Mapping[str, Any]]:
     """Load exact retained parent bindings and make the refined child model."""
 
-    from thermal_source_response_fit import build_balances, read_primary
-
     from honf_runtime.compat import load_trusted_checkpoint, set_seed
+    from thermal_source_response_fit import build_balances, read_primary
 
     config = dict(config)
     parent_path = Path(config.get("parent_checkpoint", DEFAULT_PARENT_CHECKPOINT)).expanduser().resolve()

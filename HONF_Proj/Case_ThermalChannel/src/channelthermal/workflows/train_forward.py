@@ -24,12 +24,44 @@ from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
 import torch
+from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
+from honf_forward_core.training.diagnostics import (
+    HONF_DIAGNOSTIC_KEYS,
+    compute_honf_diagnostics,
+    organizer_regularization_loss,
+)
+from honf_forward_core.training.hypergraph_shadow import (
+    hard_value_soft_hypergraph_forward,
+)
+from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_runtime.compat import (
+    autocast_context,
+    count_parameters,
+    current_timestamp,
+    ensure_dir,
+    load_trusted_checkpoint,
+    make_grad_scaler,
+    read_json,
+    recursive_to_device,
+    resolve_demo_path,
+    select_device,
+    set_seed,
+    strip_module_prefix,
+    write_json,
+)
+from honf_runtime.run_layout import RunLayout
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from channelthermal.config import ChannelThermalHONFConfig
-from channelthermal.data.collation import ChannelThermalBatchCollator, ModuleCountBucketBatchSampler
-from channelthermal.data.datasets import GlobalChannelThermalDataset, fit_global_normalizer
+from channelthermal.data.collation import (
+    ChannelThermalBatchCollator,
+    ModuleCountBucketBatchSampler,
+)
+from channelthermal.data.datasets import (
+    GlobalChannelThermalDataset,
+    fit_global_normalizer,
+)
 from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.training.campaign import (
     HYPERGRAPH_ARCHITECTURES,
@@ -87,29 +119,6 @@ from channelthermal.training.reporting import (
 )
 from channelthermal.training.stop_request import acknowledge_stop, stop_requested
 from channelthermal.training_tools.losses import channelthermal_field_mse
-from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
-from honf_forward_core.training.diagnostics import (
-    HONF_DIAGNOSTIC_KEYS,
-    compute_honf_diagnostics,
-    organizer_regularization_loss,
-)
-from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergraph_forward
-from honf_runtime.checkpoints import validate_checkpoint_identity
-from honf_runtime.compat import (
-    autocast_context,
-    count_parameters,
-    current_timestamp,
-    ensure_dir,
-    load_trusted_checkpoint,
-    make_grad_scaler,
-    read_json,
-    recursive_to_device,
-    resolve_demo_path,
-    select_device,
-    set_seed,
-    strip_module_prefix,
-    write_json,
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -211,7 +220,9 @@ def resolve_development_training(config: dict[str, Any], *, max_train_batches=No
     stop = int(training["epochs"] if effective_epochs is None else effective_epochs)
     paths = campaign.get("response_stencils", [])
     if campaign.get("forward_refinement"):
-        from channelthermal.training.response_refinement import validate_response_addendum
+        from channelthermal.training.response_refinement import (
+            validate_response_addendum,
+        )
         validate_response_addendum(campaign, {**dataset_config, "development_subset": manifest})
     elif len(paths) > 4 or (stop > 100 and not paths):
         raise ValueError("Development after epoch100 requires one to four selected-train response stencils.")
@@ -731,18 +742,25 @@ def run_from_config(
         run_name = f"Run_{run_id}_{stamp}_{suffix}" if suffix else f"Run_{run_id}_{stamp}"
         run_dir = ensure_dir(saved_root / run_name)
     else:
-        run_dir = ensure_dir(resume_checkpoint.parent)
-    write_json(run_dir / "config_resolved.json", cfg)
-    write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        run_dir = ensure_dir(
+            resume_checkpoint.parent.parent
+            if resume_checkpoint.parent.name == "checkpoints"
+            else resume_checkpoint.parent
+        )
+    layout = RunLayout(run_dir)
+    layout.ensure()
+    write_json(layout.write_path("configs/config_resolved.json"), cfg)
+    optimizer_inventory_path = layout.write_path("configs/optimizer_group_inventory.json")
+    write_json(optimizer_inventory_path, optimizer_group_inventory)
     if matched_initialization is not None:
-        write_json(run_dir / "initialization_inventory.json", matched_initialization)
+        write_json(layout.write_path("configs/initialization_inventory.json"), matched_initialization)
     optimizer_inventory_announced = all(
         bool(group["scalar_count_complete"])
         for group in optimizer_group_inventory["groups"]
     )
     if optimizer_inventory_announced:
         _print_optimizer_group_inventory(optimizer_group_inventory)
-    metrics_path = run_dir / "metrics.csv"
+    metrics_path = layout.write_path("metrics/metrics.csv")
     fieldnames = [
         "epoch",
         "loss_total",
@@ -918,7 +936,7 @@ def run_from_config(
             model,
             optimizer_group_inventory,
         )
-        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        write_json(optimizer_inventory_path, optimizer_group_inventory)
         if not optimizer_inventory_announced:
             _print_optimizer_group_inventory(optimizer_group_inventory)
             optimizer_inventory_announced = True
@@ -932,13 +950,14 @@ def run_from_config(
                 "target_organizer_mode": model_config.core_honf.organizer_mode,
             }
         )
-        write_json(run_dir / "initialization_inventory.json", initialization_inventory)
+        initialization_inventory_path = layout.write_path("configs/initialization_inventory.json")
+        write_json(initialization_inventory_path, initialization_inventory)
         cfg["initialization"] = {
             "checkpoint_path": str(initialize_checkpoint),
             "checkpoint_sha256": initialization_inventory["checkpoint_sha256"],
-            "inventory_path": str(run_dir / "initialization_inventory.json"),
+            "inventory_path": str(initialization_inventory_path),
         }
-        write_json(run_dir / "config_resolved.json", cfg)
+        write_json(layout.write_path("configs/config_resolved.json"), cfg)
         print(
             f"[initialize] loaded {len(initialization_inventory['loaded'])} parameters from "
                 f"{initialize_checkpoint}; skipped={len(initialization_inventory['skipped'])}, "
@@ -961,17 +980,21 @@ def run_from_config(
         )
         _validate_optimizer_resume_compatibility(checkpoint, optimizer_group_inventory)
         if interface_fit:
-            from channelthermal.training.interface_fit import validate_interface_fit_resume
+            from channelthermal.training.interface_fit import (
+                validate_interface_fit_resume,
+            )
             validate_interface_fit_resume(checkpoint, model, campaign)
         model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
         if forward_refinement:
-            from channelthermal.training.refinement_policy import validate_refinement_resume
+            from channelthermal.training.refinement_policy import (
+                validate_refinement_resume,
+            )
             validate_refinement_resume(checkpoint, model, campaign, config=cfg)
         optimizer_group_inventory = refresh_optimizer_group_inventory(
             model,
             optimizer_group_inventory,
         )
-        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        write_json(optimizer_inventory_path, optimizer_group_inventory)
         if not optimizer_inventory_announced:
             _print_optimizer_group_inventory(optimizer_group_inventory)
             optimizer_inventory_announced = True
@@ -1018,7 +1041,7 @@ def run_from_config(
         print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
 
     if development is not None:
-        write_json(run_dir / "development_subset.json", development)
+        write_json(layout.write_path("metrics/development_subset.json"), development)
     total_train_seconds = 0.0
     if forward_refinement:
         from channelthermal.training.response_refinement import NativeResponseRefinement
@@ -1029,7 +1052,9 @@ def run_from_config(
     peak_cuda_memory_mb = 0.0
     refinement_frozen_state = None
     if forward_refinement:
-        from channelthermal.training.refinement_policy import capture_refinement_frozen_state
+        from channelthermal.training.refinement_policy import (
+            capture_refinement_frozen_state,
+        )
         refinement_frozen_state = capture_refinement_frozen_state(model)
     last_completed_epoch = start_epoch - 1
     stopped_resumable = False
@@ -1092,7 +1117,7 @@ def run_from_config(
             if forward_refinement:
                 train_metrics.update(refinement_epoch=epoch, interface_prefit_epoch=100,
                                      physical_objective_epoch=physical_epoch)
-            with (run_dir / "epoch_telemetry.jsonl").open("a", encoding="utf-8") as telemetry:
+            with layout.write_path("logs/epoch_telemetry.jsonl").open("a", encoding="utf-8") as telemetry:
                 telemetry.write(json.dumps({"epoch": epoch, "arm": campaign.get("arm"), "lineage": campaign,
                                             "train_seconds": train_wall_seconds, "coverage": {key: train_metrics[key] for key in coverage_keys},
                                             "gpu_before": gpu_before, "gpu_after": gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None,
@@ -1110,7 +1135,7 @@ def run_from_config(
             model,
             optimizer_group_inventory,
         )
-        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        write_json(optimizer_inventory_path, optimizer_group_inventory)
         if not optimizer_inventory_announced:
             _print_optimizer_group_inventory(optimizer_group_inventory)
             optimizer_inventory_announced = True
@@ -1177,37 +1202,39 @@ def run_from_config(
         routing_keys = [key for key in row if key.startswith(("routing_", "val_routing_"))]
         if routing_keys:
             routing_row = {"epoch": epoch, **{key: row.pop(key) for key in sorted(routing_keys)}}
-            write_metrics_row(run_dir / "routing_metrics.csv", routing_row.keys(), routing_row)
+            write_metrics_row(layout.write_path("metrics/routing_metrics.csv"), routing_row.keys(), routing_row)
         write_metrics_row(metrics_path, fieldnames, row)
         total_metric = float(row["val_loss_total"])
         field_metric = float(row["val_field_mse"])
         temp_metric = float(row["val_temperature_mse"])
         retain_best = should_save_best_checkpoint(epoch, epochs, checkpoint_cfg)
         if refinement_frozen_state is not None and (retain_best or stop_requested(run_dir)):
-            from channelthermal.training.refinement_policy import assert_refinement_frozen_state
+            from channelthermal.training.refinement_policy import (
+                assert_refinement_frozen_state,
+            )
             assert_refinement_frozen_state(model, refinement_frozen_state)
         if retain_best and math.isfinite(total_metric) and total_metric < best_total:
             best_total = total_metric
             if bool(checkpoint_cfg.get("save_best", True)):
-                save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+                save_checkpoint(layout.write_path("best_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if retain_best and math.isfinite(field_metric) and field_metric < best_field:
             best_field = field_metric
             if bool(checkpoint_cfg.get("save_best_field_mse", True)):
-                save_checkpoint(run_dir / "best_by_field_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+                save_checkpoint(layout.write_path("best_by_field_mse_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if retain_best and math.isfinite(temp_metric) and temp_metric < best_temperature:
             best_temperature = temp_metric
             if bool(checkpoint_cfg.get("save_best_temperature_mse", True)):
-                save_checkpoint(run_dir / "best_by_temperature_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+                save_checkpoint(layout.write_path("best_by_temperature_mse_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         predicted_metric = float(row["val_predicted_loss_total"])
         if retain_best and math.isfinite(predicted_metric) and predicted_metric < best_predicted:
             best_predicted = predicted_metric
             if bool(checkpoint_cfg.get("save_best_predicted", True)):
-                save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+                save_checkpoint(layout.write_path("best_predicted_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         stop_at_boundary = stop_requested(run_dir)
         if stop_at_boundary or should_save_latest_checkpoint(epoch, epochs, checkpoint_cfg):
-            save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+            save_checkpoint(layout.write_path("latest_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if should_save_milestone_checkpoint(epoch, checkpoint_cfg):
-            save_checkpoint(run_dir / f"epoch_{epoch:04d}_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+            save_checkpoint(layout.write_path(f"epoch_{epoch:04d}_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         plot_every = max(int(training_cfg.get("plot_every_epochs", 10)), 1)
         if epoch % plot_every == 0 or epoch == epochs:
             save_global_loss_plots(metrics_path, run_dir)
@@ -1227,7 +1254,7 @@ def run_from_config(
             break
 
     write_json(
-        run_dir / "summary.json",
+        layout.write_path("metrics/summary.json"),
         {
             "stage": "channelthermal_prompt3_honf_physical_coupling",
             "run_dir": str(run_dir),

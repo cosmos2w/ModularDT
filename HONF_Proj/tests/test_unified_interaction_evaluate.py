@@ -125,6 +125,25 @@ def test_cli_accepts_separate_field_and_detailed_checkpoint_labels():
     ])
     assert args.detailed_label == ["selected_adaptive"]
     assert args.field_label == ["selected_full"]
+    assert args.output_dir is None
+
+
+def test_default_evaluator_index_belongs_to_source_run(tmp_path, monkeypatch, capsys):
+    checkpoint = tmp_path / "Run_fixture/checkpoints/latest_model.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"fixture")
+    monkeypatch.setattr(evaluator, "_load_task", lambda *_: (None, None, None, None, "fixture"))
+
+    def completed_evaluation(task, label, path, **kwargs):
+        assert kwargs["output_root"] is None
+        return {"checkpoint": {"label": label, "epoch": 100, "arm": "adaptive_detail"},
+                "summary_path": str(tmp_path / "Run_fixture/evaluations/unified" / label / "evaluation_summary.json")}
+
+    monkeypatch.setattr(evaluator, "evaluate_checkpoint", completed_evaluation)
+    assert evaluator.main(["--task", "wind", "--checkpoint", f"selected={checkpoint}"]) == 0
+    capsys.readouterr()
+    index = tmp_path / "Run_fixture/comparisons/unified_evaluation_index.json"
+    assert json.loads(index.read_text())["checkpoint_results"][0]["epoch"] == 100
 
 
 def test_six_observed_three_held_interface_is_geometry_only_and_disjoint():
@@ -348,11 +367,13 @@ def test_wind_same_layout_probe_uses_nine_target_free_receivers_and_reads_target
     assert arrays["layout2_direction_pair/row7/target/interpolation_flat_indices"].shape == (9, 8)
 
 
-def test_monitor_cache_reuse_requires_exact_run_arm_epoch_and_ordered_thermal_dev_membership(tmp_path):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_monitor_cache_reuse_requires_exact_run_arm_epoch_and_ordered_thermal_dev_membership(tmp_path, canonical):
     run_id = "thermal-fixed25"
     run_directory = tmp_path / "runs" / "thermal" / run_id / "adaptive_detail"
     run_directory.mkdir(parents=True)
-    checkpoint = run_directory / "best_by_field_mse_model.pt"
+    checkpoint = run_directory / ("checkpoints/best_by_field_mse_model.pt" if canonical else "best_by_field_mse_model.pt")
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint.write_bytes(b"trusted-checkpoint")
     case_ids = [f"{index:04d}" for index in range(22)]
     cache = {
@@ -362,7 +383,9 @@ def test_monitor_cache_reuse_requires_exact_run_arm_epoch_and_ordered_thermal_de
         "case_ids": case_ids,
         "field_score": 0.5,
     }
-    (run_directory / "validation_epoch_1200.json").write_text(json.dumps(cache), encoding="utf-8")
+    cache_path = run_directory / ("evaluations/validation/validation_epoch_1200.json" if canonical else "validation_epoch_1200.json")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
     payload = {
         "epoch": 1200,
         "arm": "adaptive_detail",
@@ -381,7 +404,7 @@ def test_monitor_cache_reuse_requires_exact_run_arm_epoch_and_ordered_thermal_de
     assert loaded[0]["field_score"] == 0.5
     assert loaded[1]["checkpoint_embeds_exact_validation_metrics"] is True
     edited_cache = {**cache, "field_score": 0.6}
-    (run_directory / "validation_epoch_1200.json").write_text(json.dumps(edited_cache), encoding="utf-8")
+    cache_path.write_text(json.dumps(edited_cache), encoding="utf-8")
     assert evaluator._load_training_validation_cache(
         payload,
         task="thermal",
@@ -389,7 +412,7 @@ def test_monitor_cache_reuse_requires_exact_run_arm_epoch_and_ordered_thermal_de
         checkpoint_path=checkpoint,
         runs_root=tmp_path / "runs",
     ) is None
-    (run_directory / "validation_epoch_1200.json").write_text(json.dumps(cache), encoding="utf-8")
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
     provider.validation_cases[0], provider.validation_cases[1] = (
         provider.validation_cases[1], provider.validation_cases[0]
     )

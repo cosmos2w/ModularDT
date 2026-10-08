@@ -15,8 +15,13 @@ from typing import Dict
 
 import numpy as np
 import torch
-
-from channelthermal.data.datasets import H5Normalizer, LocalModuleDataset
+from honf_runtime.artifact_layout import (
+    EVALUATION_LAYOUT_VERSION,
+    EvaluationArtifactLayout,
+    default_evaluation_root,
+    finalize_evaluation_job,
+)
+from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import (
     current_timestamp,
     load_trusted_checkpoint,
@@ -26,15 +31,15 @@ from honf_runtime.compat import (
     strip_module_prefix,
     write_json,
 )
-from honf_runtime.checkpoints import validate_checkpoint_identity
-from honf_runtime.artifact_layout import (
-    EVALUATION_LAYOUT_VERSION,
-    EvaluationArtifactLayout,
-    default_evaluation_root,
-    finalize_evaluation_job,
+from honf_runtime.run_layout import resolve_checkpoint
+
+from channelthermal.data.datasets import H5Normalizer, LocalModuleDataset
+from channelthermal.evaluation_tools.plots import (
+    error_metrics,
+    plot_local_interface,
+    plot_local_internal,
 )
 from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
-from channelthermal.evaluation_tools.plots import error_metrics, plot_local_interface, plot_local_internal
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -101,14 +106,14 @@ def resolve_checkpoint_arg(args: argparse.Namespace) -> Path:
     if args.run_id:
         saved_root = resolve_demo_path(args.saved_root)
         run_dir = latest_run_dir(saved_root, args.run_id)
-        return (run_dir / checkpoint_file_name(selector)).resolve()
+        return resolve_checkpoint(run_dir, checkpoint_file_name(selector))
     candidate = resolve_demo_path(selector)
     if candidate.suffix == ".pt" or candidate.exists():
         return candidate
     if selector.strip().lower() in {"best", "latest", "lastest"}:
         raise ValueError("--Run_ID is required when --checkpoint is 'best' or 'latest'.")
     saved_root = resolve_demo_path(args.saved_root)
-    return (latest_run_dir(saved_root, selector) / "best_model.pt").resolve()
+    return resolve_checkpoint(latest_run_dir(saved_root, selector), "best_model.pt")
 
 
 def tensorize_sample(sample: Dict, device: torch.device) -> Dict:

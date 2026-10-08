@@ -32,3 +32,19 @@ def test_repeated_clean_stop_preserves_the_pending_request_identity(tmp_path, ca
     args.note = "another click"
     _command_clean_stop(args)
     assert (tmp_path / "CLEAN_STOP_REQUEST.json").read_bytes() == before
+
+
+def test_status_reads_canonical_records_without_creating_root_copies(tmp_path, capsys):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "metrics").mkdir()
+    (tmp_path / "logs/active_process.json").write_text(json.dumps({"status": "completed"}))
+    (tmp_path / "metrics/fit_summary.json").write_text(json.dumps({"completed_epoch": 100}))
+    (tmp_path / "metrics/history.json").write_text(json.dumps([{"epoch": 100, "phase": "hard"}]))
+    (tmp_path / "logs/clean_stop_consumed_abc.json").write_text('{}')
+    _command_status(argparse.Namespace(run_dir=str(tmp_path)))
+    reported = json.loads(capsys.readouterr().out)
+    assert reported["status"] == "completed"
+    assert reported["fit_summary"]["completed_epoch"] == 100
+    assert reported["history"]["last_epoch"] == 100
+    assert reported["consumed_clean_stop_receipts"] == [str(tmp_path / "logs/clean_stop_consumed_abc.json")]
+    assert not (tmp_path / "history.json").exists()

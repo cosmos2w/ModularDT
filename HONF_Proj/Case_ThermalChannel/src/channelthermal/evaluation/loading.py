@@ -9,10 +9,6 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
-
-from channelthermal.config import ChannelThermalHONFConfig
-from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
-from channelthermal.model import ChannelThermalHONFModel
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import (
     load_trusted_checkpoint,
@@ -20,6 +16,11 @@ from honf_runtime.compat import (
     resolve_demo_path,
     strip_module_prefix,
 )
+from honf_runtime.run_layout import resolve_checkpoint
+
+from channelthermal.config import ChannelThermalHONFConfig
+from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
+from channelthermal.model import ChannelThermalHONFModel
 
 
 def checkpoint_file_name(selector: str) -> str:
@@ -79,13 +80,13 @@ def resolve_checkpoint_arg(args: argparse.Namespace) -> Path:
     selector = str(args.checkpoint)
     if args.run_id:
         run_dir = latest_run_dir(resolve_demo_path(args.saved_root), args.run_id)
-        candidate = (run_dir / checkpoint_file_name(selector)).resolve()
+        candidate = resolve_checkpoint(run_dir, checkpoint_file_name(selector))
         if (
             not candidate.exists()
             and selector.lower() in {"best_predicted", "predicted", "autonomous"}
             and bool(args.allow_checkpoint_fallback)
         ):
-            fallback = (run_dir / "best_model.pt").resolve()
+            fallback = resolve_checkpoint(run_dir, "best_model.pt")
             print(f"[warning] {candidate.name} not found; falling back to {fallback.name}.")
             return fallback
         return candidate

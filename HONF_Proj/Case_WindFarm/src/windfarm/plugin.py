@@ -180,7 +180,9 @@ def _checkpoint_for_run(run_dir: Path, selector: str) -> Path:
                                 f"manifest={expected_metric}, checkpoint={actual_metric}."
                             )
             return candidate
-    return run_dir / checkpoint_filename(key)
+    from honf_runtime.run_layout import resolve_checkpoint
+
+    return resolve_checkpoint(run_dir, checkpoint_filename(key))
 
 
 class WindFarmPlugin:

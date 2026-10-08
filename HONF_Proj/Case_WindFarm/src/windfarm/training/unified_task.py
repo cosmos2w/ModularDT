@@ -33,7 +33,11 @@ from torch import nn
 
 from ..data import WindFarmNativeView
 from ..model import REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE, build_windfarm_model
-from ..normalization import VelocityNormalizer, VerticalProfileBaseline, read_normalization_json
+from ..normalization import (
+    VelocityNormalizer,
+    VerticalProfileBaseline,
+    read_normalization_json,
+)
 from ..splits import GroupSplit, make_group_split
 from ..workflows.directed_packet_pair import ACTIVE_REUSE_CONFIG
 from ..workflows.joint_forward import (
@@ -1042,6 +1046,54 @@ class WindRefinementTask:
             if name == "router_importance_loss":
                 weight = _ROUTER_IMPORTANCE_COEFFICIENT
             result[name] = LossTerm(numerator, denominator, weight=weight)
+        return result
+
+    def validation_loss_terms(
+        self,
+        predictions: WindPredictions,
+        targets: WindTargets,
+        auxiliary_state: Mapping[str, Any],
+        *,
+        batch: TaskBatch,
+        arm: str,
+    ) -> Mapping[str, LossTerm]:
+        """Measure heldout hard-route terms without replaying omitted fine reads."""
+        del auxiliary_state
+        target = torch.as_tensor(
+            targets.velocity_mps,
+            device=predictions.main_mps.device,
+            dtype=predictions.main_mps.dtype,
+        )
+        error = predictions.main_mps - target
+        role_ids = predictions.role_ids
+        result: dict[str, LossTerm] = {}
+        for role in ROLE_NAMES:
+            selected = role_ids == _ROLE_INDEX[role]
+            scale = float(self.role_scales[role])
+            numerator = (error[selected].square() / (scale * scale)).sum()
+            denominator = float(int(selected.sum().item()) * 3)
+            result[f"native_role/{role}"] = LossTerm(numerator, denominator, weight=0.2)
+
+        if arm == "adaptive_detail" and self._expected_work_calibration is not None:
+            auxiliary = predictions.auxiliary
+            probability = auxiliary.get("probability")
+            protected = auxiliary.get("protected")
+            if torch.is_tensor(probability) and torch.is_tensor(protected):
+                active_sources = torch.zeros(
+                    probability.shape[0], probability.shape[2], dtype=torch.bool,
+                    device=probability.device,
+                )
+                for index, scene in enumerate(batch.scene_inputs):
+                    source_present = torch.as_tensor(
+                        scene.module_present, dtype=torch.bool, device=probability.device)
+                    count = min(int(source_present.numel()), int(probability.shape[2]))
+                    active_sources[index, :count] = source_present[:count]
+                active = active_sources[:, None, :].expand_as(probability)
+                protected_active = protected.bool() & active
+                eligible = active & ~protected_active
+                numerator = (probability * eligible).sum() + protected_active.sum()
+                result["expected_work"] = LossTerm(
+                    numerator, active.sum(), float(self._expected_work_weight))
         return result
 
     def validation_batches(self) -> Iterable[TaskBatch]:

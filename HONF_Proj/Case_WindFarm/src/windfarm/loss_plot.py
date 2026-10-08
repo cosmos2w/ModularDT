@@ -64,19 +64,26 @@ def render_loss_history(
     figure, axes = plt.subplots(1, 3, figsize=(15, 4.5), layout="constrained")
     try:
         panels = (
-            (axes[0], (("loss_total", "Training objective"),), "Training objective"),
+            (
+                axes[0],
+                (("loss_total", "Train"), ("val_loss_total", "Validation")),
+                "Total velocity prediction loss\nWeighted sampled velocity error",
+                "Objective (log scale)",
+            ),
             (
                 axes[1],
                 (("train_volume_mse", "Train"), ("val_volume_mse", "Validation")),
-                "Volume MSE",
+                "Volume velocity error\nMean squared normalized velocity error",
+                "Standardized MSE (log scale)",
             ),
             (
                 axes[2],
                 (("train_band_mse", "Train"), ("val_band_mse", "Validation")),
-                "Rotor-height-band MSE",
+                "Rotor-height velocity error\nMean squared normalized velocity error",
+                "Standardized MSE (log scale)",
             ),
         )
-        for axis, series, panel_title in panels:
+        for axis, series, panel_title, ylabel in panels:
             for field, label in series:
                 epochs, values = _finite_points(history, field)
                 if epochs:
@@ -85,7 +92,7 @@ def render_loss_history(
             axis.set(
                 title=panel_title,
                 xlabel="Epoch",
-                ylabel="Standardized MSE (log scale)",
+                ylabel=ylabel,
                 yscale="log",
             )
             axis.grid(alpha=0.2)
@@ -93,6 +100,7 @@ def render_loss_history(
             if handles:
                 axis.legend(fontsize=8)
         figure.suptitle(title or f"WindFarm loss history through epoch {latest_epoch}")
+        _replace_figure(figure, output_path.with_suffix(".pdf"))
         _replace_figure(figure, output_path)
     finally:
         plt.close(figure)

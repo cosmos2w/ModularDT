@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 from collections import Counter
 from datetime import datetime
-import json
 from pathlib import Path
-import shutil
 from typing import Any
 
 import h5py
-from torch.utils.data import DataLoader
-
 from honf_inverse_core.config import validate_config_keys
 from honf_inverse_core.models.hierarchical_inverse import HierarchicalInverseDesigner
 from honf_inverse_core.training.checkpointing import load_inverse_checkpoint
 from honf_inverse_core.training.stages import TRAINING_STAGES
 from honf_inverse_core.training.trainer import InverseTrainer
+from honf_runtime.run_layout import RunLayout, resolve_checkpoint
+from torch.utils.data import DataLoader
+
 from channelthermal.inverse.dataset_io import InverseH5Dataset, validate_inverse_hdf5
 from channelthermal.inverse.diagnostics import artifact_sha256
-from channelthermal.inverse.differentiable_verifier import DifferentiableThermalChannelVerifier
+from channelthermal.inverse.differentiable_verifier import (
+    DifferentiableThermalChannelVerifier,
+)
 from channelthermal.inverse.verifier import FrozenThermalChannelVerifier
 
 
@@ -155,12 +158,16 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         }
     run_dir = _next_run_dir(Path(config["output_root"]).expanduser().resolve(), str(config.get("run_name", "hierarchical_inverse")))
     run_dir.mkdir(parents=True)
+    layout = RunLayout(run_dir)
+    layout.ensure()
     if initialize_from:
+        source_checkpoint = Path(str(initialize_from)).expanduser().resolve()
+        source_run_dir = source_checkpoint.parent.parent if source_checkpoint.parent.name == "checkpoints" else source_checkpoint.parent
         for alias in ("best_plan_model.pt", "best_layout_model.pt", "best_unguided_model.pt"):
-            source_alias = Path(str(initialize_from)).expanduser().resolve().parent / alias
+            source_alias = resolve_checkpoint(source_run_dir, alias)
             if source_alias.is_file():
-                shutil.copy2(source_alias, run_dir / alias)
-    with (run_dir / "config_resolved.json").open("w", encoding="utf-8") as stream:
+                shutil.copy2(source_alias, layout.write_path(alias))
+    with layout.write_path("configs/config_resolved.json").open("w", encoding="utf-8") as stream:
         json.dump({**config, "model": model_config, "run_dir": str(run_dir)}, stream, indent=2, sort_keys=True)
         stream.write("\n")
     batch_size = int(config.get("batch_size", 16))
@@ -257,7 +264,7 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         "checkpoint_provenance": provenance,
         "initialization": initialization,
     }
-    with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
+    with layout.write_path("metrics/summary.json").open("w", encoding="utf-8") as stream:
         json.dump(run_summary, stream, indent=2, sort_keys=True, allow_nan=False)
         stream.write("\n")
     train_dataset.close()

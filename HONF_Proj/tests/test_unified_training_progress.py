@@ -4,10 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
-from torch import nn
-
 import honf_runtime.unified_training as runtime
+import torch
+from honf_runtime.run_layout import RunLayout
 from honf_runtime.unified_training import (
     EngineConfig,
     LossTerm,
@@ -17,6 +16,7 @@ from honf_runtime.unified_training import (
     TaskBatch,
     TrainingEngine,
 )
+from torch import nn
 
 
 @dataclass
@@ -130,7 +130,8 @@ def test_progress_is_tty_gated_and_reports_completed_macro_updates(tmp_path, mon
         return result
 
     monkeypatch.setattr(engine, "_run_update", record_update)
-    engine.fit(nn.Linear(1, 1), _ProgressProvider(), Path(tmp_path) / "progress",
+    output = Path(tmp_path) / "progress"
+    engine.fit(nn.Linear(1, 1), _ProgressProvider(), output,
                identity={"run": "progress"}, arm="full_detail", stop_after=1)
 
     assert len(bars) == 1
@@ -143,3 +144,12 @@ def test_progress_is_tty_gated_and_reports_completed_macro_updates(tmp_path, mon
     assert [row["updates"] for row in bar.snapshots] == ["1/2", "2/2"]
     assert all(float(row["loss"]) >= 0.0 for row in bar.snapshots)
     assert all("predictor:" in row["lr"] and row["phase"] == "warmup" for row in bar.snapshots)
+    assert RunLayout(output).read_path("progress.json") == output / "logs" / "progress.json"
+    assert not (output / "progress.json").exists()
+    assert (output / "logs" / "active_process.json").is_file()
+    assert (output / "metrics" / "history.json").is_file()
+    assert (output / "checkpoints" / "latest_model.pt").is_file()
+    assert (output / "artifact_layout.json").is_file()
+    assert (output / "configs" / "experiment_identity.json").is_file()
+    assert (output / "environment" / "software.json").is_file()
+    assert (output / "environment" / "source_state.json").is_file()

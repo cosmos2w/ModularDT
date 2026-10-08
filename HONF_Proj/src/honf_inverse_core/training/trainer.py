@@ -9,17 +9,18 @@ iterative design optimization.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 import math
 import os
-from pathlib import Path
 import time
 import traceback
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import torch
+from honf_runtime.run_layout import RunLayout
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -31,7 +32,6 @@ from honf_inverse_core.models.request_encoder import RequestEncoding
 from .checkpointing import load_inverse_checkpoint, save_inverse_checkpoint
 from .losses import layout_training_losses, plan_training_losses
 from .stages import configure_stage, generated_plan_probability
-
 
 JointLossHook = Callable[
     [HierarchicalInverseDesigner, Mapping[str, Any], Any, torch.Tensor, torch.Tensor],
@@ -95,13 +95,14 @@ class InverseTrainer:
         self.designer = designer.to(self.device)
         self.run_dir = Path(run_dir).expanduser().resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        (self.run_dir / "checkpoints").mkdir(exist_ok=True)
+        self.layout = RunLayout(self.run_dir)
+        self.layout.ensure()
         self.provenance = dict(checkpoint_provenance)
         self.joint_loss_hook = joint_loss_hook
         self.global_step = 0
-        self.metrics_path = self.run_dir / "metrics.csv"
-        self.loss_curve_path = self.run_dir / "loss_curve.png"
-        self.status_path = self.run_dir / "training_status.json"
+        self.metrics_path = self.layout.write_path("metrics/metrics.csv")
+        self.loss_curve_path = self.layout.write_path("plots/training/loss_curve.png")
+        self.status_path = self.layout.write_path("logs/training_status.json")
 
     @staticmethod
     def _utc_now() -> str:
@@ -142,8 +143,8 @@ class InverseTrainer:
 
         figure, axes = plt.subplots(1, 2, figsize=(12.5, 4.8), constrained_layout=True)
         panels = (
-            (axes[0], "Total loss", "train_total", "validation_total"),
-            (axes[1], "Flow loss", "train_flow", "validation_flow"),
+            (axes[0], "Total design-training loss\nWeighted sum of configured terms", "train_total", "validation_total"),
+            (axes[1], "Design flow-matching loss\nSquared design-sampling velocity error", "train_flow", "validation_flow"),
         )
         stages = list(dict.fromkeys(row.get("stage", "unknown") for row in rows))
         for axis, title, train_key, validation_key in panels:
@@ -179,14 +180,20 @@ class InverseTrainer:
             if axis.lines:
                 axis.legend(fontsize=7)
         figure.suptitle("Hierarchical inverse training (updated after every epoch)")
-        temporary = self.loss_curve_path.with_name(f".{self.loss_curve_path.name}.tmp-{os.getpid()}")
         try:
-            figure.savefig(temporary, format="png", dpi=150)
-            os.replace(temporary, self.loss_curve_path)
+            for output, image_format in (
+                (self.loss_curve_path.with_suffix(".pdf"), "pdf"),
+                (self.loss_curve_path, "png"),
+            ):
+                temporary = output.with_name(f".{output.stem}.tmp-{os.getpid()}{output.suffix}")
+                try:
+                    figure.savefig(temporary, format=image_format, dpi=150)
+                    os.replace(temporary, output)
+                finally:
+                    if temporary.exists():
+                        temporary.unlink()
         finally:
             plt.close(figure)
-            if temporary.exists():
-                temporary.unlink()
 
     def _encoding(self, batch: Mapping[str, Any]):
         return self.designer.encode_request(
@@ -493,7 +500,7 @@ class InverseTrainer:
                 }
                 self._append_metrics(row)
                 latest_path = save_inverse_checkpoint(
-                    self.run_dir / "latest_model.pt",
+                    self.layout.write_path("latest_model.pt"),
                     designer=self.designer,
                     stage=stage,
                     epoch=epoch,
@@ -502,7 +509,7 @@ class InverseTrainer:
                     optimizer=optimizer,
                     metrics=row,
                 )
-                best_path = self.run_dir / self.ALIASES[stage]
+                best_path = self.layout.write_path(self.ALIASES[stage])
                 if improved:
                     best_path = save_inverse_checkpoint(
                         best_path,
@@ -573,7 +580,7 @@ class InverseTrainer:
         # especially important for small diagnostic datasets where the last
         # teacher-layout epoch can overfit badly. ``latest_model.pt`` still
         # preserves the literal last-epoch resume state.
-        best_checkpoint = load_inverse_checkpoint(self.run_dir / self.ALIASES[stage])
+        best_checkpoint = load_inverse_checkpoint(self.layout.write_path(self.ALIASES[stage]))
         self.designer.load_state_dict(best_checkpoint["model_state_dict"])
         self._write_status(
             {
@@ -584,8 +591,8 @@ class InverseTrainer:
                 "global_step": self.global_step,
                 "best_validation_loss": best_loss,
                 "best_epoch": best_epoch + 1,
-                "latest_checkpoint": str(self.run_dir / "latest_model.pt"),
-                "best_checkpoint": str(self.run_dir / self.ALIASES[stage]),
+                "latest_checkpoint": str(self.layout.write_path("latest_model.pt")),
+                "best_checkpoint": str(self.layout.write_path(self.ALIASES[stage])),
                 "loss_curve": str(self.loss_curve_path),
             }
         )
@@ -603,7 +610,7 @@ class InverseTrainer:
                 "status": "complete",
                 "global_step": self.global_step,
                 "stages": [dict(result) for result in results],
-                "latest_checkpoint": str(self.run_dir / "latest_model.pt"),
+                "latest_checkpoint": str(self.layout.write_path("latest_model.pt")),
                 "loss_curve": str(self.loss_curve_path),
                 "metrics": str(self.metrics_path),
             }

@@ -491,8 +491,9 @@ class ThermalChannelPlugin:
             run_dir = candidates[0]
         elif checkpoint:
             candidate = resolve_path(checkpoint)
-            if candidate.suffix == ".pt" and (candidate.parent / "run_manifest.json").is_file():
-                run_dir = candidate.parent
+            parent = candidate.parent.parent if candidate.parent.name == "checkpoints" else candidate.parent
+            if candidate.suffix == ".pt" and (parent / "run_manifest.json").is_file():
+                run_dir = parent
         if run_dir is None:
             return bundle.effective
 

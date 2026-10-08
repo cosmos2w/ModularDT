@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from typing import Any
 from .config_loader import ConfigBundle
 from .paths import PROJECT_ROOT, resolve_path
 from .reproducibility import environment_snapshot, source_state_snapshot
+from .run_layout import RUN_ARTIFACT_LAYOUT_VERSION, RunLayout, resolve_checkpoint
 
 
 def _safe_name(value: Any) -> str:
@@ -44,16 +44,13 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _link_or_copy(source: Path, destination: Path) -> None:
-    """Materialize a canonical artifact without duplicating large files when possible."""
+def _preferred_artifact_path(layout: RunLayout, name: str) -> Path:
+    """Prefer the active writer path, then allow canonical/legacy fallback reads."""
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        destination.unlink()
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copy2(source, destination)
+    preferred = layout.write_path(name)
+    if preferred.is_file():
+        return preferred
+    return layout.read_path(name)
 
 
 @dataclass(frozen=True)
@@ -136,17 +133,7 @@ class RunStore:
         proposal.path.mkdir(exist_ok=False)
         config_dir = proposal.path / "configs"
         config_dir.mkdir()
-        for relative in (
-            "checkpoints",
-            "metrics",
-            "plots/training",
-            "plots/diagnostics",
-            "evaluations",
-            "comparisons",
-            "logs",
-            "environment",
-        ):
-            (proposal.path / relative).mkdir(parents=True, exist_ok=True)
+        RunLayout(proposal.path).ensure()
         atomic_write_json(config_dir / "core_source.json", bundle.core_source_payload or bundle.core)
         atomic_write_json(config_dir / "case_source.json", bundle.case_source_payload or bundle.case)
         if bundle.experiment_source is not None:
@@ -175,6 +162,7 @@ class RunStore:
         atomic_write_json(proposal.path / "environment" / "source_state.json", source_state)
         manifest = {
             "schema_version": 1,
+            "artifact_layout_version": RUN_ARTIFACT_LAYOUT_VERSION,
             "run_uuid": proposal.run_uuid,
             "run_id": proposal.run_id,
             "display_name": proposal.display_name,
@@ -203,38 +191,21 @@ class RunStore:
 
     @staticmethod
     def finalize_artifacts(run_dir: Path) -> dict[str, str]:
-        """Populate the canonical artifact tree while retaining legacy workflow names."""
+        """Inventory canonical or legacy checkpoints without copying artifacts."""
 
         run_dir = Path(run_dir).resolve()
-        checkpoint_aliases = {
-            "best_total": ("best_model.pt", "best_total.pt"),
-            "best_field": ("best_by_field_mse_model.pt", "best_field.pt"),
-            "best_temperature": ("best_by_temperature_mse_model.pt", "best_temperature.pt"),
-            "best_autonomous": ("best_predicted_model.pt", "best_autonomous.pt"),
-            "latest": ("latest_model.pt", "latest.pt"),
+        checkpoint_names = {
+            "best_total": "best_model.pt",
+            "best_field": "best_by_field_mse_model.pt",
+            "best_temperature": "best_by_temperature_mse_model.pt",
+            "best_autonomous": "best_predicted_model.pt",
+            "latest": "latest_model.pt",
         }
         inventory: dict[str, str] = {}
-        for selector, (legacy_name, canonical_name) in checkpoint_aliases.items():
-            source = run_dir / legacy_name
-            if source.is_file():
-                destination = run_dir / "checkpoints" / canonical_name
-                _link_or_copy(source, destination)
-                inventory[selector] = str(destination)
-
-        history = next((run_dir / name for name in ("metrics.csv", "loss_history.csv") if (run_dir / name).is_file()), None)
-        if history is not None:
-            _link_or_copy(history, run_dir / "metrics" / "metrics.csv")
-        summary = run_dir / "summary.json"
-        if summary.is_file():
-            _link_or_copy(summary, run_dir / "metrics" / "summary.json")
-        for plot in run_dir.glob("*.png"):
-            _link_or_copy(plot, run_dir / "plots" / "training" / plot.name)
-        for directory_name in ("diagnostics", "diagnostic_plots"):
-            diagnostics = run_dir / directory_name
-            if diagnostics.is_dir():
-                for plot in diagnostics.rglob("*.png"):
-                    relative = plot.relative_to(diagnostics)
-                    _link_or_copy(plot, run_dir / "plots" / "diagnostics" / relative)
+        for selector, filename in checkpoint_names.items():
+            checkpoint = resolve_checkpoint(run_dir, filename)
+            if checkpoint.is_file():
+                inventory[selector] = str(checkpoint)
         return inventory
 
     @staticmethod
@@ -242,15 +213,31 @@ class RunStore:
         """Extract last epoch and workflow-provided best metrics for the manifest."""
 
         run_dir = Path(run_dir)
+        layout = RunLayout(run_dir)
         details: dict[str, Any] = {}
-        history = next((run_dir / name for name in ("metrics.csv", "loss_history.csv") if (run_dir / name).is_file()), None)
-        if history is not None:
-            with history.open(newline="", encoding="utf-8") as stream:
-                rows = list(csv.DictReader(stream))
-            if rows:
+        history_path = next(
+            (
+                candidate
+                for name in ("metrics.csv", "loss_history.csv", "history.json")
+                if (candidate := _preferred_artifact_path(layout, name)).is_file()
+            ),
+            None,
+        )
+        if history_path is not None:
+            if history_path.suffix.lower() == ".csv":
+                with history_path.open(newline="", encoding="utf-8") as stream:
+                    rows = list(csv.DictReader(stream))
+            else:
+                payload = json.loads(history_path.read_text(encoding="utf-8"))
+                rows = payload if isinstance(payload, list) else []
+            if rows and "epoch" in rows[-1]:
                 details["last_completed_epoch"] = int(float(rows[-1]["epoch"]))
-        summary_path = run_dir / "summary.json"
-        if summary_path.is_file():
+        summary_path = next(
+            (candidate for name in ("summary.json", "fit_summary.json")
+             if (candidate := _preferred_artifact_path(layout, name)).is_file()),
+            None,
+        )
+        if summary_path is not None:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             details["best_metrics"] = {
                 key: float(value)
