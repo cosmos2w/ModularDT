@@ -56,13 +56,27 @@ def _read(path):
     return value
 
 
-def _profile(task, *, startup_benchmark=False):
+def _profile(task, *, startup_benchmark=False, monitoring=None):
     from honf_runtime.unified_training import EngineConfig, SelectionPolicy
 
     micro, effective, seed = (8, 48, 0) if task == 'thermal' else (4, 24, 42)
     config = EngineConfig(seed=seed, microbatch_cases=micro, effective_cases=effective,
         total_epochs=5000, warmup_epochs=500, open_through_epoch=600,
         soft_through_epoch=800, monitor_every=100, gradient_clip=1.0)
+    if monitoring is not None:
+        required = {'validation_every', 'validation_epochs', 'checkpoint_epochs', 'latest_every', 'curve_every'}
+        if set(monitoring) != required:
+            raise ValueError('Formal monitoring contract keys differ.')
+        if type(monitoring['validation_every']) is not int or monitoring['validation_every'] < 1:
+            raise ValueError('Formal validation interval must be a positive integer.')
+        config = EngineConfig(seed=seed, microbatch_cases=micro, effective_cases=effective,
+            total_epochs=5000, warmup_epochs=500, open_through_epoch=600,
+            soft_through_epoch=800, monitor_every=monitoring['validation_every'], gradient_clip=1.0,
+            monitor_epochs=tuple(monitoring['validation_epochs']),
+            checkpoint_epochs=tuple(monitoring['checkpoint_epochs']),
+            latest_every=monitoring['latest_every'], curve_every=monitoring['curve_every'])
+        if not config.checkpoint_epochs or config.checkpoint_epochs[-1] != 5000:
+            raise ValueError('The formal retained milestones must include terminal epoch5000.')
     # Fresh full-data weights have no inherited development response guard.
     # Native response metrics remain dataset-owned, separately reported.
     selection = SelectionPolicy(field_metric='field_score', response_guard_metric=None)
@@ -87,6 +101,7 @@ def _load_recipe(path):
             or recipe.get('new_solver_attempts') != 0):
         raise ValueError('Formal workflow readiness, fresh-state or horizon contract differs.')
     _factory(recipe['task']).validate_recipe(native)
+    _profile(recipe['task'], monitoring=recipe.get('monitoring'))
     recipe['recipe_sha256'] = saved_sha
     return recipe
 
@@ -96,6 +111,13 @@ def prepare(args):
     output = Path(args.recipe).expanduser().resolve()
     if output.exists():
         raise ValueError('Preparation requires a new recipe path; preserved recipes are not overwritten.')
+    monitoring = {
+        'validation_every': args.validation_every, 'validation_epochs': args.validation_epochs,
+        'checkpoint_epochs': args.checkpoint_epochs,
+        'latest_every': args.latest_every, 'curve_every': args.curve_every,
+    }
+    _paths()
+    _profile(args.task, monitoring=monitoring)
     config = {'seed': 0 if args.task == 'thermal' else 42,
               'output_dir': str(output.parent / 'prepared_data')}
     for name in ('flow_checkpoint', 'data_root', 'dataset_path'):
@@ -110,6 +132,7 @@ def prepare(args):
         'normalization_rule': 'freshly fitted on all bound original TRAIN cases only',
         'horizon_epochs': 5000, 'fine_hold_through_epoch': 2000,
         'new_solver_attempts': 0}
+    recipe['monitoring'] = monitoring
     recipe['recipe_sha256'] = _canonical_sha(recipe)
     _write(output, recipe)
     return {'recipe': str(output), 'recipe_sha256': recipe['recipe_sha256'],
@@ -119,7 +142,7 @@ def prepare(args):
 def dry_run(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
     recipe = _load_recipe(args.recipe)
-    config, selection = _profile(recipe['task'])
+    config, selection = _profile(recipe['task'], monitoring=recipe.get('monitoring'))
     return {'status': 'formal_metadata_and_parser_checked',
         'recipe_sha256': recipe['recipe_sha256'],
         'ready_for_training': recipe['ready_for_training'],
@@ -141,7 +164,8 @@ def train(args, *, resume=False):
     output = Path(args.run_dir).expanduser().resolve()
     if not resume and output.exists() and next(output.iterdir(), None) is not None:
         raise ValueError('A formal start requires a new empty run directory; use exact resume for saved runs.')
-    config, selection = _profile(recipe['task'], startup_benchmark=args.startup_benchmark)
+    config, selection = _profile(recipe['task'], startup_benchmark=args.startup_benchmark,
+                                 monitoring=recipe.get('monitoring'))
     if args.startup_benchmark and not 1 <= args.stop_after <= 3:
         raise ValueError('The separately labelled manual startup benchmark is limited to three complete epochs.')
     if not 1 <= args.stop_after <= 5000:
@@ -184,6 +208,11 @@ def build_parser():
     prep.add_argument('--flow-checkpoint')
     prep.add_argument('--data-root')
     prep.add_argument('--dataset-path')
+    prep.add_argument('--validation-every', type=int, default=500)
+    prep.add_argument('--validation-epochs', type=int, nargs='*', default=[100])
+    prep.add_argument('--checkpoint-epochs', type=int, nargs='+', default=[100, 500, 1000, 2000, 2500, 5000])
+    prep.add_argument('--latest-every', type=int, default=100)
+    prep.add_argument('--curve-every', type=int, default=100)
     prep.set_defaults(handler=prepare)
     dry = commands.add_parser('dry-run', help='validate bindings/parser only; no full-data optimizer or step')
     dry.add_argument('--recipe', required=True)

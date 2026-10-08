@@ -4,12 +4,15 @@ import copy
 import fcntl
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
 
+import honf_runtime.unified_training as runtime
 from honf_runtime.unified_training import (
     EngineConfig,
     LossTerm,
@@ -103,6 +106,127 @@ def _config():
     return EngineConfig(seed=17, microbatch_cases=2, effective_cases=4, total_epochs=10,
                         warmup_epochs=2, open_through_epoch=4, soft_through_epoch=6,
                         monitor_every=1, gradient_clip=10.0)
+
+
+def _sparse_config():
+    return replace(_config(), monitor_every=4, monitor_epochs=(2,),
+                   checkpoint_epochs=(2, 6, 10), latest_every=2, curve_every=2)
+
+
+def test_sparse_outputs_keep_only_milestones_and_update_real_curves(tmp_path):
+    provider = _ToyProvider()
+    output = tmp_path / "sparse"
+    engine = TrainingEngine(_sparse_config(), device="cpu")
+    engine.fit(nn.Linear(1, 1), provider, output, identity={"run": "sparse"},
+               arm="adaptive_detail", stop_after=10)
+    history = json.loads((output / "history.json").read_text())
+    assert [row["epoch"] for row in history if "validation" in row] == [2, 4, 8, 10]
+    assert {path.name for path in output.glob("epoch_*_model.pt")} == {
+        "epoch_0002_model.pt", "epoch_0006_model.pt", "epoch_0010_model.pt"}
+    for name in ("loss_curves.pdf", "loss_curves.png", "best_by_field_mse_model.pt"):
+        assert (output / name).stat().st_size > 0
+    progress = json.loads((output / "progress.json").read_text())
+    assert progress["completed_epoch"] == progress["latest_checkpoint_epoch"] == 10
+    assert progress["completed_case_visits"] == 50
+    assert progress["completed_optimizer_updates"] == 20
+    summary = json.loads((output / "fit_summary.json").read_text())
+    assert summary["cumulative_microbatches"] == 30
+    assert summary["cumulative_partial_update_cases"] == 10
+
+
+def test_curve_rng_is_preserved_and_sparse_resume_is_exact(tmp_path, monkeypatch):
+    class StochasticProvider(_ToyProvider):
+        def predict_native(self, model, *args, **kwargs):
+            prediction, auxiliary = super().predict_native(model, *args, **kwargs)
+            if model.training:
+                prediction = prediction + torch.rand_like(prediction) * 0.05 + np.random.rand() * 0.05
+            return prediction, auxiliary
+
+    def noisy_curve(*args):
+        torch.rand(7)
+        np.random.rand(7)
+
+    monkeypatch.setattr(runtime, "_render_loss_curves", noisy_curve)
+    torch.manual_seed(88)
+    initial = nn.Linear(1, 1).state_dict()
+    engine = TrainingEngine(_sparse_config(), device="cpu")
+    uninterrupted = nn.Linear(1, 1)
+    uninterrupted.load_state_dict(initial)
+    torch.manual_seed(91)
+    np.random.seed(91)
+    engine.fit(uninterrupted, StochasticProvider(), tmp_path / "full_sparse",
+               identity={"run": "sparse"}, arm="adaptive_detail", stop_after=10)
+    expected_rng = torch.get_rng_state().clone()
+    expected_numpy_rng = np.random.get_state()
+    interrupted = nn.Linear(1, 1)
+    interrupted.load_state_dict(initial)
+    output = tmp_path / "resume_sparse"
+    torch.manual_seed(91)
+    np.random.seed(91)
+    engine.fit(interrupted, StochasticProvider(), output,
+               identity={"run": "sparse"}, arm="adaptive_detail", stop_after=4)
+    torch.rand(9)
+    np.random.rand(9)
+    engine.fit(interrupted, StochasticProvider(), output, identity={"run": "sparse"},
+               arm="adaptive_detail", stop_after=10, resume_checkpoint=output / "latest_model.pt")
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+    actual_numpy_rng = np.random.get_state()
+    assert np.array_equal(actual_numpy_rng[1], expected_numpy_rng[1])
+    assert actual_numpy_rng[2:] == expected_numpy_rng[2:]
+    for name, value in uninterrupted.state_dict().items():
+        assert torch.equal(value, interrupted.state_dict()[name])
+    summary = json.loads((output / "fit_summary.json").read_text())
+    assert summary["case_visits"] == 30
+    assert summary["cumulative_case_visits"] == 50
+
+
+def test_sparse_nonmilestone_clean_stop_saves_latest_without_extra_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    output = tmp_path / "sparse_clean"
+    output.mkdir()
+    (output / "CLEAN_STOP_REQUEST.json").write_text(json.dumps({"request_id": "sparse-stop"}))
+    engine = TrainingEngine(_sparse_config(), device="cpu")
+    model = nn.Linear(1, 1)
+    receipt = engine.fit(model, _ToyProvider(), output, identity={"run": "sparse-clean"},
+                         arm="adaptive_detail", stop_after=10)
+    assert receipt["completed_epoch"] == 1 and receipt["status"] == "clean_stopped"
+    assert not list(output.glob("epoch_*_model.pt"))
+    assert (output / "latest_model.pt").exists()
+    resumed = engine.fit(model, _ToyProvider(), output, identity={"run": "sparse-clean"},
+                         arm="adaptive_detail", stop_after=2, resume_checkpoint=output / "latest_model.pt")
+    assert resumed["completed_epoch"] == 2
+
+
+def test_unused_output_controls_preserve_legacy_checkpoint_identity():
+    payload = runtime._engine_config_payload(_config())
+    assert not {"monitor_epochs", "checkpoint_epochs", "latest_every", "curve_every"} & payload.keys()
+
+
+@pytest.mark.parametrize("failed_sidecar", ["epoch_0010_model.pt", "best_by_field_mse_model.pt"])
+def test_failed_terminal_sidecar_does_not_advance_latest_past_recoverable_age(tmp_path, monkeypatch, failed_sidecar):
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    original_save = runtime._atomic_torch_save
+
+    def fail_terminal(path, payload):
+        if path.name == failed_sidecar and payload["epoch"] == 10:
+            raise OSError("injected terminal sidecar failure")
+        original_save(path, payload)
+
+    monkeypatch.setattr(runtime, "_atomic_torch_save", fail_terminal)
+    engine = TrainingEngine(_sparse_config(), device="cpu")
+    output = tmp_path / "interrupted_terminal"
+    model = nn.Linear(1, 1)
+    with pytest.raises(OSError, match="injected terminal"):
+        engine.fit(model, _ToyProvider(), output, identity={"run": "recover"},
+                   arm="adaptive_detail", stop_after=10)
+    saved = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+    assert saved["epoch"] == 8
+    monkeypatch.setattr(runtime, "_atomic_torch_save", original_save)
+    result = engine.fit(model, _ToyProvider(), output, identity={"run": "recover"},
+                        arm="adaptive_detail", stop_after=10, resume_checkpoint=output / "latest_model.pt")
+    assert result["completed_epoch"] == 10
+    for name in ("latest_model.pt", "epoch_0010_model.pt", "best_by_field_mse_model.pt"):
+        assert torch.load(output / name, map_location="cpu", weights_only=False)["epoch"] == 10
 
 
 def test_schedule_hits_declared_warmup_endpoints_and_cosine_final():

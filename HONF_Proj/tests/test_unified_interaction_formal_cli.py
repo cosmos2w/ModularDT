@@ -72,3 +72,42 @@ def test_manual_lifecycle_parser_requires_resume_checkpoint():
     args = parser.parse_args(['start', '--recipe', 'recipe.json', '--run-dir', 'startup',
                               '--startup-benchmark', '--stop-after', '3'])
     assert args.startup_benchmark and args.stop_after == 3
+
+
+def test_sparse_monitoring_is_sealed_and_used_by_formal_dry_run(tmp_path, monkeypatch):
+    recipe = _recipe()
+    recipe['monitoring'] = {'validation_every': 500, 'validation_epochs': [100],
+        'checkpoint_epochs': [100, 500, 1000, 2000, 2500, 5000],
+        'latest_every': 100, 'curve_every': 100}
+    monkeypatch.setattr(cli, '_factory', lambda task: type('Factory', (), {
+        'validate_recipe': staticmethod(lambda native: {'ready_for_training': False})})())
+    path = _save(tmp_path, recipe)
+    result = cli.dry_run(cli.build_parser().parse_args(['dry-run', '--recipe', str(path)]))
+    config = result['engine_config']
+    assert config['monitor_every'] == 500
+    assert config['monitor_epochs'] == (100,)
+    assert config['checkpoint_epochs'] == (100, 500, 1000, 2000, 2500, 5000)
+    assert config['latest_every'] == config['curve_every'] == 100
+
+
+@pytest.mark.parametrize('overrides', [
+    {'validation_every': 0}, {'checkpoint_epochs': [100, 500]},
+    {'checkpoint_epochs': [5000, 100]}, {'latest_every': -1},
+    {'validation_epochs': [5001]}, {'curve_every': 0},
+])
+def test_invalid_sparse_formal_schedule_is_rejected(overrides):
+    monitoring = {'validation_every': 500, 'validation_epochs': [100],
+        'checkpoint_epochs': [100, 500, 1000, 2000, 2500, 5000],
+        'latest_every': 100, 'curve_every': 100}
+    monitoring.update(overrides)
+    with pytest.raises(ValueError):
+        cli._profile('wind', monitoring=monitoring)
+
+
+def test_invalid_monitoring_fails_before_full_data_preparation(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, '_factory', lambda task: pytest.fail('Invalid options reached full-data preparation.'))
+    args = cli.build_parser().parse_args(['prepare', '--task', 'wind', '--arm', 'adaptive_detail',
+        '--recipe', str(tmp_path / 'invalid.json'), '--curve-every', '0'])
+    with pytest.raises(ValueError, match='interval'):
+        cli.prepare(args)
+    assert not list(tmp_path.iterdir())

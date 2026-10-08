@@ -160,6 +160,10 @@ class EngineConfig:
     monitor_every: int = 100
     gradient_clip: float = 1.0
     deterministic_case_order: bool = True
+    monitor_epochs: tuple[int, ...] = ()
+    checkpoint_epochs: tuple[int, ...] | None = None
+    latest_every: int | None = None
+    curve_every: int | None = None
 
     def __post_init__(self) -> None:
         if min(self.microbatch_cases, self.effective_cases, self.total_epochs, self.monitor_every) < 1:
@@ -170,6 +174,15 @@ class EngineConfig:
             raise ValueError("Warmup/open/soft stages must be ordered inside the declared horizon.")
         if self.gradient_clip <= 0 or not math.isfinite(self.gradient_clip):
             raise ValueError("Gradient clipping must be positive and finite.")
+        for name in ("monitor_epochs", "checkpoint_epochs"):
+            epochs = getattr(self, name)
+            if epochs is not None and (not isinstance(epochs, tuple)
+                    or any(type(epoch) is not int or not 1 <= epoch <= self.total_epochs for epoch in epochs)
+                    or tuple(sorted(set(epochs))) != epochs):
+                raise ValueError("Declared monitoring/checkpoint epochs must be sorted unique horizon epochs.")
+        for interval in (self.latest_every, self.curve_every):
+            if interval is not None and (type(interval) is not int or interval < 1):
+                raise ValueError("Latest-state and loss-curve intervals must be positive integers.")
 
     def stage_for_epoch(self, epoch: int) -> str:
         if epoch <= self.warmup_epochs:
@@ -190,6 +203,50 @@ class EngineConfig:
             return 0.1
         fraction = (epoch - soft_start) / (self.soft_through_epoch - soft_start)
         return 1.0 + fraction * (0.1 - 1.0)
+
+
+def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
+    """Keep legacy identities unchanged when new optional output controls are unused."""
+    payload = asdict(config)
+    for name, default in (("monitor_epochs", ()), ("checkpoint_epochs", None),
+                          ("latest_every", None), ("curve_every", None)):
+        if payload[name] == default:
+            payload.pop(name)
+    return payload
+
+
+def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str) -> None:
+    """Replace two small curve aliases; never render native fields during training."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    names = sorted({name for row in history for name in row["train_losses"]})
+    figure = Figure(figsize=(12, 2.8 * math.ceil((len(names) + 1) / 2)), constrained_layout=True)
+    FigureCanvasAgg(figure)
+    axes = figure.subplots(math.ceil((len(names) + 1) / 2), 2, squeeze=False).ravel()
+    for axis, name in zip(axes, names):
+        rows = [row for row in history if name in row["train_losses"]]
+        axis.plot([row["epoch"] for row in rows], [row["train_losses"][name] for row in rows])
+        axis.set(title=name, xlabel="Completed epoch", ylabel="Native objective term")
+        axis.grid(alpha=0.2)
+    validation = [row for row in history if "validation" in row]
+    axis = axes[len(names)]
+    if validation:
+        axis.plot([row["epoch"] for row in validation],
+                  [row["validation"][field_metric] for row in validation], "o-")
+    else:
+        axis.text(0.5, 0.5, "Validation not yet scheduled", ha="center", va="center", transform=axis.transAxes)
+    axis.set(title=f"Exposed validation {field_metric}", xlabel="Completed epoch", ylabel=field_metric)
+    axis.grid(alpha=0.2)
+    for axis in axes[len(names) + 1:]:
+        axis.set_visible(False)
+    figure.suptitle("Training loss: equal macro-update means; validation is a separate sampled estimand")
+    for suffix in ("pdf", "png"):
+        destination = output / f"loss_curves.{suffix}"
+        temporary = output / f".loss_curves.{os.getpid()}.tmp.{suffix}"
+        figure.savefig(temporary, format=suffix, dpi=120)
+        os.replace(temporary, destination)
+    figure.clear()
 
 
 @dataclass(frozen=True)
@@ -722,7 +779,7 @@ class TrainingEngine:
         sealed_identity = {
             **dict(identity),
             "provider_identity": provider_identity,
-            "engine_config": asdict(self.config),
+            "engine_config": _engine_config_payload(self.config),
             "selection_policy": asdict(self.selection),
             "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in group_specs],
         }
@@ -783,6 +840,9 @@ class TrainingEngine:
         _atomic_json(output / "active_process.json", active)
         total_started = time.perf_counter()
         stopped_at = start_epoch - 1
+        latest_epoch = int(source_payload["epoch"]) if resume_checkpoint is not None else 0
+        completed_visits = sum(int(row["case_visits"]) for row in history)
+        completed_updates = sum(int(row["optimizer_updates"]) for row in history)
         clean_stopped = False
         previous_phase = self.config.stage_for_epoch(start_epoch - 1) if start_epoch > 1 else None
         try:
@@ -834,6 +894,14 @@ class TrainingEngine:
                     update_rows.append({"losses": losses, "work": work, "case_count": len(update_cases),
                                         "microbatch_count": len(microbatches),
                                         "query_sampling_sha256": sampling_hash})
+                    _atomic_json(output / "progress.json", {
+                        "status": "training", "epoch_in_progress": epoch, "completed_epoch": epoch - 1,
+                        "phase": phase, "updates_this_epoch": len(update_rows),
+                        "case_visits_this_epoch": sum(item["case_count"] for item in update_rows),
+                        "completed_case_visits": completed_visits,
+                        "completed_optimizer_updates": completed_updates,
+                        "latest_checkpoint_epoch": latest_epoch, "updated_unix": time.time(),
+                    })
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
                 train_seconds = time.perf_counter() - epoch_started
@@ -862,7 +930,9 @@ class TrainingEngine:
                     row["stage_receipt"] = stage_receipt
                 clean_stop_request = _read_clean_stop_request(output, clean_stop_name)
                 clean_stop_requested = clean_stop_request is not None
-                review = (epoch % self.config.monitor_every == 0 or epoch == stop_after or clean_stop_requested)
+                review = (epoch % self.config.monitor_every == 0 or epoch in self.config.monitor_epochs
+                          or epoch == stop_after or clean_stop_requested)
+                improved_field = improved_guarded = False
                 if review:
                     validation_started = time.perf_counter()
                     metrics = self._evaluate(model, provider, arm, phase, epoch)
@@ -881,7 +951,13 @@ class TrainingEngine:
                         best_guarded = field_score
                 history.append(row)
                 print(json.dumps(row, sort_keys=True, default=str, allow_nan=False), flush=True)
-                should_save = review or epoch == stop_after
+                milestone = ((review if self.config.checkpoint_epochs is None
+                              else epoch in self.config.checkpoint_epochs)
+                             or epoch == stop_after or improved_guarded)
+                curve_due = self.config.curve_every is not None and (
+                    epoch == 1 or epoch % self.config.curve_every == 0 or epoch == stop_after or clean_stop_requested)
+                should_save = (review or milestone or curve_due
+                               or (self.config.latest_every is not None and epoch % self.config.latest_every == 0))
                 if should_save:
                     sampler_state = {
                         "seed": self.config.seed,
@@ -896,10 +972,10 @@ class TrainingEngine:
                         history=history, best_field=best_field, best_guarded=best_guarded, sampler_state=sampler_state,
                         group_specs=optimizer_specs,
                         provider_training_state=getattr(provider, "training_state_dict", dict)())
-                    _atomic_torch_save(output / "latest_model.pt", payload)
                     _atomic_json(output / "history.json", history)
-                    if review:
+                    if milestone:
                         _atomic_torch_save(output / f"epoch_{epoch:04d}_model.pt", payload)
+                    if review:
                         _atomic_json(output / f"validation_epoch_{epoch:04d}.json", row["validation"])
                         if improved_field:
                             _atomic_torch_save(output / "best_by_field_mse_model.pt", payload)
@@ -916,6 +992,24 @@ class TrainingEngine:
                                 "checkpoint": selected_checkpoint.name,
                                 "checkpoint_sha256": hashlib.sha256(selected_checkpoint.read_bytes()).hexdigest(),
                             })
+                    # Advance the resume cursor only after required milestone
+                    # and selector artifacts exist, including the terminal age.
+                    _atomic_torch_save(output / "latest_model.pt", payload)
+                    latest_epoch = epoch
+                if curve_due:
+                    _atomic_json(output / "history.json", history)
+                    curve_rng = capture_rng_state()
+                    try:
+                        _render_loss_curves(history, output, self.selection.field_metric)
+                    finally:
+                        restore_rng_state(curve_rng)
+                completed_visits += len(ordered_cases)
+                completed_updates += len(update_rows)
+                _atomic_json(output / "progress.json", {
+                    "status": "epoch_completed", "completed_epoch": epoch, "phase": phase,
+                    "completed_case_visits": completed_visits, "completed_optimizer_updates": completed_updates,
+                    "latest_checkpoint_epoch": latest_epoch, "updated_unix": time.time(),
+                })
                 stopped_at = epoch
                 if clean_stop_requested:
                     acknowledgement = {
@@ -946,6 +1040,10 @@ class TrainingEngine:
                 **active,
                 "case_visits": sum(int(item["case_visits"]) for item in history if int(item["epoch"]) >= start_epoch),
                 "optimizer_updates": sum(int(item["optimizer_updates"]) for item in history if int(item["epoch"]) >= start_epoch),
+                "cumulative_case_visits": completed_visits,
+                "cumulative_optimizer_updates": completed_updates,
+                "cumulative_microbatches": sum(int(item["microbatches"]) for item in history),
+                "cumulative_partial_update_cases": sum(int(item["partial_update_cases"]) for item in history),
                 "best_field_score": best_field,
                 "best_response_guarded_score": guarded_summary,
                 "branch_parent": branch_parent,
