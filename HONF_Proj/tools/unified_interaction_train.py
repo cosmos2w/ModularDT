@@ -111,14 +111,26 @@ def _model_state_sha256(model: Any) -> str:
     return digest.hexdigest()
 
 
-def _profile(task: str, seed: int):
+def _profile(
+    task: str,
+    seed: int,
+    *,
+    versioned_wind: bool = False,
+    microbatch_cases: int | None = None,
+):
     from honf_runtime.unified_training import (
         EngineConfig,
         SelectionPolicy,
         TrainingEngine,
     )
 
-    microbatch, effective = (8, 48) if task == "thermal" else (4, 24)
+    microbatch, effective = (
+        (8, 48) if task == "thermal" else ((24, 24) if versioned_wind else (4, 24))
+    )
+    if microbatch_cases is not None:
+        if type(microbatch_cases) is not int or not 1 <= microbatch_cases <= effective:
+            raise ValueError("Microbatch size must stay inside the unchanged effective task batch.")
+        microbatch = microbatch_cases
     config = EngineConfig(
         seed=seed,
         microbatch_cases=microbatch,
@@ -129,6 +141,7 @@ def _profile(task: str, seed: int):
         soft_through_epoch=800,
         monitor_every=100,
         gradient_clip=1.0,
+        sampling_version=("case_epoch_v1" if task == "wind" and versioned_wind else "legacy_packed_v1"),
     )
     selection = (SelectionPolicy(field_metric="field_score", response_guard_metric="response_guard_max_ratio",
                                  maximum_response_ratio=1.10)
@@ -142,11 +155,29 @@ def _build(args: argparse.Namespace, *, device: str | None = None):
     args.seed = seed
     _seed_everything(seed)
     factory = _factory(args.task)
-    model, provider, optimizer_seed = factory({
+    provider_config: dict[str, Any] = {
         "seed": seed,
         "device": device or args.device,
-    })
-    config, selection, engine_class = _profile(args.task, args.seed)
+    }
+    recipe_payload = _read_json(Path(args.recipe_json).expanduser().resolve()) if args.recipe_json else None
+    versioned_wind = args.task == "wind" and (args.recipe_id is not None or recipe_payload is not None)
+    if args.task != "wind" and (versioned_wind or args.query_tile_size is not None or args.execution_backend is not None):
+        raise ValueError("Wind recipe, query-tile and execution-backend options are Wind-only.")
+    if args.recipe_id is not None:
+        provider_config["recipe_id"] = args.recipe_id
+    if recipe_payload is not None:
+        provider_config["recipe"] = recipe_payload
+    if args.query_tile_size is not None:
+        provider_config["query_tile_size"] = args.query_tile_size
+    if args.execution_backend is not None:
+        provider_config["execution_backend"] = args.execution_backend
+    model, provider, optimizer_seed = factory(provider_config)
+    config, selection, engine_class = _profile(
+        args.task,
+        args.seed,
+        versioned_wind=versioned_wind,
+        microbatch_cases=args.microbatch_cases,
+    )
     engine = engine_class(config, device=device or args.device, selection=selection)
     identity = {
         "workflow": "unified_interaction_refinement",
@@ -157,6 +188,9 @@ def _build(args: argparse.Namespace, *, device: str | None = None):
         "initial_model_state_sha256": _model_state_sha256(model),
         "engine_profile": "warmup500_open600_soft800_total2500",
     }
+    if versioned_wind:
+        identity["wind_recipe_id"] = provider.recipe["recipe_id"]
+        identity["wind_recipe_sha256"] = provider.recipe["recipe_sha256"]
     return model, provider, optimizer_seed, engine, identity
 
 
@@ -327,6 +361,12 @@ def _task_args(parser: argparse.ArgumentParser, *, output: bool = False) -> None
     parser.add_argument("--seed", type=int, default=None,
                         help="profile default: Thermal 0, Wind 42; matched arms share the sealed value")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--recipe-id", help="versioned Wind recipe ID, for example wind_w1_component_q1024_v1")
+    parser.add_argument("--recipe-json", help="strict resolved Wind recipe JSON for a custom declared variant")
+    parser.add_argument("--query-tile-size", type=int, choices=(512, 2048, 8192))
+    parser.add_argument("--execution-backend", choices=("selected", "dense_masked"))
+    parser.add_argument("--microbatch-cases", type=int,
+                        help="physical packing size; the effective optimizer batch remains fixed by the task profile")
     if output:
         parser.add_argument("--output-dir")
 

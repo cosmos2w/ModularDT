@@ -13,6 +13,7 @@ from channelthermal.training.checkpoints import _restore_rng_state, save_checkpo
 from channelthermal.training.stop_request import acknowledge_stop, stop_requested
 
 from honf_runtime.compat import load_trusted_checkpoint
+from honf_runtime.run_layout import RunLayout
 
 
 class TinyTrainer(torch.nn.Module):
@@ -143,4 +144,4 @@ def test_stop_acknowledgement_records_resumable_status(tmp_path):
     manifest = json.loads((tmp_path / "run_manifest.json").read_text())
     assert manifest["status"] == "stopped_resumable"
     assert manifest["last_completed_epoch"] == 7
-    assert manifest["resume_checkpoint"] == str(tmp_path / "latest_model.pt")
+    assert manifest["resume_checkpoint"] == str(RunLayout(tmp_path).path("latest_model.pt"))

@@ -451,19 +451,52 @@ def _expected_literal_age(label: str) -> int | None:
     return None
 
 
-def _load_task(task: str, device: str):
+def _load_task(task: str, device: str, experiment_identity: Mapping[str, Any] | None = None):
     _add_import_paths()
     from honf_runtime.reproducibility import seed_all
     from unified_interaction_train import _factory, _model_state_sha256, _profile
+    from honf_runtime.unified_training import EngineConfig, SelectionPolicy
 
     seed = 0 if task == "thermal" else 42
     seed_all(seed)
-    model, provider, _ = _factory(task)({"seed": seed, "device": device})
-    engine_config, selection, _ = _profile(task, seed)
+    provider_config: dict[str, Any] = {"seed": seed, "device": device}
+    if experiment_identity is not None:
+        if int(experiment_identity.get("seed", -1)) != seed:
+            raise ValueError("Checkpoint task seed differs from its sealed task profile.")
+        saved_provider = experiment_identity.get("provider_identity")
+        if not isinstance(saved_provider, Mapping):
+            raise TypeError("Checkpoint omitted the provider identity required for evaluator reconstruction.")
+        if task == "wind":
+            resolved_recipe = saved_provider.get("resolved_recipe")
+            if resolved_recipe is not None:
+                provider_config["recipe"] = dict(resolved_recipe)
+            elif experiment_identity.get("wind_recipe_id") is not None:
+                raise ValueError("Checkpoint names a Wind recipe but omits its resolved provider binding.")
+        saved_engine = experiment_identity.get("engine_config")
+        saved_selection = experiment_identity.get("selection_policy")
+        if not isinstance(saved_engine, Mapping) or not isinstance(saved_selection, Mapping):
+            raise TypeError("Checkpoint omitted its shared engine configuration or selector binding.")
+        engine_config = EngineConfig(**dict(saved_engine))
+        selection = SelectionPolicy(**dict(saved_selection))
+    else:
+        engine_config, selection, _ = _profile(task, seed)
+    model, provider, _ = _factory(task)(provider_config)
     initial_state_sha256 = _model_state_sha256(model)
     model.to(device)
     model.eval()
     return model, provider, engine_config, selection, initial_state_sha256
+
+
+def _load_checkpoint_payload(path: Path) -> Mapping[str, Any]:
+    """Load only the checkpoint identity needed to reconstruct its bound evaluator."""
+
+    _add_import_paths()
+    from honf_runtime.compat import load_trusted_checkpoint
+
+    payload = load_trusted_checkpoint(path, map_location="cpu")
+    if not isinstance(payload, Mapping):
+        raise TypeError("Trusted checkpoint loader returned a non-mapping payload.")
+    return payload
 
 
 def validate_checkpoint_binding(
@@ -515,9 +548,37 @@ def validate_checkpoint_binding(
     evaluation_device = active_provider_identity.pop("device", None)
     if saved_provider_identity != active_provider_identity:
         raise ValueError("Checkpoint dataset membership, source, normalization or provider identity differs.")
-    if identity.get("engine_config") != engine_config.__dict__:
+    if is_dataclass(engine_config):
+        from honf_runtime.unified_training import EngineConfig, _engine_config_payload
+
+        expected_engine = _engine_config_payload(engine_config)
+        saved_engine = identity.get("engine_config")
+        if not isinstance(saved_engine, Mapping):
+            raise TypeError("Checkpoint shared-engine configuration must be a mapping.")
+        try:
+            normalized_saved_engine = _engine_config_payload(EngineConfig(**dict(saved_engine)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Checkpoint shared-engine configuration cannot be reconstructed.") from exc
+    else:
+        expected_engine = dict(engine_config.__dict__)
+        normalized_saved_engine = identity.get("engine_config")
+    if normalized_saved_engine != expected_engine:
         raise ValueError("Checkpoint shared-engine configuration differs from the sealed development profile.")
-    if identity.get("selection_policy") != selection.__dict__:
+    if is_dataclass(selection):
+        from honf_runtime.unified_training import SelectionPolicy
+
+        expected_selection = asdict(selection)
+        saved_selection = identity.get("selection_policy")
+        if not isinstance(saved_selection, Mapping):
+            raise TypeError("Checkpoint selector must be a mapping.")
+        try:
+            normalized_saved_selection = asdict(SelectionPolicy(**dict(saved_selection)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Checkpoint selector cannot be reconstructed.") from exc
+    else:
+        expected_selection = dict(selection.__dict__)
+        normalized_saved_selection = identity.get("selection_policy")
+    if normalized_saved_selection != expected_selection:
         raise ValueError("Checkpoint selector differs from the sealed development profile.")
     if not isinstance(identity.get("optimizer_schedule_contract"), list):
         raise TypeError("Checkpoint optimizer schedule contract must be a list.")
@@ -2388,10 +2449,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("Every field-label must identify one unique supplied checkpoint label.")
     if set(args.detailed_label) & set(args.field_label):
         raise ValueError("A checkpoint label cannot request both detailed and field-only exports.")
-    model, provider, engine_config, selection, initial_sha = _load_task(args.task, args.device)
     output_root = args.output_dir.expanduser().resolve() if args.output_dir is not None else None
     results = []
     for label, path in specs:
+        checkpoint_payload = _load_checkpoint_payload(path)
+        identity = checkpoint_payload.get("experiment_identity")
+        if not isinstance(identity, Mapping):
+            raise TypeError("Checkpoint omitted its sealed experiment identity mapping.")
+        model, provider, engine_config, selection, initial_sha = _load_task(args.task, args.device, identity)
         results.append(evaluate_checkpoint(
             args.task,
             label,

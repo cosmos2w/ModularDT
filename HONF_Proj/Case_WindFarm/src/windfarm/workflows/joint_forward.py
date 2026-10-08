@@ -522,6 +522,7 @@ def sample_native_role_queries(
     role_query_counts: Mapping[str, int] = DEFAULT_ROLE_QUERY_COUNTS,
     *,
     catalogue_cache: NativeRoleCatalogueCache | None = None,
+    rng_by_role: Mapping[str, np.random.Generator] | None = None,
 ) -> NativeRoleSample:
     """Draw fresh, quadrature-weighted native cells for each protected role.
 
@@ -533,6 +534,8 @@ def sample_native_role_queries(
     counts = {name: int(role_query_counts[name]) for name in ROLE_NAMES}
     if any(count <= 0 for count in counts.values()):
         raise ValueError("all protected WindFarm role query counts must be positive")
+    if rng_by_role is not None and set(rng_by_role) != set(ROLE_NAMES):
+        raise ValueError("Packing-independent Wind sampling requires one RNG for every protected role.")
     catalogue = (catalogue_cache or _DEFAULT_ROLE_CATALOGUE_CACHE).get(case)
     pieces: list[np.ndarray] = []
     target_pieces: list[np.ndarray] = []
@@ -542,7 +545,8 @@ def sample_native_role_queries(
     offset = 0
     for role in ROLE_NAMES:
         cdf = catalogue.role_cdf[role]
-        positions = np.searchsorted(cdf, rng.random(counts[role]), side="right")
+        role_rng = rng if rng_by_role is None else rng_by_role[role]
+        positions = np.searchsorted(cdf, role_rng.random(counts[role]), side="right")
         positions = np.minimum(positions, cdf.size - 1)
         valid = catalogue.role_indices.get(role)
         selected = positions if valid is None else valid[positions]

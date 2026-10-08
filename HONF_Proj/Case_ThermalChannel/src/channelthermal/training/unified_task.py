@@ -20,6 +20,8 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch import nn
+
 from honf_forward_core.interface_fields.interaction_refinement import (
     RefinedSourceResponseOperator,
 )
@@ -30,7 +32,6 @@ from honf_runtime.unified_training import (
     ScheduleSpec,
     TaskBatch,
 )
-from torch import nn
 
 from ..source_response import CONTEXT_KEYS, ThermalSourceResponse
 
@@ -328,15 +329,30 @@ def _sample_primary(
                 raise ValueError("Thermal TRAIN query sampling requires an engine-owned SamplingKey.")
             if key.epoch != int(epoch):
                 raise ValueError("Thermal sample epoch differs from its engine-owned SamplingKey.")
-            rng = key.numpy_rng("thermal_primary_native_queries", case_id)
+            if key.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
+                fluid = key.native_indices(
+                    len(original["query_xy"]), int(budget["fluid_queries"]),
+                    case_id, "fluid", "primary_native_queries", replace=False,
+                )
+                material = key.native_indices(
+                    len(original["module_internal_query_points"]),
+                    int(budget["material_queries_per_module"]),
+                    case_id, "material", "primary_native_queries", replace=False,
+                )
+            else:
+                rng = key.numpy_rng("thermal_primary_native_queries", case_id)
+                fluid = rng.choice(len(original["query_xy"]), int(budget["fluid_queries"]), replace=False)
+                material = rng.choice(
+                    len(original["module_internal_query_points"]),
+                    int(budget["material_queries_per_module"]), replace=False,
+                )
         else:
             rng = np.random.default_rng(1000 + int(index) * 104729)
-        fluid = rng.choice(len(original["query_xy"]), int(budget["fluid_queries"]), replace=False)
-        material = rng.choice(
-            len(original["module_internal_query_points"]),
-            int(budget["material_queries_per_module"]),
-            replace=False,
-        )
+            fluid = rng.choice(len(original["query_xy"]), int(budget["fluid_queries"]), replace=False)
+            material = rng.choice(
+                len(original["module_internal_query_points"]),
+                int(budget["material_queries_per_module"]), replace=False,
+            )
         surface_stride = int(budget.get("surface_stride", RESPONSE_SURFACE_STRIDE))
         samples.append({
             "structure": original["structure"],
@@ -709,17 +725,34 @@ class ThermalRefinementTask:
         if training:
             if key is None:
                 raise ValueError("TRAIN response sampling requires its engine-owned SamplingKey.")
-            rng = key.numpy_rng("thermal_response_addendum", str(family["family_id"]))
+            family_id = str(family["family_id"])
+            if key.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
+                valid_fluid = np.flatnonzero(np.asarray(family["fluid_valid"], dtype=bool))
+                fluid_count = int(self.budget["fluid_queries"])
+                material_count = int(self.budget["material_queries_per_module"])
+                if len(valid_fluid) < fluid_count or len(family["material_local"]) < material_count:
+                    raise ValueError("Thermal response family has insufficient fixed receiver coverage.")
+                fluid_ids = valid_fluid[key.native_indices(
+                    len(valid_fluid), fluid_count, family_id, "response_fluid", "response_addendum",
+                )]
+                material_ids = key.native_indices(
+                    len(family["material_local"]), material_count,
+                    family_id, "response_material", "response_addendum",
+                )
+                rng = None
+            else:
+                rng = key.numpy_rng("thermal_response_addendum", family_id)
         else:
             family_index = DEVELOPMENT_RESPONSE_IDS.index(str(family["family_id"]))
             rng = np.random.default_rng(0x5448524D + family_index * 104729)
-        valid_fluid = np.flatnonzero(np.asarray(family["fluid_valid"], dtype=bool))
-        fluid_count = int(self.budget["fluid_queries"])
-        material_count = int(self.budget["material_queries_per_module"])
-        if len(valid_fluid) < fluid_count or len(family["material_local"]) < material_count:
-            raise ValueError("Thermal response family has insufficient fixed receiver coverage.")
-        fluid_ids = rng.choice(valid_fluid, fluid_count, replace=False)
-        material_ids = rng.choice(len(family["material_local"]), material_count, replace=False)
+        if not training or key is None or key.sampling_version != SamplingKey.CASE_EPOCH_VERSION:
+            valid_fluid = np.flatnonzero(np.asarray(family["fluid_valid"], dtype=bool))
+            fluid_count = int(self.budget["fluid_queries"])
+            material_count = int(self.budget["material_queries_per_module"])
+            if len(valid_fluid) < fluid_count or len(family["material_local"]) < material_count:
+                raise ValueError("Thermal response family has insufficient fixed receiver coverage.")
+            fluid_ids = rng.choice(valid_fluid, fluid_count, replace=False)
+            material_ids = rng.choice(len(family["material_local"]), material_count, replace=False)
         surface_stride = int(self.budget.get("surface_stride", RESPONSE_SURFACE_STRIDE))
         tensor = lambda value: torch.as_tensor(value, dtype=torch.float32)
         return {
@@ -1491,8 +1524,9 @@ class ThermalRefinementTask:
 def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, ThermalRefinementTask, Mapping[str, Any]]:
     """Load exact retained parent bindings and make the refined child model."""
 
-    from honf_runtime.compat import load_trusted_checkpoint, set_seed
     from thermal_source_response_fit import build_balances, read_primary
+
+    from honf_runtime.compat import load_trusted_checkpoint, set_seed
 
     config = dict(config)
     parent_path = Path(config.get("parent_checkpoint", DEFAULT_PARENT_CHECKPOINT)).expanduser().resolve()

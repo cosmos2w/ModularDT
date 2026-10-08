@@ -5,11 +5,16 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from honf_runtime.unified_training import _sampling_dataset_id as engine_sampling_dataset_id
 from torch import nn
 
 from windfarm.normalization import VelocityNormalizer, VerticalProfileBaseline
 from windfarm.training import unified_formal
-from windfarm.training.unified_task import DEFAULT_ROLE_QUERY_COUNTS
+from windfarm.training.unified_task import (
+    DEFAULT_ROLE_QUERY_COUNTS,
+    WIND_W1_RECIPE_ID,
+    resolve_wind_recipe,
+)
 
 
 def _metadata() -> dict[str, np.ndarray]:
@@ -154,9 +159,77 @@ def test_full_prepare_fits_only_420_original_train_rows_and_binds_transform(
     assert validation["source_rows"] == {"train": 420, "validation": 90, "test_metadata_only": 90}
 
 
+def test_versioned_formal_recipe_uses_shared_four_layout_train_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    data_root = _fake_dataset(tmp_path, monkeypatch)
+    observed: dict[str, object] = {}
+
+    def fake_fit(dataset, rows, *, samples_per_row, seed, profile_bins):
+        del dataset, samples_per_row, seed, profile_bins
+        observed["normalization_rows"] = np.asarray(rows).copy()
+        return _normalizer(), _profile()
+
+    def fake_role_fit(view, rows, train_layout_indices, background_profile, normalizer, **kwargs):
+        del background_profile, normalizer
+        row_ids = np.asarray(rows, dtype=np.int64)
+        layouts = tuple(int(value) for value in train_layout_indices[:4])
+        layout_by_row = np.asarray(view.metadata["layout_index"], dtype=np.int64)
+        calibration_rows = [int(row) for row in row_ids if int(layout_by_row[int(row)]) in set(layouts)]
+        training_recipe = resolve_wind_recipe(WIND_W1_RECIPE_ID)
+        assert training_recipe is not None
+        counts = dict(training_recipe["calibration_role_query_counts"])
+        observed["calibration_rows"] = calibration_rows
+        observed["calibration_kwargs"] = kwargs
+        return {
+            "schema_version": 1,
+            "method": "same panel W0 target variance and W1 profile residual RMS",
+            "scope": "selected TRAIN rows only",
+            "training_fingerprint": kwargs["training_fingerprint"],
+            "training_rows_sha256": unified_formal._indices_sha256(row_ids),
+            "calibration_layout_indices": list(layouts),
+            "calibration_row_indices": calibration_rows,
+            "calibration_query_count_per_row": 1024,
+            "role_query_counts_per_row": counts,
+            "role_sample_counts": {name: len(calibration_rows) * count for name, count in counts.items()},
+            "scalar_scale_rule": "max(sqrt(mean of three TRAIN target component variances), 1e-3 m/s)",
+            "component_scale_rule": "max(profile residual RMS, physical floor, 0.10 scalar scale)",
+            "physical_component_floor_mps": 0.009,
+            "scalar_role_scales_mps": {name: 1.0 for name in counts},
+            "component_role_scales_mps": {name: [1.0, 0.2, 0.1] for name in counts},
+            "component_statistics": {},
+            "query_sampling_sha256": "query-sample-test",
+            "target_sample_sha256": "target-sample-test",
+            "background_profile_sha256": "profile-test",
+            "sampling_version": "case_epoch_v1",
+            "catalogue_build_or_lookup_seconds": 1.25,
+            "native_target_sampling_seconds": 2.5,
+            "catalogue_cache_after_calibration": {"hits": 0, "misses": 12},
+            "target_values_read": "TRAIN calibration panel only",
+            "solver_attempts": 0,
+        }
+
+    monkeypatch.setattr(unified_formal, "fit_velocity_statistics", fake_fit)
+    monkeypatch.setattr(unified_formal, "_fit_train_role_scales", fake_role_fit)
+    config = {**_config(tmp_path, data_root), "wind_recipe_id": WIND_W1_RECIPE_ID}
+    recipe = unified_formal.prepare_recipe(config, metadata_only=False)
+
+    assert recipe["wind_training_recipe"]["recipe_id"] == WIND_W1_RECIPE_ID
+    assert recipe["role_query_counts"] == recipe["wind_training_recipe"]["role_query_counts"]
+    assert len(observed["normalization_rows"]) == 420
+    assert len(observed["calibration_rows"]) == 12
+    assert recipe["role_scale_calibration"]["status"] == "fitted_from_shared_four_layout_original_TRAIN_panel"
+    assert recipe["role_scale_profile_path"]
+    assert Path(recipe["role_scale_profile_path"]).is_file()
+    assert recipe["role_scales_mps"] == {name: 1.0 for name in DEFAULT_ROLE_QUERY_COUNTS}
+    validation = unified_formal.validate_recipe(recipe)
+    assert validation["ready_for_training"] is True
+
+
 def test_formal_provider_uses_5000_epoch_schedule_and_full_scope_identity(tmp_path: Path):
     class View:
         def __init__(self):
+            self.token_shape = (2, 2, 2)
             self.metadata = {
                 "layout_index": np.repeat(np.arange(6, dtype=np.int64), 3),
                 "wd_deg": np.tile(np.asarray([270.0, 285.0, 300.0]), 6),
@@ -199,3 +272,58 @@ def test_formal_provider_uses_5000_epoch_schedule_and_full_scope_identity(tmp_pa
     assert all(group.schedule.hold_through_epoch == 2000 for group in groups)
     assert all(group.schedule.peak_lr == pytest.approx(3.0e-4) for group in groups)
     assert all(group.schedule.final_lr == pytest.approx(3.0e-6) for group in groups)
+
+
+def test_versioned_formal_sampler_key_uses_full_train_membership(tmp_path: Path):
+    class View:
+        def __init__(self):
+            self.token_shape = (2, 2, 2)
+            self.metadata = {
+                "layout_index": np.repeat(np.arange(6, dtype=np.int64), 3),
+                "wd_deg": np.tile(np.asarray([270.0, 285.0, 300.0]), 6),
+            }
+
+    training_recipe = resolve_wind_recipe(WIND_W1_RECIPE_ID)
+    assert training_recipe is not None
+    train_rows = np.arange(18, dtype=np.int64)
+    train_fingerprint = "full-train-membership-sha"
+    manifest = {
+        "subset_id": unified_formal.FORMAL_RECIPE_ID,
+        "manifest_sha256": "local-formal-manifest-sha",
+        "train_layout_indices": list(range(6)),
+        "validation_layout_indices": [],
+        "train_layout_selection": {"selected_turbine_counts": list(range(6, 31)), "uncovered_turbine_counts": []},
+    }
+    formal_recipe = {
+        "recipe_sha256": "prepared-full-dataset-recipe-sha",
+        "source_metadata_sha256": "metadata-sha",
+        "source_file_inventory": [],
+        "partition_identity": {"train_rows_sha256": train_fingerprint},
+        "normalization_sha256": "normalization-sha",
+        "normalization_binding_sha256": "binding-sha",
+        "role_scale_sha256": "role-scale-sha",
+    }
+    normalization_path = tmp_path / "normalization.json"
+    normalization_path.write_text("fixture")
+    provider = unified_formal.WindFormalRefinementTask(
+        View(),  # type: ignore[arg-type]
+        train_rows=train_rows,
+        validation_rows=np.asarray([], dtype=np.int64),
+        normalizer=_normalizer(),
+        background_profile=_profile(),
+        manifest=manifest,
+        manifest_path=tmp_path / "formal_recipe.json",
+        normalization_path=normalization_path,
+        role_scales={name: 0.5 for name in DEFAULT_ROLE_QUERY_COUNTS},
+        role_scale_sha256="role-scale-sha",
+        role_query_counts=training_recipe["role_query_counts"],
+        role_component_scales={name: (0.2, 0.1, 0.1) for name in DEFAULT_ROLE_QUERY_COUNTS},
+        role_scale_calibration={"training_rows_sha256": train_fingerprint},
+        recipe=training_recipe,
+        sampling_dataset_fingerprint=train_fingerprint,
+        formal_recipe=formal_recipe,
+    )
+    provider._message_scale = 1.0
+    identity = provider.identity_payload()
+    assert identity["subset_manifest_sha256"] == train_fingerprint
+    assert identity["sampling_dataset_id"] == engine_sampling_dataset_id(identity)

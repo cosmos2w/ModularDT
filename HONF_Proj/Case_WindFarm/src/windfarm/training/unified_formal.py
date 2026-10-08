@@ -38,8 +38,10 @@ from ..workflows.joint_forward import (
 from .unified_task import (
     DEFAULT_ROLE_QUERY_COUNTS,
     WindRefinementTask,
+    _fit_train_role_scales,
     _indices_sha256,
     _load_original_split,
+    resolve_wind_recipe,
     _sha256,
     _stable_json_sha256,
 )
@@ -171,6 +173,14 @@ def _metadata_recipe(config: Mapping[str, Any]) -> tuple[dict[str, Any], WindFar
     data_root = Path(config.get("data_root", DEFAULT_DATA_ROOT)).expanduser().resolve()
     derived_root = Path(config.get("derived_root", DEFAULT_DERIVED_ROOT)).expanduser().resolve()
     formal_root = Path(config.get("formal_root", config.get("output_dir", FORMAL_ROOT))).expanduser().resolve()
+    training_recipe_value = config.get("wind_training_recipe", config.get("wind_recipe"))
+    training_recipe_id = config.get("wind_recipe_id")
+    if training_recipe_value is not None and training_recipe_id is not None:
+        raise ValueError("Supply a resolved Wind training recipe or a recipe ID, not both.")
+    training_recipe = resolve_wind_recipe(
+        None if training_recipe_id is None else str(training_recipe_id),
+        recipe=training_recipe_value,
+    )
     normalization_path = _require_child_path(
         formal_root, Path(config.get("normalization_path", formal_root / "train_only_normalization.json")),
         "normalization",
@@ -183,12 +193,60 @@ def _metadata_recipe(config: Mapping[str, Any]) -> tuple[dict[str, Any], WindFar
         formal_root, Path(config.get("role_scale_path", formal_root / "train_only_role_scales.json")),
         "role scales",
     )
-    view = WindFarmNativeView(data_root, allow_npz_metadata_fallback=True, token_shape=(2, 2, 2))
+    role_scale_profile_path = _require_child_path(
+        formal_root, Path(config.get("role_scale_profile_path", formal_root / "role_scale_profile.json")),
+        "role-scale profile",
+    )
+    model_recipe = {} if training_recipe is None else dict(training_recipe["model"])
+    token_shape = (2, 2, 2) if training_recipe is None else tuple(model_recipe["environment_token_shape"])
+    view = WindFarmNativeView(data_root, allow_npz_metadata_fallback=True, token_shape=token_shape)
     split = _load_original_split(view, derived_root)
     membership = _validate_original_membership(view, split)
     turbine_counts = np.asarray(view.metadata["n_turbines"], dtype=np.int64)
     train_counts = sorted(set(map(int, turbine_counts[split.train].tolist())))
     all_counts = sorted(set(map(int, turbine_counts.tolist())))
+    calibration_counts = (
+        dict(DEFAULT_ROLE_QUERY_COUNTS)
+        if training_recipe is None
+        else dict(training_recipe["calibration_role_query_counts"])
+    )
+    training_role_counts = (
+        dict(DEFAULT_ROLE_QUERY_COUNTS)
+        if training_recipe is None
+        else dict(training_recipe["role_query_counts"])
+    )
+    calibration_layout_count = (
+        None if training_recipe is None else int(training_recipe["calibration_layout_count"])
+    )
+    role_scale_calibration = {
+        "method": "pooled componentwise standard deviation over deterministic Q=1024 five-role native samples"
+        if training_recipe is None
+        else "W0 target-component variance and W1 fixed-profile residual RMS on the same deterministic four-layout TRAIN panel",
+        "scope": "all original TRAIN rows only" if training_recipe is None else "four-layout panel selected from original TRAIN rows only",
+        "train_row_count": int(split.train.size),
+        "seed": 42,
+        "role_query_counts": calibration_counts,
+        "scalar_scale": "sqrt(mean of the three per-component TRAIN variances)",
+        "minimum_scale_mps": 1.0e-3,
+        "status": "not_run_in_metadata_only_mode",
+    }
+    if training_recipe is not None:
+        role_scale_calibration.update({
+            "training_recipe_id": training_recipe["recipe_id"],
+            "training_recipe_sha256": training_recipe["recipe_sha256"],
+            "component_scale": "max(profile-residual RMS including residual mean, u_ref_mps * normalizer.std_floor, 1e-3 m/s, 0.10 * scalar role scale)",
+            "physical_component_floor_mps": "max(u_ref_mps * normalizer.std_floor, 1e-3 m/s)",
+            "calibration_layout_count": calibration_layout_count,
+        })
+    model_payload = {
+        "forward_architecture": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
+        "hidden": 64 if training_recipe is None else int(model_recipe["hidden"]),
+        "message": 64 if training_recipe is None else int(model_recipe["message"]),
+        "max_sources": 30 if training_recipe is None else int(model_recipe["max_sources"]),
+        "base_width": 16 if training_recipe is None else int(model_recipe["base_width"]),
+        "router_hidden": 32 if training_recipe is None else int(model_recipe["router_hidden"]),
+        "environment_token_shape": list(token_shape),
+    }
     payload: dict[str, Any] = {
         "schema_version": 1,
         "recipe_id": FORMAL_RECIPE_ID,
@@ -205,26 +263,9 @@ def _metadata_recipe(config: Mapping[str, Any]) -> tuple[dict[str, Any], WindFar
         "normalization_binding_path": str(binding_path.expanduser().resolve()),
         "role_scale_path": str(role_scale_path),
         "role_scale_sha256": None,
-        "role_scale_calibration": {
-            "method": "pooled componentwise standard deviation over deterministic Q=1024 five-role native samples",
-            "scope": "all original TRAIN rows only",
-            "train_row_count": int(split.train.size),
-            "seed": 42,
-            "role_query_counts": dict(DEFAULT_ROLE_QUERY_COUNTS),
-            "scalar_scale": "sqrt(mean of the three per-component TRAIN variances)",
-            "minimum_scale_mps": 1.0e-3,
-            "status": "not_run_in_metadata_only_mode",
-        },
-        "role_query_counts": dict(DEFAULT_ROLE_QUERY_COUNTS),
-        "model": {
-            "forward_architecture": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
-            "hidden": 64,
-            "message": 64,
-            "max_sources": 30,
-            "base_width": 16,
-            "router_hidden": 32,
-            "environment_token_shape": [2, 2, 2],
-        },
+        "role_scale_calibration": role_scale_calibration,
+        "role_query_counts": training_role_counts,
+        "model": model_payload,
         "background_choice": "train_only_height_profile",
         "normalization_fit": {
             "source_rows": int(split.train.size),
@@ -254,6 +295,9 @@ def _metadata_recipe(config: Mapping[str, Any]) -> tuple[dict[str, Any], WindFar
         "target_values_read": False,
         "solver_attempts": 0,
     }
+    if training_recipe is not None:
+        payload["wind_training_recipe"] = training_recipe
+        payload["role_scale_profile_path"] = str(role_scale_profile_path)
     return _seal(payload), view, split
 
 
@@ -286,7 +330,11 @@ def prepare_recipe(config: Mapping[str, Any], *, metadata_only: bool = False) ->
 
     prepared_recipe_path = formal_root / "prepared_recipe.json"
     role_scale_path = Path(recipe["role_scale_path"])
-    existing = [path for path in (normalization_path, binding_path, role_scale_path, prepared_recipe_path) if path.exists()]
+    role_scale_profile_path = Path(recipe.get("role_scale_profile_path", formal_root / "role_scale_profile.json"))
+    expected_outputs = [normalization_path, binding_path, role_scale_path, prepared_recipe_path]
+    if recipe.get("wind_training_recipe") is not None:
+        expected_outputs.append(role_scale_profile_path)
+    existing = [path for path in expected_outputs if path.exists()]
     if existing:
         raise FileExistsError(f"Full formal preparation requires a new output directory; existing files: {existing}.")
 
@@ -301,8 +349,46 @@ def prepare_recipe(config: Mapping[str, Any], *, metadata_only: bool = False) ->
         raise RuntimeError("Fresh formal Wind transforms do not match the full original TRAIN fit contract.")
     write_normalization_json(normalization_path, normalizer, profile)
     normalization_sha256 = _sha256(normalization_path)
-    role_scale_payload = _fit_formal_role_scales(view, split.train)
+    role_scale_profile: dict[str, Any] | None = None
+    if recipe.get("wind_training_recipe") is None:
+        role_scale_payload = _fit_formal_role_scales(view, split.train)
+    else:
+        training_recipe = resolve_wind_recipe(recipe=dict(recipe["wind_training_recipe"]))
+        if training_recipe is None:
+            raise RuntimeError("The prepared formal Wind training recipe disappeared.")
+        cache = NativeRoleCatalogueCache(max_cached_bytes=FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES)
+        calibration = _fit_train_role_scales(
+            view,
+            split.train,
+            recipe["partition_identity"]["train_layout_indices"],
+            profile,
+            normalizer,
+            training_fingerprint=recipe["partition_identity"]["train_rows_sha256"],
+            calibration_layout_count=int(training_recipe["calibration_layout_count"]),
+            catalogue_cache=cache,
+        )
+        profile_fields = {
+            "catalogue_build_or_lookup_seconds",
+            "native_target_sampling_seconds",
+            "catalogue_cache_after_calibration",
+        }
+        role_scale_profile = {key: calibration[key] for key in profile_fields}
+        role_scale_payload = {key: value for key, value in calibration.items() if key not in profile_fields}
+        role_scale_payload.update({
+            "recipe_id": FORMAL_RECIPE_ID,
+            "training_recipe_id": training_recipe["recipe_id"],
+            "training_recipe_sha256": training_recipe["recipe_sha256"],
+            "objective": training_recipe["objective"],
+            "loss_scale_rule": training_recipe["loss_scale_rule"],
+            "training_scope": "calibration panel selected only from all 420 original TRAIN rows",
+            "training_rows_sha256": recipe["partition_identity"]["train_rows_sha256"],
+            "role_scales_mps": dict(calibration["scalar_role_scales_mps"]),
+            "target_values_read": "TRAIN calibration panel only",
+            "solver_attempts": 0,
+        })
     _atomic_json(role_scale_path, role_scale_payload)
+    if role_scale_profile is not None:
+        _atomic_json(role_scale_profile_path, role_scale_profile)
     role_scale_sha256 = _sha256(role_scale_path)
     binding = {
         "schema_version": 1,
@@ -331,7 +417,11 @@ def prepare_recipe(config: Mapping[str, Any], *, metadata_only: bool = False) ->
         "role_scales_mps": role_scale_payload["role_scales_mps"],
         "role_scale_calibration": {
             **dict(recipe["role_scale_calibration"]),
-            "status": "fitted_from_all_420_original_TRAIN_rows",
+            "status": (
+                "fitted_from_all_420_original_TRAIN_rows"
+                if recipe.get("wind_training_recipe") is None
+                else "fitted_from_shared_four_layout_original_TRAIN_panel"
+            ),
             "role_sample_counts": role_scale_payload["role_sample_counts"],
             "query_sampling_sha256": role_scale_payload["query_sampling_sha256"],
             "target_sample_sha256": role_scale_payload["target_sample_sha256"],
@@ -344,6 +434,8 @@ def prepare_recipe(config: Mapping[str, Any], *, metadata_only: bool = False) ->
         },
         "prepared_recipe_path": str(prepared_recipe_path),
     }
+    if role_scale_profile is not None:
+        result["role_scale_profile_path"] = str(role_scale_profile_path)
     result = _seal(result)
     _atomic_json(prepared_recipe_path, result)
     return result
@@ -438,8 +530,13 @@ def validate_recipe(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
         "normalization_binding_path": recipe["normalization_binding_path"],
         "role_scale_path": recipe["role_scale_path"],
     }
+    if recipe.get("wind_training_recipe") is not None:
+        config["wind_training_recipe"] = recipe["wind_training_recipe"]
     current, _view, split = _metadata_recipe(config)
-    for key in ("source_metadata_sha256", "partition_identity", "source_file_inventory", "role_scale_path"):
+    compare_keys = ["source_metadata_sha256", "partition_identity", "source_file_inventory", "role_scale_path"]
+    if recipe.get("wind_training_recipe") is not None:
+        compare_keys.extend(("wind_training_recipe", "model", "role_query_counts"))
+    for key in compare_keys:
         if current[key] != recipe[key]:
             raise ValueError(f"Formal Wind recipe changed current {key}.")
     if recipe.get("ready_for_training") is not True:
@@ -476,12 +573,45 @@ def validate_recipe(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
     if not role_scale_path.is_file() or _sha256(role_scale_path) != recipe.get("role_scale_sha256"):
         raise ValueError("Formal Wind role scales are missing or no longer match the fresh TRAIN-only fit.")
     role_scale_payload = json.loads(role_scale_path.read_text(encoding="utf-8"))
-    expected_scale_counts = {name: 420 * int(DEFAULT_ROLE_QUERY_COUNTS[name]) for name in ROLE_NAMES}
     scales = role_scale_payload.get("role_scales_mps", {})
+    if recipe.get("wind_training_recipe") is None:
+        expected_scale_counts = {name: 420 * int(DEFAULT_ROLE_QUERY_COUNTS[name]) for name in ROLE_NAMES}
+        scale_scope_valid = role_scale_payload.get("training_scope") == "all 420 original TRAIN rows only"
+    else:
+        training_recipe = resolve_wind_recipe(recipe=dict(recipe["wind_training_recipe"]))
+        if training_recipe is None:
+            raise RuntimeError("The prepared formal Wind training recipe disappeared during validation.")
+        calibration_rows = recipe["role_scale_calibration"].get("calibration_row_indices")
+        if calibration_rows is None:
+            calibration_rows = role_scale_payload.get("calibration_row_indices")
+        # The role-scale payload is the authoritative deterministic TRAIN-only panel receipt.
+        calibration_rows = role_scale_payload.get("calibration_row_indices", calibration_rows)
+        if not isinstance(calibration_rows, list) or len(calibration_rows) != 3 * int(training_recipe["calibration_layout_count"]):
+            raise ValueError("Versioned formal Wind scales do not bind all directions from four TRAIN layouts.")
+        expected_scale_counts = {
+            name: len(calibration_rows) * int(training_recipe["calibration_role_query_counts"][name])
+            for name in ROLE_NAMES
+        }
+        scale_scope_valid = (
+            role_scale_payload.get("training_scope")
+            == "calibration panel selected only from all 420 original TRAIN rows"
+            and role_scale_payload.get("training_recipe_id") == training_recipe["recipe_id"]
+            and role_scale_payload.get("training_recipe_sha256") == training_recipe["recipe_sha256"]
+            and role_scale_payload.get("objective") == training_recipe["objective"]
+            and role_scale_payload.get("loss_scale_rule") == training_recipe["loss_scale_rule"]
+        )
+        component_scales = role_scale_payload.get("component_role_scales_mps", {})
+        if training_recipe["objective"] == "component_role" and (
+            set(component_scales) != set(ROLE_NAMES)
+            or any(np.asarray(component_scales[name], dtype=np.float64).shape != (3,) for name in ROLE_NAMES)
+            or not all(np.isfinite(np.asarray(component_scales[name], dtype=np.float64)).all()
+                       and np.all(np.asarray(component_scales[name], dtype=np.float64) > 0) for name in ROLE_NAMES)
+        ):
+            raise ValueError("Versioned formal Wind component scales are malformed.")
     if (
         role_scale_payload.get("recipe_id") != FORMAL_RECIPE_ID
         or role_scale_payload.get("training_rows_sha256") != recipe["partition_identity"]["train_rows_sha256"]
-        or role_scale_payload.get("training_scope") != "all 420 original TRAIN rows only"
+        or not scale_scope_valid
         or role_scale_payload.get("role_sample_counts") != expected_scale_counts
         or set(scales) != set(ROLE_NAMES)
         or not all(np.isfinite(float(value)) and float(value) > 0 for value in scales.values())
@@ -518,6 +648,7 @@ class WindFormalRefinementTask(WindRefinementTask):
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self.max_microbatch_cases = 24
         self.formal_recipe = dict(formal_recipe)
         self.startup_benchmark = bool(startup_benchmark)
 
@@ -548,7 +679,11 @@ class WindFormalRefinementTask(WindRefinementTask):
             },
         })
         payload["subset_id"] = FORMAL_RECIPE_ID
-        payload["subset_manifest_sha256"] = self.formal_recipe["recipe_sha256"]
+        payload["subset_manifest_sha256"] = (
+            self.formal_recipe["partition_identity"]["train_rows_sha256"]
+            if self.recipe is not None
+            else self.formal_recipe["recipe_sha256"]
+        )
         return payload
 
     def optimizer_groups(self, model: nn.Module, arm: str, stage: str):
@@ -625,7 +760,9 @@ def create_task(
     if not receipt["ready_for_training"]:
         raise ValueError("Formal Wind task construction requires a completed full TRAIN-only normalization prepare.")
     view = WindFarmNativeView(
-        Path(sealed["data_root"]), allow_npz_metadata_fallback=True, token_shape=(2, 2, 2)
+        Path(sealed["data_root"]),
+        allow_npz_metadata_fallback=True,
+        token_shape=tuple(sealed["model"].get("environment_token_shape", (2, 2, 2))),
     )
     split = _load_original_split(view, Path(sealed["derived_root"]))
     membership = _validate_original_membership(view, split)
@@ -638,6 +775,19 @@ def create_task(
     role_scale_payload = json.loads(role_scale_path.read_text(encoding="utf-8"))
     role_scales = {name: float(role_scale_payload["role_scales_mps"][name]) for name in ROLE_NAMES}
     role_scale_sha256 = _sha256(role_scale_path)
+    training_recipe = (
+        None
+        if sealed.get("wind_training_recipe") is None
+        else resolve_wind_recipe(recipe=dict(sealed["wind_training_recipe"]))
+    )
+    if sealed.get("wind_training_recipe") is not None and training_recipe is None:
+        raise RuntimeError("The prepared formal Wind training recipe disappeared during task construction.")
+    role_component_scales = None
+    if training_recipe is not None and training_recipe["objective"] == "component_role":
+        role_component_scales = {
+            name: tuple(float(value) for value in role_scale_payload["component_role_scales_mps"][name])
+            for name in ROLE_NAMES
+        }
     validation_rows = split.validation.astype(np.int64)
     if startup_benchmark:
         from .unified_task import DEFAULT_PILOT_ROOT, _read_fixed_rows
@@ -662,18 +812,21 @@ def create_task(
         },
     }
     manifest = {**manifest_body, "manifest_sha256": _stable_digest(manifest_body)}
+    model_recipe = {} if training_recipe is None else dict(training_recipe["model"])
+    model_payload = {
+        "forward_architecture": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
+        "hidden": 64 if training_recipe is None else int(model_recipe["hidden"]),
+        "message": 64 if training_recipe is None else int(model_recipe["message"]),
+        "max_sources": 30 if training_recipe is None else int(model_recipe["max_sources"]),
+        "base_width": 16 if training_recipe is None else int(model_recipe["base_width"]),
+        "router_hidden": 32 if training_recipe is None else int(model_recipe["router_hidden"]),
+    }
     model = build_windfarm_model(
-        {
-            "forward_architecture": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
-            "hidden": 64,
-            "message": 64,
-            "max_sources": 30,
-            "base_width": 16,
-            "router_hidden": 32,
-        },
+        model_payload,
         velocity_transform=normalizer,
         background_profile=profile,
     ).to(torch.device(device))
+    catalogue_cache = NativeRoleCatalogueCache(max_cached_bytes=FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES)
     provider = WindFormalRefinementTask(
         view,
         train_rows=split.train.astype(np.int64),
@@ -687,11 +840,20 @@ def create_task(
         role_scale_sha256=role_scale_sha256,
         seed=42,
         device=device,
-        role_query_counts=DEFAULT_ROLE_QUERY_COUNTS,
+        role_query_counts=(
+            DEFAULT_ROLE_QUERY_COUNTS if training_recipe is None else training_recipe["role_query_counts"]
+        ),
         # Full TRAIN and first-validation geometry share this lazy cache.
         # Its capacity is sealed by the provider identity, not preallocated.
         catalogue_cache_bytes=FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES,
-        message_width=64,
+        message_width=(64 if training_recipe is None else int(training_recipe["model"]["message"])),
+        role_component_scales=role_component_scales,
+        role_scale_calibration=role_scale_payload if training_recipe is not None else None,
+        recipe=training_recipe,
+        sampling_dataset_fingerprint=(
+            None if training_recipe is None else sealed["partition_identity"]["train_rows_sha256"]
+        ),
+        catalogue_cache=catalogue_cache,
         formal_recipe=sealed,
         startup_benchmark=startup_benchmark,
     )

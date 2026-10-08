@@ -56,7 +56,17 @@ def _exclusive_training_run(function):
 
 @dataclass(frozen=True)
 class SamplingKey:
-    """Stable key for data and query streams, independent of global RNG state."""
+    """Stable key for data and query streams, independent of global RNG state.
+
+    ``legacy_packed_v1`` preserves the historical update/microbatch-keyed
+    stream. ``case_epoch_v1`` keys each case/role stream by dataset, seed,
+    epoch, physical identity and named stream, so changing packing does not
+    change a case's native query sequence.
+    """
+
+    LEGACY_VERSION = "legacy_packed_v1"
+    CASE_EPOCH_VERSION = "case_epoch_v1"
+    SUPPORTED_VERSIONS = (LEGACY_VERSION, CASE_EPOCH_VERSION)
 
     seed: int
     epoch: int
@@ -64,20 +74,94 @@ class SamplingKey:
     microbatch_index: int
     stage: str
     arm: str
+    sampling_version: str = LEGACY_VERSION
+    dataset_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.sampling_version not in self.SUPPORTED_VERSIONS:
+            raise ValueError(f"Unsupported query sampling version {self.sampling_version!r}.")
+        if not isinstance(self.dataset_id, str):
+            raise TypeError("Query sampling dataset identity must be a string.")
 
     def seed_for(self, *coordinates: Any) -> int:
-        """Return a stable query/data seed that is identical across matched arms."""
+        """Return a stable seed under the selected historical or case stream."""
+
+        if self.sampling_version == self.CASE_EPOCH_VERSION:
+            identity = [self.sampling_version, self.dataset_id, self.seed, self.epoch, coordinates]
+        else:
+            identity = [self.seed, self.epoch, self.update_index, self.microbatch_index, self.stage, coordinates]
 
         payload = json.dumps(
-            [self.seed, self.epoch, self.update_index, self.microbatch_index, self.stage, coordinates],
+            identity,
             sort_keys=True,
             default=str,
             separators=(",", ":"),
         ).encode("utf-8")
         return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "little") % (2**32)
 
-    def numpy_rng(self, *coordinates: Any) -> np.random.Generator:
-        return np.random.default_rng(self.seed_for(*coordinates))
+    def numpy_rng(self, *coordinates: Any, draw_start: int = 0) -> np.random.Generator:
+        """Return a stream whose draws form a stable prefix across request sizes.
+
+        With ``case_epoch_v1`` the stream is independent of arm, stage, update,
+        and microbatch position. ``draw_start`` seeks to a prefix offset for
+        callers that consume a stream in explicit blocks.
+        """
+
+        if type(draw_start) is not int or draw_start < 0:
+            raise ValueError("Query stream draw_start must be a nonnegative integer.")
+        generator = np.random.default_rng(self.seed_for(*coordinates))
+        if draw_start and self.sampling_version == self.CASE_EPOCH_VERSION:
+            generator.bit_generator.advance(draw_start)
+        elif draw_start:
+            raise ValueError("Explicit draw offsets require case_epoch_v1 sampling.")
+        return generator
+
+    def native_indices(
+        self,
+        population_size: int,
+        count: int,
+        physical_id: Any,
+        role: str,
+        stream: str,
+        *,
+        draw_start: int = 0,
+        replace: bool = False,
+    ) -> np.ndarray:
+        """Draw native IDs from a per-case stream with prefix-stable semantics.
+
+        Sampling without replacement uses the unique values of an iid integer
+        stream in encounter order. This is exact sequential uniform sampling
+        without replacement, and requesting a longer panel preserves its
+        shorter panel as a prefix.
+        """
+
+        population_size, count = int(population_size), int(count)
+        if population_size < 1 or count < 0 or draw_start < 0:
+            raise ValueError("Native query sampling requires a nonempty population and nonnegative draw range.")
+        if not replace and draw_start + count > population_size:
+            raise ValueError("A without-replacement native query panel exceeds its population.")
+        if count == 0:
+            return np.empty(0, dtype=np.int64)
+        rng = self.numpy_rng(physical_id, role, stream)
+        needed = draw_start + count
+        if replace:
+            return rng.integers(population_size, size=needed, dtype=np.int64)[draw_start:]
+
+        selected: list[np.ndarray] = []
+        seen = np.empty(0, dtype=np.int64)
+        selected_count = 0
+        while selected_count < needed:
+            remaining = needed - selected_count
+            candidates = rng.integers(population_size, size=max(32, 2 * remaining), dtype=np.int64)
+            if seen.size:
+                candidates = candidates[~np.isin(candidates, seen, assume_unique=False)]
+            unique, first = np.unique(candidates, return_index=True)
+            ordered = unique[np.argsort(first)]
+            if ordered.size:
+                selected.append(ordered)
+                seen = np.concatenate((seen, ordered))
+                selected_count += int(ordered.size)
+        return np.concatenate(selected)[:needed][draw_start:]
 
     def torch_generator(self, *coordinates: Any, device: torch.device | str = "cpu") -> torch.Generator:
         generator = torch.Generator(device=device)
@@ -170,8 +254,11 @@ class EngineConfig:
     checkpoint_epochs: tuple[int, ...] | None = None
     latest_every: int | None = None
     curve_every: int | None = None
+    sampling_version: str = SamplingKey.LEGACY_VERSION
 
     def __post_init__(self) -> None:
+        if self.sampling_version not in SamplingKey.SUPPORTED_VERSIONS:
+            raise ValueError(f"Unsupported query sampling version {self.sampling_version!r}.")
         if min(self.microbatch_cases, self.effective_cases, self.total_epochs, self.monitor_every) < 1:
             raise ValueError("Batch sizes, horizon, and monitoring interval must be positive.")
         if self.effective_cases < self.microbatch_cases:
@@ -215,7 +302,8 @@ def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
     """Keep legacy identities unchanged when new optional output controls are unused."""
     payload = asdict(config)
     for name, default in (("monitor_epochs", ()), ("checkpoint_epochs", None),
-                          ("latest_every", None), ("curve_every", None)):
+                          ("latest_every", None), ("curve_every", None),
+                          ("sampling_version", SamplingKey.LEGACY_VERSION)):
         if payload[name] == default:
             payload.pop(name)
     return payload
@@ -239,9 +327,36 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
     amended["engine_config"]["microbatch_cases"] = after
     if amended != current:
         raise ValueError(message)
+    sampling_version = previous.get("sampling_version", SamplingKey.LEGACY_VERSION)
+    trajectory_note = (
+        "Case/epoch query identities are packing-independent; accumulation reduction order may change."
+        if sampling_version == SamplingKey.CASE_EPOCH_VERSION else
+        "Query seeds include microbatch index; future samples and FP32 accumulation can change."
+    )
     return {"kind": "explicit_microbatch_continuation", "source_microbatch_cases": before,
             "microbatch_cases": after, "effective_cases": proposed["effective_cases"],
-            "trajectory_note": "Query seeds include microbatch index; future samples and FP32 accumulation can change."}
+            "trajectory_note": trajectory_note}
+
+
+def _sampling_dataset_id(provider_identity: Mapping[str, Any]) -> str:
+    """Build a small stable key from dataset and sealed TRAIN membership."""
+
+    dataset = provider_identity.get("dataset", provider_identity.get("task", "unspecified"))
+    subset = next((provider_identity[name] for name in (
+        "subset_manifest_sha256", "manifest_fingerprint", "manifest_sha256", "manifest",
+        "train_rows_sha256", "training_case_ids_sha256", "train_case_ids_sha256",
+    ) if name in provider_identity), None)
+    if subset is None:
+        # Test and small downstream providers may expose only case inventories.
+        subset = next((provider_identity[name] for name in (
+            "training_case_ids", "train_case_ids", "train_rows", "train_ids",
+        ) if name in provider_identity), None)
+    if subset is None:
+        raise ValueError("case_epoch_v1 requires a stable dataset TRAIN-membership fingerprint.")
+    payload = json.dumps([str(dataset), subset], sort_keys=True, default=str,
+                         separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    return f"{dataset}:{digest}"
 
 
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str) -> None:
@@ -945,7 +1060,11 @@ class TrainingEngine:
             raise ValueError("The task provider has no TRAIN case for a dry run.")
         cases = cases[:1]
         phase = self.config.stage_for_epoch(1)
-        key = SamplingKey(self.config.seed, 1, 0, 0, phase, arm)
+        provider_identity = dict(provider.identity_payload())
+        dataset_id = (_sampling_dataset_id(provider_identity)
+                      if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION else "")
+        key = SamplingKey(self.config.seed, 1, 0, 0, phase, arm,
+                          sampling_version=self.config.sampling_version, dataset_id=dataset_id)
         batch = provider.make_batch(cases, key)
         if tuple(batch.case_keys) and list(batch.case_keys) != list(cases):
             raise ValueError("Provider changed case keys during the disposable preflight.")
@@ -1259,6 +1378,10 @@ class TrainingEngine:
         # run, including router parameters while warmup executes all fine
         # reads. All-fine execution does not imply frozen router gradients.
         group_specs = tuple(provider.optimizer_groups(model, arm, "warmup"))
+        sampling_dataset_id = (
+            _sampling_dataset_id(provider_identity)
+            if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION else ""
+        )
         sealed_identity = {
             **dict(identity),
             "provider_identity": provider_identity,
@@ -1266,6 +1389,8 @@ class TrainingEngine:
             "selection_policy": asdict(self.selection),
             "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in group_specs],
         }
+        if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
+            sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
             amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
@@ -1413,7 +1538,11 @@ class TrainingEngine:
                         microbatches = []
                         for micro_index, start in enumerate(range(0, len(update_cases), self.config.microbatch_cases)):
                             case_chunk = update_cases[start:start + self.config.microbatch_cases]
-                            key = SamplingKey(self.config.seed, epoch, update_index, micro_index, phase, arm)
+                            key = SamplingKey(
+                                self.config.seed, epoch, update_index, micro_index, phase, arm,
+                                sampling_version=self.config.sampling_version,
+                                dataset_id=sampling_dataset_id,
+                            )
                             batch = provider.make_batch(case_chunk, key)
                             if tuple(batch.case_keys) and list(batch.case_keys) != list(case_chunk):
                                 raise ValueError("Provider changed the ordered case keys inside a microbatch.")

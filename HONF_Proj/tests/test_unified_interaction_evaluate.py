@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from honf_runtime.unified_training import EngineConfig, SelectionPolicy, _engine_config_payload
 
 TOOL_PATH = Path(__file__).resolve().parents[1] / "tools/unified_interaction_evaluate.py"
 SPEC = importlib.util.spec_from_file_location("unified_interaction_evaluate", TOOL_PATH)
@@ -103,6 +104,45 @@ def test_checkpoint_identity_rejects_other_normalizer_and_task_profile():
         )
 
 
+def test_evaluator_normalizes_legacy_checkpoint_sampler_default():
+    config = EngineConfig(seed=42, microbatch_cases=4, effective_cases=24, total_epochs=2500,
+                          warmup_epochs=500, open_through_epoch=600, soft_through_epoch=800)
+    selection = SelectionPolicy(field_metric="field_score", response_guard_metric=None)
+    saved_engine = _engine_config_payload(config)
+    assert "sampling_version" not in saved_engine  # Prior sealed checkpoints predate the explicit sampler field.
+    provider_identity = {"dataset": "WindFarm", "subset_manifest_sha256": "fixed24", "device": "cpu"}
+    identity = {
+        "workflow": "unified_interaction_refinement",
+        "task": "WindFarm",
+        "development_profile": "fixed24_v1",
+        "seed": 42,
+        "initial_model_state_sha256": "initial-state",
+        "engine_profile": "warmup500_open600_soft800_total2500",
+        "provider_identity": provider_identity,
+        "engine_config": saved_engine,
+        "selection_policy": selection.__dict__,
+        "optimizer_schedule_contract": [],
+    }
+    payload = {
+        "workflow": "unified_interaction_refinement",
+        "checkpoint_schema_version": 1,
+        "epoch": 1000,
+        "current_epoch": 1000,
+        "experiment_identity": identity,
+        "arm": "full_detail",
+    }
+    result = evaluator.validate_checkpoint_binding(
+        payload,
+        task="wind",
+        provider_identity=provider_identity,
+        initial_state_sha256="initial-state",
+        engine_config=config,
+        selection=selection,
+        label="literal1000",
+    )
+    assert result["epoch"] == 1000
+
+
 def test_representative_export_scope_binds_controls_and_field_only_to_their_arms():
     evaluator._validate_export_scope("adaptive_detail", detailed=True, field_only=False)
     evaluator._validate_export_scope("full_detail", detailed=False, field_only=True)
@@ -133,6 +173,7 @@ def test_default_evaluator_index_belongs_to_source_run(tmp_path, monkeypatch, ca
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"fixture")
     monkeypatch.setattr(evaluator, "_load_task", lambda *_: (None, None, None, None, "fixture"))
+    monkeypatch.setattr(evaluator, "_load_checkpoint_payload", lambda _path: {"experiment_identity": {}})
 
     def completed_evaluation(task, label, path, **kwargs):
         assert kwargs["output_root"] is None

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 
 import pytest
 import torch
@@ -203,6 +204,15 @@ def test_prepared_refinement_route_mutation_or_replacement_is_rejected(replace_r
         request.dense_kernel(accumulation_dtype=torch.float64)
 
 
+def test_prepared_refinement_rejects_a_backend_policy_replacement():
+    _, refined = thermal_pair()
+    refined.set_execution('adaptive', execution_backend='selected')
+    request = refined.prepare_receivers(context(refined), points())
+    request.policy = replace(request.policy, execution_backend='dense_masked')
+    with pytest.raises(ValueError, match='replaced'):
+        request.dense_kernel(accumulation_dtype=torch.float64)
+
+
 def test_nonlinear_all_fine_recovers_and_coarse_read_preserves_physical_sources():
     torch.manual_seed(13)
     fine = NonlinearFieldReadout(2, 3, 1, hidden=8, message=8, spatial_dim=3)
@@ -250,3 +260,151 @@ def test_soft_read_prices_full_fine_and_training_replay_is_shared():
     refined.set_execution('all_fine', training_signal=True)
     full = refined.prepare_receivers(context(refined), points())
     assert full.full_response is full
+
+
+def test_thermal_dense_masked_backend_preserves_the_refinement_kernel_and_increment():
+    _, refined = thermal_pair()
+    prepared_context = context(refined)
+    receivers = points()
+    refined.set_execution('adaptive', threshold=0.5, execution_backend='selected')
+    selected = refined.prepare_receivers(prepared_context, receivers, chunk_size=2)
+    refined.set_execution('adaptive', threshold=0.5, execution_backend='dense_masked')
+    dense = refined.prepare_receivers(prepared_context, receivers, chunk_size=2)
+
+    torch.testing.assert_close(dense.keep, selected.keep)
+    torch.testing.assert_close(dense.protected, selected.protected)
+    torch.testing.assert_close(
+        dense.dense_kernel(accumulation_dtype=torch.float64),
+        selected.dense_kernel(accumulation_dtype=torch.float64),
+        atol=2e-7,
+        rtol=2e-6,
+    )
+    assert selected.refinement_aux['fine_rows'] == selected.refinement_aux['selected_detail_rows']
+    assert dense.refinement_aux['fine_rows'] == receivers.shape[0] * receivers.shape[1] * prepared_context.centers.shape[1]
+    heat = torch.tensor([[0.7, 0.3, 0.0]])
+    delta = torch.tensor([[0.001, -0.001, 0.0]])
+    torch.testing.assert_close(
+        refined.apply_forcing(dense, heat),
+        refined.apply_forcing(selected, heat),
+        atol=2e-7,
+        rtol=2e-6,
+    )
+    torch.testing.assert_close(
+        refined.apply_increment(dense, delta, accumulation_dtype=torch.float64),
+        refined.apply_increment(selected, delta, accumulation_dtype=torch.float64),
+        atol=2e-10,
+        rtol=2e-6,
+    )
+
+
+def test_wind_selected_and_dense_masked_backends_match_masks_values_and_input_derivatives():
+    torch.manual_seed(13)
+    model = RefinedNonlinearFieldReadout(2, 3, 1, hidden=8, message=8, spatial_dim=3)
+    with torch.no_grad():
+        for parameter in model.refinement.router.parameters():
+            parameter.zero_()
+        model.refinement.router[-1].bias.fill_(-2.0)
+    prepared = context(model, dimension=3, gradients=True)
+    receivers = points(3, gradients=True)
+
+    model.set_execution('adaptive', phase='hard', threshold=0.5, execution_backend='selected')
+    selected = model.read_refinement(prepared, receivers, chunk_size=2)
+    selected_gradients = torch.autograd.grad(
+        selected.values.square().sum(), (prepared.centers, receivers), retain_graph=True
+    )
+    model.set_execution('adaptive', phase='hard', threshold=0.5, execution_backend='dense_masked')
+    dense = model.read_refinement(prepared, receivers, chunk_size=2)
+    dense_gradients = torch.autograd.grad(dense.values.square().sum(), (prepared.centers, receivers))
+
+    torch.testing.assert_close(dense.auxiliary['keep'], selected.auxiliary['keep'])
+    torch.testing.assert_close(dense.auxiliary['protected'], selected.auxiliary['protected'])
+    torch.testing.assert_close(dense.values, selected.values, atol=2e-6, rtol=2e-6)
+    assert selected.auxiliary['selected_detail_rows'] < dense.auxiliary['fine_rows']
+    assert dense.auxiliary['fine_rows'] == receivers.shape[0] * receivers.shape[1] * prepared.centers.shape[1]
+    for actual, expected in zip(dense_gradients, selected_gradients, strict=True):
+        torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+
+
+def test_wind_dense_masked_backend_is_source_permutation_safe_with_padded_sources():
+    torch.manual_seed(23)
+    model = RefinedNonlinearFieldReadout(2, 3, 1, hidden=8, message=8, spatial_dim=3)
+    with torch.no_grad():
+        for parameter in model.refinement.router.parameters():
+            parameter.zero_()
+        model.refinement.router[-1].bias.fill_(-2.0)
+    receivers = points(3)
+    permutation = torch.tensor([2, 0, 1])
+    torch.manual_seed(19)
+    sources = torch.rand(1, 3, 2)
+    context_values = torch.rand(1, 3)
+    centers = torch.tensor([[[1.0, 1.0, 1.0], [3.0, 1.0, 1.0], [0.0, 0.0, 1.0]]])
+    lengths = torch.tensor([[10.0, 6.0, 3.0]])
+    present = torch.tensor([[1.0, 1.0, 0.0]])
+    source_lengths = torch.full((1, 3), 0.2)
+    environment_tokens = torch.rand(1, 2, 1)
+    environment_coords = torch.ones(1, 2, 3)
+    source_ids = torch.tensor([[17, 4, 9]])
+    original_context = model.prepare_context(sources, context_values, centers, present, lengths,
+        source_lengths, environment_tokens=environment_tokens, environment_coords=environment_coords,
+        source_ids=source_ids)
+    permuted_context = model.prepare_context(
+        sources=sources[:, permutation],
+        context=context_values,
+        centers=centers[:, permutation],
+        present=present[:, permutation],
+        lengths=lengths,
+        source_lengths=source_lengths[:, permutation],
+        environment_tokens=environment_tokens,
+        environment_coords=environment_coords,
+        source_ids=source_ids[:, permutation],
+    )
+
+    model.set_execution('adaptive', threshold=0.5, execution_backend='dense_masked')
+    original = model.read_refinement(original_context, receivers, chunk_size=2)
+    permuted = model.read_refinement(permuted_context, receivers, chunk_size=2)
+    torch.testing.assert_close(permuted.auxiliary['keep'], original.auxiliary['keep'][:, :, permutation])
+    torch.testing.assert_close(permuted.values, original.values, atol=2e-6, rtol=2e-6)
+
+
+def test_wind_route_provenance_is_independent_of_larger_misaligned_fine_tiles():
+    torch.manual_seed(37)
+    model = RefinedNonlinearFieldReadout(2, 3, 1, hidden=8, message=8, spatial_dim=3)
+    with torch.no_grad():
+        for parameter in model.refinement.router.parameters():
+            parameter.zero_()
+        model.refinement.router[-1].bias.zero_()
+    prepared = context(model, dimension=3, gradients=True)
+    receivers = points(3, gradients=True).repeat(1, 4, 1)
+
+    model.set_execution('adaptive', phase='hard', threshold=0.5)
+    legacy = model.read_refinement(prepared, receivers, chunk_size=2, route_chunk_size=2)
+    legacy_gradient, = torch.autograd.grad(legacy.values.square().sum(), receivers, retain_graph=True)
+    larger = model.read_refinement(prepared, receivers, chunk_size=3, route_chunk_size=2)
+    larger_gradient, = torch.autograd.grad(larger.values.square().sum(), receivers)
+
+    assert torch.equal(larger.auxiliary['keep'], legacy.auxiliary['keep'])
+    assert torch.equal(larger.auxiliary['protected'], legacy.auxiliary['protected'])
+    assert torch.equal(larger.auxiliary['probability'], legacy.auxiliary['probability'])
+    torch.testing.assert_close(larger.values, legacy.values, atol=2e-6, rtol=2e-6)
+    torch.testing.assert_close(larger_gradient, legacy_gradient, atol=2e-5, rtol=2e-5)
+
+
+def test_thermal_route_provenance_is_independent_of_larger_misaligned_fine_tiles():
+    _, refined = thermal_pair()
+    refined.set_execution('adaptive', phase='hard', threshold=0.5)
+    receivers = torch.tensor([[[8., 5.], [7., 4.], [1.1, 1.], [6., 2.], [9., 3.]]])
+    scene = context(refined)
+    legacy = refined.prepare_receivers(scene, receivers, chunk_size=2, route_chunk_size=2)
+    larger = refined.prepare_receivers(scene, receivers, chunk_size=3, route_chunk_size=2)
+
+    assert torch.equal(larger.keep, legacy.keep)
+    assert torch.equal(larger.protected, legacy.protected)
+    assert torch.equal(larger.probability, legacy.probability)
+    torch.testing.assert_close(larger.dense_kernel(), legacy.dense_kernel(), atol=2e-6, rtol=2e-6)
+    delta = torch.tensor([[1.0e-8, -1.0e-8, 0.0]], dtype=torch.float64)
+    torch.testing.assert_close(
+        refined.apply_increment(larger, delta, accumulation_dtype=torch.float64),
+        refined.apply_increment(legacy, delta, accumulation_dtype=torch.float64),
+        atol=2e-12,
+        rtol=2e-6,
+    )

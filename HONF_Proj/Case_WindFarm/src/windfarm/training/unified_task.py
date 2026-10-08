@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,15 @@ DEFAULT_ROLE_QUERY_COUNTS = {
     "near_turbine": 205,
     "background": 204,
 }
+WIND_W0_RECIPE_ID = "wind_w0_scalar_q1024_v1"
+WIND_W1_RECIPE_ID = "wind_w1_component_q1024_v1"
+WIND_W2_RECIPE_ID = "wind_w2_component_q4096_v1"
+WIND_RECIPE_SCHEMA_VERSION = 1
+WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS = dict(DEFAULT_ROLE_QUERY_COUNTS)
+WIND_COMPONENT_SCALE_MINIMUM_MPS = 1.0e-3
+WIND_COMPONENT_SCALE_FRACTION_OF_SCALAR = 0.10
+WIND_ALLOWED_QUERY_TILES = (512, 2048, 8192)
+WIND_ALLOWED_CONTEXT_SHAPES = ((2, 2, 2), (8, 4, 2))
 _ROLE_INDEX = {name: index for index, name in enumerate(ROLE_NAMES)}
 _QUERY_STREAM = 0x57494E44
 _MESSAGE_CALIBRATION_STREAM = 0x4D534753
@@ -90,6 +100,150 @@ _WIND_DEPENDENCY = DependencySpec(
     ),
     prepared_nodes=("source_context", "global_context"),
 )
+
+
+def _role_counts_for_query_count(query_count: int) -> dict[str, int]:
+    """Scale the sealed five-role mixture with deterministic largest remainders."""
+
+    query_count = int(query_count)
+    if query_count < len(ROLE_NAMES):
+        raise ValueError("Wind query count must provide at least one draw for every protected role.")
+    base_total = sum(DEFAULT_ROLE_QUERY_COUNTS.values())
+    exact = {
+        name: query_count * int(DEFAULT_ROLE_QUERY_COUNTS[name]) / base_total
+        for name in ROLE_NAMES
+    }
+    counts = {name: int(math.floor(exact[name])) for name in ROLE_NAMES}
+    remainder = query_count - sum(counts.values())
+    order = sorted(ROLE_NAMES, key=lambda name: (-(exact[name] - counts[name]), ROLE_NAMES.index(name)))
+    for name in order[:remainder]:
+        counts[name] += 1
+    if sum(counts.values()) != query_count or any(count <= 0 for count in counts.values()):
+        raise RuntimeError("Wind query role allocation failed its exact total contract.")
+    return counts
+
+
+def _builtin_wind_recipe(recipe_id: str) -> dict[str, Any]:
+    """Return one of the three versioned, fresh-initialization screen recipes."""
+
+    definitions = {
+        WIND_W0_RECIPE_ID: (1024, "scalar_role", "train_role_target_component_variance_v1"),
+        WIND_W1_RECIPE_ID: (1024, "component_role", "train_role_profile_residual_rms_v1"),
+        WIND_W2_RECIPE_ID: (4096, "component_role", "train_role_profile_residual_rms_v1"),
+    }
+    if recipe_id not in definitions:
+        raise ValueError(f"Unknown versioned Wind development recipe {recipe_id!r}.")
+    query_count, objective, scale_rule = definitions[recipe_id]
+    return {
+        "schema_version": WIND_RECIPE_SCHEMA_VERSION,
+        "recipe_id": recipe_id,
+        "dataset_profile": "wind_shared_fixed24_v1",
+        "objective": objective,
+        "loss_scale_rule": scale_rule,
+        "query_count": query_count,
+        "role_query_counts": _role_counts_for_query_count(query_count),
+        "calibration_query_count": 1024,
+        "calibration_role_query_counts": dict(WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS),
+        "calibration_layout_count": _MESSAGE_CALIBRATION_LAYOUT_COUNT,
+        "model": {
+            "forward_architecture": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
+            "hidden": 64,
+            "message": 64,
+            "environment_token_shape": [2, 2, 2],
+            "max_sources": 30,
+            "base_width": 16,
+            "router_hidden": 32,
+        },
+        "execution_backend": "selected",
+        "query_tile_size": 512,
+        "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
+    }
+
+
+def resolve_wind_recipe(
+    recipe_id: str | None = None,
+    *,
+    recipe: Mapping[str, Any] | None = None,
+    execution_backend: str | None = None,
+    query_tile_size: int | None = None,
+) -> dict[str, Any] | None:
+    """Resolve a strict immutable recipe payload; ``None`` keeps the old profile."""
+
+    if recipe is None and recipe_id is None:
+        return None
+    if recipe is not None:
+        resolved = dict(recipe)
+        saved_sha = resolved.pop("recipe_sha256", None)
+        if saved_sha is not None and saved_sha != _stable_json_sha256(resolved):
+            raise ValueError("Resolved Wind recipe SHA256 does not verify.")
+        required = {
+            "schema_version", "recipe_id", "dataset_profile", "objective", "loss_scale_rule",
+            "query_count", "role_query_counts", "calibration_query_count", "calibration_role_query_counts",
+            "calibration_layout_count", "model", "execution_backend", "query_tile_size", "sampling_version",
+        }
+        if set(resolved) != required:
+            raise ValueError("Resolved Wind recipe fields do not match the strict recipe schema.")
+        if recipe_id is not None and resolved["recipe_id"] != recipe_id:
+            raise ValueError("Wind recipe ID does not match the supplied resolved recipe payload.")
+    else:
+        assert recipe_id is not None
+        resolved = _builtin_wind_recipe(str(recipe_id))
+    if int(resolved["schema_version"]) != WIND_RECIPE_SCHEMA_VERSION:
+        raise ValueError("Unsupported Wind recipe schema version.")
+    if resolved["dataset_profile"] != "wind_shared_fixed24_v1":
+        raise ValueError("Versioned Wind development recipes must use wind_shared_fixed24_v1.")
+    if resolved["objective"] not in {"scalar_role", "component_role"}:
+        raise ValueError("Wind recipe objective must be scalar_role or component_role.")
+    expected_scale_rule = {
+        "scalar_role": "train_role_target_component_variance_v1",
+        "component_role": "train_role_profile_residual_rms_v1",
+    }[resolved["objective"]]
+    if resolved["loss_scale_rule"] != expected_scale_rule:
+        raise ValueError("Wind objective and TRAIN-only scale rule do not match the versioned contract.")
+    query_count = int(resolved["query_count"])
+    role_counts = {str(name): int(value) for name, value in dict(resolved["role_query_counts"]).items()}
+    if set(role_counts) != set(ROLE_NAMES) or role_counts != _role_counts_for_query_count(query_count):
+        raise ValueError("Wind recipe role counts must preserve the canonical mixture and sum exactly to Q.")
+    if int(resolved["calibration_query_count"]) != 1024:
+        raise ValueError("Wind scale calibration remains bound to its declared Q=1024 panel.")
+    calibration_counts = {
+        str(name): int(value) for name, value in dict(resolved["calibration_role_query_counts"]).items()
+    }
+    if calibration_counts != dict(WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS):
+        raise ValueError("Wind TRAIN scale calibration role counts are frozen to Q=1024.")
+    if int(resolved["calibration_layout_count"]) != _MESSAGE_CALIBRATION_LAYOUT_COUNT:
+        raise ValueError("Wind TRAIN scale calibration uses the fixed four-layout panel.")
+    model = dict(resolved["model"])
+    if set(model) != {
+        "forward_architecture", "hidden", "message", "environment_token_shape", "max_sources", "base_width",
+        "router_hidden",
+    }:
+        raise ValueError("Wind recipe model fields do not match the strict source-resolved model schema.")
+    if model["forward_architecture"] != REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE:
+        raise ValueError("Wind development recipes retain the shared refined nonlinear architecture.")
+    if int(model["hidden"]) not in (64, 128) or int(model["message"]) not in (64, 128):
+        raise ValueError("Wind recipe hidden and message widths must be 64 or 128.")
+    shape = tuple(int(value) for value in model["environment_token_shape"])
+    if shape not in WIND_ALLOWED_CONTEXT_SHAPES:
+        raise ValueError("Wind environment context must use the declared E8 or E64 token shape.")
+    for name in ("max_sources", "base_width", "router_hidden"):
+        if int(model[name]) <= 0:
+            raise ValueError(f"Wind recipe model field {name!r} must be positive.")
+    backend = str(resolved["execution_backend"] if execution_backend is None else execution_backend)
+    if backend not in {"selected", "dense_masked"}:
+        raise ValueError("Wind execution backend must be selected or dense_masked.")
+    tile = int(resolved["query_tile_size"] if query_tile_size is None else query_tile_size)
+    if tile not in WIND_ALLOWED_QUERY_TILES:
+        raise ValueError(f"Wind query tile size must be one of {WIND_ALLOWED_QUERY_TILES}.")
+    if resolved["sampling_version"] != SamplingKey.CASE_EPOCH_VERSION:
+        raise ValueError("New Wind recipes require packing-independent case_epoch_v1 sampling.")
+    resolved["role_query_counts"] = role_counts
+    resolved["calibration_role_query_counts"] = calibration_counts
+    resolved["model"] = {**model, "environment_token_shape": list(shape)}
+    resolved["execution_backend"] = backend
+    resolved["query_tile_size"] = tile
+    resolved["recipe_sha256"] = _stable_json_sha256(resolved)
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -308,21 +462,32 @@ def _query_sampling_sha256(
     if len(rows) != len(samples):
         raise ValueError("Wind query receipt rows and sampled panels must have equal lengths.")
     digest = hashlib.sha256()
-    stream = {
-        "seed": int(key.seed),
-        "epoch": int(key.epoch),
-        "update_index": int(key.update_index),
-        "microbatch_index": int(key.microbatch_index),
-        "stage": str(key.stage),
-    }
+    if getattr(key, "sampling_version", SamplingKey.LEGACY_VERSION) == SamplingKey.CASE_EPOCH_VERSION:
+        stream = {
+            "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
+            "dataset_id": str(key.dataset_id),
+            "seed": int(key.seed),
+            "epoch": int(key.epoch),
+        }
+    else:
+        # Preserve the historical receipt definition for sealed legacy runs.
+        stream = {
+            "seed": int(key.seed),
+            "epoch": int(key.epoch),
+            "update_index": int(key.update_index),
+            "microbatch_index": int(key.microbatch_index),
+            "stage": str(key.stage),
+        }
     digest.update(json.dumps(stream, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     for row, sample in zip(rows, samples):
         role_ids = _role_ids(sample.role_sample_counts)
         coordinates = np.ascontiguousarray(sample.coordinates_D, dtype=np.float32)
         flat_indices = np.ascontiguousarray(sample.flat_indices, dtype=np.int64)
-        if coordinates.shape != (1024, 3) or flat_indices.shape != (1024,) or role_ids.shape != (1024,):
-            raise ValueError("Wind query receipt requires aligned Q=1024 cell IDs, coordinates, and roles.")
+        if coordinates.ndim != 2 or coordinates.shape[1] != 3 or flat_indices.shape != (coordinates.shape[0],) or role_ids.shape != (coordinates.shape[0],):
+            raise ValueError("Wind query receipt requires aligned native cell IDs, coordinates, and roles.")
         digest.update(int(row).to_bytes(8, "little", signed=False))
+        if getattr(key, "sampling_version", SamplingKey.LEGACY_VERSION) == SamplingKey.CASE_EPOCH_VERSION:
+            digest.update(json.dumps(sample.role_sample_counts, sort_keys=True, separators=(",", ":")).encode("utf-8"))
         digest.update(flat_indices.tobytes())
         digest.update(coordinates.tobytes())
         digest.update(np.ascontiguousarray(role_ids, dtype=np.int8).tobytes())
@@ -361,6 +526,19 @@ def _role_counts_from_config(config: Mapping[str, Any]) -> dict[str, int]:
     if sum(counts.values()) != 1024:
         raise RuntimeError("Wind role query counts no longer sum to Q=1024.")
     return counts
+
+
+def _sampling_dataset_id(dataset: str, training_fingerprint: str) -> str:
+    payload = json.dumps([str(dataset), str(training_fingerprint)], sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return f"{dataset}:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _physical_case_direction_id(case: Any) -> str:
+    """Return a stable native row identity that includes its operating direction."""
+
+    return f"{case.case}|layout={int(case.layout_index)}|wd={float(case.wind_direction_deg):.6f}"
 
 
 def _role_scales(path: Path) -> tuple[dict[str, float], str]:
@@ -503,6 +681,12 @@ class WindRefinementTask:
         catalogue_cache_bytes: int = DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
         message_width: int = 64,
         objective_weights: Mapping[str, float] | None = None,
+        role_component_scales: Mapping[str, Sequence[float]] | None = None,
+        role_scale_calibration: Mapping[str, Any] | None = None,
+        role_scale_profile: Mapping[str, Any] | None = None,
+        recipe: Mapping[str, Any] | None = None,
+        sampling_dataset_fingerprint: str | None = None,
+        catalogue_cache: NativeRoleCatalogueCache | None = None,
     ) -> None:
         self.view = view
         self.train_rows = np.asarray(train_rows, dtype=np.int64)
@@ -517,8 +701,41 @@ class WindRefinementTask:
         self.seed = int(seed)
         self.device = torch.device(device)
         self.role_query_counts = {name: int(role_query_counts[name]) for name in ROLE_NAMES}
+        self.validation_role_query_counts = (
+            dict(DEFAULT_ROLE_QUERY_COUNTS)
+            if recipe is not None
+            else dict(self.role_query_counts)
+        )
         self.message_width = int(message_width)
-        self.catalogue_cache = NativeRoleCatalogueCache(max_cached_bytes=int(catalogue_cache_bytes))
+        self.recipe = None if recipe is None else dict(recipe)
+        self.execution_backend = "selected" if self.recipe is None else str(self.recipe["execution_backend"])
+        self.query_tile_size = 512 if self.recipe is None else int(self.recipe["query_tile_size"])
+        self.sampling_version = (
+            SamplingKey.LEGACY_VERSION if self.recipe is None else str(self.recipe["sampling_version"])
+        )
+        self.sampling_dataset_id = (
+            ""
+            if self.sampling_version == SamplingKey.LEGACY_VERSION
+            else _sampling_dataset_id(
+                "WindFarm",
+                str(sampling_dataset_fingerprint or self.manifest.get("manifest_sha256", "")),
+            )
+        )
+        self.role_scale_calibration = None if role_scale_calibration is None else dict(role_scale_calibration)
+        self.role_scale_profile = None if role_scale_profile is None else dict(role_scale_profile)
+        self.role_component_scales = {
+            name: np.asarray(
+                [self.role_scales[name]] * 3
+                if role_component_scales is None
+                else role_component_scales[name],
+                dtype=np.float64,
+            )
+            for name in ROLE_NAMES
+        }
+        if catalogue_cache is not None and catalogue_cache.max_cached_bytes != int(catalogue_cache_bytes):
+            raise ValueError("Injected Wind catalogue cache capacity differs from the provider binding.")
+        self.catalogue_cache = catalogue_cache or NativeRoleCatalogueCache(max_cached_bytes=int(catalogue_cache_bytes))
+        self.max_microbatch_cases = 24 if self.recipe is not None else 4
         requested_weights = dict(objective_weights or {})
         if requested_weights and requested_weights != {
             "base_loss": _MESSAGE_APPROXIMATION_COEFFICIENT,
@@ -530,12 +747,23 @@ class WindRefinementTask:
             "router_importance_loss": _ROUTER_IMPORTANCE_COEFFICIENT,
             "expected_work": 0.0,
         }
-        if self.message_width != 64:
-            raise ValueError("The fresh Wind refinement recipe is sealed to message width 64.")
+        expected_message_width = 64 if self.recipe is None else int(self.recipe["model"]["message"])
+        if self.message_width != expected_message_width:
+            raise ValueError("Wind provider message width differs from its sealed model recipe.")
         if set(self.role_scales) != set(ROLE_NAMES) or set(self.role_query_counts) != set(ROLE_NAMES):
             raise ValueError("Wind provider role names do not match the fixed native role inventory.")
-        if sum(self.role_query_counts.values()) != 1024:
-            raise ValueError("Wind provider must retain exactly Q=1024 receiver samples per case.")
+        self.query_count = sum(self.role_query_counts.values())
+        if any(value.shape != (3,) or not np.isfinite(value).all() or np.any(value <= 0.0)
+               for value in self.role_component_scales.values()):
+            raise ValueError("Wind component role scales must be positive finite physical m/s triples.")
+        if self.recipe is None and self.query_count != 1024:
+            raise ValueError("The sealed legacy Wind provider must retain exactly Q=1024 receiver samples per case.")
+        if self.recipe is not None and self.role_query_counts != self.recipe["role_query_counts"]:
+            raise ValueError("Wind provider role counts differ from the resolved recipe.")
+        if self.recipe is not None and self.recipe["objective"] == "component_role" and role_component_scales is None:
+            raise ValueError("Component-balanced Wind recipes require calibrated per-role component scales.")
+        if self.recipe is not None and self.role_scale_calibration is None:
+            raise ValueError("Versioned Wind recipes require a TRAIN-only role-scale calibration receipt.")
         if not np.array_equal(np.sort(self.train_rows), self.train_rows):
             raise ValueError("Wind provider TRAIN rows must be canonical source order.")
         if not np.array_equal(np.sort(self.validation_rows), self.validation_rows):
@@ -565,7 +793,7 @@ class WindRefinementTask:
     def identity_payload(self) -> Mapping[str, Any]:
         if self._message_scale is None:
             raise RuntimeError("Calibrate the fixed TRAIN message scale before sealing Wind training identity.")
-        return {
+        payload = {
             "dataset": "WindFarm",
             "family": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
             "subset_id": self.manifest["subset_id"],
@@ -612,6 +840,23 @@ class WindRefinementTask:
             "device": str(self.device),
             "physical_reference": "stored OpenFOAM native fields; no new solver calls",
         }
+        if self.recipe is not None:
+            payload.update({
+                "resolved_recipe": dict(self.recipe),
+                "resolved_recipe_sha256": self.recipe["recipe_sha256"],
+                "objective": str(self.recipe["objective"]),
+                "loss_scale_rule": str(self.recipe["loss_scale_rule"]),
+                "role_component_scales_mps": {
+                    name: self.role_component_scales[name].astype(float).tolist() for name in ROLE_NAMES
+                },
+                "role_scale_calibration": self.role_scale_calibration,
+                "sampling_version": self.sampling_version,
+                "sampling_dataset_id": self.sampling_dataset_id,
+                "execution_backend": self.execution_backend,
+                "query_tile_size": self.query_tile_size,
+                "model": dict(self.recipe["model"]),
+            })
+        return payload
 
     def _sample_geometry_only_queries(self, row: int, key: SamplingKey) -> tuple[Any, np.ndarray]:
         """Sample the fixed role mixture without gathering any native values."""
@@ -619,10 +864,20 @@ class WindRefinementTask:
         case = self.view.run(int(row))
         catalogue = self.catalogue_cache.get(case)
         rng = _query_rng(key, "wind_message_scale_calibration", int(row), _MESSAGE_CALIBRATION_STREAM)
+        counts = (
+            WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS
+            if self.recipe is not None
+            else self.role_query_counts
+        )
         pieces: list[np.ndarray] = []
         for role in ROLE_NAMES:
             cdf = catalogue.role_cdf[role]
-            positions = np.searchsorted(cdf, rng.random(self.role_query_counts[role]), side="right")
+            role_rng = (
+                key.numpy_rng("wind_message_scale_calibration", _physical_case_direction_id(case), role)
+                if self.sampling_version == SamplingKey.CASE_EPOCH_VERSION
+                else rng
+            )
+            positions = np.searchsorted(cdf, role_rng.random(counts[role]), side="right")
             positions = np.minimum(positions, cdf.size - 1)
             valid = catalogue.role_indices.get(role)
             selected = positions if valid is None else valid[positions]
@@ -652,7 +907,16 @@ class WindRefinementTask:
         try:
             with torch.no_grad():
                 for index, row in enumerate(self.message_calibration_rows):
-                    key = SamplingKey(self.seed, 0, 0, index, "message_scale_calibration", "shared")
+                    key = SamplingKey(
+                        self.seed,
+                        0,
+                        0,
+                        index,
+                        "message_scale_calibration",
+                        "shared",
+                        sampling_version=self.sampling_version,
+                        dataset_id=self.sampling_dataset_id,
+                    )
                     case, coordinates = self._sample_geometry_only_queries(row, key)
                     query_digest.update(np.ascontiguousarray(coordinates).tobytes())
                     scene = self.make_scene((_scene_inputs(case),))
@@ -773,13 +1037,18 @@ class WindRefinementTask:
     def _sample_row(self, row: int, key: SamplingKey) -> tuple[WindSceneInputs, np.ndarray, np.ndarray, Any]:
         case = self.view.run(int(row))
         rng = _query_rng(key, "wind_native_role_query", int(row), _QUERY_STREAM)
-        sampled = sample_native_role_queries(
-            case,
-            rng,
-            self.role_query_counts,
-            catalogue_cache=self.catalogue_cache,
-        )
-        if sampled.coordinates_D.shape != (1024, 3) or sampled.target_mps.shape != (1024, 3):
+        rng_by_role = None
+        if self.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
+            physical_id = _physical_case_direction_id(case)
+            rng_by_role = {
+                role: key.numpy_rng("wind_native_role_query", physical_id, role)
+                for role in ROLE_NAMES
+            }
+        sampler_kwargs: dict[str, Any] = {"catalogue_cache": self.catalogue_cache}
+        if rng_by_role is not None:
+            sampler_kwargs["rng_by_role"] = rng_by_role
+        sampled = sample_native_role_queries(case, rng, self.role_query_counts, **sampler_kwargs)
+        if sampled.coordinates_D.shape != (self.query_count, 3) or sampled.target_mps.shape != (self.query_count, 3):
             raise ValueError("Wind role sampler changed the fixed query/target shape.")
         if not np.isfinite(sampled.target_mps).all():
             raise ValueError(f"Native Wind target contains nonfinite values for row {row}.")
@@ -789,7 +1058,7 @@ class WindRefinementTask:
             self.training_samples += 1
         scene_inputs = _scene_inputs(case)
         role_ids = _role_ids(sampled.role_sample_counts)
-        if role_ids.shape != (1024,):
+        if role_ids.shape != (self.query_count,):
             raise RuntimeError("Wind role assignments do not align with the receiver queries.")
         return scene_inputs, np.asarray(sampled.coordinates_D, dtype=np.float32), role_ids, sampled
 
@@ -867,7 +1136,7 @@ class WindRefinementTask:
             raise ValueError("Wind role IDs must align one-to-one with physical receiver coordinates.")
         expected_role_ids = _role_ids(self.role_query_counts)
         if any(not np.array_equal(np.sort(row_ids), np.sort(expected_role_ids)) for row_ids in role_ids):
-            raise ValueError("Wind receiver rows must retain the exact sealed Q=1024 five-role allocation.")
+            raise ValueError("Wind receiver rows must retain the exact resolved five-role allocation.")
         denominators: dict[str, float] = {}
         for role in ROLE_NAMES:
             receiver_count = int(np.count_nonzero(role_ids == _ROLE_INDEX[role]))
@@ -886,7 +1155,7 @@ class WindRefinementTask:
             InteractionContextCore.near_weight(
                 query_chunk, scene.centers, scene.source_lengths, scene.present,
             ) > 0
-            for query_chunk in query_tensor.split(512, dim=1)
+            for query_chunk in query_tensor.split(self.query_tile_size, dim=1)
         ], dim=1)
         active = scene.present[:, None, :] > 0
         active_pairs = int(active.expand_as(near).sum().item())
@@ -952,6 +1221,8 @@ class WindRefinementTask:
             phase=effective_phase,
             training_signal=bool(model.training),
             temperature=float(temperature),
+            execution_backend=self.execution_backend,
+            chunk_size=self.query_tile_size,
         )
         if isinstance(predictions, Mapping):
             main_standardized = predictions["values"]
@@ -1012,13 +1283,21 @@ class WindRefinementTask:
         for role in ROLE_NAMES:
             selected = role_ids == _ROLE_INDEX[role]
             scale = float(self.role_scales[role])
-            numerator = main_weight * (main_error[selected].square() / (scale * scale)).sum()
+            component_scale = None
+            if self.recipe is not None and self.recipe["objective"] == "component_role":
+                component_scale = main_error.new_tensor(self.role_component_scales[role])
+                numerator = main_weight * (main_error[selected].square() / component_scale.square()).sum()
+            else:
+                numerator = main_weight * (main_error[selected].square() / (scale * scale)).sum()
             if replay_weight:
                 if full_error is None:
                     raise RuntimeError("Wind replay loss lost its all-fine residual.")
-                numerator = numerator + replay_weight * (
-                    full_error[selected].square() / (scale * scale)
-                ).sum()
+                if component_scale is not None:
+                    numerator = numerator + replay_weight * (
+                        full_error[selected].square() / component_scale.square()
+                    ).sum()
+                else:
+                    numerator = numerator + replay_weight * (full_error[selected].square() / (scale * scale)).sum()
             denominator = float(int(selected.sum().item()) * 3)
             result[f"native_role/{role}"] = LossTerm(numerator, denominator, weight=0.2)
 
@@ -1101,7 +1380,16 @@ class WindRefinementTask:
             batches: list[TaskBatch] = []
             for start in range(0, self.validation_rows.size, 4):
                 rows = self.validation_rows[start : start + 4]
-                key = SamplingKey(self.seed, 0, 0, start // 4, "validation", "shared")
+                key = SamplingKey(
+                    self.seed,
+                    0,
+                    0,
+                    start // 4,
+                    "validation",
+                    "shared",
+                    sampling_version=self.sampling_version,
+                    dataset_id=self.sampling_dataset_id,
+                )
                 batches.append(self._make_validation_batch(rows, key))
             self._validation_cache = tuple(batches)
         return iter(self._validation_cache)
@@ -1117,12 +1405,17 @@ class WindRefinementTask:
             row = int(row_value)
             case = self.view.run(row)
             rng = _query_rng(key, "wind_validation_role_query", row, 0x56414C31)
-            sample = sample_native_role_queries(
-                case,
-                rng,
-                self.role_query_counts,
-                catalogue_cache=self.catalogue_cache,
-            )
+            rng_by_role = None
+            if self.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
+                physical_id = _physical_case_direction_id(case)
+                rng_by_role = {
+                    role: key.numpy_rng("wind_validation_role_query", physical_id, role)
+                    for role in ROLE_NAMES
+                }
+            sampler_kwargs: dict[str, Any] = {"catalogue_cache": self.catalogue_cache}
+            if rng_by_role is not None:
+                sampler_kwargs["rng_by_role"] = rng_by_role
+            sample = sample_native_role_queries(case, rng, self.validation_role_query_counts, **sampler_kwargs)
             self.validation_samples += 1
             scene_rows.append(_scene_inputs(case))
             receiver_rows.append(np.asarray(sample.coordinates_D, dtype=np.float32))
@@ -1461,15 +1754,179 @@ class WindRefinementTask:
             "expected_work_train_calibration_query_samples": int(self.calibration_samples),
             "validation_native_query_samples": int(self.validation_samples),
             "role_query_counts": dict(self.role_query_counts),
+            "validation_role_query_counts": dict(self.validation_role_query_counts),
+            "query_count": int(self.query_count),
+            "recipe_id": None if self.recipe is None else str(self.recipe["recipe_id"]),
+            "resolved_recipe_sha256": None if self.recipe is None else str(self.recipe["recipe_sha256"]),
+            "execution_backend": self.execution_backend,
+            "query_tile_size": self.query_tile_size,
+            "sampling_version": self.sampling_version,
+            "role_scale_calibration": self.role_scale_calibration,
+            "role_scale_profile": self.role_scale_profile,
             "static_native_catalogues": self.catalogue_cache.summary(),
             "test_values_read": False,
         }
 
 
+def _fit_train_role_scales(
+    view: WindFarmNativeView,
+    train_rows: np.ndarray,
+    train_layout_indices: Sequence[int],
+    background_profile: VerticalProfileBaseline,
+    normalizer: VelocityNormalizer,
+    *,
+    training_fingerprint: str,
+    calibration_layout_count: int = _MESSAGE_CALIBRATION_LAYOUT_COUNT,
+    catalogue_cache: NativeRoleCatalogueCache | None = None,
+) -> dict[str, Any]:
+    """Fit W0 and W1 scales from one deterministic, TRAIN-only native panel."""
+
+    rows = np.asarray(train_rows, dtype=np.int64)
+    layouts = tuple(int(value) for value in train_layout_indices[:calibration_layout_count])
+    layout_by_row = np.asarray(view.metadata["layout_index"], dtype=np.int64)
+    layout_set = set(layouts)
+    calibration_rows = tuple(int(row) for row in rows if int(layout_by_row[int(row)]) in layout_set)
+    if len(layouts) != calibration_layout_count or len(calibration_rows) != 3 * calibration_layout_count:
+        raise ValueError("Wind role-scale calibration must retain all three directions from four TRAIN layouts.")
+    train_set = set(map(int, rows.tolist()))
+    if any(row not in train_set for row in calibration_rows):
+        raise ValueError("Wind role-scale calibration panel escaped the selected TRAIN rows.")
+    cache = catalogue_cache or NativeRoleCatalogueCache(max_cached_bytes=DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES)
+    sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
+    squared_sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
+    residual_squared_sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
+    residual_sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
+    sample_counts = {name: 0 for name in ROLE_NAMES}
+    query_digest = hashlib.sha256()
+    target_digest = hashlib.sha256()
+    catalogue_build_seconds = 0.0
+    native_target_sampling_seconds = 0.0
+    dataset_id = _sampling_dataset_id("WindFarm", training_fingerprint)
+    key = SamplingKey(
+        42,
+        0,
+        0,
+        0,
+        "wind_role_scale_calibration",
+        "shared",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+        dataset_id=dataset_id,
+    )
+    for row in calibration_rows:
+        case = view.run(row)
+        catalogue_started = time.perf_counter()
+        cache.get(case)
+        catalogue_build_seconds += time.perf_counter() - catalogue_started
+        physical_id = _physical_case_direction_id(case)
+        rng_by_role = {
+            role: key.numpy_rng("wind_role_scale_calibration", physical_id, role)
+            for role in ROLE_NAMES
+        }
+        target_sampling_started = time.perf_counter()
+        sample = sample_native_role_queries(
+            case,
+            key.numpy_rng("wind_role_scale_calibration_fallback", physical_id),
+            WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS,
+            catalogue_cache=cache,
+            rng_by_role=rng_by_role,
+        )
+        native_target_sampling_seconds += time.perf_counter() - target_sampling_started
+        query_digest.update(row.to_bytes(8, "little", signed=False))
+        query_digest.update(np.ascontiguousarray(sample.flat_indices, dtype=np.int64).tobytes())
+        query_digest.update(np.ascontiguousarray(sample.coordinates_D, dtype=np.float32).tobytes())
+        target_digest.update(row.to_bytes(8, "little", signed=False))
+        target_digest.update(np.ascontiguousarray(sample.target_mps, dtype=np.float32).tobytes())
+        background = np.asarray(background_profile.predict(sample.coordinates_D[:, 2]), dtype=np.float64)
+        target_values = np.asarray(sample.target_mps, dtype=np.float64)
+        residual = target_values - background
+        for role in ROLE_NAMES:
+            role_slice = sample.role_slices[role]
+            target_role = target_values[role_slice]
+            residual_role = residual[role_slice]
+            if target_role.shape != (WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS[role], 3):
+                raise ValueError(f"Wind TRAIN scale panel has malformed native role {role!r} at row {row}.")
+            if not np.isfinite(target_role).all() or not np.isfinite(residual_role).all():
+                raise ValueError(f"Wind TRAIN scale panel contains nonfinite values for role {role!r}.")
+            sums[role] += target_role.sum(axis=0, dtype=np.float64)
+            squared_sums[role] += np.square(target_role).sum(axis=0, dtype=np.float64)
+            residual_sums[role] += residual_role.sum(axis=0, dtype=np.float64)
+            residual_squared_sums[role] += np.square(residual_role).sum(axis=0, dtype=np.float64)
+            sample_counts[role] += int(target_role.shape[0])
+
+    scalar_scales: dict[str, float] = {}
+    component_scales: dict[str, list[float]] = {}
+    statistics: dict[str, Any] = {}
+    physical_component_floor = max(
+        float(normalizer.u_ref_mps) * float(normalizer.std_floor),
+        WIND_COMPONENT_SCALE_MINIMUM_MPS,
+    )
+    for role in ROLE_NAMES:
+        count = sample_counts[role]
+        expected_count = len(calibration_rows) * WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS[role]
+        if count != expected_count:
+            raise RuntimeError(f"Wind TRAIN role scale {role!r} has an unexpected sample count.")
+        target_mean = sums[role] / count
+        target_variance = np.maximum(squared_sums[role] / count - np.square(target_mean), 0.0)
+        scalar_scale = max(
+            float(np.sqrt(target_variance.mean(dtype=np.float64))),
+            WIND_COMPONENT_SCALE_MINIMUM_MPS,
+        )
+        residual_mean = residual_sums[role] / count
+        residual_rms = np.sqrt(np.maximum(residual_squared_sums[role] / count, 0.0))
+        component_scale = np.maximum.reduce((
+            residual_rms,
+            np.full(3, physical_component_floor, dtype=np.float64),
+            np.full(3, WIND_COMPONENT_SCALE_FRACTION_OF_SCALAR * scalar_scale, dtype=np.float64),
+        ))
+        scalar_scales[role] = scalar_scale
+        component_scales[role] = component_scale.astype(float).tolist()
+        statistics[role] = {
+            "target_mean_mps": target_mean.astype(float).tolist(),
+            "target_std_mps": np.sqrt(target_variance).astype(float).tolist(),
+            "profile_residual_mean_mps": residual_mean.astype(float).tolist(),
+            "profile_residual_rms_mps": residual_rms.astype(float).tolist(),
+            "profile_residual_scale_mps": component_scale.astype(float).tolist(),
+            "sample_count": int(count),
+        }
+    return {
+        "schema_version": 1,
+        "method": "shared deterministic per-role native query panel; W0 target-component variance and W1 RMS residual from TRAIN height profile",
+        "scope": "selected TRAIN rows only",
+        "training_fingerprint": str(training_fingerprint),
+        "training_rows_sha256": _indices_sha256(rows),
+        "calibration_layout_indices": list(layouts),
+        "calibration_row_indices": list(calibration_rows),
+        "calibration_query_count_per_row": 1024,
+        "role_query_counts_per_row": dict(WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS),
+        "role_sample_counts": sample_counts,
+        "scalar_scale_rule": "max(sqrt(mean of three TRAIN target component variances), 1e-3 m/s)",
+        "component_scale_rule": "max(profile-residual RMS including residual mean, u_ref_mps * normalizer.std_floor, 1e-3 m/s, 0.10 * scalar role scale)",
+        "physical_component_floor_mps": physical_component_floor,
+        "scalar_role_scales_mps": scalar_scales,
+        "component_role_scales_mps": component_scales,
+        "component_statistics": statistics,
+        "query_sampling_sha256": query_digest.hexdigest(),
+        "target_sample_sha256": target_digest.hexdigest(),
+        "background_profile_sha256": _stable_json_sha256(background_profile.to_dict()),
+        "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
+        "catalogue_build_or_lookup_seconds": catalogue_build_seconds,
+        "native_target_sampling_seconds": native_target_sampling_seconds,
+        "catalogue_cache_after_calibration": cache.summary(),
+        "target_values_read": "TRAIN calibration panel only",
+        "solver_attempts": 0,
+    }
+
+
 def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTask, None]:
-    """Construct the fresh fixed24/H64 Wind task without an optimizer loop."""
+    """Construct a sealed legacy or versioned fixed24 Wind task."""
 
     config = dict(config)
+    recipe = resolve_wind_recipe(
+        None if config.get("recipe_id") is None else str(config["recipe_id"]),
+        recipe=config.get("recipe"),
+        execution_backend=config.get("execution_backend"),
+        query_tile_size=config.get("query_tile_size"),
+    )
     data_root = Path(config.get("data_root", DEFAULT_DATA_ROOT)).expanduser().resolve()
     derived_root = Path(config.get("derived_root", DEFAULT_DERIVED_ROOT)).expanduser().resolve()
     pilot_root = Path(config.get("pilot_root", DEFAULT_PILOT_ROOT)).expanduser().resolve()
@@ -1484,15 +1941,16 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTas
     background_choice = str(config.get("background_choice", "train_only_height_profile"))
     seed = int(config.get("seed", 42))
     if seed != 42:
-        raise ValueError("Wind shared fixed24_v1 training is sealed to the existing seed-42 query stream.")
+        raise ValueError("Wind shared fixed24_v1 training is sealed to the existing seed-42 initialization and streams.")
     if background_choice != "train_only_height_profile":
         raise ValueError("The sealed Wind comparison uses the shared TRAIN-fitted height-profile background.")
     if not data_root.exists():
         raise FileNotFoundError(f"Native Wind data root is unavailable: {data_root}")
+    model_recipe = {} if recipe is None else dict(recipe["model"])
     view = WindFarmNativeView(
         data_root,
         allow_npz_metadata_fallback=True,
-        token_shape=(2, 2, 2),
+        token_shape=(2, 2, 2) if recipe is None else tuple(model_recipe["environment_token_shape"]),
     )
     split = _load_original_split(view, derived_root)
     manifest, train_rows, validation_rows = _read_fixed_rows(view, split, manifest_path)
@@ -1509,25 +1967,65 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTas
         raise ValueError("Wind normalization is not bound to the exact fixed24 TRAIN membership.")
     if normalizer.source_rows != 72 or normalizer.sample_count_per_row != 8192 or normalizer.seed != 42:
         raise ValueError("Wind normalization differs from the frozen 72-row TRAIN fitting protocol.")
-    role_scales, role_scale_hash = _role_scales(role_scale_path)
-    roles = _role_counts_from_config(config)
+    catalogue_cache_bytes = int(config.get("catalogue_cache_bytes", DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES))
+    catalogue_cache = None if recipe is None else NativeRoleCatalogueCache(max_cached_bytes=catalogue_cache_bytes)
+    role_component_scales = None
+    role_scale_calibration = None
+    role_scale_profile = None
+    if recipe is None:
+        role_scales, role_scale_hash = _role_scales(role_scale_path)
+        roles = _role_counts_from_config(config)
+        architecture = str(config.get("model", {}).get(
+            "forward_architecture", REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE
+        ))
+        legacy_model = dict(config.get("model", {}))
+        if architecture != REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE:
+            raise ValueError("Wind common training requires the explicit refined nonlinear model recipe.")
+        if int(legacy_model.get("hidden", 64)) != 64 or int(legacy_model.get("message", 64)) != 64:
+            raise ValueError("The sealed legacy Wind development recipe uses H64/message64.")
+        if int(legacy_model.get("environment_donors", 8)) != 8:
+            raise ValueError("The sealed legacy Wind development recipe retains eight environment records.")
+        model_payload = {
+            "forward_architecture": architecture,
+            "hidden": 64,
+            "message": 64,
+            "max_sources": int(legacy_model.get("max_sources", 30)),
+            "base_width": int(legacy_model.get("base_width", 16)),
+            "router_hidden": int(legacy_model.get("router_hidden", 32)),
+        }
+    else:
+        if config.get("role_query_counts") is not None and dict(config["role_query_counts"]) != recipe["role_query_counts"]:
+            raise ValueError("Wind explicit role counts do not match the sealed query recipe.")
+        calibration_result = _fit_train_role_scales(
+            view,
+            train_rows,
+            manifest["train_layout_indices"],
+            profile,
+            normalizer,
+            training_fingerprint=manifest["manifest_sha256"],
+            calibration_layout_count=int(recipe["calibration_layout_count"]),
+            catalogue_cache=catalogue_cache,
+        )
+        profile_fields = {
+            "catalogue_build_or_lookup_seconds",
+            "native_target_sampling_seconds",
+            "catalogue_cache_after_calibration",
+        }
+        role_scale_profile = {key: calibration_result[key] for key in profile_fields}
+        calibration = {key: value for key, value in calibration_result.items() if key not in profile_fields}
+        role_scales = {name: float(calibration["scalar_role_scales_mps"][name]) for name in ROLE_NAMES}
+        role_component_scales = {
+            name: tuple(float(value) for value in calibration["component_role_scales_mps"][name])
+            for name in ROLE_NAMES
+        }
+        role_scale_calibration = calibration
+        role_scale_hash = _stable_json_sha256(calibration)
+        roles = dict(recipe["role_query_counts"])
+        model_payload = {
+            key: model_recipe[key]
+            for key in ("forward_architecture", "hidden", "message", "max_sources", "base_width", "router_hidden")
+        }
     device = torch.device(str(config.get("device", "cpu")))
-    model_recipe = dict(config.get("model", {}))
-    architecture = str(model_recipe.get("forward_architecture", REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE))
-    if architecture != REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE:
-        raise ValueError("Wind common training requires the explicit refined nonlinear model recipe.")
-    if int(model_recipe.get("hidden", 64)) != 64 or int(model_recipe.get("message", 64)) != 64:
-        raise ValueError("Wind common training uses the single sealed H64/message64 size.")
-    if int(model_recipe.get("environment_donors", 8)) != 8:
-        raise ValueError("Wind common training retains eight environmental records.")
-    model_payload = {
-        "forward_architecture": architecture,
-        "hidden": 64,
-        "message": 64,
-        "max_sources": int(model_recipe.get("max_sources", 30)),
-        "base_width": int(model_recipe.get("base_width", 16)),
-        "router_hidden": int(model_recipe.get("router_hidden", 32)),
-    }
     model = build_windfarm_model(model_payload, velocity_transform=normalizer, background_profile=profile)
     provider = WindRefinementTask(
         view,
@@ -1543,8 +2041,15 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTas
         seed=seed,
         device=device,
         role_query_counts=roles,
-        catalogue_cache_bytes=int(config.get("catalogue_cache_bytes", DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES)),
+        catalogue_cache_bytes=catalogue_cache_bytes,
         objective_weights=config.get("objective_weights"),
+        role_component_scales=role_component_scales,
+        role_scale_calibration=role_scale_calibration,
+        role_scale_profile=role_scale_profile,
+        recipe=recipe,
+        sampling_dataset_fingerprint=None if recipe is None else manifest["manifest_sha256"],
+        message_width=int(model_payload["message"]),
+        catalogue_cache=catalogue_cache,
     )
     model.to(device)
     provider.calibrate_train_message_scale(model)
@@ -1553,10 +2058,16 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTas
 
 __all__ = [
     "DEFAULT_ROLE_QUERY_COUNTS",
+    "WIND_W0_RECIPE_ID",
+    "WIND_W1_RECIPE_ID",
+    "WIND_W2_RECIPE_ID",
     "WindPredictions",
     "WindReceiverInputs",
     "WindRefinementTask",
     "WindSceneInputs",
     "WindTargets",
+    "_fit_train_role_scales",
+    "_role_counts_for_query_count",
+    "resolve_wind_recipe",
     "create_task",
 ]

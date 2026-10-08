@@ -15,6 +15,7 @@ from honf_forward_core.config import BatchData, InterfaceFieldConfig, UnifiedFor
 from honf_forward_core.interface_fields.adaptive_interaction_cover import INTERACTION_MECHANISMS
 from honf_forward_core.interface_fields.core import InterfaceFieldCore
 from honf_forward_core.interface_fields.input_cover_organizer import InputOnlyCoverOrganizer, OrganizerScores
+from honf_runtime.unified_training import SamplingKey
 
 from windfarm.workflows import joint_forward as joint
 
@@ -87,6 +88,46 @@ def test_cached_role_sampler_matches_direct_native_quadrature_draws() -> None:
         joint.sample_native_role_queries(
             changed_geometry, np.random.default_rng(3), counts, catalogue_cache=cache,
         )
+
+
+def test_role_streams_are_packing_independent_and_query_count_prefix_stable() -> None:
+    case = _NativeCase()
+    cache = joint.NativeRoleCatalogueCache()
+    first_key = SamplingKey(
+        42, 18, 0, 0, "warmup", "full_detail",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="WindFarm:fixed25",
+    )
+    repacked_key = SamplingKey(
+        42, 18, 3, 2, "hard", "adaptive_detail",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="WindFarm:fixed25",
+    )
+    short_counts = {role: 7 for role in joint.ROLE_NAMES}
+    long_counts = {role: 19 for role in joint.ROLE_NAMES}
+
+    def draw(key: SamplingKey, counts: dict[str, int]):
+        role_rngs = {
+            role: key.numpy_rng("wind_native_role_query", case.index, role)
+            for role in joint.ROLE_NAMES
+        }
+        return joint.sample_native_role_queries(
+            case, key.numpy_rng("legacy_fallback"), counts,
+            catalogue_cache=cache, rng_by_role=role_rngs,
+        )
+
+    short = draw(first_key, short_counts)
+    long = draw(first_key, long_counts)
+    repacked = draw(repacked_key, long_counts)
+    np.testing.assert_array_equal(long.flat_indices, repacked.flat_indices)
+    short_offset = 0
+    long_offset = 0
+    for role in joint.ROLE_NAMES:
+        count = short_counts[role]
+        np.testing.assert_array_equal(
+            long.flat_indices[long_offset:long_offset + count],
+            short.flat_indices[short_offset:short_offset + count],
+        )
+        short_offset += short_counts[role]
+        long_offset += long_counts[role]
 
 
 def test_role_catalogue_cache_is_byte_bounded_lru() -> None:

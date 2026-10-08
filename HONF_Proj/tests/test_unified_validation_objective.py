@@ -9,12 +9,7 @@ from channelthermal.training.unified_task import (
     ThermalPredictions,
     ThermalRefinementTask,
     ThermalTargets,
-)
-from honf_runtime.unified_training import (
-    EngineConfig,
-    LossTerm,
-    TaskBatch,
-    TrainingEngine,
+    _sample_primary,
 )
 from torch import nn
 from windfarm.training.unified_task import (
@@ -23,6 +18,82 @@ from windfarm.training.unified_task import (
     WindRefinementTask,
     WindTargets,
 )
+
+from honf_runtime.unified_training import (
+    EngineConfig,
+    LossTerm,
+    SamplingKey,
+    TaskBatch,
+    TrainingEngine,
+)
+
+
+def _thermal_sampling_case():
+    fluid_count, material_count = 80, 40
+    return {
+        "case_id": "thermal-case-A",
+        "structure": {
+            "module_centers": np.asarray([[1.0, 2.0]], dtype=np.float32),
+            "module_present": np.asarray([1.0], dtype=np.float32),
+            "material_params": np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32),
+        },
+        "query_xy": np.arange(fluid_count * 2, dtype=np.float32).reshape(fluid_count, 2),
+        "field_targets": np.arange(fluid_count * 5, dtype=np.float32).reshape(fluid_count, 5),
+        "point_weights": np.ones((fluid_count, 1), dtype=np.float32),
+        "interface_target": np.arange(1 * 8 * 2, dtype=np.float32).reshape(1, 8, 2),
+        "interface_condition_valid_mask": np.ones((1, 8, 2), dtype=np.float32),
+        "module_internal_temperature_points": np.arange(material_count, dtype=np.float32)[None],
+        "module_internal_query_points": np.arange(material_count * 2, dtype=np.float32).reshape(material_count, 2),
+    }
+
+
+def test_thermal_case_epoch_sampler_is_packing_independent_and_prefix_stable():
+    case = _thermal_sampling_case()
+    short_budget = {"fluid_queries": 12, "material_queries_per_module": 8, "surface_stride": 2}
+    long_budget = {"fluid_queries": 24, "material_queries_per_module": 16, "surface_stride": 2}
+    full_key = SamplingKey(
+        0, 5, 1, 0, "warmup", "full_detail",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="ThermalChannel:fixed25_v1",
+    )
+    repacked_key = SamplingKey(
+        0, 5, 8, 3, "hard", "adaptive_detail",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="ThermalChannel:fixed25_v1",
+    )
+
+    short, short_hash = _sample_primary(
+        (case,), (0,), epoch=5, key=full_key, training=True,
+        budget=short_budget, device=torch.device("cpu"),
+    )
+    long, long_hash = _sample_primary(
+        (case,), (0,), epoch=5, key=repacked_key, training=True,
+        budget=long_budget, device=torch.device("cpu"),
+    )
+    assert short_hash != long_hash  # Receipts bind the full sampled panel.
+    np.testing.assert_array_equal(short["query_xy"].numpy(), long["query_xy"][:, :12].numpy())
+    np.testing.assert_array_equal(
+        short["module_internal_query_points"].numpy(),
+        long["module_internal_query_points"][:, :8].numpy(),
+    )
+    assert short["field_targets"].shape[1] == 12
+    assert long["field_targets"].shape[1] == 24
+    assert short["module_internal_temperature_points"].shape[-1] == 8
+    assert long["module_internal_temperature_points"].shape[-1] == 16
+
+
+def test_thermal_legacy_sampler_retains_the_historical_packed_draws():
+    case = _thermal_sampling_case()
+    budget = {"fluid_queries": 12, "material_queries_per_module": 8, "surface_stride": 2}
+    key = SamplingKey(0, 5, 1, 2, "warmup", "full_detail")
+    sampled, _receipt = _sample_primary(
+        (case,), (0,), epoch=5, key=key, training=True,
+        budget=budget, device=torch.device("cpu"),
+    )
+    rng = key.numpy_rng("thermal_primary_native_queries", case["case_id"])
+    fluid = rng.choice(len(case["query_xy"]), budget["fluid_queries"], replace=False)
+    material = rng.choice(len(case["module_internal_query_points"]), budget["material_queries_per_module"], replace=False)
+    np.testing.assert_array_equal(sampled["query_xy"].numpy()[0], case["query_xy"][fluid])
+    np.testing.assert_array_equal(sampled["module_internal_query_points"].numpy()[0],
+                                  case["module_internal_query_points"][material])
 
 
 class _ValidationObjectiveProvider:

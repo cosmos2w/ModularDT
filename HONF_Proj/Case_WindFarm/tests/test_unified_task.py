@@ -16,16 +16,156 @@ from windfarm.splits import make_group_split
 from windfarm.training.unified_formal import WindFormalRefinementTask
 from windfarm.training.unified_task import (
     DEFAULT_ROLE_QUERY_COUNTS,
+    WIND_W0_RECIPE_ID,
+    WIND_W1_RECIPE_ID,
+    WIND_W2_RECIPE_ID,
     WindReceiverInputs,
     WindRefinementTask,
     WindTargets,
+    _fit_train_role_scales,
     _as_scene_batch,
     _query_sampling_sha256,
     _read_fixed_rows,
     _role_ids,
+    _role_counts_for_query_count,
+    resolve_wind_recipe,
     _scene_inputs,
     _stable_json_sha256,
 )
+
+
+@pytest.mark.parametrize(
+    ("recipe_id", "query_count", "objective"),
+    [
+        (WIND_W0_RECIPE_ID, 1024, "scalar_role"),
+        (WIND_W1_RECIPE_ID, 1024, "component_role"),
+        (WIND_W2_RECIPE_ID, 4096, "component_role"),
+    ],
+)
+def test_versioned_wind_recipes_seal_exact_role_mixture_and_sampler(recipe_id, query_count, objective):
+    recipe = resolve_wind_recipe(recipe_id)
+    assert recipe is not None
+    assert recipe["query_count"] == query_count
+    assert sum(recipe["role_query_counts"].values()) == query_count
+    assert recipe["objective"] == objective
+    assert recipe["dataset_profile"] == "wind_shared_fixed24_v1"
+    assert recipe["sampling_version"] == SamplingKey.CASE_EPOCH_VERSION
+    if query_count == 4096:
+        assert recipe["role_query_counts"] == {
+            name: 4 * count for name, count in DEFAULT_ROLE_QUERY_COUNTS.items()
+        }
+
+
+def test_wind_recipe_rejects_unsealed_query_counts_and_legacy_profile_is_unchanged():
+    recipe = resolve_wind_recipe(WIND_W2_RECIPE_ID)
+    assert recipe is not None
+    recipe["role_query_counts"]["background"] += 1
+    recipe["recipe_sha256"] = _stable_json_sha256(
+        {key: value for key, value in recipe.items() if key != "recipe_sha256"}
+    )
+    with pytest.raises(ValueError, match="canonical mixture"):
+        resolve_wind_recipe(recipe=recipe)
+    assert unified_task_module.resolve_wind_recipe() is None
+
+
+def test_component_objective_changes_training_denominator_but_common_validation_stays_scalar():
+    recipe = resolve_wind_recipe(WIND_W1_RECIPE_ID)
+    assert recipe is not None
+    provider = _provider(recipe)
+    provider.role_scales = {name: 2.0 for name in DEFAULT_ROLE_QUERY_COUNTS}
+    provider._message_scale = 1.0
+    predictions = unified_task_module.WindPredictions(
+        main_mps=torch.tensor([[[1.0, 2.0, 3.0]]]),
+        full_mps=None,
+        role_ids=torch.tensor([[0]], dtype=torch.int64),
+        auxiliary={},
+        execution_mode="full",
+    )
+    targets = WindTargets(
+        velocity_mps=np.zeros((1, 1, 3), dtype=np.float32),
+        row_indices=(0,),
+        case_metadata=(),
+    )
+    terms = provider.loss_terms(
+        predictions,
+        targets,
+        "warmup",
+        {"base_numerator": torch.tensor(0.0), "base_denominator": 1.0},
+    )
+    assert terms["native_role/volume"].numerator.item() == pytest.approx(3.0)
+    assert terms["native_role/volume"].denominator == 3.0
+    assert provider.validation_role_query_counts == DEFAULT_ROLE_QUERY_COUNTS
+
+    five_role_predictions = unified_task_module.WindPredictions(
+        main_mps=torch.tensor([[[1.0, 2.0, 3.0]] * 5]),
+        full_mps=None,
+        role_ids=torch.arange(5, dtype=torch.int64)[None],
+        auxiliary={"baseline_mps": torch.zeros((1, 5, 3))},
+        execution_mode="full",
+    )
+    metrics = provider.validation_metrics(
+        five_role_predictions,
+        WindTargets(
+            velocity_mps=np.zeros((1, 5, 3), dtype=np.float32),
+            row_indices=(0,),
+            case_metadata=({"row_index": 0},),
+        ),
+        {},
+    )
+    assert metrics["rows"][0]["field_score"] == pytest.approx(7.0 / 6.0)
+    assert all(metrics["rows"][0]["roles"][role]["role_scale_mps"] == 2.0 for role in DEFAULT_ROLE_QUERY_COUNTS)
+
+
+def test_wind_scale_calibration_keeps_w0_variance_and_w1_profile_residual_rules(monkeypatch):
+    from windfarm.workflows.joint_forward import ROLE_NAMES
+
+    view = _View()
+
+    def deterministic_samples(case, rng, role_query_counts, *, catalogue_cache, rng_by_role):
+        del rng, catalogue_cache, rng_by_role
+        counts = dict(role_query_counts)
+        values = []
+        slices = {}
+        start = 0
+        for role in ROLE_NAMES:
+            count = counts[role]
+            # A constant target keeps W0's source-derived variance at its 1e-3 m/s floor.
+            values.append(np.tile(np.asarray([5.0, 0.2, 0.0], dtype=np.float32), (count, 1)))
+            slices[role] = slice(start, start + count)
+            start += count
+        target = np.concatenate(values, axis=0)
+        return SimpleNamespace(
+            coordinates_D=np.zeros((start, 3), dtype=np.float32),
+            target_mps=target,
+            flat_indices=np.arange(start, dtype=np.int64),
+            role_slices=slices,
+        )
+
+    class Cache:
+        def get(self, case):
+            del case
+            return None
+
+        def summary(self):
+            return {"hits": 0, "misses": 0, "cached_bytes": 0}
+
+    monkeypatch.setattr(unified_task_module, "sample_native_role_queries", deterministic_samples)
+    result = _fit_train_role_scales(
+        view,  # type: ignore[arg-type]
+        np.arange(18, dtype=np.int64),
+        tuple(range(6)),
+        _profile(),
+        _normalizer(),
+        training_fingerprint="fixed-train-membership",
+        catalogue_cache=Cache(),  # type: ignore[arg-type]
+    )
+    assert result["calibration_row_indices"] == list(range(12))
+    assert result["role_query_counts_per_row"] == DEFAULT_ROLE_QUERY_COUNTS
+    for role in ROLE_NAMES:
+        assert result["scalar_role_scales_mps"][role] == pytest.approx(1.0e-3)
+        # The profile at z=0 is [4, 0.1, -0.2]; residual RMS includes the signed mean.
+        assert result["component_role_scales_mps"][role] == pytest.approx([1.0, 0.1, 0.2])
+    assert result["physical_component_floor_mps"] == pytest.approx(0.009)
 
 
 def _normalizer() -> VelocityNormalizer:
@@ -86,7 +226,7 @@ class _View:
         return _case(row, int(self.metadata["layout_index"][row]), float(self.metadata["wd_deg"][row]))
 
 
-def _provider() -> WindRefinementTask:
+def _provider(recipe=None) -> WindRefinementTask:
     view = _View()
     train_rows = np.arange(0, 18, dtype=np.int64)
     validation_rows = np.arange(18, 42, dtype=np.int64)
@@ -100,6 +240,15 @@ def _provider() -> WindRefinementTask:
             "uncovered_turbine_counts": [18],
         },
     }
+    kwargs = {}
+    if recipe is not None:
+        kwargs = {
+            "role_query_counts": dict(recipe["role_query_counts"]),
+            "role_component_scales": {name: (1.0, 2.0, 3.0) for name in DEFAULT_ROLE_QUERY_COUNTS},
+            "role_scale_calibration": {"training_rows_sha256": "test-train"},
+            "recipe": recipe,
+            "sampling_dataset_fingerprint": manifest["manifest_sha256"],
+        }
     return WindRefinementTask(
         view,  # type: ignore[arg-type]
         train_rows=train_rows,
@@ -111,6 +260,7 @@ def _provider() -> WindRefinementTask:
         normalization_path=Path("/tmp/train_only_normalization.json"),
         role_scales={name: 1.0 for name in DEFAULT_ROLE_QUERY_COUNTS},
         role_scale_sha256="test-role-scale-sha",
+        **kwargs,
     )
 
 

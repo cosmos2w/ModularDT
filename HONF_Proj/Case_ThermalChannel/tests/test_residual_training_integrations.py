@@ -10,6 +10,7 @@ from channelthermal.model_support import ChannelThermalModelSupportMixin
 from channelthermal.training.reporting import save_global_loss_plots
 
 from honf_forward_core.training.diagnostics import compute_honf_diagnostics
+from honf_runtime.run_layout import RunLayout
 
 
 def _residual_organizer_fixture() -> dict[str, torch.Tensor]:
@@ -96,7 +97,7 @@ def test_thermal_compatibility_view_uses_effective_residual_mask() -> None:
 def test_training_reporting_writes_compact_organizer_health_plot(tmp_path: Path) -> None:
     run_dir = tmp_path / "Run_0001_fixture"
     run_dir.mkdir(parents=True)
-    (run_dir / "run_manifest.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "run_manifest.json").write_text('{"artifact_layout_version": 1}\n', encoding="utf-8")
     metrics_path = run_dir / "metrics.csv"
     fields = [
         "epoch",
@@ -120,4 +121,6 @@ def test_training_reporting_writes_compact_organizer_health_plot(tmp_path: Path)
 
     save_global_loss_plots(metrics_path, run_dir)
 
-    assert (run_dir / "plots" / "diagnostics" / "honf_organizer_health_curve.png").is_file()
+    organizer_plot = RunLayout(run_dir).path("diagnostics/honf_organizer_health_curve.png")
+    assert organizer_plot.is_file()
+    assert organizer_plot.stat().st_size > 0

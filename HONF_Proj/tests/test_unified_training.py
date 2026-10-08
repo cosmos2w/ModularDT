@@ -7,10 +7,12 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-import honf_runtime.unified_training as runtime
 import numpy as np
 import pytest
 import torch
+from torch import nn
+
+import honf_runtime.unified_training as runtime
 from honf_runtime.run_layout import RunLayout, resolve_checkpoint
 from honf_runtime.unified_training import (
     EngineConfig,
@@ -22,7 +24,6 @@ from honf_runtime.unified_training import (
     TaskBatch,
     TrainingEngine,
 )
-from torch import nn
 
 
 class _ToyProvider:
@@ -483,6 +484,146 @@ def test_sampling_key_uses_matched_arm_independent_query_seeds():
     assert full.seed_for("case-033", "fluid") == adaptive.seed_for("case-033", "fluid")
     assert full.seed_for("case-033", "fluid") != full.seed_for("case-034", "fluid")
     assert full.numpy_rng("receiver").integers(2**31) == adaptive.numpy_rng("receiver").integers(2**31)
+
+
+def test_case_epoch_stream_is_packing_independent_and_prefix_consistent():
+    full = SamplingKey(
+        17, 601, 2, 1, "soft", "full_detail",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="toy:fixed-membership",
+    )
+    repacked = SamplingKey(
+        17, 601, 99, 7, "hard", "adaptive_detail",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="toy:fixed-membership",
+    )
+    short = full.numpy_rng("case-033", "fluid", "primary").random(31)
+    long_rng = repacked.numpy_rng("case-033", "fluid", "primary")
+    long = long_rng.random(97)
+    np.testing.assert_array_equal(short, long[:len(short)])
+    offset = repacked.numpy_rng("case-033", "fluid", "primary", draw_start=31).random(66)
+    np.testing.assert_array_equal(offset, long[31:])
+
+    short_ids = full.native_indices(1009, 41, "case-033", "fluid", "primary")
+    long_ids = repacked.native_indices(1009, 91, "case-033", "fluid", "primary")
+    np.testing.assert_array_equal(short_ids, long_ids[:len(short_ids)])
+    assert len(np.unique(long_ids)) == len(long_ids)
+    for changed in (
+        replace(full, epoch=602),
+        replace(full, dataset_id="toy:other-membership"),
+        replace(full, seed=18),
+    ):
+        assert not np.array_equal(long, changed.numpy_rng("case-033", "fluid", "primary").random(97))
+
+
+class _PackingSamplerProvider(_ToyProvider):
+    def make_batch(self, case_keys, key: SamplingKey):
+        rows = []
+        for case_id in case_keys:
+            ids = key.native_indices(257, 9, f"case-{case_id}", "native", "primary")
+            rows.append(ids)
+        ids = np.stack(rows).astype(np.float32)
+        x = torch.as_tensor(ids[..., None] / 257.0)
+        case_offset = torch.as_tensor(case_keys, dtype=torch.float32)[:, None, None] / 100.0
+        y = 0.75 * x + case_offset
+        receipt = hashlib.sha256(np.ascontiguousarray(ids, dtype=np.int64).tobytes()).hexdigest()
+        return TaskBatch(scene_inputs=x, receivers=None, targets=y,
+                         auxiliary={"query_sampling_sha256": receipt}, case_keys=tuple(case_keys))
+
+
+def test_packing_changes_preserve_samples_denominators_gradients_and_fp32_update():
+    provider_a = _PackingSamplerProvider()
+    provider_b = _PackingSamplerProvider()
+    version = SamplingKey.CASE_EPOCH_VERSION
+    base_key = SamplingKey(17, 1, 0, 0, "warmup", "full_detail",
+                           sampling_version=version, dataset_id="toy:fixed-membership")
+    cases = (0, 1, 2, 3)
+
+    def batches(provider, microbatch_cases):
+        output = []
+        sampled = {}
+        for micro_index, start in enumerate(range(0, len(cases), microbatch_cases)):
+            selected = cases[start:start + microbatch_cases]
+            key = replace(base_key, microbatch_index=micro_index)
+            batch = provider.make_batch(selected, key)
+            native_ids = (batch.scene_inputs[..., 0] * 257.0).round().to(torch.int64).tolist()
+            for case_id, ids in zip(selected, native_ids, strict=True):
+                sampled[case_id] = ids
+            output.append(batch)
+        return tuple(output), sampled
+
+    packed_a, samples_a = batches(provider_a, 2)
+    packed_b, samples_b = batches(provider_b, 4)
+    assert samples_a == samples_b
+
+    engine = TrainingEngine(
+        replace(_config(), microbatch_cases=2, effective_cases=4, sampling_version=version), device="cpu",
+    )
+    models = [nn.Linear(1, 1), nn.Linear(1, 1)]
+    initial = {name: value.detach().clone() for name, value in models[0].state_dict().items()}
+    for model in models:
+        model.load_state_dict(initial)
+    snapshots = []
+    observed = []
+    for model, provider, microbatches in zip(models, (provider_a, provider_b), (packed_a, packed_b), strict=True):
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.02)
+        step = optimizer.step
+
+        def capture_step(model=model, step=step):
+            snapshots.append({name: parameter.grad.detach().clone() for name, parameter in model.named_parameters()})
+            step()
+
+        optimizer.step = capture_step
+        losses, _work, denominators, _sampling_hash = engine._run_update(
+            model, provider, optimizer, microbatches, phase="warmup", arm="full_detail",
+            epoch=1, update_index=0,
+        )
+        observed.append((losses, denominators))
+    assert observed[0][1] == observed[1][1] == {"native": 4 * 9}
+    assert observed[0][0]["native"] == pytest.approx(observed[1][0]["native"], rel=1e-6, abs=1e-7)
+    for name in snapshots[0]:
+        torch.testing.assert_close(snapshots[0][name], snapshots[1][name], rtol=1e-6, atol=1e-7)
+        torch.testing.assert_close(models[0].state_dict()[name], models[1].state_dict()[name], rtol=1e-6, atol=1e-7)
+
+
+def test_case_epoch_sampling_recipe_is_stored_and_resume_is_strict(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    config = replace(_sparse_config(), sampling_version=SamplingKey.CASE_EPOCH_VERSION)
+    identity = {"run": "case-epoch-resume"}
+    torch.manual_seed(820)
+    initial_model = nn.Linear(1, 1)
+    initial = {name: value.detach().clone() for name, value in initial_model.state_dict().items()}
+    uninterrupted = nn.Linear(1, 1)
+    uninterrupted.load_state_dict(initial)
+    torch.manual_seed(91)
+    TrainingEngine(config, device="cpu").fit(
+        uninterrupted, _PackingSamplerProvider(), tmp_path / "case_epoch_full", identity=identity,
+        arm="adaptive_detail", stop_after=6,
+    )
+    expected_rng = torch.get_rng_state().clone()
+
+    interrupted = nn.Linear(1, 1)
+    interrupted.load_state_dict(initial)
+    output = tmp_path / "case_epoch_resume"
+    torch.manual_seed(91)
+    TrainingEngine(config, device="cpu").fit(
+        interrupted, _PackingSamplerProvider(), output, identity=identity,
+        arm="adaptive_detail", stop_after=4,
+    )
+    TrainingEngine(config, device="cpu").fit(
+        interrupted, _PackingSamplerProvider(), output, identity=identity,
+        arm="adaptive_detail", stop_after=6, resume_checkpoint=_checkpoint(output),
+    )
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+    for name, value in uninterrupted.state_dict().items():
+        torch.testing.assert_close(value, interrupted.state_dict()[name], rtol=0.0, atol=0.0)
+    saved = torch.load(_checkpoint(output), map_location="cpu", weights_only=False)
+    assert saved["experiment_identity"]["engine_config"]["sampling_version"] == SamplingKey.CASE_EPOCH_VERSION
+
+    legacy_engine = TrainingEngine(replace(config, sampling_version=SamplingKey.LEGACY_VERSION), device="cpu")
+    with pytest.raises(ValueError, match="identity, engine config"):
+        legacy_engine.fit(
+            interrupted, _PackingSamplerProvider(), output, identity=identity,
+            arm="adaptive_detail", stop_after=7, resume_checkpoint=_checkpoint(output),
+        )
 
 
 def test_engine_temperature_anneals_on_absolute_soft_epochs():

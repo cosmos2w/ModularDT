@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 import unified_interaction_formal as cli
+import unified_interaction_train as development_cli
 
 
 def _recipe():
@@ -41,6 +43,49 @@ def test_metadata_dry_run_never_constructs_task(tmp_path, monkeypatch):
     assert result['training_started'] is False
     assert result['ready_for_training'] is False
     assert result['engine_config']['total_epochs'] == 5000
+
+
+def test_manual_wind_pair_shares_one_prepared_recipe_and_case_epoch_binding(tmp_path, monkeypatch):
+    class Factory:
+        def prepare_recipe(self, config, *, metadata_only):
+            assert config['wind_recipe_id'] == 'wind_w1_component_q1024_v1'
+            assert metadata_only is True
+            return {'recipe_id': 'prepared-w1', 'recipe_sha256': 'native-recipe-sha',
+                    'ready_for_training': False,
+                    'wind_training_recipe': {'recipe_id': 'wind_w1_component_q1024_v1'}}
+
+        def validate_recipe(self, native):
+            return {'ready_for_training': native['ready_for_training']}
+
+        def create_task(self, native):
+            raise AssertionError('Manual recipe dry run constructed a model.')
+
+    monkeypatch.setattr(cli, '_factory', lambda task: Factory())
+    path = tmp_path / 'wind_pair.json'
+    args = cli.build_parser().parse_args([
+        'prepare', '--task', 'wind', '--arm', 'both', '--recipe', str(path),
+        '--wind-recipe-id', 'wind_w1_component_q1024_v1', '--metadata-only',
+    ])
+    prepared = cli.prepare(args)
+    assert prepared['optimizer_started'] is False
+    assert len(prepared['matched_recipes']) == 2
+    recipes = [json.loads(Path(item['recipe']).read_text()) for item in prepared['matched_recipes']]
+    assert {item['execution_arm'] for item in recipes} == {'full_detail', 'adaptive_detail'}
+    assert recipes[0]['dataset_recipe'] == recipes[1]['dataset_recipe']
+    assert {item['horizon_epochs'] for item in recipes} == {5000}
+    result = cli.dry_run(cli.build_parser().parse_args(['dry-run', '--recipe', prepared['matched_recipes'][0]['recipe']]))
+    assert result['engine_config']['microbatch_cases'] == 24
+    assert result['engine_config']['sampling_version'] == 'case_epoch_v1'
+    assert result['optimizer_created'] is result['training_started'] is False
+
+
+def test_versioned_development_profile_uses_measured_effective24_packing():
+    legacy, _, _ = development_cli._profile('wind', 42)
+    versioned, _, _ = development_cli._profile('wind', 42, versioned_wind=True)
+    assert (legacy.microbatch_cases, legacy.effective_cases, legacy.sampling_version) == (
+        4, 24, 'legacy_packed_v1')
+    assert (versioned.microbatch_cases, versioned.effective_cases, versioned.sampling_version) == (
+        24, 24, 'case_epoch_v1')
 
 
 @pytest.mark.parametrize('key,value', [
