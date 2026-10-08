@@ -1,0 +1,977 @@
+"""One case-neutral optimizer engine for matched HONF refinement campaigns.
+
+Dataset adapters construct target-separated batches, native predictions, loss
+terms, and physical metrics. This module owns visitation, accumulation,
+optimizers, schedules, checkpointing, selection, and exact epoch-boundary
+resume for both Thermal and Wind.
+"""
+
+from __future__ import annotations
+
+import copy
+import fcntl
+import functools
+import hashlib
+import json
+import math
+import os
+import random
+import tempfile
+import time
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+import numpy as np
+import torch
+from torch import nn
+
+
+def _exclusive_training_run(function):
+    """Hold one process-owned output lock across startup, fit and failure."""
+
+    @functools.wraps(function)
+    def locked(self, model, provider, output_dir, **kwargs):
+        output = Path(output_dir).resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        with (output / ".training.lock").open("a+") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ValueError("Another training process owns this run directory.") from exc
+            try:
+                return function(self, model, provider, output, **kwargs)
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    return locked
+
+
+@dataclass(frozen=True)
+class SamplingKey:
+    """Stable key for data and query streams, independent of global RNG state."""
+
+    seed: int
+    epoch: int
+    update_index: int
+    microbatch_index: int
+    stage: str
+    arm: str
+
+    def seed_for(self, *coordinates: Any) -> int:
+        """Return a stable query/data seed that is identical across matched arms."""
+
+        payload = json.dumps(
+            [self.seed, self.epoch, self.update_index, self.microbatch_index, self.stage, coordinates],
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "little") % (2**32)
+
+    def numpy_rng(self, *coordinates: Any) -> np.random.Generator:
+        return np.random.default_rng(self.seed_for(*coordinates))
+
+    def torch_generator(self, *coordinates: Any, device: torch.device | str = "cpu") -> torch.Generator:
+        generator = torch.Generator(device=device)
+        generator.manual_seed(self.seed_for(*coordinates))
+        return generator
+
+
+@dataclass(frozen=True)
+class TaskBatch:
+    """A microbatch with an explicit inference/supervision boundary."""
+
+    scene_inputs: Any
+    receivers: Any
+    targets: Any
+    auxiliary: Any = None
+    case_keys: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
+class LossTerm:
+    """A summed differentiable numerator and its exact valid-element count."""
+
+    numerator: torch.Tensor
+    denominator: float | int | torch.Tensor
+    weight: float = 1.0
+
+
+@dataclass(frozen=True)
+class ScheduleSpec:
+    """Linear warmup, hold, then cosine decay on the absolute epoch clock."""
+
+    peak_lr: float
+    warmup_start_lr: float = 0.0
+    warmup_epochs: int = 0
+    hold_through_epoch: int = 1000
+    total_epochs: int = 2500
+    final_lr: float = 3.0e-6
+
+    def __post_init__(self) -> None:
+        if self.peak_lr <= 0 or self.final_lr <= 0 or self.warmup_start_lr < 0:
+            raise ValueError("Learning rates must be finite and positive, except a zero warmup start.")
+        if not all(math.isfinite(value) for value in (self.peak_lr, self.warmup_start_lr, self.final_lr)):
+            raise ValueError("Learning rates must be finite.")
+        if self.warmup_epochs < 0 or self.hold_through_epoch < self.warmup_epochs:
+            raise ValueError("Schedule warmup/hold boundaries are inconsistent.")
+        if self.total_epochs <= self.hold_through_epoch:
+            raise ValueError("The schedule horizon must extend beyond its hold boundary.")
+        if self.final_lr > self.peak_lr:
+            raise ValueError("The final learning rate cannot exceed its peak.")
+
+    def value(self, epoch: int) -> float:
+        epoch = int(epoch)
+        if epoch < 1:
+            raise ValueError("Schedule epochs are one-based.")
+        if self.warmup_epochs and epoch <= self.warmup_epochs:
+            fraction = 1.0 if self.warmup_epochs == 1 else (epoch - 1) / (self.warmup_epochs - 1)
+            return self.warmup_start_lr + fraction * (self.peak_lr - self.warmup_start_lr)
+        if epoch <= self.hold_through_epoch:
+            return self.peak_lr
+        fraction = min(max((epoch - self.hold_through_epoch) /
+                           (self.total_epochs - self.hold_through_epoch), 0.0), 1.0)
+        return self.final_lr + 0.5 * (self.peak_lr - self.final_lr) * (1.0 + math.cos(math.pi * fraction))
+
+
+@dataclass(frozen=True)
+class OptimizerGroupSpec:
+    """Named parameter selection and schedule for one AdamW parameter group."""
+
+    name: str
+    parameter_names: tuple[str, ...]
+    schedule: ScheduleSpec
+    weight_decay: float = 1.0e-5
+    betas: tuple[float, float] = (0.9, 0.999)
+    eps: float = 1.0e-8
+
+
+@dataclass(frozen=True)
+class EngineConfig:
+    seed: int
+    microbatch_cases: int
+    effective_cases: int
+    total_epochs: int = 2500
+    warmup_epochs: int = 500
+    open_through_epoch: int = 600
+    soft_through_epoch: int = 800
+    monitor_every: int = 100
+    gradient_clip: float = 1.0
+    deterministic_case_order: bool = True
+
+    def __post_init__(self) -> None:
+        if min(self.microbatch_cases, self.effective_cases, self.total_epochs, self.monitor_every) < 1:
+            raise ValueError("Batch sizes, horizon, and monitoring interval must be positive.")
+        if self.effective_cases < self.microbatch_cases:
+            raise ValueError("Effective batch size must be at least the microbatch size.")
+        if not 1 <= self.warmup_epochs <= self.open_through_epoch < self.soft_through_epoch < self.total_epochs:
+            raise ValueError("Warmup/open/soft stages must be ordered inside the declared horizon.")
+        if self.gradient_clip <= 0 or not math.isfinite(self.gradient_clip):
+            raise ValueError("Gradient clipping must be positive and finite.")
+
+    def stage_for_epoch(self, epoch: int) -> str:
+        if epoch <= self.warmup_epochs:
+            return "warmup"
+        if epoch <= self.open_through_epoch:
+            return "open"
+        if epoch <= self.soft_through_epoch:
+            return "soft"
+        return "hard"
+
+    def temperature_for_epoch(self, epoch: int) -> float:
+        """Anneal the smooth phase from 1.0 to 0.1 on absolute epochs."""
+
+        soft_start = self.open_through_epoch + 1
+        if epoch <= soft_start:
+            return 1.0
+        if epoch >= self.soft_through_epoch:
+            return 0.1
+        fraction = (epoch - soft_start) / (self.soft_through_epoch - soft_start)
+        return 1.0 + fraction * (0.1 - 1.0)
+
+
+@dataclass(frozen=True)
+class SelectionPolicy:
+    field_metric: str = "field_score"
+    response_guard_metric: str | None = None
+    maximum_response_ratio: float = 1.10
+
+    def __post_init__(self) -> None:
+        if not self.field_metric:
+            raise ValueError("A field metric is required for checkpoint selection.")
+        if not math.isfinite(self.maximum_response_ratio) or self.maximum_response_ratio <= 0:
+            raise ValueError("The response guard must be a positive finite ratio.")
+
+
+class TaskProvider(Protocol):
+    """Dataset-owned data, native physics, objective and metric contract."""
+
+    def identity_payload(self) -> Mapping[str, Any]: ...
+
+    def epoch_cases(self, epoch: int, seed: int) -> Sequence[Any]: ...
+
+    def make_batch(self, case_keys: Sequence[Any], key: SamplingKey) -> TaskBatch: ...
+
+    def loss_denominators(
+        self, batches: Sequence[TaskBatch], phase: str, arm: str,
+    ) -> Mapping[str, float]: ...
+
+    def make_scene(self, scene_inputs: Any) -> Any: ...
+
+    def predict_native(
+        self, model: nn.Module, scene: Any, receivers: Any, execution_mode: str, phase: str,
+        epoch: int, temperature: float,
+    ) -> tuple[Any, Any]: ...
+
+    def loss_terms(
+        self, predictions: Any, targets: Any, phase: str, auxiliary_state: Any,
+    ) -> Mapping[str, LossTerm]: ...
+
+    def validation_batches(self) -> Iterable[TaskBatch]: ...
+
+    def validation_metrics(self, predictions: Any, targets: Any, auxiliary_state: Any) -> Mapping[str, Any]: ...
+
+    def reduce_native_metrics(self, records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]: ...
+
+    def optimizer_groups(self, model: nn.Module, arm: str, stage: str) -> Sequence[OptimizerGroupSpec]: ...
+
+    def work_counts(self, batch: TaskBatch, predictions: Any, auxiliary_state: Any) -> Mapping[str, int | float]: ...
+
+
+def _cpu_tree(value: Any) -> Any:
+    if torch.is_tensor(value):
+        return value.detach().cpu().clone()
+    if isinstance(value, Mapping):
+        return {key: _cpu_tree(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_cpu_tree(item) for item in value)
+    if isinstance(value, list):
+        return [_cpu_tree(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def capture_rng_state() -> dict[str, Any]:
+    """Capture all process RNGs needed for exact epoch-boundary continuation."""
+
+    state: dict[str, Any] = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state().clone(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda"] = [item.clone() for item in torch.cuda.get_rng_state_all()]
+    return state
+
+
+def restore_rng_state(state: Mapping[str, Any]) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"].cpu())
+    if "torch_cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([item.cpu() for item in state["torch_cuda"]])
+
+
+def named_optimizer_state(model: nn.Module, optimizer: torch.optim.Optimizer) -> dict[str, Any]:
+    """Serialize AdamW moments by stable model parameter name."""
+
+    name_by_parameter = {id(parameter): name for name, parameter in model.named_parameters()}
+    state: dict[str, Any] = {}
+    group_names = []
+    for group in optimizer.param_groups:
+        names = []
+        for parameter in group["params"]:
+            name = name_by_parameter.get(id(parameter))
+            if name is None:
+                raise ValueError("Optimizer contains a parameter not owned by the model.")
+            names.append(name)
+            if parameter in optimizer.state:
+                state[name] = _cpu_tree(optimizer.state[parameter])
+        group_names.append({"name": group["group_name"], "parameter_names": names})
+    return {"state_by_name": state, "groups": group_names}
+
+
+def _load_named_optimizer_state(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    payload: Mapping[str, Any] | None,
+) -> None:
+    if payload is None:
+        return
+    states = payload.get("state_by_name", payload)
+    if not isinstance(states, Mapping):
+        raise TypeError("Named optimizer seed must map parameter names to optimizer states.")
+    parameters = dict(model.named_parameters())
+    for name, saved_state in states.items():
+        if name not in parameters:
+            raise ValueError(f"Optimizer seed refers to missing model parameter {name!r}.")
+        if not isinstance(saved_state, Mapping):
+            raise TypeError(f"Optimizer state for {name!r} is not a mapping.")
+        parameter = parameters[name]
+        restored = {}
+        for key, value in saved_state.items():
+            if torch.is_tensor(value) and key != "step":
+                restored[key] = value.to(parameter.device).clone()
+            elif torch.is_tensor(value):
+                restored[key] = value.detach().cpu().clone()
+            else:
+                restored[key] = copy.deepcopy(value)
+        optimizer.state[parameter] = restored
+
+
+def _atomic_torch_save(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        torch.save(dict(payload), temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _read_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
+    request_path = output / name
+    if not request_path.is_file():
+        return None
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    if not isinstance(request, dict) or not isinstance(request.get("request_id"), str):
+        raise TypeError("Clean-stop requests must be JSON objects with a stable request_id.")
+    if not request["request_id"]:
+        raise ValueError("Clean-stop request_id must be nonempty.")
+    return request
+
+
+def _consume_acknowledged_clean_stop(output: Path, name: str) -> None:
+    """Remove only a leftover request whose exact identity was already acked."""
+
+    request = _read_clean_stop_request(output, name)
+    if request is None:
+        return
+    acknowledgement_path = output / "clean_stop_acknowledged.json"
+    if not acknowledgement_path.is_file():
+        return
+    acknowledgement = json.loads(acknowledgement_path.read_text(encoding="utf-8"))
+    if (not isinstance(acknowledgement, dict)
+            or acknowledgement.get("request_id") != request["request_id"]):
+        return
+    request_tag = hashlib.sha256(request["request_id"].encode("utf-8")).hexdigest()[:16]
+    _atomic_json(output / f"clean_stop_consumed_{request_tag}.json", {
+        "request": request,
+        "acknowledgement": acknowledgement,
+        "consumed_on_resume": True,
+    })
+    (output / name).unlink(missing_ok=True)
+
+
+def _denominator(value: float | torch.Tensor) -> float:
+    result = float(value.detach().item()) if torch.is_tensor(value) else float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError("Loss denominators must be finite and nonnegative.")
+    return result
+
+
+def _macro_update_slices(count: int, effective_cases: int) -> Iterable[slice]:
+    for start in range(0, count, effective_cases):
+        yield slice(start, min(start + effective_cases, count))
+
+
+def _case_order_digest(case_keys: Sequence[Any]) -> str:
+    encoded = json.dumps(list(case_keys), sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _optimizer_spec_payload(spec: OptimizerGroupSpec) -> dict[str, Any]:
+    return {
+        "name": spec.name,
+        "parameter_names": list(spec.parameter_names),
+        "schedule": asdict(spec.schedule),
+        "weight_decay": float(spec.weight_decay),
+        "betas": list(spec.betas),
+        "eps": float(spec.eps),
+    }
+
+
+class TrainingEngine:
+    """Own the single training/evaluation loop used by all dataset adapters."""
+
+    def __init__(
+        self,
+        config: EngineConfig,
+        *,
+        device: torch.device | str,
+        selection: SelectionPolicy | None = None,
+    ) -> None:
+        self.config = config
+        self.device = torch.device(device)
+        self.selection = selection or SelectionPolicy()
+
+    def _make_optimizer(
+        self,
+        model: nn.Module,
+        provider: TaskProvider,
+        arm: str,
+        initial_epoch: int,
+        optimizer_seed: Mapping[str, Any] | None,
+        *,
+        group_specs: Sequence[OptimizerGroupSpec] | None = None,
+    ) -> tuple[torch.optim.Optimizer, tuple[OptimizerGroupSpec, ...]]:
+        specs = tuple(group_specs or provider.optimizer_groups(
+            model, arm, self.config.stage_for_epoch(initial_epoch)))
+        if not specs or len({spec.name for spec in specs}) != len(specs):
+            raise ValueError("Providers must declare at least one uniquely named optimizer group.")
+        named = dict(model.named_parameters())
+        used: set[str] = set()
+        groups: list[dict[str, Any]] = []
+        for spec in specs:
+            if not spec.parameter_names:
+                raise ValueError(f"Optimizer group {spec.name!r} has no parameters.")
+            if not math.isfinite(spec.weight_decay) or spec.weight_decay < 0:
+                raise ValueError(f"Optimizer group {spec.name!r} has invalid weight decay.")
+            params = []
+            for name in spec.parameter_names:
+                if name not in named:
+                    raise ValueError(f"Optimizer group {spec.name!r} references missing parameter {name!r}.")
+                if name in used:
+                    raise ValueError(f"Parameter {name!r} appears in more than one optimizer group.")
+                if not named[name].requires_grad:
+                    raise ValueError(f"Optimizer parameter {name!r} is unexpectedly frozen at engine creation.")
+                params.append(named[name])
+                used.add(name)
+            groups.append({
+                "params": params,
+                "lr": spec.schedule.value(initial_epoch),
+                "weight_decay": spec.weight_decay,
+                "betas": spec.betas,
+                "eps": spec.eps,
+                "group_name": spec.name,
+            })
+        trainable = {name for name, parameter in named.items() if parameter.requires_grad}
+        omitted = trainable - used
+        if omitted:
+            raise ValueError(f"Trainable model parameters lack optimizer groups: {sorted(omitted)}")
+        optimizer = torch.optim.AdamW(groups)
+        _load_named_optimizer_state(model, optimizer, optimizer_seed)
+        return optimizer, specs
+
+    def preflight_one_update(
+        self,
+        model: nn.Module,
+        provider: TaskProvider,
+        *,
+        arm: str = "warmup",
+        optimizer_seed: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Exercise one disposable warmup optimizer update without saving a run.
+
+        The maintained CLI uses this for a CPU-only dry run. It deliberately
+        delegates to the exact same batch, denominator, forward, loss,
+        accumulation, clipping, and optimizer helpers as :meth:`fit`, while
+        leaving no checkpoint or training history behind.
+        """
+
+        if arm != "warmup":
+            raise ValueError("A disposable preflight update must use the shared warmup arm.")
+        model.to(self.device)
+        cases = tuple(provider.epoch_cases(1, self.config.seed))
+        if not cases:
+            raise ValueError("The task provider has no TRAIN case for a dry run.")
+        cases = cases[:1]
+        phase = self.config.stage_for_epoch(1)
+        key = SamplingKey(self.config.seed, 1, 0, 0, phase, arm)
+        batch = provider.make_batch(cases, key)
+        if tuple(batch.case_keys) and list(batch.case_keys) != list(cases):
+            raise ValueError("Provider changed case keys during the disposable preflight.")
+        if not tuple(batch.case_keys):
+            batch = TaskBatch(batch.scene_inputs, batch.receivers, batch.targets, batch.auxiliary, cases)
+        on_phase_start = getattr(provider, "on_phase_start", None)
+        stage_receipt = None
+        if callable(on_phase_start):
+            stage_receipt = on_phase_start(
+                model=model, arm=arm, epoch=1, phase=phase,
+                temperature=self.config.temperature_for_epoch(1))
+        model.train(True)
+        optimizer, specs = self._make_optimizer(
+            model, provider, arm, 1, optimizer_seed)
+        self._set_schedules(optimizer, specs, 1)
+        losses, work, denominators, query_hash = self._run_update(
+            model, provider, optimizer, (batch,), phase=phase, arm=arm,
+            epoch=1, update_index=0)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        return {
+            "status": "disposable_cpu_preflight_update" if self.device.type == "cpu" else "disposable_preflight_update",
+            "arm": arm,
+            "phase": phase,
+            "case_keys": list(cases),
+            "optimizer_updates": 1,
+            "losses": losses,
+            "denominators": denominators,
+            "work_counts": work,
+            "query_sampling_sha256": query_hash,
+            "stage_receipt": stage_receipt,
+        }
+
+    @staticmethod
+    def _set_schedules(optimizer: torch.optim.Optimizer, specs: Sequence[OptimizerGroupSpec], epoch: int) -> None:
+        by_name = {spec.name: spec for spec in specs}
+        if {group["group_name"] for group in optimizer.param_groups} != set(by_name):
+            raise ValueError("Optimizer groups changed after the absolute schedule was sealed.")
+        for group in optimizer.param_groups:
+            group["lr"] = by_name[group["group_name"]].schedule.value(epoch)
+
+    def _run_update(
+        self,
+        model: nn.Module,
+        provider: TaskProvider,
+        optimizer: torch.optim.Optimizer,
+        microbatches: Sequence[TaskBatch],
+        *,
+        phase: str,
+        arm: str,
+        epoch: int,
+        update_index: int,
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, float], str | None]:
+        planned = {
+            name: _denominator(value)
+            for name, value in provider.loss_denominators(microbatches, phase, arm).items()
+        }
+        if any(not name for name in planned):
+            raise ValueError("Loss term names must be nonempty.")
+        if any(value <= 0 for value in planned.values()):
+            raise ValueError("A declared optimization term must have a positive macro-update denominator.")
+        observed: dict[str, float] = {name: 0.0 for name in planned}
+        losses: dict[str, float] = {name: 0.0 for name in planned}
+        work: dict[str, float] = {}
+        sampling_records: list[str] = []
+        optimizer.zero_grad(set_to_none=True)
+        for batch in microbatches:
+            batch_auxiliary = batch.auxiliary if isinstance(batch.auxiliary, Mapping) else {}
+            sample_hash = batch_auxiliary.get("query_sampling_sha256")
+            if sample_hash is not None:
+                if not isinstance(sample_hash, str) or len(sample_hash) != 64:
+                    raise ValueError("Provider query-sampling receipt must be a SHA256 hex string.")
+                sampling_records.append(sample_hash)
+            scene = provider.make_scene(batch.scene_inputs)
+            predictions, auxiliary_state = provider.predict_native(
+                model, scene, batch.receivers, arm, phase, epoch=epoch,
+                temperature=self.config.temperature_for_epoch(epoch))
+            terms = provider.loss_terms(predictions, batch.targets, phase, auxiliary_state)
+            if not isinstance(terms, Mapping):
+                raise TypeError("loss_terms must return a mapping of names to LossTerm values.")
+            objective: torch.Tensor | None = None
+            for name, term in terms.items():
+                if name not in planned:
+                    raise ValueError(f"Loss term {name!r} has no target-only macro denominator.")
+                if not torch.is_tensor(term.numerator) or term.numerator.numel() != 1:
+                    raise ValueError(f"Loss numerator {name!r} must be a scalar tensor.")
+                denominator = _denominator(term.denominator)
+                if not math.isfinite(float(term.weight)):
+                    raise ValueError(f"Loss weight {name!r} is not finite.")
+                if denominator == 0:
+                    if float(term.numerator.detach()) != 0.0:
+                        raise ValueError(f"Loss numerator {name!r} is nonzero with an empty valid mask.")
+                    continue
+                observed[name] += denominator
+                piece = term.numerator * (float(term.weight) / planned[name])
+                objective = piece if objective is None else objective + piece
+                losses[name] += float(term.numerator.detach()) / planned[name] * float(term.weight)
+            for name, value in provider.work_counts(batch, predictions, auxiliary_state).items():
+                work[name] = work.get(name, 0.0) + float(value)
+            if objective is None:
+                raise ValueError("A microbatch produced no differentiable loss terms.")
+            if not bool(torch.isfinite(objective.detach())):
+                raise FloatingPointError("Nonfinite optimizer objective.")
+            objective.backward()
+        for name, expected in planned.items():
+            actual = observed.get(name, 0.0)
+            if not math.isclose(actual, expected, rel_tol=1.0e-6, abs_tol=1.0e-7):
+                raise ValueError(f"Actual denominator for {name!r} ({actual}) differs from prepass ({expected}).")
+        parameters = [parameter for group in optimizer.param_groups for parameter in group["params"]
+                      if parameter.grad is not None]
+        norm = torch.nn.utils.clip_grad_norm_(parameters, self.config.gradient_clip)
+        if not torch.isfinite(norm) or norm <= 0:
+            raise FloatingPointError("Nonfinite or zero actual parameter gradient.")
+        optimizer.step()
+        work["gradient_norm"] = float(norm.detach())
+        sampling_hash = hashlib.sha256(
+            json.dumps(sampling_records, separators=(",", ":")).encode("utf-8")
+        ).hexdigest() if sampling_records else None
+        return losses, work, {name: observed[name] for name in observed}, sampling_hash
+
+    @torch.no_grad()
+    def _evaluate(
+        self, model: nn.Module, provider: TaskProvider, arm: str, phase: str, epoch: int,
+    ) -> dict[str, Any]:
+        previous_mode = model.training
+        model.eval()
+        records: list[Mapping[str, Any]] = []
+        for batch in provider.validation_batches():
+            scene = provider.make_scene(batch.scene_inputs)
+            # The candidate's deployed hard route is always measured here; a
+            # warmup/open or soft training phase must not leak into validation.
+            predictions, auxiliary_state = provider.predict_native(
+                model, scene, batch.receivers, arm, "hard", epoch=epoch,
+                temperature=self.config.temperature_for_epoch(epoch))
+            records.append(provider.validation_metrics(predictions, batch.targets, auxiliary_state))
+        result = dict(provider.reduce_native_metrics(records))
+        extra_metrics = getattr(provider, "extra_validation_metrics", None)
+        if callable(extra_metrics):
+            result.update(extra_metrics(model, arm, "hard"))
+        result["validation_execution_mode"] = arm
+        result["validation_route_phase"] = "hard"
+        model.train(previous_mode)
+        return result
+
+    def _checkpoint_payload(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        *,
+        identity: Mapping[str, Any],
+        arm: str,
+        epoch: int,
+        history: Sequence[Mapping[str, Any]],
+        best_field: float,
+        best_guarded: float,
+        sampler_state: Mapping[str, Any],
+        group_specs: Sequence[OptimizerGroupSpec],
+        provider_training_state: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "checkpoint_schema_version": 1,
+            "workflow": "unified_interaction_refinement",
+            "experiment_identity": _cpu_tree(identity),
+            "arm": arm,
+            "epoch": int(epoch),
+            "current_epoch": int(epoch),
+            "model_state_dict": _cpu_tree(model.state_dict()),
+            "optimizer_state_by_name": named_optimizer_state(model, optimizer),
+            "rng_state": _cpu_tree(capture_rng_state()),
+            "sampler_state": _cpu_tree(sampler_state),
+            "history": _cpu_tree(list(history)),
+            "best_field_score": float(best_field),
+            "best_response_guarded_score": float(best_guarded),
+            "optimizer_group_names": [group["group_name"] for group in optimizer.param_groups],
+            "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in group_specs],
+            "provider_training_state": _cpu_tree(provider_training_state or {}),
+        }
+
+    @_exclusive_training_run
+    def fit(
+        self,
+        model: nn.Module,
+        provider: TaskProvider,
+        output_dir: str | Path,
+        *,
+        identity: Mapping[str, Any],
+        arm: str,
+        stop_after: int,
+        optimizer_seed: Mapping[str, Any] | None = None,
+        resume_checkpoint: str | Path | None = None,
+        branch_from_checkpoint: str | Path | None = None,
+        clean_stop_name: str = "CLEAN_STOP_REQUEST.json",
+    ) -> dict[str, Any]:
+        """Fit one warmup or arm segment and save exact epoch-boundary state."""
+
+        output = Path(output_dir).resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        if resume_checkpoint is None:
+            markers = ("latest_model.pt", "history.json", "fit_summary.json", "active_process.json")
+            if any((output / name).exists() for name in markers) or any(output.glob("epoch_*_model.pt")):
+                raise ValueError("A new fit requires a fresh run directory; use exact resume for existing history.")
+        elif Path(resume_checkpoint).resolve() != (output / "latest_model.pt").resolve():
+            raise ValueError("Exact resume requires this run's current latest_model.pt; historical checkpoints cannot rewind history.")
+        identity = dict(identity)
+        provider_identity = dict(provider.identity_payload())
+        if "provider_identity" in identity and identity["provider_identity"] != provider_identity:
+            raise ValueError("Sealed experiment provider identity differs from the active task adapter.")
+        if "arm" in identity:
+            raise ValueError("Matched execution arm is checkpoint metadata, not part of shared identity.")
+        if resume_checkpoint is not None and branch_from_checkpoint is not None:
+            raise ValueError("A run cannot be both an exact resume and a new branch.")
+        source_path = Path(resume_checkpoint or branch_from_checkpoint).resolve() if (
+            resume_checkpoint is not None or branch_from_checkpoint is not None) else None
+        source_payload: Mapping[str, Any] | None = None
+        restored_rng: Mapping[str, Any] | None = None
+        if source_path is not None:
+            from honf_runtime.compat import load_trusted_checkpoint
+
+            source_payload = load_trusted_checkpoint(source_path, map_location="cpu")
+        start_epoch = 1 if source_payload is None else int(source_payload["epoch"]) + 1
+        if resume_checkpoint is not None and int(source_payload["epoch"]) >= stop_after:
+            raise ValueError("Exact resume stop must advance the saved epoch.")
+        if not start_epoch <= stop_after <= self.config.total_epochs:
+            raise ValueError("Requested stop must advance the saved age and remain inside the common horizon.")
+        if not identity:
+            raise ValueError("A sealed nonempty experiment identity is required.")
+        model.to(self.device)
+        # The warmup stage declares the stable parameter groups for the whole
+        # run, including router parameters that intentionally receive no
+        # gradient or AdamW age before the adaptive stage.
+        group_specs = tuple(provider.optimizer_groups(model, arm, "warmup"))
+        sealed_identity = {
+            **dict(identity),
+            "provider_identity": provider_identity,
+            "engine_config": asdict(self.config),
+            "selection_policy": asdict(self.selection),
+            "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in group_specs],
+        }
+        if source_payload is not None:
+            if source_payload.get("experiment_identity") != sealed_identity:
+                raise ValueError("Checkpoint identity, engine config, selection or optimizer schedule differs.")
+            if resume_checkpoint is not None:
+                if source_payload.get("arm") != arm:
+                    raise ValueError("Exact resume arm differs from the saved checkpoint.")
+            else:
+                if source_payload.get("arm") != "warmup":
+                    raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
+                if int(source_payload.get("epoch", -1)) != self.config.warmup_epochs:
+                    raise ValueError("Matched arms must branch at the declared common warmup boundary.")
+            model.load_state_dict(source_payload["model_state_dict"], strict=True)
+            optimizer_seed = source_payload["optimizer_state_by_name"]
+            restored_rng = source_payload["rng_state"]
+            restore_provider_state = getattr(provider, "load_training_state_dict", None)
+            if callable(restore_provider_state):
+                restore_provider_state(source_payload.get("provider_training_state", {}))
+        if resume_checkpoint is not None:
+            _consume_acknowledged_clean_stop(output, clean_stop_name)
+        optimizer, optimizer_specs = self._make_optimizer(
+            model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
+        if resume_checkpoint is not None:
+            saved_group_names = source_payload.get("optimizer_group_names")
+            current_group_names = [group["group_name"] for group in optimizer.param_groups]
+            saved_groups = source_payload["optimizer_state_by_name"].get("groups", [])
+            current_groups = named_optimizer_state(model, optimizer).get("groups", [])
+            if (saved_group_names != current_group_names or saved_groups != current_groups
+                    or source_payload.get("optimizer_schedule_contract")
+                    != [_optimizer_spec_payload(spec) for spec in optimizer_specs]):
+                raise ValueError("Exact resume optimizer group membership/order differs from its checkpoint.")
+        if restored_rng is not None:
+            restore_rng_state(restored_rng)
+        history = list(source_payload.get("history", [])) if source_payload is not None else []
+        best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
+        best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
+        branch_parent = None
+        if branch_from_checkpoint is not None:
+            branch_parent = {
+                "path": str(source_path),
+                "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                "identity": source_payload.get("experiment_identity"),
+                "epoch": int(source_payload["epoch"]),
+            }
+            history = []
+            best_field = best_guarded = float("inf")
+        active = {
+            "status": "running", "arm": arm, "identity": sealed_identity, "device": str(self.device),
+            "pid": os.getpid(),
+            "process_start_ticks": Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()[19],
+            "start_epoch": start_epoch, "requested_stop": int(stop_after),
+            "started_unix": float(os.getenv("PROCESS_STARTED_UNIX", time.time())),
+            "engine_started_unix": time.time(),
+            "branch_parent": branch_parent,
+        }
+        _atomic_json(output / "active_process.json", active)
+        total_started = time.perf_counter()
+        stopped_at = start_epoch - 1
+        clean_stopped = False
+        previous_phase = self.config.stage_for_epoch(start_epoch - 1) if start_epoch > 1 else None
+        try:
+            for epoch in range(start_epoch, int(stop_after) + 1):
+                # Callbacks (preparation, validation, or a prior calibration hook)
+                # may leave the module in evaluation mode. The engine owns the
+                # mode for every optimization epoch.
+                model.train(True)
+                phase = self.config.stage_for_epoch(epoch)
+                stage_receipt = None
+                if phase != previous_phase:
+                    on_phase_start = getattr(provider, "on_phase_start", None)
+                    if callable(on_phase_start):
+                        stage_receipt = on_phase_start(
+                            model=model, arm=arm, epoch=epoch, phase=phase,
+                            temperature=self.config.temperature_for_epoch(epoch))
+                    if stage_receipt is not None:
+                        _atomic_json(output / f"stage_receipt_epoch_{epoch:04d}_{phase}.json", stage_receipt)
+                # A stage callback may run calibration/evaluation in no-grad mode.
+                # Reassert training mode after it and before any optimizer work.
+                model.train(True)
+                previous_phase = phase
+                self._set_schedules(optimizer, group_specs, epoch)
+                epoch_started = time.perf_counter()
+                ordered_cases = list(provider.epoch_cases(epoch, self.config.seed))
+                if not ordered_cases:
+                    raise ValueError("Each development epoch must visit at least one selected TRAIN case.")
+                if self.config.deterministic_case_order:
+                    rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, epoch, 0x484F4E46]))
+                    order = rng.permutation(len(ordered_cases)).tolist()
+                    ordered_cases = [ordered_cases[index] for index in order]
+                order_hash = _case_order_digest(ordered_cases)
+                update_rows: list[dict[str, Any]] = []
+                for update_index, group_slice in enumerate(_macro_update_slices(len(ordered_cases), self.config.effective_cases)):
+                    update_cases = ordered_cases[group_slice]
+                    microbatches = []
+                    for micro_index, start in enumerate(range(0, len(update_cases), self.config.microbatch_cases)):
+                        case_chunk = update_cases[start:start + self.config.microbatch_cases]
+                        key = SamplingKey(self.config.seed, epoch, update_index, micro_index, phase, arm)
+                        batch = provider.make_batch(case_chunk, key)
+                        if tuple(batch.case_keys) and list(batch.case_keys) != list(case_chunk):
+                            raise ValueError("Provider changed the ordered case keys inside a microbatch.")
+                        if not tuple(batch.case_keys):
+                            batch = TaskBatch(batch.scene_inputs, batch.receivers, batch.targets, batch.auxiliary,
+                                              tuple(case_chunk))
+                        microbatches.append(batch)
+                    losses, work, _denominators, sampling_hash = self._run_update(model, provider, optimizer, microbatches,
+                        phase=phase, arm=arm, epoch=epoch, update_index=update_index)
+                    update_rows.append({"losses": losses, "work": work, "case_count": len(update_cases),
+                                        "microbatch_count": len(microbatches),
+                                        "query_sampling_sha256": sampling_hash})
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                train_seconds = time.perf_counter() - epoch_started
+                row: dict[str, Any] = {
+                    "epoch": epoch,
+                    "phase": phase,
+                    "temperature": self.config.temperature_for_epoch(epoch),
+                    "arm": arm,
+                    "case_visits": len(ordered_cases),
+                    "optimizer_updates": len(update_rows),
+                    "microbatches": sum(item["microbatch_count"] for item in update_rows),
+                    "partial_update_cases": len(ordered_cases) % self.config.effective_cases,
+                    "learning_rates": {group["group_name"]: float(group["lr"]) for group in optimizer.param_groups},
+                    "train_seconds": train_seconds,
+                    "train_losses": _mean_mapping([item["losses"] for item in update_rows]),
+                    "work_counts": _sum_mapping([item["work"] for item in update_rows]),
+                    "case_order_sha256": order_hash,
+                }
+                sample_hashes = [item["query_sampling_sha256"] for item in update_rows
+                                 if item["query_sampling_sha256"] is not None]
+                if sample_hashes:
+                    row["query_sampling_sha256"] = hashlib.sha256(
+                        json.dumps(sample_hashes, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest()
+                if stage_receipt is not None:
+                    row["stage_receipt"] = stage_receipt
+                clean_stop_request = _read_clean_stop_request(output, clean_stop_name)
+                clean_stop_requested = clean_stop_request is not None
+                review = (epoch % self.config.monitor_every == 0 or epoch == stop_after or clean_stop_requested)
+                if review:
+                    validation_started = time.perf_counter()
+                    metrics = self._evaluate(model, provider, arm, phase, epoch)
+                    row["validation"] = metrics
+                    row["validation_seconds"] = time.perf_counter() - validation_started
+                    field_score = float(metrics[self.selection.field_metric])
+                    if not math.isfinite(field_score):
+                        raise FloatingPointError("Nonfinite declared field selector.")
+                    improved_field = field_score < best_field
+                    if improved_field:
+                        best_field = field_score
+                    guard_key = self.selection.response_guard_metric
+                    guard_pass = guard_key is None or float(metrics[guard_key]) <= self.selection.maximum_response_ratio
+                    improved_guarded = guard_key is not None and guard_pass and field_score < best_guarded
+                    if improved_guarded:
+                        best_guarded = field_score
+                history.append(row)
+                print(json.dumps(row, sort_keys=True, default=str, allow_nan=False), flush=True)
+                should_save = review or epoch == stop_after
+                if should_save:
+                    sampler_state = {
+                        "seed": self.config.seed,
+                        "completed_epoch": epoch,
+                        "next_epoch": epoch + 1,
+                        "next_case_cursor": 0,
+                        "last_case_order_sha256": order_hash,
+                        "case_visits_this_epoch": len(ordered_cases),
+                        "optimizer_updates_this_epoch": len(update_rows),
+                    }
+                    payload = self._checkpoint_payload(model, optimizer, identity=sealed_identity, arm=arm, epoch=epoch,
+                        history=history, best_field=best_field, best_guarded=best_guarded, sampler_state=sampler_state,
+                        group_specs=optimizer_specs,
+                        provider_training_state=getattr(provider, "training_state_dict", dict)())
+                    _atomic_torch_save(output / "latest_model.pt", payload)
+                    _atomic_json(output / "history.json", history)
+                    if review:
+                        _atomic_torch_save(output / f"epoch_{epoch:04d}_model.pt", payload)
+                        _atomic_json(output / f"validation_epoch_{epoch:04d}.json", row["validation"])
+                        if improved_field:
+                            _atomic_torch_save(output / "best_by_field_mse_model.pt", payload)
+                        if improved_guarded:
+                            selected_checkpoint = output / f"epoch_{epoch:04d}_model.pt"
+                            _atomic_json(output / "best_by_response_guarded_selection.json", {
+                                "selector": "response_guarded_field_score",
+                                "field_metric": self.selection.field_metric,
+                                "field_score": field_score,
+                                "guard_metric": guard_key,
+                                "guard_value": float(metrics[guard_key]),
+                                "maximum_guard_ratio": self.selection.maximum_response_ratio,
+                                "epoch": int(epoch),
+                                "checkpoint": selected_checkpoint.name,
+                                "checkpoint_sha256": hashlib.sha256(selected_checkpoint.read_bytes()).hexdigest(),
+                            })
+                stopped_at = epoch
+                if clean_stop_requested:
+                    acknowledgement = {
+                        "request_id": clean_stop_request["request_id"],
+                        "requested_unix": clean_stop_request.get("requested_unix"),
+                        "requested_by": clean_stop_request.get("requested_by"),
+                        "acknowledged_unix": time.time(),
+                        "epoch": epoch,
+                        "phase": phase,
+                    }
+                    _atomic_json(output / "clean_stop_acknowledged.json", acknowledgement)
+                    request_tag = hashlib.sha256(clean_stop_request["request_id"].encode("utf-8")).hexdigest()[:16]
+                    _atomic_json(output / f"clean_stop_consumed_{request_tag}.json", {
+                        "request": clean_stop_request,
+                        "acknowledgement": acknowledgement,
+                        "consumed_on_resume": False,
+                    })
+                    (output / clean_stop_name).unlink(missing_ok=True)
+                    clean_stopped = True
+                    break
+            elapsed = time.perf_counter() - total_started
+            active.update(status="clean_stopped" if clean_stopped else "completed",
+                          completed_epoch=stopped_at, ended_unix=time.time(), engine_seconds=elapsed,
+                          process_seconds=max(0.0, time.time() - float(active["started_unix"])))
+            _atomic_json(output / "active_process.json", active)
+            guarded_summary = best_guarded if math.isfinite(best_guarded) else None
+            _atomic_json(output / "fit_summary.json", {
+                **active,
+                "case_visits": sum(int(item["case_visits"]) for item in history if int(item["epoch"]) >= start_epoch),
+                "optimizer_updates": sum(int(item["optimizer_updates"]) for item in history if int(item["epoch"]) >= start_epoch),
+                "best_field_score": best_field,
+                "best_response_guarded_score": guarded_summary,
+                "branch_parent": branch_parent,
+            })
+            return {**active, "completed_epoch": stopped_at, "best_field_score": best_field,
+                    "best_response_guarded_score": guarded_summary, "branch_parent": branch_parent}
+        except BaseException as exc:
+            active.update(status="failed", completed_epoch=stopped_at, ended_unix=time.time(),
+                          engine_seconds=time.perf_counter() - total_started,
+                          process_seconds=max(0.0, time.time() - float(active["started_unix"])),
+                          exception_type=type(exc).__name__, exception_message=str(exc))
+            try:
+                _atomic_json(output / "active_process.json", active)
+            except OSError:
+                pass  # Preserve the original failure when its receipt cannot be written.
+            raise
+
+
+def _mean_mapping(rows: Sequence[Mapping[str, float]]) -> dict[str, float]:
+    keys = sorted({key for row in rows for key in row})
+    return {key: float(np.mean([float(row[key]) for row in rows if key in row])) for key in keys}
+
+
+def _sum_mapping(rows: Sequence[Mapping[str, float]]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for row in rows:
+        for key, value in row.items():
+            result[key] = result.get(key, 0.0) + float(value)
+    return result

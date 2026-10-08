@@ -7,15 +7,22 @@ import numpy as np
 import pytest
 import torch
 from honf_forward_core.interface_fields.interaction_core import NonlinearFieldReadout
+from honf_forward_core.interface_fields.interaction_refinement import RefinedNonlinearFieldReadout
 
 from windfarm.geometry import environment_representation, global_geometry_features, support_geometry
-from windfarm.model import SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE, build_windfarm_model
-from windfarm.normalization import VelocityNormalizer
+from windfarm.model import (
+    REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
+    SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
+    build_windfarm_model,
+)
+from windfarm.normalization import VelocityNormalizer, VerticalProfileBaseline
 from windfarm.shared_interaction import (
     WIND_INTERACTION_DEPENDENCY,
+    WindFarmRefinedInteractionModel,
     WindFarmSharedInteractionModel,
     wind_scene_from_case,
 )
+from windfarm.training.unified_task import _as_scene_batch, _scene_inputs
 
 
 def _case() -> SimpleNamespace:
@@ -49,6 +56,16 @@ def _normalizer() -> VelocityNormalizer:
         std=np.asarray([0.2, 0.1, 0.1]),
         safe_std=np.asarray([0.2, 0.1, 0.1]),
         source_rows=3,
+    )
+
+
+def _profile() -> VerticalProfileBaseline:
+    return VerticalProfileBaseline(
+        bin_centers_D=np.asarray([0.0, 2.0], dtype=np.float64),
+        values_mps=np.asarray([[4.0, 0.1, -0.2], [12.0, 0.5, 0.2]], dtype=np.float64),
+        counts=np.asarray([100, 100], dtype=np.int64),
+        z_min_D=0.0,
+        z_max_D=2.0,
     )
 
 
@@ -99,6 +116,142 @@ def test_native_model_factory_has_an_explicit_shared_core_family() -> None:
             {"forward_architecture": SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE, "field_dim": 3},
             velocity_transform=_normalizer(),
         )
+
+
+def test_refined_factory_uses_real_refined_nonlinear_core_and_fixed_profile() -> None:
+    model = build_windfarm_model(
+        {
+            "forward_architecture": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
+            "hidden": 16,
+            "message": 12,
+            "max_sources": 8,
+            "base_width": 16,
+            "router_hidden": 8,
+        },
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+    )
+    assert isinstance(model, WindFarmRefinedInteractionModel)
+    assert isinstance(model.core, RefinedNonlinearFieldReadout)
+    with pytest.raises(ValueError, match="height profile"):
+        build_windfarm_model(
+            {"forward_architecture": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE},
+            velocity_transform=_normalizer(),
+        )
+
+
+def test_wind_train_profile_and_normalized_residual_round_trip_with_live_height_gradient() -> None:
+    model = WindFarmRefinedInteractionModel(
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+        hidden=16,
+        message=12,
+    )
+    receivers = torch.tensor([[[0.5, 0.2, 0.5], [0.5, 0.2, 1.5]]], requires_grad=True)
+    residual = torch.tensor([[[0.5, -0.25, 0.75], [-0.1, 0.2, 0.3]]], requires_grad=True)
+    background = model.profile_at_receivers(receivers)
+    physical = model._physical_from_standardized(residual, receivers)
+    normalized_total = model.normalized_field_from_physical(physical, receivers)
+    normalized_background = model.normalize_tensor(background)
+    torch.testing.assert_close(normalized_total, normalized_background + residual)
+    torch.testing.assert_close(model.residual_from_physical(physical, receivers), residual)
+    height_gradient = torch.autograd.grad(physical.sum(), receivers)[0][..., 2]
+    assert torch.isfinite(height_gradient).all()
+    assert torch.all(height_gradient > 0)
+
+
+def test_refined_context_rejects_mutated_train_profile_and_jvp_restores_fixed_route() -> None:
+    torch.manual_seed(12)
+    case = _case()
+    model = WindFarmRefinedInteractionModel(
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+        hidden=16,
+        message=12,
+    )
+    prepared = model.prepare_case(case)
+    receivers = torch.tensor([[[0.5, 0.2, 0.875]]])
+    model.core.set_execution(mode="adaptive", phase="hard", training_signal=True)
+    original_policy = model.core.refinement_policy
+    linearized = model.linearize_case(
+        prepared,
+        receivers,
+        torch.ones_like(prepared.scene.centers),
+        wrt="centers",
+    )
+    assert torch.isfinite(linearized["jvp"]).all()
+    assert model.core.refinement_policy == original_policy
+
+    profile = model.background_profile
+    assert profile is not None
+    profile.values_mps[0, 0] += 0.5
+    with pytest.raises(ValueError, match="background profile changed; rebuild"):
+        model.predict_physical_case(case, prepared, receivers)
+
+
+def test_wind_native_scene_batch_is_target_free_and_pads_only_inactive_sources() -> None:
+    case_a = _case()
+    case_a.index = 0
+    case_b = _case()
+    case_b.index = 1
+    case_b.module_centers = case_b.module_centers[:1].copy()
+    case_b.module_present = case_b.module_present[:1].copy()
+    case_b.module_features = case_b.module_features[:1].copy()
+    case_b.global_context = global_geometry_features(case_b.support, 270.0, 1)
+    inputs_a = _scene_inputs(case_a)
+    inputs_b = _scene_inputs(case_b)
+    assert not hasattr(inputs_a, "target_field")
+    assert not hasattr(inputs_a, "velocity_mps")
+    scene = _as_scene_batch((inputs_a, inputs_b), torch.device("cpu"))
+    assert scene.centers.shape == (2, 2, 3)
+    torch.testing.assert_close(scene.present, torch.tensor([[1.0, 1.0], [1.0, 0.0]]))
+    assert set(scene.tensors()) == {
+        "sources",
+        "context",
+        "centers",
+        "present",
+        "lengths",
+        "source_lengths",
+        "source_measures",
+        "environment_tokens",
+        "environment_coords",
+        "environment_present",
+        "environment_measures",
+        "source_ids",
+        "environment_embedding",
+    }
+
+
+def test_refined_wind_batch_emits_exact_auxiliary_counts_for_shared_engine() -> None:
+    torch.manual_seed(13)
+    cases = (_case(), _case())
+    for index, case in enumerate(cases):
+        case.index = index
+    scene = _as_scene_batch(tuple(_scene_inputs(case) for case in cases), torch.device("cpu"))
+    model = WindFarmRefinedInteractionModel(
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+        hidden=16,
+        message=12,
+    )
+    receivers = torch.tensor(
+        [
+            [[0.5, 0.2, 0.875], [4.0, 1.0, 1.1]],
+            [[0.8, 0.1, 0.875], [3.5, 0.8, 1.1]],
+        ]
+    )
+    predictions, auxiliary = model.predict_refined_batch(
+        scene,
+        receivers,
+        execution_mode="all_fine",
+        phase="warmup",
+        training_signal=True,
+    )
+    assert predictions.values.shape == (2, 2, 3)
+    assert predictions.full_values is not None
+    assert auxiliary["base_denominator"].item() == 2 * 2 * 2 * 12
+    assert auxiliary["expected_work_denominator"].item() == 2 * 2 * 2
+    assert torch.isfinite(predictions.values).all()
 
 
 def test_wind_readout_has_finite_live_geometry_and_query_gradients() -> None:
@@ -226,3 +379,45 @@ def test_linearize_rejects_reassigned_scene_before_local_ad() -> None:
 
     with pytest.raises(ValueError, match="metadata changed; rebuild"):
         model.linearize_case(prepared, receivers, torch.ones_like(prepared.scene.centers))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "entrypoint"),
+    (
+        ("mean_value", "endpoint"),
+        ("safe_std_value", "jvp"),
+        ("u_ref_and_identity", "endpoint"),
+        ("identity_only", "vjp"),
+    ),
+)
+def test_prepared_wind_request_rejects_stale_physical_normalizer(mutation: str, entrypoint: str) -> None:
+    case = _case()
+    normalizer = _normalizer()
+    model = WindFarmSharedInteractionModel(velocity_transform=normalizer, hidden=16, message=12)
+    prepared = model.prepare_case(case)
+    receivers = torch.tensor([[[0.5, 0.2, 0.875]]])
+
+    if mutation == "mean_value":
+        normalizer.mean[0] += 0.25
+    elif mutation == "safe_std_value":
+        normalizer.safe_std[0] *= 1.5
+    elif mutation == "u_ref_and_identity":
+        model.velocity_transform = replace(normalizer, u_ref_mps=12.0)
+    elif mutation == "identity_only":
+        model.velocity_transform = replace(normalizer)
+    else:
+        raise AssertionError(f"unknown test mutation {mutation!r}")
+
+    with pytest.raises(ValueError, match="velocity transform changed; rebuild"):
+        if entrypoint == "endpoint":
+            model.predict_physical_case(case, prepared, receivers)
+        elif entrypoint == "jvp":
+            model.linearize_case(
+                prepared,
+                receivers,
+                torch.ones_like(prepared.scene.centers),
+                wrt="centers",
+            )
+        else:
+            prediction = model.predict_physical_case(case, prepared, receivers.requires_grad_())
+            torch.autograd.grad(prediction.sum(), receivers)

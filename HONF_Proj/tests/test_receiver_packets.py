@@ -11,7 +11,9 @@ from honf_forward_core.interface_fields.receiver_packets import (
     ReceiverPacket,
     ReceiverPairScorer,
     apply_affine_packet_increment,
+    apply_differentiable_fixed_route,
     build_receiver_pair_features,
+    compile_receiver_request,
     deterministic_cover,
     exact_teacher_sensitivities,
     execution_source_mask,
@@ -1127,3 +1129,496 @@ def test_full_mode_rejects_inactive_or_misidentified_prepared_source_slots():
                 mode="full",
                 requested_receiver_ids=binding.receiver_ids,
             )
+
+
+def _compiled_receiver_request(operator, context, receivers, *, packets=None, roles=None, fallback_roles=()):
+    receiver_ids = ("r0", "r1", "r2", "r3")
+    binding = _binding(prepared_context=context, receiver_ids=receiver_ids)
+    action = ActionDomain("heat", "W", binding.source_ids, (0.2, 0.1, 0.0))
+    if packets is None:
+        packets = (_packet(binding, action, receiver_ids, ("s0",)),)
+    request = compile_receiver_request(
+        binding,
+        action,
+        packets,
+        list(receiver_ids),
+        operator=operator,
+        prepared_context=context,
+        receiver_roles=roles,
+        full_fallback_roles=fallback_roles,
+    )
+    return binding, action, request
+
+
+def _balanced_packet_case():
+    operator, context, receivers = _operator_and_state()
+    receiver_ids = ("r0", "r1", "r2", "r3")
+    binding = _binding(prepared_context=context, receiver_ids=receiver_ids)
+    action = ActionDomain("heat", "W", binding.source_ids, (0.2, 0.2, 0.2), require_balanced=True)
+    packet = _packet(binding, action, receiver_ids, ("s0",))
+    union = union_receiver_packets(binding, action, (packet,), receiver_ids)
+    request = compile_receiver_request(
+        binding,
+        action,
+        (packet,),
+        receiver_ids,
+        operator=operator,
+        prepared_context=context,
+    )
+    baseline = torch.zeros(receivers.shape[0], receivers.shape[1], 1)
+    return operator, context, receivers, binding, action, union, request, baseline
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_balanced_action_accepts_valid_float32_and_float64_controls(dtype):
+    (
+        _operator,
+        _context,
+        _receivers,
+        binding,
+        action,
+        _union,
+        request,
+        _baseline,
+    ) = _balanced_packet_case()
+    balanced = torch.tensor([[0.1, -0.1, 0.0]], dtype=dtype)
+    assert action.accepts(balanced, binding.source_ids)
+    assert packet_module._compiled_action_valid_rows(balanced, request).tolist() == [True]
+
+
+def test_balance_guard_is_scale_relative_and_accepts_float32_sum_others_rounding():
+    (
+        operator,
+        context,
+        receivers,
+        binding,
+        action,
+        union,
+        request,
+        baseline,
+    ) = _balanced_packet_case()
+    formed_from_sum = torch.tensor([[0.05, 0.06, 0.0]], dtype=torch.float32)
+    formed_from_sum[:, 2] = -formed_from_sum[:, :2].sum(-1)
+    assert action.accepts(formed_from_sum, binding.source_ids)
+    assert packet_module._compiled_action_valid_rows(formed_from_sum, request).tolist() == [True]
+
+    tiny_unbalanced = torch.tensor([[1.0e-6, -0.95e-6, 0.0]], dtype=torch.float32)
+    for increment in (tiny_unbalanced, tiny_unbalanced * 1000.0):
+        assert not action.accepts(increment, binding.source_ids)
+        assert packet_module._compiled_action_valid_rows(increment, request).tolist() == [False]
+
+    _value_result, value_receipt = apply_affine_packet_increment(
+        operator,
+        context,
+        receivers,
+        baseline,
+        tiny_unbalanced,
+        binding,
+        binding,
+        action,
+        union,
+        mode="packet_experimental",
+    )
+    assert not value_receipt["action_domain_valid"]
+    assert not value_receipt["used_pre_mlp_subset_gather"]
+    _compiled_result, compiled_receipt = apply_differentiable_fixed_route(
+        operator,
+        context,
+        receivers,
+        baseline,
+        tiny_unbalanced,
+        request,
+        current_binding=binding,
+        baseline_binding=binding,
+        action_domain=action,
+        mode="packet_experimental",
+    )
+    assert compiled_receipt["invalid_action_batch_rows_full_fallback"] == 1
+    assert not compiled_receipt["used_pre_mlp_subset_gather"]
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_low_precision_unbalanced_controls_force_full_access_in_both_consumers(dtype):
+    (
+        operator,
+        context,
+        receivers,
+        binding,
+        action,
+        union,
+        request,
+        baseline,
+    ) = _balanced_packet_case()
+    unbalanced = torch.tensor([[0.1, -0.095, 0.0]], dtype=dtype)
+    assert not action.accepts(unbalanced, binding.source_ids)
+    assert packet_module._compiled_action_valid_rows(unbalanced, request).tolist() == [False]
+
+    value_result, value_receipt = apply_affine_packet_increment(
+        operator,
+        context,
+        receivers,
+        baseline,
+        unbalanced,
+        binding,
+        binding,
+        action,
+        union,
+        mode="packet_experimental",
+    )
+    assert value_result.shape == baseline.shape
+    assert not value_receipt["action_domain_valid"]
+    assert not value_receipt["used_pre_mlp_subset_gather"]
+    assert value_receipt["executed_subset_receipt"]["fine_rows"] == receivers.shape[0] * receivers.shape[1] * 3
+
+    compiled_result, compiled_receipt = apply_differentiable_fixed_route(
+        operator,
+        context,
+        receivers,
+        baseline,
+        unbalanced,
+        request,
+        current_binding=binding,
+        baseline_binding=binding,
+        action_domain=action,
+        mode="packet_experimental",
+    )
+    assert compiled_result.shape == baseline.shape
+    assert compiled_receipt["invalid_action_batch_rows_full_fallback"] == 1
+    assert not compiled_receipt["used_pre_mlp_subset_gather"]
+    assert compiled_receipt["executed_subset_receipt"]["fine_rows"] == receivers.shape[0] * receivers.shape[1] * 3
+
+
+def test_compiled_request_deduplicates_overlapping_packets_and_owns_immutable_catalogs():
+    operator, context, _receivers = _operator_and_state()
+    binding = _binding(
+        prepared_context=context,
+        receiver_ids=("r0", "r1", "r2", "r3"),
+    )
+    binding = replace(binding, output_roles=("fluid", "solid"))
+    action = ActionDomain("heat", "W", binding.source_ids, (0.2, 0.1, 0.0))
+    first = _packet(binding, action, ("r0", "r1"), ("s0",), packet_id="first")
+    second = _packet(binding, action, ("r0", "r2"), ("s0", "s1"), packet_id="second")
+    receiver_ids = ["r0", "r1", "r2", "r3"]
+    request = compile_receiver_request(
+        binding,
+        action,
+        (first, second),
+        receiver_ids,
+        operator=operator,
+        prepared_context=context,
+        receiver_roles=("fluid", "fluid", "solid", "fluid"),
+        full_fallback_roles=("solid",),
+    )
+    receiver_ids.reverse()
+
+    assert request.receiver_ids == ("r0", "r1", "r2", "r3")
+    assert request.packet_ids == ("first", "second")
+    assert request.selected_source_ids == (
+        ("s0", "s1"),
+        ("s0",),
+        ("s0", "s1", "s2"),
+        ("s0", "s1", "s2"),
+    )
+    assert request.source_keep.tolist() == [
+        [True, True, False],
+        [True, False, False],
+        [True, True, True],
+        [True, True, True],
+    ]
+    assert request.fallback == (False, False, True, True)
+    assert request.fallback_reasons[2] == "unsupported_receiver_role:solid"
+    assert request.fallback_reasons[3] == "no_packet_covers_receiver"
+    assert request.role_partitions == (("fluid", (0, 1, 3)), ("solid", (2,)))
+    assert request.fallback_role_counts == (("fluid", 1), ("solid", 1))
+
+    diagnostic_mask = request.source_keep
+    diagnostic_mask.zero_()
+    assert request.source_keep.tolist()[0] == [True, True, False]
+
+
+def test_compiled_request_validates_each_packet_once_at_compile_boundary(monkeypatch):
+    operator, context, _receivers = _operator_and_state()
+    binding = _binding(prepared_context=context, receiver_ids=("r0", "r1", "r2", "r3"))
+    action = ActionDomain("heat", "W", binding.source_ids, (0.2, 0.1, 0.0))
+    packet = _packet(binding, action, binding.receiver_ids, ("s0",), packet_id="counted")
+    original = packet_module._packet_valid
+    calls = []
+
+    def counted(packet, binding, action):
+        calls.append(packet.packet_id)
+        return original(packet, binding, action)
+
+    monkeypatch.setattr(packet_module, "_packet_valid", counted)
+    compile_receiver_request(
+        binding,
+        action,
+        (packet,),
+        binding.receiver_ids,
+        operator=operator,
+        prepared_context=context,
+    )
+    assert calls == ["counted"]
+
+
+def test_fixed_route_differentiable_consumer_preserves_gradients_and_row_local_fallback():
+    operator, _unused_context, receiver_values = _operator_and_state()
+    sources = torch.randn(1, 3, 2, requires_grad=True)
+    centers = torch.tensor(
+        [[[0.1, 0.1], [0.9, 0.9], [0.5, 0.4]]],
+        requires_grad=True,
+    )
+    context = operator.prepare_context(
+        sources=sources,
+        context=torch.ones(1, 1),
+        centers=centers,
+        present=torch.ones(1, 3),
+        lengths=torch.ones(1, 2),
+        source_lengths=torch.full((1, 3), 0.05),
+        environment_tokens=torch.empty(1, 0, 3),
+        environment_coords=torch.empty(1, 0, 2),
+    )
+    receivers = receiver_values.clone().requires_grad_()
+    binding = _binding(prepared_context=context, receiver_ids=("r0", "r1", "r2", "r3"))
+    action = ActionDomain("heat", "W", binding.source_ids, (0.2, 0.1, 0.0))
+    packets = (
+        _packet(binding, action, ("r0", "r1"), ("s0",), packet_id="fluid-a"),
+        _packet(binding, action, ("r2",), ("s0", "s1"), packet_id="solid"),
+    )
+    request = compile_receiver_request(
+        binding,
+        action,
+        packets,
+        binding.receiver_ids,
+        operator=operator,
+        prepared_context=context,
+        receiver_roles=("fluid", "fluid", "solid", "fluid"),
+        full_fallback_roles=("solid",),
+    )
+    heat = torch.tensor([[0.3, 0.2, 0.0]])
+    baseline_response = operator.prepare_receivers(context, receivers)
+    exact_baseline = operator.apply_forcing(
+        baseline_response,
+        heat,
+        accumulation_dtype=torch.float64,
+    )
+    delta = torch.tensor([[0.1, -0.05, 0.0]], requires_grad=True)
+
+    result, receipt = apply_differentiable_fixed_route(
+        operator,
+        context,
+        receivers,
+        exact_baseline,
+        delta,
+        request,
+        current_binding=binding,
+        baseline_binding=binding,
+        action_domain=action,
+        mode="packet_experimental",
+    )
+    full_response = operator.prepare_receivers(context, receivers)
+    full_expected = exact_baseline + operator.apply_increment(
+        full_response,
+        delta,
+        accumulation_dtype=torch.float64,
+    )
+    torch.testing.assert_close(result[0, 2], full_expected[0, 2])
+    assert receipt["fallback_receivers"] == 2
+    assert receipt["used_pre_mlp_subset_gather"]
+    assert receipt["autograd_enabled"]
+    assert receipt["fixed_route_derivative"]
+    assert receipt["proposal_full_kernel_calls"] == 0
+    assert result.dtype == torch.float64
+
+    gradients = torch.autograd.grad(
+        result.square().sum(),
+        (receivers, delta, sources, centers),
+        allow_unused=True,
+    )
+    assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in gradients)
+    assert all(float(gradient.abs().sum()) > 0 for gradient in gradients)
+
+
+def test_fixed_route_guard_rejects_receiver_binding_mask_context_action_and_optimizer_mutation():
+    operator, context, receivers = _operator_and_state()
+    binding, action, request = _compiled_receiver_request(operator, context, receivers)
+    exact_baseline = operator.apply_forcing(
+        operator.prepare_receivers(context, receivers),
+        torch.tensor([[0.3, 0.2, 0.0]]),
+    )
+    delta = torch.tensor([[0.1, -0.05, 0.0]])
+    kwargs = {
+        "operator": operator,
+        "prepared_context": context,
+        "receivers": receivers,
+        "exact_baseline": exact_baseline,
+        "delta_control": delta,
+        "request": request,
+        "current_binding": binding,
+        "baseline_binding": binding,
+        "action_domain": action,
+    }
+
+    with pytest.raises(ValueError, match="coordinates or order"):
+        apply_differentiable_fixed_route(**(kwargs | {"receivers": receivers.flip(1)}))
+    foreign_baseline_binding = replace(binding, scene_id="same-values-new-owner")
+    with pytest.raises(ValueError, match="baseline belongs to a replaced or stale scene"):
+        apply_differentiable_fixed_route(
+            **(kwargs | {"baseline_binding": foreign_baseline_binding})
+        )
+
+    request._source_keep_active.zero_()
+    with pytest.raises(ValueError, match="active source mask was modified"):
+        apply_differentiable_fixed_route(**kwargs)
+
+    operator, context, receivers = _operator_and_state()
+    binding, action, request = _compiled_receiver_request(operator, context, receivers)
+    baseline = operator.apply_forcing(operator.prepare_receivers(context, receivers), torch.ones(1, 3))
+    kwargs = {
+        "operator": operator,
+        "prepared_context": context,
+        "receivers": receivers,
+        "exact_baseline": baseline,
+        "delta_control": delta,
+        "request": request,
+        "current_binding": binding,
+        "baseline_binding": binding,
+        "action_domain": action,
+    }
+    context.global_state.add_(0.01)
+    with pytest.raises(ValueError, match="prepared tensor ownership changed"):
+        apply_differentiable_fixed_route(**kwargs)
+
+    operator, context, receivers = _operator_and_state()
+    binding, action, request = _compiled_receiver_request(operator, context, receivers)
+    baseline = operator.apply_forcing(operator.prepare_receivers(context, receivers), torch.ones(1, 3))
+    kwargs = {
+        "operator": operator,
+        "prepared_context": context,
+        "receivers": receivers,
+        "exact_baseline": baseline,
+        "delta_control": delta,
+        "request": request,
+        "current_binding": binding,
+        "baseline_binding": binding,
+        "action_domain": action,
+    }
+    optimizer = torch.optim.SGD(operator.parameters(), lr=1e-4)
+    for parameter in operator.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    with pytest.raises(ValueError, match="model weights changed"):
+        apply_differentiable_fixed_route(**kwargs)
+
+
+def test_compiled_request_rejects_source_unit_action_config_parameter_and_receiver_mutation():
+    def assert_stale(mutate, expected_message):
+        operator, context, receivers = _operator_and_state()
+        binding, action, request = _compiled_receiver_request(operator, context, receivers)
+        baseline = operator.apply_forcing(
+            operator.prepare_receivers(context, receivers),
+            torch.ones(1, 3),
+        )
+        delta = torch.tensor([[0.05, -0.025, 0.0]])
+        mutate(binding, action, operator)
+        with pytest.raises(ValueError, match=expected_message):
+            apply_differentiable_fixed_route(
+                operator,
+                context,
+                receivers,
+                baseline,
+                delta,
+                request,
+                current_binding=binding,
+                baseline_binding=binding,
+                action_domain=action,
+            )
+
+    assert_stale(
+        lambda binding, _action, _operator: object.__setattr__(
+            binding, "source_ids", ("s1", "s0", "s2")
+        ),
+        "stale scene binding",
+    )
+    assert_stale(
+        lambda binding, _action, _operator: object.__setattr__(
+            binding,
+            "units",
+            (("control", "kW"), ("output.temperature", "K"), ("position", "m")),
+        ),
+        "stale scene binding",
+    )
+    assert_stale(
+        lambda _binding, action, _operator: object.__setattr__(action, "unit", "kW"),
+        "action role, unit, or source metadata was replaced",
+    )
+    assert_stale(
+        lambda _binding, _action, operator: operator.config.__setitem__("forcing_scale", 2.0),
+        "configuration or normalization changed",
+    )
+    assert_stale(
+        lambda _binding, _action, operator: setattr(
+            operator.near_head[0],
+            "weight",
+            torch.nn.Parameter(operator.near_head[0].weight.detach().clone()),
+        ),
+        "model weights changed",
+    )
+
+    operator, context, receivers = _operator_and_state()
+    _binding, _action, request = _compiled_receiver_request(operator, context, receivers)
+    coordinates = receivers.clone()
+    request.validate_receivers(coordinates)
+    coordinates[0, 0, 0] += 1e-3
+    with pytest.raises(ValueError, match="coordinates or order"):
+        request.validate_receivers(coordinates)
+
+
+def test_fixed_route_invalid_action_falls_back_per_batch_row_without_disabling_others():
+    operator, context_one, receiver_values = _operator_and_state()
+    context = operator.prepare_context(
+        sources=torch.randn(2, 3, 2),
+        context=torch.ones(2, 1),
+        centers=context_one.centers.expand(2, -1, -1).clone(),
+        present=torch.ones(2, 3),
+        lengths=torch.ones(2, 2),
+        source_lengths=torch.full((2, 3), 0.05),
+        environment_tokens=torch.empty(2, 0, 3),
+        environment_coords=torch.empty(2, 0, 2),
+    )
+    receivers = receiver_values.expand(2, -1, -1).clone()
+    binding = _binding(prepared_context=context, receiver_ids=("r0", "r1", "r2", "r3"))
+    action = ActionDomain("heat", "W", binding.source_ids, (0.2, 0.1, 0.0))
+    packet = _packet(binding, action, binding.receiver_ids, ("s0",))
+    request = compile_receiver_request(
+        binding,
+        action,
+        (packet,),
+        binding.receiver_ids,
+        operator=operator,
+        prepared_context=context,
+    )
+    baseline = operator.apply_forcing(
+        operator.prepare_receivers(context, receivers),
+        torch.ones(2, 3),
+    )
+    delta = torch.tensor([[0.1, -0.05, 0.0], [0.3, -0.05, 0.0]])
+    result, receipt = apply_differentiable_fixed_route(
+        operator,
+        context,
+        receivers,
+        baseline,
+        delta,
+        request,
+        current_binding=binding,
+        baseline_binding=binding,
+        action_domain=action,
+    )
+    full = operator.apply_increment(
+        operator.prepare_receivers(context, receivers),
+        delta,
+        accumulation_dtype=torch.float64,
+    )
+    torch.testing.assert_close(result[1], baseline[1] + full[1])
+    assert receipt["invalid_action_batch_rows_full_fallback"] == 1
+    assert receipt["used_pre_mlp_subset_gather"]
+    assert receipt["executed_subset_receipt"]["fine_rows"] < receipt["executed_subset_receipt"]["full_far_rows"]

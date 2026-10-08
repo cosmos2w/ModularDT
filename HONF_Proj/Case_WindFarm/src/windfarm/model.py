@@ -21,8 +21,8 @@ from honf_forward_core.interface_fields.capabilities import CAMPAIGN_ARCHITECTUR
 from honf_forward_core.model import HONFNeuralField
 from torch import nn
 
-from .normalization import VelocityNormalizer
-from .shared_interaction import WindFarmSharedInteractionModel
+from .normalization import VelocityNormalizer, VerticalProfileBaseline
+from .shared_interaction import WindFarmRefinedInteractionModel, WindFarmSharedInteractionModel
 
 INTERFACE_FIELD_ARCHITECTURES = frozenset(
     {
@@ -34,6 +34,7 @@ INTERFACE_FIELD_ARCHITECTURES = frozenset(
     }
 )
 SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE = "source_resolved_nonlinear"
+REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE = "source_resolved_nonlinear_refined"
 
 
 def build_windfarm_forward_config(payload: Mapping[str, Any]) -> UnifiedForwardConfig:
@@ -361,6 +362,7 @@ def build_windfarm_model(
     payload: Mapping[str, Any],
     *,
     velocity_transform: VelocityNormalizer | None = None,
+    background_profile: VerticalProfileBaseline | None = None,
 ) -> nn.Module:
     """Build an existing Wind family or the explicit shared-core pilot family.
 
@@ -372,26 +374,54 @@ def build_windfarm_model(
 
     resolved = copy.deepcopy(dict(payload))
     architecture = str(resolved.get("forward_architecture", "legacy_honf"))
-    if architecture != SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE:
-        return WindFarmForwardModel(
-            build_windfarm_forward_config(resolved),
+    if architecture == SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE:
+        if velocity_transform is None:
+            raise ValueError("The source-resolved nonlinear WindFarm family requires a train-only velocity transform.")
+        allowed = {"forward_architecture", "hidden", "message", "max_sources"}
+        unexpected = sorted(set(resolved) - allowed)
+        if unexpected:
+            raise ValueError(f"Unsupported source-resolved nonlinear WindFarm recipe fields: {unexpected}.")
+        return WindFarmSharedInteractionModel(
             velocity_transform=velocity_transform,
+            hidden=int(resolved.get("hidden", 64)),
+            message=int(resolved.get("message", 64)),
+            max_sources=int(resolved.get("max_sources", 30)),
         )
-    if velocity_transform is None:
-        raise ValueError("The source-resolved nonlinear WindFarm family requires a train-only velocity transform.")
-    allowed = {"forward_architecture", "hidden", "message", "max_sources"}
-    unexpected = sorted(set(resolved) - allowed)
-    if unexpected:
-        raise ValueError(f"Unsupported source-resolved nonlinear WindFarm recipe fields: {unexpected}.")
-    return WindFarmSharedInteractionModel(
+    if architecture == REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE:
+        if velocity_transform is None or background_profile is None:
+            raise ValueError(
+                "The refined WindFarm family requires its fixed TRAIN velocity transform and height profile."
+            )
+        allowed = {
+            "forward_architecture",
+            "hidden",
+            "message",
+            "max_sources",
+            "base_width",
+            "router_hidden",
+            "residual_scale",
+        }
+        unexpected = sorted(set(resolved) - allowed)
+        if unexpected:
+            raise ValueError(f"Unsupported refined nonlinear WindFarm recipe fields: {unexpected}.")
+        return WindFarmRefinedInteractionModel(
+            velocity_transform=velocity_transform,
+            background_profile=background_profile,
+            hidden=int(resolved.get("hidden", 64)),
+            message=int(resolved.get("message", 64)),
+            max_sources=int(resolved.get("max_sources", 30)),
+            base_width=int(resolved.get("base_width", 16)),
+            router_hidden=int(resolved.get("router_hidden", 32)),
+            residual_scale=float(resolved.get("residual_scale", 1.0)),
+        )
+    return WindFarmForwardModel(
+        build_windfarm_forward_config(resolved),
         velocity_transform=velocity_transform,
-        hidden=int(resolved.get("hidden", 64)),
-        message=int(resolved.get("message", 64)),
-        max_sources=int(resolved.get("max_sources", 30)),
     )
 
 
 __all__ = [
+    "REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE",
     "SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE",
     "PreparedWindFarmCase",
     "WindFarmForwardModel",

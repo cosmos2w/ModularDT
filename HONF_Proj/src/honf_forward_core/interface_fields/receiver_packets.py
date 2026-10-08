@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -197,6 +198,27 @@ def validate_bound_receiver_coordinates(
     return perf_counter() - started
 
 
+def _balance_roundoff_epsilon(dtype: torch.dtype) -> float:
+    """Keep inferred balance roundoff from growing at low precision.
+
+    The packet omission bound assumes the declared action is balanced. A
+    half/bfloat16 epsilon is therefore not a safe way to excuse a larger net
+    action. Use at most float32 roundoff, while retaining the tighter float64
+    roundoff when supplied.
+    """
+    epsilon = min(torch.finfo(dtype).eps, torch.finfo(torch.float32).eps)
+    return float(epsilon) * 64.0
+
+
+def _balanced_action_rows(increment: torch.Tensor, *, declared_absolute_tolerance: float = 0.0) -> torch.Tensor:
+    """Validate balance relative to each action's L1 scale, without a unit floor."""
+    values = increment.to(torch.float64)
+    l1_scale = values.abs().sum(-1).clamp_min(torch.finfo(increment.dtype).tiny)
+    tolerance = _balance_roundoff_epsilon(increment.dtype) * l1_scale
+    tolerance = tolerance + max(float(declared_absolute_tolerance), 0.0)
+    return values.sum(-1).abs() <= tolerance
+
+
 @dataclass(frozen=True)
 class ActionDomain:
     """A TRAIN-qualified componentwise action box in physical units."""
@@ -226,6 +248,7 @@ class ActionDomain:
         return torch.tensor(self.radii, device=device, dtype=dtype)
 
     def accepts(self, increment: torch.Tensor, source_ids: Sequence[str], *, tolerance: float = 0.0) -> bool:
+        """Check source-aligned controls; ``tolerance`` is absolute slack."""
         ids = tuple(str(value) for value in source_ids)
         if ids != self.source_ids or increment.shape[-1] != len(ids) or not bool(torch.isfinite(increment).all()):
             return False
@@ -233,9 +256,7 @@ class ActionDomain:
         if bool((increment.abs() > radii + tolerance).any()):
             return False
         if self.require_balanced:
-            epsilon = max(tolerance, torch.finfo(increment.dtype).eps * 64)
-            if bool((increment.sum(-1).abs() > epsilon * increment.abs().sum(-1).clamp_min(1)).any()):
-                return False
+            return bool(_balanced_action_rows(increment, declared_absolute_tolerance=tolerance).all())
         return True
 
 
@@ -529,6 +550,480 @@ def union_receiver_packets(
         fallback=tuple(fallback),
         reasons=tuple(reasons),
         selected_source_ids=tuple(selected),
+    )
+
+
+def _tensor_owner_signature(value: torch.Tensor) -> tuple:
+    return (
+        id(value),
+        value.data_ptr(),
+        int(value._version),
+        tuple(value.shape),
+        str(value.dtype),
+        str(value.device),
+    )
+
+
+def _prepared_tensor_owner_signature(prepared_context) -> tuple:
+    names = (
+        "source_states",
+        "environment_states",
+        "global_state",
+        "centers",
+        "source_lengths",
+        "present",
+        "source_measure",
+        "environment_coords",
+        "environment_present",
+        "environment_measure",
+        "lengths",
+        "source_ids",
+    )
+    values = tuple((name, getattr(prepared_context, name, None)) for name in names)
+    if any(not torch.is_tensor(value) for _name, value in values):
+        raise ValueError("Prepared context is missing a tensor required by the compiled affine request")
+    return tuple((name, _tensor_owner_signature(value)) for name, value in values)
+
+
+def _module_tensor_owner_signature(module: nn.Module) -> tuple:
+    tensors = []
+    tensors.extend(("parameter", name, value) for name, value in module.named_parameters())
+    tensors.extend(("buffer", name, value) for name, value in module.named_buffers())
+    return tuple((kind, name, _tensor_owner_signature(value)) for kind, name, value in tensors)
+
+
+def _module_buffer_owner_signature(module: nn.Module) -> tuple:
+    return tuple(
+        (name, _tensor_owner_signature(value))
+        for name, value in module.named_buffers()
+    )
+
+
+def _operator_contract_signature(operator) -> tuple:
+    names = (
+        "mode",
+        "query_width",
+        "spatial_dim",
+        "output_width",
+        "forcing_scale",
+        "zero_offset",
+        "background_mode",
+        "training",
+    )
+    config = getattr(operator, "config", None)
+    config_signature = tuple(sorted(config.items())) if isinstance(config, dict) else None
+    return tuple((name, getattr(operator, name, None)) for name in names), id(config), config_signature
+
+
+def _binding_metadata_signature(binding: InteractionBinding) -> tuple:
+    names = (
+        "dataset_id",
+        "scene_id",
+        "geometry_fingerprint",
+        "context_fingerprint",
+        "source_ids",
+        "source_slots",
+        "prepared_source_ids",
+        "receiver_ids",
+        "receiver_coordinates",
+        "environment_context_ids",
+        "output_roles",
+        "control_roles",
+        "units",
+        "capability",
+        "ancestry",
+    )
+    return tuple((name, id(getattr(binding, name))) for name in names)
+
+
+@dataclass(frozen=True)
+class CompiledReceiverRequest:
+    """Opaque, immutable receiver/source route compiled at the request boundary.
+
+    The public ID catalogs are frozen tuples. Tensor-valued route state remains
+    private; diagnostic accessors return copies so callers cannot silently
+    change the executed route. Compile again when scene, operator, action,
+    receiver order or role metadata changes.
+    """
+
+    receiver_ids: tuple[str, ...]
+    source_ids: tuple[str, ...]
+    receiver_roles: tuple[str, ...]
+    selected_source_ids: tuple[tuple[str, ...], ...]
+    fallback: tuple[bool, ...]
+    fallback_reasons: tuple[str, ...]
+    binding_fingerprint: str
+    action_domain_fingerprint: str
+    packet_ids: tuple[str, ...]
+    _binding_owner: InteractionBinding = field(repr=False, compare=False)
+    _action_domain_owner: ActionDomain = field(repr=False, compare=False)
+    _operator_owner: object = field(repr=False, compare=False)
+    _prepared_context_owner: object = field(repr=False, compare=False)
+    _source_keep_active: torch.Tensor = field(repr=False, compare=False)
+    _source_keep_native: torch.Tensor = field(repr=False, compare=False)
+    _fallback_mask: torch.Tensor = field(repr=False, compare=False)
+    _source_slot_indices: torch.Tensor = field(repr=False, compare=False)
+    _receiver_catalog_indices: torch.Tensor = field(repr=False, compare=False)
+    _receiver_catalog_index_tuple: tuple[int, ...] = field(repr=False, compare=False)
+    _receiver_coordinates: torch.Tensor = field(repr=False, compare=False)
+    _action_radii: torch.Tensor = field(repr=False, compare=False)
+    _role_row_catalog: tuple[tuple[str, tuple[int, ...]], ...] = field(repr=False, compare=False)
+    _fallback_role_counts: tuple[tuple[str, int], ...] = field(repr=False, compare=False)
+    _has_active_omissions: bool = field(repr=False, compare=False)
+    _selected_pair_count: int = field(repr=False, compare=False)
+    _fallback_receiver_count: int = field(repr=False, compare=False)
+    _prepared_owner_signature: tuple = field(init=False, repr=False, compare=False)
+    _module_owner_signature: tuple = field(init=False, repr=False, compare=False)
+    _module_buffer_signature: tuple = field(init=False, repr=False, compare=False)
+    _context_tracks_operator_parameters: bool = field(init=False, repr=False, compare=False)
+    _operator_signature: tuple = field(init=False, repr=False, compare=False)
+    _tensor_signatures: tuple = field(init=False, repr=False, compare=False)
+    _prepared_geometry_fingerprint: str = field(init=False, repr=False, compare=False)
+    _prepared_context_fingerprint: str = field(init=False, repr=False, compare=False)
+    _binding_signature: tuple = field(init=False, repr=False, compare=False)
+    _action_signature: tuple = field(init=False, repr=False, compare=False)
+    _validated_receiver_ref: weakref.ReferenceType[torch.Tensor] | None = field(
+        init=False, repr=False, compare=False, default=None
+    )
+    _validated_receiver_signature: tuple | None = field(init=False, repr=False, compare=False, default=None)
+
+    def __post_init__(self) -> None:
+        if not self.receiver_ids or not self.source_ids:
+            raise ValueError("Compiled requests require nonempty receiver and source catalogs")
+        if not (
+            len(self.receiver_ids)
+            == len(self.receiver_roles)
+            == len(self.selected_source_ids)
+            == len(self.fallback)
+            == len(self.fallback_reasons)
+        ):
+            raise ValueError("Compiled receiver metadata must align in the original receiver order")
+        if self.binding_fingerprint != self._binding_owner.fingerprint:
+            raise ValueError("Compiled request binding fingerprint is stale")
+        if self.action_domain_fingerprint != self._action_domain_owner.fingerprint:
+            raise ValueError("Compiled request action fingerprint is stale")
+        prepared_geometry, prepared_context = prepared_context_fingerprints(self._prepared_context_owner)
+        if (
+            prepared_geometry != self._binding_owner.geometry_fingerprint
+            or prepared_context != self._binding_owner.context_fingerprint
+        ):
+            raise ValueError("Compiled request scene differs from the prepared context")
+        object.__setattr__(self, "_prepared_geometry_fingerprint", prepared_geometry)
+        object.__setattr__(self, "_prepared_context_fingerprint", prepared_context)
+        object.__setattr__(self, "_prepared_owner_signature", _prepared_tensor_owner_signature(self._prepared_context_owner))
+        object.__setattr__(self, "_module_owner_signature", _module_tensor_owner_signature(self._operator_owner))
+        object.__setattr__(self, "_module_buffer_signature", _module_buffer_owner_signature(self._operator_owner))
+        model_reference = getattr(self._prepared_context_owner, "model_reference", None)
+        object.__setattr__(
+            self,
+            "_context_tracks_operator_parameters",
+            callable(model_reference) and model_reference() is self._operator_owner,
+        )
+        object.__setattr__(self, "_operator_signature", _operator_contract_signature(self._operator_owner))
+        object.__setattr__(self, "_binding_signature", _binding_metadata_signature(self._binding_owner))
+        action_owner = self._action_domain_owner
+        object.__setattr__(
+            self,
+            "_action_signature",
+            (
+                id(action_owner.control_role),
+                id(action_owner.unit),
+                id(action_owner.source_ids),
+                id(action_owner.radii),
+                action_owner.require_balanced,
+            ),
+        )
+        tracked = (
+            ("active source mask", self._source_keep_active),
+            ("native source mask", self._source_keep_native),
+            ("fallback mask", self._fallback_mask),
+            ("source slot map", self._source_slot_indices),
+            ("receiver catalog map", self._receiver_catalog_indices),
+            ("receiver coordinate catalog", self._receiver_coordinates),
+            ("action radii", self._action_radii),
+        )
+        object.__setattr__(
+            self,
+            "_tensor_signatures",
+            tuple((name, value, _tensor_owner_signature(value)) for name, value in tracked),
+        )
+
+    @property
+    def source_keep(self) -> torch.Tensor:
+        """Return a diagnostic copy of the active-source mask."""
+        return self._source_keep_active.clone()
+
+    @property
+    def receiver_catalog_indices(self) -> tuple[int, ...]:
+        return self._receiver_catalog_index_tuple
+
+    @property
+    def source_slot_indices(self) -> tuple[int, ...]:
+        return self._binding_owner.source_slots
+
+    @property
+    def role_partitions(self) -> tuple[tuple[str, tuple[int, ...]], ...]:
+        return self._role_row_catalog
+
+    @property
+    def fallback_role_counts(self) -> tuple[tuple[str, int], ...]:
+        return self._fallback_role_counts
+
+    @property
+    def fallback_receivers(self) -> int:
+        return self._fallback_receiver_count
+
+    @property
+    def has_active_omissions(self) -> bool:
+        return self._has_active_omissions
+
+    def assert_fresh(
+        self,
+        *,
+        operator,
+        prepared_context,
+        current_binding: InteractionBinding,
+        action_domain: ActionDomain,
+        baseline_binding: InteractionBinding,
+    ) -> None:
+        """Check fixed scene/model ownership using bounded identities/versions."""
+        if (
+            current_binding is not self._binding_owner
+            or current_binding.fingerprint != self.binding_fingerprint
+            or _binding_metadata_signature(current_binding) != self._binding_signature
+        ):
+            raise ValueError("Compiled request belongs to a replaced or stale scene binding")
+        if baseline_binding is not self._binding_owner or baseline_binding.fingerprint != self.binding_fingerprint:
+            raise ValueError("Exact baseline belongs to a replaced or stale scene binding")
+        if action_domain is not self._action_domain_owner or (
+            id(action_domain.control_role),
+            id(action_domain.unit),
+            id(action_domain.source_ids),
+            id(action_domain.radii),
+            action_domain.require_balanced,
+        ) != self._action_signature:
+            raise ValueError("Compiled request action role, unit, or source metadata was replaced")
+        if operator is not self._operator_owner or prepared_context is not self._prepared_context_owner:
+            raise ValueError("Compiled request operator or prepared context was replaced")
+        if _operator_contract_signature(operator) != self._operator_signature:
+            raise ValueError("Compiled request operator configuration or normalization changed")
+        if self._context_tracks_operator_parameters:
+            model_reference = getattr(prepared_context, "model_reference", None)
+            if not callable(model_reference) or model_reference() is not operator:
+                raise ValueError("Compiled request prepared parameter owner was replaced")
+            if _module_buffer_owner_signature(operator) != self._module_buffer_signature:
+                raise ValueError("Compiled request operator buffers changed; rebuild this request")
+        elif _module_tensor_owner_signature(operator) != self._module_owner_signature:
+            raise ValueError("Compiled request operator parameters or buffers changed; rebuild this request")
+        if _prepared_tensor_owner_signature(prepared_context) != self._prepared_owner_signature:
+            raise ValueError("Compiled request prepared tensor ownership changed; rebuild this request")
+        for name, value, signature in self._tensor_signatures:
+            if _tensor_owner_signature(value) != signature:
+                raise ValueError(f"Compiled request {name} was modified after binding")
+        if hasattr(operator, "assert_owned"):
+            operator.assert_owned(prepared_context)
+        elif hasattr(prepared_context, "assert_fresh"):
+            prepared_context.assert_fresh()
+        geometry, context = prepared_context_fingerprints(prepared_context)
+        if geometry != self._prepared_geometry_fingerprint or context != self._prepared_context_fingerprint:
+            raise ValueError("Compiled request prepared scene tensors no longer match their bound fingerprints")
+
+    def validate_receivers(self, receivers: torch.Tensor) -> None:
+        if (
+            receivers.ndim != 3
+            or receivers.shape[1] != len(self.receiver_ids)
+            or receivers.shape[2] != self._receiver_coordinates.shape[-1]
+            or receivers.device != self._receiver_coordinates.device
+            or receivers.dtype != self._receiver_coordinates.dtype
+        ):
+            raise ValueError("Receiver tensor shape/order/device differs from the compiled request")
+        receiver_signature = _tensor_owner_signature(receivers)
+        previous_receiver = self._validated_receiver_ref() if self._validated_receiver_ref is not None else None
+        if receivers is previous_receiver and receiver_signature == self._validated_receiver_signature:
+            return
+        expected = self._receiver_coordinates.unsqueeze(0).expand(receivers.shape[0], -1, -1)
+        if not bool(torch.isfinite(receivers).all()) or not torch.equal(receivers.detach(), expected):
+            raise ValueError("Receiver coordinates or order differ from the compiled ID-coordinate catalog")
+        object.__setattr__(self, "_validated_receiver_ref", weakref.ref(receivers))
+        object.__setattr__(self, "_validated_receiver_signature", receiver_signature)
+
+
+def compile_receiver_request(
+    binding: InteractionBinding,
+    action_domain: ActionDomain,
+    packets: Sequence[ReceiverPacket],
+    receiver_ids: Sequence[str],
+    *,
+    operator,
+    prepared_context,
+    receiver_roles: Sequence[str] | None = None,
+    full_fallback_roles: Sequence[str] = (),
+    device=None,
+) -> CompiledReceiverRequest:
+    """Compile immutable IDs, tensor row maps and row-local full fallbacks once.
+
+    This is the efficient request boundary for repeated tensor consumers. It
+    leaves the audited `union_receiver_packets` value API intact. All packet
+    identity and capability checks happen here. ID/role inputs are copied into
+    immutable tuples, so later caller-list edits have no effect; compile again
+    to request a different order or role assignment. No full-catalog
+    reconstruction or source hashing is required in subsequent reads.
+    """
+    requested = _ids(receiver_ids, "compiled receiver_ids")
+    source_order = binding.source_ids
+    if not _action_matches_binding(action_domain, binding):
+        raise ValueError("Compiled request action role, unit, or source order differs from its scene binding")
+    if binding.capability != "affine_scalar_increment":
+        raise ValueError("The fixed-route affine request requires affine_scalar_increment capability")
+    if getattr(operator, "mode", None) != "direct" or int(getattr(operator, "query_width", 0)) != 0:
+        raise ValueError("Compiled affine receiver requests require a direct, geometry-only source readout")
+    if not hasattr(operator, "prepare_receivers_subset") or not hasattr(operator, "apply_increment"):
+        raise ValueError("Compiled affine receiver requests require subset preparation and increment application")
+    if hasattr(operator, "assert_owned"):
+        operator.assert_owned(prepared_context)
+    elif hasattr(prepared_context, "assert_fresh"):
+        prepared_context.assert_fresh()
+    _validate_prepared_source_binding(binding, prepared_context)
+    geometry_fingerprint, context_fingerprint = prepared_context_fingerprints(prepared_context)
+    if (
+        geometry_fingerprint != binding.geometry_fingerprint
+        or context_fingerprint != binding.context_fingerprint
+    ):
+        raise ValueError("Prepared context differs from the binding used to compile the request")
+
+    centers = getattr(prepared_context, "centers", None)
+    if not torch.is_tensor(centers):
+        raise ValueError("Prepared context must expose native source slots")
+    request_device = centers.device if device is None else torch.device(device)
+    if request_device != centers.device:
+        raise ValueError("Compile the request on the prepared context device; cross-device route copies are unsupported")
+    source_capacity = int(centers.shape[1])
+    if any(slot >= source_capacity for slot in binding.source_slots):
+        raise ValueError("Bound source slot exceeds the prepared native source capacity")
+
+    receiver_catalog = {value: index for index, value in enumerate(binding.receiver_ids)}
+    receiver_positions = [receiver_catalog.get(value, -1) for value in requested]
+    if any(value < 0 for value in receiver_positions):
+        raise ValueError("Compiled request includes a receiver outside the bound physical catalog")
+    source_columns = {value: index for index, value in enumerate(source_order)}
+    if receiver_roles is None:
+        roles = (binding.output_roles[0],) * len(requested)
+    else:
+        roles = tuple(str(value) for value in receiver_roles)
+        if len(roles) != len(requested) or any(not value for value in roles):
+            raise ValueError("Receiver roles must be explicit, nonempty, and aligned with the requested order")
+    fallback_roles = _ids(full_fallback_roles, "full_fallback_roles", allow_empty=True)
+    fallback_role_set = set(fallback_roles)
+
+    selected_by_row: list[set[str]] = [set() for _ in requested]
+    covered = [False] * len(requested)
+    invalid_reasons: list[str | None] = [None] * len(requested)
+    row_by_id = {value: index for index, value in enumerate(requested)}
+    row_pairs: list[int] = []
+    source_pairs: list[int] = []
+    packet_tuple = tuple(packets)
+    for packet in packet_tuple:
+        invalid = _packet_valid(packet, binding, action_domain)
+        for receiver_id in packet.receiver_ids:
+            row = row_by_id.get(receiver_id)
+            if row is None:
+                continue
+            covered[row] = True
+            if invalid is not None:
+                if invalid_reasons[row] is None:
+                    invalid_reasons[row] = invalid
+                continue
+            for source_id in packet.source_ids:
+                source_column = source_columns.get(source_id)
+                if source_column is None:
+                    invalid_reasons[row] = "unknown_physical_source"
+                    continue
+                selected_by_row[row].add(source_id)
+                row_pairs.append(row)
+                source_pairs.append(source_column)
+
+    fallback_reasons: list[str] = []
+    fallback = []
+    for row, role in enumerate(roles):
+        reason = invalid_reasons[row]
+        if role in fallback_role_set:
+            reason = f"unsupported_receiver_role:{role}"
+        elif not covered[row]:
+            reason = "no_packet_covers_receiver"
+        is_fallback = reason is not None
+        fallback.append(is_fallback)
+        fallback_reasons.append(reason or "compiled_packet_route")
+        if is_fallback:
+            selected_by_row[row] = set(source_order)
+
+    source_keep_active = torch.zeros(
+        len(requested), len(source_order), dtype=torch.bool, device=request_device
+    )
+    if row_pairs:
+        row_index_tensor = torch.tensor(row_pairs, dtype=torch.long, device=request_device)
+        source_index_tensor = torch.tensor(source_pairs, dtype=torch.long, device=request_device)
+        source_keep_active[row_index_tensor, source_index_tensor] = True
+    fallback_values = torch.tensor(fallback, dtype=torch.bool, device=request_device)
+    fallback_indices = torch.tensor(
+        [index for index, is_fallback in enumerate(fallback) if is_fallback],
+        dtype=torch.long,
+        device=request_device,
+    )
+    if fallback_indices.numel():
+        source_keep_active[fallback_indices] = True
+    source_slots = torch.tensor(binding.source_slots, dtype=torch.long, device=request_device)
+    source_keep_native = torch.zeros(
+        len(requested), source_capacity, dtype=torch.bool, device=request_device
+    )
+    source_keep_native.index_copy_(1, source_slots, source_keep_active)
+    receiver_catalog_indices = torch.tensor(receiver_positions, dtype=torch.long, device=request_device)
+    receiver_catalog_tensor = torch.tensor(
+        binding.receiver_coordinates,
+        dtype=centers.dtype,
+        device=request_device,
+    )
+    receiver_coordinates = receiver_catalog_tensor.index_select(0, receiver_catalog_indices).clone()
+    action_radii = torch.tensor(action_domain.radii, dtype=torch.float64, device=request_device)
+    role_order = tuple(dict.fromkeys(roles))
+    role_row_catalog = tuple(
+        (role, tuple(index for index, value in enumerate(roles) if value == role))
+        for role in role_order
+    )
+    fallback_role_counts = tuple(
+        (role, sum(fallback[index] for index in rows))
+        for role, rows in role_row_catalog
+    )
+    selected_source_ids = tuple(
+        tuple(source_id for source_id in source_order if source_id in selected_by_row[index])
+        for index in range(len(requested))
+    )
+    return CompiledReceiverRequest(
+        receiver_ids=requested,
+        source_ids=source_order,
+        receiver_roles=roles,
+        selected_source_ids=selected_source_ids,
+        fallback=tuple(fallback),
+        fallback_reasons=tuple(fallback_reasons),
+        binding_fingerprint=binding.fingerprint,
+        action_domain_fingerprint=action_domain.fingerprint,
+        packet_ids=tuple(packet.packet_id for packet in packet_tuple),
+        _binding_owner=binding,
+        _action_domain_owner=action_domain,
+        _operator_owner=operator,
+        _prepared_context_owner=prepared_context,
+        _source_keep_active=source_keep_active,
+        _source_keep_native=source_keep_native,
+        _fallback_mask=fallback_values,
+        _source_slot_indices=source_slots,
+        _receiver_catalog_indices=receiver_catalog_indices,
+        _receiver_catalog_index_tuple=tuple(receiver_positions),
+        _receiver_coordinates=receiver_coordinates,
+        _action_radii=action_radii,
+        _role_row_catalog=role_row_catalog,
+        _fallback_role_counts=fallback_role_counts,
+        _has_active_omissions=not bool(source_keep_active.all()),
+        _selected_pair_count=sum(len(ids) for ids in selected_source_ids),
+        _fallback_receiver_count=sum(fallback),
     )
 
 
@@ -1273,5 +1768,169 @@ def apply_affine_packet_increment(
         "executed_source_rows": int(getattr(response, "execution_receipt", {}).get("fine_rows", 0)),
         "full_far_rows": int(getattr(response, "execution_receipt", {}).get("full_far_rows", 0)),
         "output_capability": binding.capability,
+    }
+    return exact_baseline + increment, receipt
+
+
+def _compiled_action_valid_rows(delta_control: torch.Tensor, request: CompiledReceiverRequest) -> torch.Tensor:
+    if delta_control.ndim != 2 or delta_control.shape[-1] != len(request.source_ids):
+        raise ValueError("Differentiable affine increment must align with the compiled physical source order")
+    if not delta_control.is_floating_point() or not bool(torch.isfinite(delta_control).all()):
+        raise ValueError("Differentiable affine increment must contain finite floating-point controls")
+    if delta_control.device != request._action_radii.device:
+        raise ValueError("Differentiable affine control device differs from the compiled action domain")
+    radii = request._action_radii.to(dtype=delta_control.dtype)
+    valid = (delta_control.abs() <= radii).all(dim=-1)
+    if request._action_domain_owner.require_balanced:
+        valid = valid & _balanced_action_rows(delta_control)
+    return valid
+
+
+def apply_differentiable_fixed_route(
+    operator,
+    prepared_context,
+    receivers: torch.Tensor,
+    exact_baseline: torch.Tensor,
+    delta_control: torch.Tensor,
+    request: CompiledReceiverRequest,
+    *,
+    current_binding: InteractionBinding,
+    baseline_binding: InteractionBinding,
+    action_domain: ActionDomain,
+    mode: Literal["full", "packet_advisory", "packet_experimental"] = "packet_experimental",
+    accumulation_dtype=torch.float64,
+) -> tuple[torch.Tensor, dict[str, object]]:
+    """Apply a live fixed route without disabling gradients through physical tensors.
+
+    IDs, receiver order, roles, source-slot maps, packet overlap and fallback
+    rows are compiled by ``compile_receiver_request``. The public receiver
+    tensor and control increment remain live in autograd. Invalid action rows
+    receive full access individually; unsupported receiver roles are already
+    full in the compiled route, so valid rows can still use subset gathering.
+    This is a fixed-route derivative, not a derivative through discrete packet
+    membership changes.
+    """
+    if mode not in PACKET_MODES:
+        raise ValueError(f"Unknown receiver-packet mode {mode!r}")
+    request.assert_fresh(
+        operator=operator,
+        prepared_context=prepared_context,
+        current_binding=current_binding,
+        action_domain=action_domain,
+        baseline_binding=baseline_binding,
+    )
+    request.validate_receivers(receivers)
+    if getattr(operator, "mode", None) != "direct":
+        raise ValueError("Fixed-route differentiable packet reads support direct source readouts only")
+    if int(getattr(operator, "query_width", 0)) != 0:
+        raise ValueError("Fixed-route differentiable packet reads require geometry-only receivers")
+    if receivers.shape[0] != prepared_context.centers.shape[0]:
+        raise ValueError("Receiver batch size differs from the compiled prepared context")
+    if delta_control.shape[0] != receivers.shape[0]:
+        raise ValueError("Control increment batch size differs from the receiver batch")
+    if exact_baseline.ndim != 3 or exact_baseline.shape[:2] != receivers.shape[:2]:
+        raise ValueError("Exact baseline must align with the compiled receiver rows")
+    if exact_baseline.device != receivers.device or not exact_baseline.is_floating_point():
+        raise ValueError("Exact baseline must be floating-point and share the receiver device")
+    if not bool(torch.isfinite(exact_baseline).all()):
+        raise ValueError("Exact baseline must be finite")
+
+    action_valid = _compiled_action_valid_rows(delta_control, request)
+    invalid_action_count = int((~action_valid).sum().item())
+    batch, query_count, _ = receivers.shape
+    native_source_count = int(prepared_context.centers.shape[1])
+    all_source_rows = torch.ones(
+        batch,
+        query_count,
+        native_source_count,
+        dtype=torch.bool,
+        device=receivers.device,
+    )
+    use_subset = (
+        mode == "packet_experimental"
+        and request.has_active_omissions
+        and invalid_action_count < batch
+    )
+    if mode != "packet_experimental" or not use_subset:
+        source_keep = all_source_rows
+    else:
+        compiled_rows = request._source_keep_native.unsqueeze(0).expand(batch, -1, -1)
+        source_keep = torch.where(action_valid[:, None, None], compiled_rows, all_source_rows)
+
+    if use_subset:
+        response = operator.prepare_receivers_subset(
+            prepared_context,
+            receivers,
+            source_keep=source_keep,
+        )
+    else:
+        response = operator.prepare_receivers(prepared_context, receivers)
+        full_far_rows = batch * query_count * native_source_count
+        response.execution_receipt = {
+            "mode": "full_access"
+            if mode == "full"
+            else (
+                "packet_experimental_full_fallback"
+                if mode == "packet_experimental"
+                else "packet_advisory_full_access"
+            ),
+            "fine_rows": full_far_rows,
+            "near_rows": int((response.near_weight > 0).sum().item()),
+            "full_far_rows": full_far_rows,
+            "context_ancestry": "full source/source and source/environment context",
+            "validity": "fixed-route differentiable affine increment; full source access",
+        }
+
+    padded_delta = delta_control.new_zeros(batch, native_source_count).index_copy(
+        1,
+        request._source_slot_indices,
+        delta_control,
+    )
+    increment = operator.apply_increment(
+        response,
+        padded_delta,
+        accumulation_dtype=accumulation_dtype,
+    )
+    if exact_baseline.shape != increment.shape:
+        raise ValueError("Exact baseline and differentiable affine increment must have identical shapes")
+    if exact_baseline.device != increment.device:
+        raise ValueError("Exact baseline and differentiable affine increment must share a device")
+
+    static_selected_pairs = request._selected_pair_count
+    if mode == "full" or mode == "packet_advisory":
+        selected_active_pairs = batch * query_count * len(request.source_ids)
+        fallback_receivers = 0 if mode == "full" else batch * request.fallback_receivers
+    else:
+        selected_active_pairs = batch * static_selected_pairs + invalid_action_count * (
+            query_count * len(request.source_ids) - static_selected_pairs
+        )
+        fallback_receivers = batch * request.fallback_receivers + invalid_action_count * (
+            query_count - request.fallback_receivers
+        )
+    executed = getattr(response, "execution_receipt", {})
+    receipt = {
+        "mode": mode,
+        "packet_proposal_used": mode != "full",
+        "packet_mask_executed": mode == "packet_experimental",
+        "used_pre_mlp_subset_gather": use_subset,
+        "fallback_receivers": fallback_receivers,
+        "fallback_reasons": request.fallback_reasons,
+        "fallback_by_role": dict(request.fallback_role_counts),
+        "invalid_action_batch_rows_full_fallback": invalid_action_count,
+        "action_domain_valid": invalid_action_count == 0,
+        "receiver_order": request.receiver_ids,
+        "source_ids": request.source_ids,
+        "source_slots": request.source_slot_indices,
+        "proposed_active_source_pair_rows": batch * static_selected_pairs,
+        "selected_active_source_pair_rows": selected_active_pairs,
+        "executed_source_rows": int(executed.get("fine_rows", 0)),
+        "full_far_rows": int(executed.get("full_far_rows", 0)),
+        "executed_subset_receipt": executed,
+        "scene_binding": request.binding_fingerprint,
+        "action_domain_binding": request.action_domain_fingerprint,
+        "increment_accumulation_dtype": str(accumulation_dtype),
+        "autograd_enabled": torch.is_grad_enabled(),
+        "fixed_route_derivative": True,
+        "proposal_full_kernel_calls": 0,
     }
     return exact_baseline + increment, receipt

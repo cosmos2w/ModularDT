@@ -21,10 +21,11 @@ from honf_forward_core.interface_fields.interaction_core import (
     NonlinearFieldReadout,
     PreparedResponseContext,
 )
+from honf_forward_core.interface_fields.interaction_refinement import RefinedNonlinearFieldReadout
 from torch import nn
 
 from .geometry import POSITIONAL_SCALE_D
-from .normalization import VelocityNormalizer
+from .normalization import VelocityNormalizer, VerticalProfileBaseline
 
 WIND_INTERACTION_DEPENDENCY = DependencySpec(
     dataset="WindFarm",
@@ -59,6 +60,8 @@ class PreparedWindInteraction:
     layout_index: int
     wind_direction_deg: float
     input_sha256: str
+    velocity_transform_signature: tuple[Any, ...]
+    background_profile_signature: tuple[Any, ...] | None
     ownership_signature: tuple[Any, ...]
 
 
@@ -164,6 +167,62 @@ def _context_ownership_signature(context: PreparedResponseContext) -> tuple[Any,
     return (id(context), fields, dynamic)
 
 
+def _velocity_transform_signature(transform: VelocityNormalizer) -> tuple[Any, ...]:
+    """Bind prepared outputs and derivatives to the exact physical transform.
+
+    ``VelocityNormalizer`` is a frozen dataclass, but its NumPy arrays remain
+    mutable. Capture both object/array identity and their bytes so that an
+    in-place edit, array replacement, or numerically equivalent replacement
+    cannot silently change physical endpoints or local derivatives.
+    """
+
+    arrays = []
+    for name in ("mean", "std", "safe_std"):
+        value = np.asarray(getattr(transform, name))
+        contiguous = np.ascontiguousarray(value)
+        arrays.append(
+            (
+                name,
+                id(value),
+                contiguous.dtype.str,
+                tuple(contiguous.shape),
+                hashlib.sha256(memoryview(contiguous).cast("B")).hexdigest(),
+            )
+        )
+    scalars = (
+        float(transform.u_ref_mps).hex(),
+        int(transform.sample_count_per_row),
+        int(transform.source_rows),
+        int(transform.seed),
+        float(transform.std_floor).hex(),
+    )
+    return (id(transform), tuple(arrays), scalars)
+
+
+def _background_profile_signature(profile: VerticalProfileBaseline | None) -> tuple[Any, ...] | None:
+    if profile is None:
+        return None
+    arrays = []
+    for name in ("bin_centers_D", "values_mps", "counts"):
+        value = np.asarray(getattr(profile, name))
+        contiguous = np.ascontiguousarray(value)
+        arrays.append(
+            (
+                name,
+                id(value),
+                contiguous.dtype.str,
+                tuple(contiguous.shape),
+                hashlib.sha256(memoryview(contiguous).cast("B")).hexdigest(),
+            )
+        )
+    return (
+        id(profile),
+        tuple(arrays),
+        float(profile.z_min_D).hex(),
+        float(profile.z_max_D).hex(),
+    )
+
+
 def _prepared_ownership_signature(
     model: WindFarmSharedInteractionModel,
     scene: InteractionScene,
@@ -172,11 +231,14 @@ def _prepared_ownership_signature(
     layout_index: int,
     wind_direction_deg: float,
     input_sha256: str,
+    velocity_transform_signature: tuple[Any, ...],
+    background_profile_signature: tuple[Any, ...] | None,
 ) -> tuple[Any, ...]:
     core_contract = (
         id(model.core),
         _ownership_metadata(getattr(model.core, "output_law", None)),
         _ownership_metadata(model.core.config),
+        _ownership_metadata(getattr(model.core, "refinement_config", None)),
     )
     return (
         _scene_ownership_signature(scene),
@@ -186,6 +248,8 @@ def _prepared_ownership_signature(
         _ownership_metadata(layout_index),
         _ownership_metadata(wind_direction_deg),
         _ownership_metadata(input_sha256),
+        velocity_transform_signature,
+        background_profile_signature,
     )
 
 
@@ -302,6 +366,7 @@ class WindFarmSharedInteractionModel(nn.Module):
     ) -> None:
         super().__init__()
         self.velocity_transform = velocity_transform
+        self.background_profile: VerticalProfileBaseline | None = None
         self.core = NonlinearFieldReadout(
             source_width=2,
             context_width=11,
@@ -328,6 +393,8 @@ class WindFarmSharedInteractionModel(nn.Module):
         layout_index = int(getattr(case, "layout_index", -1))
         wind_direction_deg = float(getattr(case, "wind_direction_deg", float("nan")))
         input_sha256 = _case_input_sha256(case)
+        velocity_transform_signature = _velocity_transform_signature(self.velocity_transform)
+        background_profile_signature = _background_profile_signature(self.background_profile)
         ownership_signature = _prepared_ownership_signature(
             self,
             scene,
@@ -336,6 +403,8 @@ class WindFarmSharedInteractionModel(nn.Module):
             layout_index,
             wind_direction_deg,
             input_sha256,
+            velocity_transform_signature,
+            background_profile_signature,
         )
         return PreparedWindInteraction(
             scene=scene,
@@ -344,10 +413,18 @@ class WindFarmSharedInteractionModel(nn.Module):
             layout_index=layout_index,
             wind_direction_deg=wind_direction_deg,
             input_sha256=input_sha256,
+            velocity_transform_signature=velocity_transform_signature,
+            background_profile_signature=background_profile_signature,
             ownership_signature=ownership_signature,
         )
 
     def _assert_prepared_owned(self, prepared: PreparedWindInteraction) -> None:
+        velocity_transform_signature = _velocity_transform_signature(self.velocity_transform)
+        if velocity_transform_signature != prepared.velocity_transform_signature:
+            raise ValueError("WindFarm velocity transform changed; rebuild prepared state.")
+        background_profile_signature = _background_profile_signature(self.background_profile)
+        if background_profile_signature != prepared.background_profile_signature:
+            raise ValueError("WindFarm background profile changed; rebuild prepared state.")
         current = _prepared_ownership_signature(
             self,
             prepared.scene,
@@ -356,6 +433,8 @@ class WindFarmSharedInteractionModel(nn.Module):
             prepared.layout_index,
             prepared.wind_direction_deg,
             prepared.input_sha256,
+            velocity_transform_signature,
+            background_profile_signature,
         )
         if current != prepared.ownership_signature:
             raise ValueError("WindFarm prepared scene/context metadata changed; rebuild prepared state.")
@@ -416,9 +495,16 @@ class WindFarmSharedInteractionModel(nn.Module):
         *,
         chunk_size: int = 512,
     ) -> torch.Tensor:
-        return self.denormalize_tensor(
-            self.predict_case(case, prepared, receivers_D, chunk_size=chunk_size)
+        return self._physical_from_standardized(
+            self.predict_case(case, prepared, receivers_D, chunk_size=chunk_size),
+            receivers_D,
         )
+
+    def _physical_from_standardized(
+        self, standardized: torch.Tensor, receivers_D: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        del receivers_D
+        return self.denormalize_tensor(standardized)
 
     def apply_increment(self, *_args: Any, **_kwargs: Any) -> None:
         self.core.apply_increment()
@@ -448,8 +534,8 @@ class WindFarmSharedInteractionModel(nn.Module):
                 if receiver_features is None
                 else receiver_features
             )
-            return self.denormalize_tensor(
-                self.core.predict(context, query, receiver_features=features)
+            return self._physical_from_standardized(
+                self.core.predict(context, query, receiver_features=features), query
             )
 
         values, jvp = torch.autograd.functional.jvp(
@@ -464,9 +550,146 @@ class WindFarmSharedInteractionModel(nn.Module):
         }
 
 
+class WindFarmRefinedInteractionModel(WindFarmSharedInteractionModel):
+    """Fresh nonlinear refinement family with a common TRAIN height profile."""
+
+    def __init__(
+        self,
+        *,
+        velocity_transform: VelocityNormalizer,
+        background_profile: VerticalProfileBaseline,
+        hidden: int = 64,
+        message: int = 64,
+        max_sources: int = 30,
+        base_width: int = 16,
+        router_hidden: int = 32,
+        residual_scale: float = 1.0,
+    ) -> None:
+        nn.Module.__init__(self)
+        self.velocity_transform = velocity_transform
+        self.background_profile = background_profile
+        self.core = RefinedNonlinearFieldReadout(
+            source_width=2,
+            context_width=11,
+            environment_width=7,
+            spatial_dim=3,
+            hidden=int(hidden),
+            message=int(message),
+            output_width=3,
+            query_width=7,
+            max_sources=int(max_sources),
+            base_width=int(base_width),
+            router_hidden=int(router_hidden),
+            residual_scale=float(residual_scale),
+        )
+
+    def profile_at_receivers(self, receivers_D: torch.Tensor) -> torch.Tensor:
+        if self.background_profile is None:
+            raise RuntimeError("Wind refinement requires the sealed TRAIN height-profile baseline.")
+        if receivers_D.ndim != 3 or receivers_D.shape[-1] != 3:
+            raise ValueError("WindFarm receivers must have shape [B,Q,3] in rotor diameters.")
+        centers = receivers_D.new_tensor(self.background_profile.bin_centers_D)
+        values = receivers_D.new_tensor(self.background_profile.values_mps)
+        z = receivers_D[..., 2].contiguous()
+        lower_index = torch.searchsorted(centers, z).sub(1).clamp(0, centers.numel() - 2)
+        lower_z = centers[lower_index]
+        upper_z = centers[lower_index + 1]
+        fraction = ((z - lower_z) / (upper_z - lower_z)).clamp(0.0, 1.0)
+        lower = values[lower_index]
+        upper = values[lower_index + 1]
+        return lower + fraction[..., None] * (upper - lower)
+
+    def _physical_from_standardized(
+        self, standardized: torch.Tensor, receivers_D: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if receivers_D is None:
+            raise ValueError("Wind residual denormalization requires its physical receiver coordinates.")
+        scale = standardized.new_tensor(self.velocity_transform.safe_std)
+        background = self.profile_at_receivers(receivers_D)
+        return background + standardized * scale * float(self.velocity_transform.u_ref_mps)
+
+    def normalized_field_from_physical(
+        self, physical_mps: torch.Tensor, receivers_D: torch.Tensor
+    ) -> torch.Tensor:
+        mean = physical_mps.new_tensor(self.velocity_transform.mean)
+        scale = physical_mps.new_tensor(self.velocity_transform.safe_std)
+        return (physical_mps / float(self.velocity_transform.u_ref_mps) - mean) / scale
+
+    def residual_from_physical(
+        self, physical_mps: torch.Tensor, receivers_D: torch.Tensor
+    ) -> torch.Tensor:
+        scale = physical_mps.new_tensor(self.velocity_transform.safe_std)
+        return (physical_mps - self.profile_at_receivers(receivers_D)) / (
+            scale * float(self.velocity_transform.u_ref_mps)
+        )
+
+    def predict_refined_batch(
+        self,
+        scene: InteractionScene,
+        receivers_D: torch.Tensor,
+        *,
+        execution_mode: str,
+        phase: str,
+        training_signal: bool,
+        temperature: float = 1.0,
+    ) -> tuple[Any, dict[str, Any]]:
+        if not isinstance(self.core, RefinedNonlinearFieldReadout):
+            raise TypeError("Wind refinement adapter lost its shared nonlinear readout.")
+        stage = "open" if phase == "warmup" else phase
+        self.core.reset_auxiliary()
+        self.core.set_execution(
+            mode=execution_mode,
+            phase=stage,
+            temperature=float(temperature),
+            training_signal=bool(training_signal),
+        )
+        context = self.core.prepare(scene)
+        features = _wind_receiver_features_from_scene(scene, receivers_D)
+        prediction = self.core.read_refinement(
+            context,
+            receivers_D,
+            receiver_features=features,
+            training_signal=bool(training_signal),
+        )
+        auxiliary = dict(prediction.auxiliary)
+        auxiliary.update(self.core.auxiliary_terms())
+        return prediction, auxiliary
+
+    def linearize_case(
+        self,
+        prepared: PreparedWindInteraction,
+        receivers_D: torch.Tensor,
+        tangent: torch.Tensor,
+        *,
+        wrt: str = "centers",
+        receiver_features: torch.Tensor | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(self.core, RefinedNonlinearFieldReadout):
+            raise TypeError("Wind refinement adapter lost its shared nonlinear readout.")
+        policy = self.core.refinement_policy
+        try:
+            self.core.set_execution(
+                mode=policy.mode,
+                phase=policy.phase,
+                threshold=policy.threshold,
+                temperature=policy.temperature,
+                training_signal=False,
+            )
+            return super().linearize_case(
+                prepared,
+                receivers_D,
+                tangent,
+                wrt=wrt,
+                receiver_features=receiver_features,
+            )
+        finally:
+            self.core.refinement_policy = policy
+
+
 __all__ = [
     "WIND_INTERACTION_DEPENDENCY",
     "PreparedWindInteraction",
+    "WindFarmRefinedInteractionModel",
     "WindFarmSharedInteractionModel",
     "wind_receiver_features",
     "wind_scene_from_case",

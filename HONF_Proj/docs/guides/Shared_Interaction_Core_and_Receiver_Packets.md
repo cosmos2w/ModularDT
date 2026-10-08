@@ -4,6 +4,8 @@ ThermalChannel and the opt-in WindFarm family execute the same `InteractionConte
 
 The compatibility path keeps the original two source/source and source/environment context rounds and direct/group near/far arithmetic. Environment is global upstream ancestry through prepared context, rather than an independently actuated source. New code contains no fixed Thermal domain, grid, rotor diameter, environmental donor count, heat-column convention or output-channel count. Legacy case defaults remain in the legacy case adapters.
 
+The current development workflow is [unified interaction training and source-preserving refinement](Unified_Interaction_Training_and_Refinement.md), with one optimizer engine, separate dataset weights, compiled row-local packet consumption and explicit normalizer ownership. The optional predicted-flow Thermal injection and the update-based H32 Wind pilot below are retained historical capabilities; the unified matched campaign disables the flow injection and does not continue that pilot.
+
 ## Dataset-owned dependencies
 
 | Capability | ThermalChannel | New WindFarm family |
@@ -11,7 +13,7 @@ The compatibility path keeps the original two source/source and source/environme
 | Configuration | Module geometry, material coefficients, prescribed boundary/flow context | Turbine geometry, wind direction, native support, environmental geometry/measures and reference inflow |
 | Separately applicable control | Scalar native heating rate at fixed geometry | None; changed configuration rebuilds context |
 | Output law | Qualified affine temperature coefficients with zero benchmark boundary offset | Source-wise nonlinear messages before reduction, then nonlinear three-velocity head |
-| Optional edge | Frozen predicted D-sep physical u/v at existing environment donors to thermal context | Wind-owned 3-D source/environment context to velocity field |
+| Historical optional edge | Frozen predicted D-sep physical u/v at existing environment donors; disabled in current refinement comparison | Wind-owned 3-D source/environment context to velocity field |
 | Environment read | Two prepared context rounds; no target-flow input | Two prepared context rounds and global representation; no dense query/environment fine read |
 | Physical output | Native fluid/surface/material temperatures and qualified derived proxies; frozen flow composed separately | Native velocity transform in m/s |
 | Derivative | Exact heating kernel and precise fixed-scene increment; live geometry graph | Local AD JVP at the declared scene; no exact affine finite increment |
@@ -55,9 +57,9 @@ The subset prototype approximates increments added to an exact baseline. It has 
 
 | Entry point | Purpose |
 | --- | --- |
-| `tools/thermal_source_response_flow_context_fit.py` | Seal and continue the single matched fixed25_v1 development pair from development e2500 parents, with original AdamW moments and one new zero projection |
+| `tools/thermal_source_response_flow_context_fit.py` | Historical matched flow-context experiment; preserved for reproducibility and stopped for current development |
 | `tools/receiver_packet_study.py` | Build TRAIN-only teacher tables, fit one capped pair scorer, verify exact/equal-K controls and execute fixed-baseline model-only consumers |
-| `tools/wind_shared_interaction_pilot.py` | Freeze native Wind layout subsets, fit TRAIN-only transforms and run the bounded update-based nonlinear pilot |
+| `tools/wind_shared_interaction_pilot.py` | Historical bounded H32 update-based nonlinear pilot; preserved with its actual512-environment-record limitation |
 | `tests/test_shared_interaction_core.py` | Shared execution, capability rejection, ownership, chunk equality and local derivatives |
 | `tests/test_receiver_packets.py` | Union/fallback, action bounds, TRAIN-only calibration, pre-MLP execution and stale baseline rejection |
 

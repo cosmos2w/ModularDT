@@ -2,6 +2,8 @@
 
 See the [complete document chronology and archive audit](DOCUMENT_CHRONOLOGY.md) for all reviewed plans/reports, timestamp origins and unresolved historical evidence.
 
+The current development round is [unified training and adaptive source-preserving refinement](HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md). It uses one real Thermal/Wind trainer, matched fixed-subset Full/Adaptive arms, explicit coarse/fine physical-source paths and measured native costs. Its evidence and manual-only formal capability are separate from completed formal3901/3902 and the archived [preceding shared-core/receiver-packet round](_bk/20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md).
+
 Start with the [two-week milestone review, 22 September–6 October2026](_bk/20261006_141642Z_HONF_Two_Week_Milestone_Review_2026-10-06.md). It connects the mathematical changes, mature1401/1804 anchors, predictor tradeoffs, actual execution, and inverse-response evidence, with nineteen selected existing figures.
 
 The review covers **20 pre-existing current top-level reports**, plus the September mature comparison and relevant archived studies. The count excludes this index, the new milestone review, helper command/findings documents, and the older nested Wind2500 baseline report. Completed reports now reside in `_bk` with evidence-based date prefixes; the [document chronology](DOCUMENT_CHRONOLOGY.md) records original paths, status, timestamps and uncertainties. This index organizes the reading order; it does not promote a research model or authorize experiments.
