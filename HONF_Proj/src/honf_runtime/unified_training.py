@@ -16,6 +16,8 @@ import json
 import math
 import os
 import random
+import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -26,6 +28,7 @@ from typing import Any, Protocol
 import numpy as np
 import torch
 from torch import nn
+from tqdm.auto import tqdm
 
 
 def _exclusive_training_run(function):
@@ -215,10 +218,53 @@ def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
     return payload
 
 
+def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, Any],
+                               *, allow_microbatch_change: bool = False) -> dict[str, Any] | None:
+    """Permit only an explicit microbatch amendment; all scientific bindings stay sealed."""
+    if saved == current:
+        return None
+    message = "Checkpoint identity, engine config, selection or optimizer schedule differs."
+    if not allow_microbatch_change:
+        raise ValueError(message)
+    previous = saved.get("engine_config", {})
+    proposed = current.get("engine_config", {})
+    before, after = previous.get("microbatch_cases"), proposed.get("microbatch_cases")
+    if (type(before) is not int or type(after) is not int
+            or not 1 <= after <= proposed.get("effective_cases", 0) or before == after):
+        raise ValueError(message)
+    amended = copy.deepcopy(saved)
+    amended["engine_config"]["microbatch_cases"] = after
+    if amended != current:
+        raise ValueError(message)
+    return {"kind": "explicit_microbatch_continuation", "source_microbatch_cases": before,
+            "microbatch_cases": after, "effective_cases": proposed["effective_cases"],
+            "trajectory_note": "Query seeds include microbatch index; future samples and FP32 accumulation can change."}
+
+
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str) -> None:
-    """Replace two small curve aliases; never render native fields during training."""
+    """Replace two small log-scale curve aliases; never render native fields during training."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
+
+    def log_values(values: Sequence[Any]) -> tuple[np.ma.MaskedArray, int]:
+        numeric = np.asarray(values, dtype=np.float64)
+        invalid = ~np.isfinite(numeric) | (numeric <= 0.0)
+        return np.ma.masked_where(invalid, numeric), int(invalid.sum())
+
+    def plot_log_series(axis: Any, epochs: Sequence[Any], values: Sequence[Any]) -> None:
+        series, masked_count = log_values(values)
+        axis.set_yscale("log")
+        if masked_count < len(values):
+            axis.plot(epochs, series, ".-")
+        else:
+            # An all-masked log series has no data limits from which to autoscale.
+            axis.set_ylim(1.0, 10.0)
+        if masked_count:
+            axis.text(
+                0.02, 0.98,
+                f"{masked_count} nonpositive/nonfinite value(s) masked\n(raw history unchanged)",
+                ha="left", va="top", transform=axis.transAxes,
+            )
 
     names = sorted({name for row in history for name in row["train_losses"]})
     figure = Figure(figsize=(12, 2.8 * math.ceil((len(names) + 1) / 2)), constrained_layout=True)
@@ -226,21 +272,34 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     axes = figure.subplots(math.ceil((len(names) + 1) / 2), 2, squeeze=False).ravel()
     for axis, name in zip(axes, names):
         rows = [row for row in history if name in row["train_losses"]]
-        axis.plot([row["epoch"] for row in rows], [row["train_losses"][name] for row in rows], ".-")
-        axis.set(title=name, xlabel="Completed epoch", ylabel="Native objective term")
+        plot_log_series(axis, [row["epoch"] for row in rows], [row["train_losses"][name] for row in rows])
+        axis.set(title=name, xlabel="Completed epoch", ylabel="Native objective term (log scale)")
         axis.grid(alpha=0.2)
-    validation = [row for row in history if "validation" in row]
+    validation = [row for row in history if field_metric in row.get("validation", {})]
     axis = axes[len(names)]
     if validation:
-        axis.plot([row["epoch"] for row in validation],
-                  [row["validation"][field_metric] for row in validation], "o-")
+        plot_log_series(axis, [row["epoch"] for row in validation],
+                        [row["validation"][field_metric] for row in validation])
     else:
         axis.text(0.5, 0.5, "Validation not yet scheduled", ha="center", va="center", transform=axis.transAxes)
-    axis.set(title=f"Exposed validation {field_metric}", xlabel="Completed epoch", ylabel=field_metric)
+        axis.set_yscale("log")
+        axis.set_ylim(1.0, 10.0)
+    axis.set(title=f"Exposed validation {field_metric}", xlabel="Completed epoch", ylabel=f"{field_metric} (log scale)")
     axis.grid(alpha=0.2)
     for axis in axes[len(names) + 1:]:
         axis.set_visible(False)
-    figure.suptitle("Training loss: equal macro-update means; validation is a separate sampled estimand")
+    arms = sorted({str(row["arm"]) for row in history if row.get("arm")})
+    case_counts = sorted({int(row["case_visits"]) for row in history if row.get("case_visits") is not None})
+    scope = ""
+    if len(case_counts) == 1:
+        scope = f"{case_counts[0]} TRAIN cases/epoch"
+    elif case_counts:
+        scope = f"{case_counts[0]}–{case_counts[-1]} TRAIN cases/epoch"
+    arm_label = ", ".join(arms) if arms else "training"
+    title_parts = [arm_label]
+    if scope:
+        title_parts.append(scope)
+    figure.suptitle(" | ".join(title_parts) + "; equal macro-update loss means; validation is separate")
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"
         temporary = output / f".loss_curves.{os.getpid()}.tmp.{suffix}"
@@ -394,6 +453,18 @@ def _atomic_json(path: Path, payload: Any) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _atomic_checkpoint_copy(source: Path, destination: Path) -> None:
+    """Keep a byte-identical rolling checkpoint as a regular file, never a symlink."""
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
@@ -737,13 +808,14 @@ class TrainingEngine:
         resume_checkpoint: str | Path | None = None,
         branch_from_checkpoint: str | Path | None = None,
         clean_stop_name: str = "CLEAN_STOP_REQUEST.json",
+        allow_microbatch_change: bool = False,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
         output = Path(output_dir).resolve()
         output.mkdir(parents=True, exist_ok=True)
         if resume_checkpoint is None:
-            markers = ("latest_model.pt", "history.json", "fit_summary.json", "active_process.json")
+            markers = ("latest_model.pt", "last.pt", "history.json", "fit_summary.json", "active_process.json")
             if any((output / name).exists() for name in markers) or any(output.glob("epoch_*_model.pt")):
                 raise ValueError("A new fit requires a fresh run directory; use exact resume for existing history.")
         elif Path(resume_checkpoint).resolve() != (output / "latest_model.pt").resolve():
@@ -756,6 +828,8 @@ class TrainingEngine:
             raise ValueError("Matched execution arm is checkpoint metadata, not part of shared identity.")
         if resume_checkpoint is not None and branch_from_checkpoint is not None:
             raise ValueError("A run cannot be both an exact resume and a new branch.")
+        if allow_microbatch_change and resume_checkpoint is None:
+            raise ValueError("A microbatch amendment requires an existing run's latest checkpoint.")
         source_path = Path(resume_checkpoint or branch_from_checkpoint).resolve() if (
             resume_checkpoint is not None or branch_from_checkpoint is not None) else None
         source_payload: Mapping[str, Any] | None = None
@@ -773,8 +847,8 @@ class TrainingEngine:
             raise ValueError("A sealed nonempty experiment identity is required.")
         model.to(self.device)
         # The warmup stage declares the stable parameter groups for the whole
-        # run, including router parameters that intentionally receive no
-        # gradient or AdamW age before the adaptive stage.
+        # run, including router parameters while warmup executes all fine
+        # reads. All-fine execution does not imply frozen router gradients.
         group_specs = tuple(provider.optimizer_groups(model, arm, "warmup"))
         sealed_identity = {
             **dict(identity),
@@ -783,9 +857,10 @@ class TrainingEngine:
             "selection_policy": asdict(self.selection),
             "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in group_specs],
         }
+        amendment = None
         if source_payload is not None:
-            if source_payload.get("experiment_identity") != sealed_identity:
-                raise ValueError("Checkpoint identity, engine config, selection or optimizer schedule differs.")
+            amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
+                allow_microbatch_change=allow_microbatch_change)
             if resume_checkpoint is not None:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
@@ -816,6 +891,15 @@ class TrainingEngine:
         if restored_rng is not None:
             restore_rng_state(restored_rng)
         history = list(source_payload.get("history", [])) if source_payload is not None else []
+        resume_amendments = list(source_payload.get("resume_amendments", [])) if source_payload is not None else []
+        if amendment is not None:
+            amendment = {**amendment, "source_epoch": int(source_payload["epoch"]), "next_epoch": start_epoch,
+                "source_checkpoint_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                "preserved_case_visits": sum(int(row["case_visits"]) for row in history),
+                "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
+                "recorded_unix": time.time()}
+            resume_amendments.append(amendment)
+            _atomic_json(output / f"microbatch_amendment_epoch_{start_epoch:04d}.json", amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = None
@@ -837,7 +921,21 @@ class TrainingEngine:
             "engine_started_unix": time.time(),
             "branch_parent": branch_parent,
         }
+        if resume_amendments:
+            active["resume_amendments"] = resume_amendments
         _atomic_json(output / "active_process.json", active)
+        if resume_checkpoint is not None:
+            restored = {"event": "checkpoint_restored", "source_epoch": start_epoch - 1,
+                "next_epoch": start_epoch, "microbatch_cases": self.config.microbatch_cases,
+                "effective_cases": self.config.effective_cases,
+                "preserved_case_visits": sum(int(row["case_visits"]) for row in history),
+                "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history)}
+            print(json.dumps(restored, sort_keys=True), flush=True)
+            if bool(getattr(sys.stderr, "isatty", lambda: False)()):
+                print(f"Restored epoch {start_epoch - 1}; next {start_epoch}/{stop_after}; "
+                      f"microbatch {self.config.microbatch_cases}, effective {self.config.effective_cases}; "
+                      f"retained {restored['preserved_case_visits']} TRAIN visits, "
+                      f"{restored['preserved_optimizer_updates']} optimizer updates", file=sys.stderr, flush=True)
         total_started = time.perf_counter()
         stopped_at = start_epoch - 1
         latest_epoch = int(source_payload["epoch"]) if resume_checkpoint is not None else 0
@@ -876,32 +974,52 @@ class TrainingEngine:
                     ordered_cases = [ordered_cases[index] for index in order]
                 order_hash = _case_order_digest(ordered_cases)
                 update_rows: list[dict[str, Any]] = []
-                for update_index, group_slice in enumerate(_macro_update_slices(len(ordered_cases), self.config.effective_cases)):
-                    update_cases = ordered_cases[group_slice]
-                    microbatches = []
-                    for micro_index, start in enumerate(range(0, len(update_cases), self.config.microbatch_cases)):
-                        case_chunk = update_cases[start:start + self.config.microbatch_cases]
-                        key = SamplingKey(self.config.seed, epoch, update_index, micro_index, phase, arm)
-                        batch = provider.make_batch(case_chunk, key)
-                        if tuple(batch.case_keys) and list(batch.case_keys) != list(case_chunk):
-                            raise ValueError("Provider changed the ordered case keys inside a microbatch.")
-                        if not tuple(batch.case_keys):
-                            batch = TaskBatch(batch.scene_inputs, batch.receivers, batch.targets, batch.auxiliary,
-                                              tuple(case_chunk))
-                        microbatches.append(batch)
-                    losses, work, _denominators, sampling_hash = self._run_update(model, provider, optimizer, microbatches,
-                        phase=phase, arm=arm, epoch=epoch, update_index=update_index)
-                    update_rows.append({"losses": losses, "work": work, "case_count": len(update_cases),
-                                        "microbatch_count": len(microbatches),
-                                        "query_sampling_sha256": sampling_hash})
-                    _atomic_json(output / "progress.json", {
-                        "status": "training", "epoch_in_progress": epoch, "completed_epoch": epoch - 1,
-                        "phase": phase, "updates_this_epoch": len(update_rows),
-                        "case_visits_this_epoch": sum(item["case_count"] for item in update_rows),
-                        "completed_case_visits": completed_visits,
-                        "completed_optimizer_updates": completed_updates,
-                        "latest_checkpoint_epoch": latest_epoch, "updated_unix": time.time(),
-                    })
+                update_count = math.ceil(len(ordered_cases) / self.config.effective_cases)
+                progress = tqdm(
+                    total=len(ordered_cases), desc=f"epoch {epoch}/{stop_after}", unit="case",
+                    dynamic_ncols=True, file=sys.stderr,
+                    disable=not bool(getattr(sys.stderr, "isatty", lambda: False)()), leave=False,
+                )
+                try:
+                    for update_index, group_slice in enumerate(
+                        _macro_update_slices(len(ordered_cases), self.config.effective_cases)
+                    ):
+                        update_cases = ordered_cases[group_slice]
+                        microbatches = []
+                        for micro_index, start in enumerate(range(0, len(update_cases), self.config.microbatch_cases)):
+                            case_chunk = update_cases[start:start + self.config.microbatch_cases]
+                            key = SamplingKey(self.config.seed, epoch, update_index, micro_index, phase, arm)
+                            batch = provider.make_batch(case_chunk, key)
+                            if tuple(batch.case_keys) and list(batch.case_keys) != list(case_chunk):
+                                raise ValueError("Provider changed the ordered case keys inside a microbatch.")
+                            if not tuple(batch.case_keys):
+                                batch = TaskBatch(batch.scene_inputs, batch.receivers, batch.targets, batch.auxiliary,
+                                                  tuple(case_chunk))
+                            microbatches.append(batch)
+                        losses, work, _denominators, sampling_hash = self._run_update(model, provider, optimizer, microbatches,
+                            phase=phase, arm=arm, epoch=epoch, update_index=update_index)
+                        update_rows.append({"losses": losses, "work": work, "case_count": len(update_cases),
+                                            "microbatch_count": len(microbatches),
+                                            "query_sampling_sha256": sampling_hash})
+                        loss_value = sum(float(value) for value in losses.values())
+                        lr_values = ",".join(
+                            f"{group['group_name']}:{float(group['lr']):.1e}" for group in optimizer.param_groups
+                        )
+                        progress.set_postfix({
+                            "updates": f"{len(update_rows)}/{update_count}", "loss": f"{loss_value:.4g}",
+                            "lr": lr_values, "phase": phase,
+                        }, refresh=False)
+                        progress.update(len(update_cases))
+                        _atomic_json(output / "progress.json", {
+                            "status": "training", "epoch_in_progress": epoch, "completed_epoch": epoch - 1,
+                            "phase": phase, "updates_this_epoch": len(update_rows),
+                            "case_visits_this_epoch": sum(item["case_count"] for item in update_rows),
+                            "completed_case_visits": completed_visits,
+                            "completed_optimizer_updates": completed_updates,
+                            "latest_checkpoint_epoch": latest_epoch, "updated_unix": time.time(),
+                        })
+                finally:
+                    progress.close()
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
                 train_seconds = time.perf_counter() - epoch_started
@@ -972,6 +1090,8 @@ class TrainingEngine:
                         history=history, best_field=best_field, best_guarded=best_guarded, sampler_state=sampler_state,
                         group_specs=optimizer_specs,
                         provider_training_state=getattr(provider, "training_state_dict", dict)())
+                    if resume_amendments:
+                        payload["resume_amendments"] = resume_amendments
                     _atomic_json(output / "history.json", history)
                     if milestone:
                         _atomic_torch_save(output / f"epoch_{epoch:04d}_model.pt", payload)
@@ -994,7 +1114,8 @@ class TrainingEngine:
                             })
                     # Advance the resume cursor only after required milestone
                     # and selector artifacts exist, including the terminal age.
-                    _atomic_torch_save(output / "latest_model.pt", payload)
+                    _atomic_torch_save(output / "last.pt", payload)
+                    _atomic_checkpoint_copy(output / "last.pt", output / "latest_model.pt")
                     latest_epoch = epoch
                 if curve_due:
                     _atomic_json(output / "history.json", history)

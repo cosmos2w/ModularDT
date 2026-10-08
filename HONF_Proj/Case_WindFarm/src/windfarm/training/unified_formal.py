@@ -508,6 +508,8 @@ def validate_recipe(value: Mapping[str, Any] | str | Path) -> dict[str, Any]:
 class WindFormalRefinementTask(WindRefinementTask):
     """The common Wind provider with explicit full-data identity/schedule."""
 
+    max_microbatch_cases = 24
+
     def __init__(
         self,
         *args: Any,

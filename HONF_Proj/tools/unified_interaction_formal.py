@@ -56,10 +56,14 @@ def _read(path):
     return value
 
 
-def _profile(task, *, startup_benchmark=False, monitoring=None):
+def _profile(task, *, startup_benchmark=False, monitoring=None, microbatch_cases=None):
     from honf_runtime.unified_training import EngineConfig, SelectionPolicy
 
     micro, effective, seed = (8, 48, 0) if task == 'thermal' else (4, 24, 42)
+    if microbatch_cases is not None:
+        if type(microbatch_cases) is not int or not 1 <= microbatch_cases <= effective:
+            raise ValueError('Explicit microbatch size must be an integer inside the unchanged effective batch.')
+        micro = microbatch_cases
     config = EngineConfig(seed=seed, microbatch_cases=micro, effective_cases=effective,
         total_epochs=5000, warmup_epochs=500, open_through_epoch=600,
         soft_through_epoch=800, monitor_every=100, gradient_clip=1.0)
@@ -165,7 +169,8 @@ def train(args, *, resume=False):
     if not resume and output.exists() and next(output.iterdir(), None) is not None:
         raise ValueError('A formal start requires a new empty run directory; use exact resume for saved runs.')
     config, selection = _profile(recipe['task'], startup_benchmark=args.startup_benchmark,
-                                 monitoring=recipe.get('monitoring'))
+                                 monitoring=recipe.get('monitoring'),
+                                 microbatch_cases=getattr(args, 'microbatch_cases', None))
     if args.startup_benchmark and not 1 <= args.stop_after <= 3:
         raise ValueError('The separately labelled manual startup benchmark is limited to three complete epochs.')
     if not 1 <= args.stop_after <= 5000:
@@ -182,7 +187,8 @@ def train(args, *, resume=False):
         'initial_model_state_sha256': _model_state_sha256(model)}
     engine = TrainingEngine(config, device=args.device, selection=selection)
     return engine.fit(model, provider, output, identity=identity, arm=recipe['execution_arm'],
-        stop_after=args.stop_after, resume_checkpoint=args.checkpoint if resume else None)
+        stop_after=args.stop_after, resume_checkpoint=args.checkpoint if resume else None,
+        allow_microbatch_change=resume and getattr(args, 'microbatch_cases', None) is not None)
 
 
 def status(args):
@@ -226,6 +232,8 @@ def build_parser():
         command.add_argument('--startup-benchmark', action='store_true')
         if name == 'resume':
             command.add_argument('--checkpoint', required=True)
+            command.add_argument('--microbatch-cases', type=int,
+                help='explicit microbatch-only continuation amendment; effective batch and schedule stay sealed')
         command.set_defaults(handler=(lambda args: train(args, resume=True)) if name == 'resume' else train)
     stat = commands.add_parser('status', help='read existing shared-engine receipts')
     stat.add_argument('--run-dir', required=True)

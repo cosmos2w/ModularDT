@@ -478,6 +478,8 @@ def _receiver_features(scene: InteractionScene, receivers: torch.Tensor) -> torc
 class WindRefinementTask:
     """Source-resolved Wind adapter implementing the common TaskProvider API."""
 
+    max_microbatch_cases = 4
+
     def __init__(
         self,
         view: WindFarmNativeView,
@@ -790,8 +792,10 @@ class WindRefinementTask:
     def make_batch(self, case_keys: Sequence[Any], key: SamplingKey) -> TaskBatch:
         if not case_keys:
             raise ValueError("Wind microbatches cannot be empty.")
-        if len(case_keys) > 4:
-            raise ValueError("Wind microbatch size is fixed at four native cases.")
+        if len(case_keys) > self.max_microbatch_cases:
+            raise ValueError(
+                f"Wind microbatch size exceeds this task's limit of {self.max_microbatch_cases} native cases."
+            )
         rows = tuple(int(value) for value in case_keys)
         if any(row not in self._train_row_set for row in rows):
             raise ValueError("Wind TRAIN batch contains a row outside the sealed 24-layout manifest.")

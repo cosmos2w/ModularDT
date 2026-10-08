@@ -111,3 +111,17 @@ def test_invalid_monitoring_fails_before_full_data_preparation(tmp_path, monkeyp
     with pytest.raises(ValueError, match='interval'):
         cli.prepare(args)
     assert not list(tmp_path.iterdir())
+
+
+def test_explicit_resume_microbatch_changes_only_accumulation_chunks():
+    args = cli.build_parser().parse_args(['resume', '--recipe', 'recipe.json', '--run-dir', 'run',
+        '--checkpoint', 'run/latest_model.pt', '--microbatch-cases', '8'])
+    assert args.microbatch_cases == 8
+    before, _ = cli._profile('wind')
+    after, _ = cli._profile('wind', microbatch_cases=args.microbatch_cases)
+    assert before.microbatch_cases == 4 and after.microbatch_cases == 8
+    before_values, after_values = before.__dict__.copy(), after.__dict__.copy()
+    before_values.pop('microbatch_cases'); after_values.pop('microbatch_cases')
+    assert before_values == after_values
+    with pytest.raises(ValueError, match='microbatch size'):
+        cli._profile('wind', microbatch_cases=25)

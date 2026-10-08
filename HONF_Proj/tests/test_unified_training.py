@@ -129,6 +129,9 @@ def test_sparse_outputs_keep_only_milestones_and_update_real_curves(tmp_path):
     assert progress["completed_epoch"] == progress["latest_checkpoint_epoch"] == 10
     assert progress["completed_case_visits"] == 50
     assert progress["completed_optimizer_updates"] == 20
+    assert not (output / "last.pt").is_symlink()
+    assert (output / "last.pt").read_bytes() == (output / "latest_model.pt").read_bytes()
+    assert torch.load(output / "last.pt", map_location="cpu", weights_only=False)["epoch"] == 10
     summary = json.loads((output / "fit_summary.json").read_text())
     assert summary["cumulative_microbatches"] == 30
     assert summary["cumulative_partial_update_cases"] == 10
@@ -476,3 +479,72 @@ def test_branch_requires_literal_warmup_boundary(tmp_path):
     with pytest.raises(ValueError, match="common warmup boundary"):
         engine.fit(model, _ToyProvider(), tmp_path / "bad_branch", identity={"run": "test"},
                    arm="adaptive_detail", stop_after=3, branch_from_checkpoint=bad)
+
+
+def test_microbatch_amendment_preserves_weights_moments_history_and_future_exact_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    output = tmp_path / "continuation"
+    model = nn.Linear(1, 1)
+    config = _sparse_config()
+    identity = {"run": "preserved"}
+    TrainingEngine(config, device="cpu").fit(model, _ToyProvider(), output,
+        identity=identity, arm="adaptive_detail", stop_after=4)
+    source = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+    new_engine = TrainingEngine(replace(config, microbatch_cases=4), device="cpu")
+    initial_steps = []
+    original_optimizer = new_engine._make_optimizer
+
+    def inspect_optimizer(*args, **kwargs):
+        optimizer, specs = original_optimizer(*args, **kwargs)
+        for name, value in source["model_state_dict"].items():
+            assert torch.equal(model.state_dict()[name], value)
+        for name, parameter in model.named_parameters():
+            for key, value in source["optimizer_state_by_name"]["state_by_name"][name].items():
+                if torch.is_tensor(value):
+                    assert torch.equal(optimizer.state[parameter][key], value)
+        initial_steps.extend(int(state["step"].item()) for state in optimizer.state.values())
+        return optimizer, specs
+
+    monkeypatch.setattr(new_engine, "_make_optimizer", inspect_optimizer)
+    with pytest.raises(ValueError, match="identity, engine config"):
+        new_engine.fit(model, _ToyProvider(), output, identity=identity,
+            arm="adaptive_detail", stop_after=6, resume_checkpoint=output / "latest_model.pt")
+    new_engine.fit(model, _ToyProvider(), output, identity=identity, arm="adaptive_detail", stop_after=6,
+        resume_checkpoint=output / "latest_model.pt", allow_microbatch_change=True)
+    assert initial_steps == [8, 8]
+    amended = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+    assert amended["history"][:4] == source["history"]
+    assert amended["history"][4]["microbatches"] == 2
+    record = amended["resume_amendments"][0]
+    assert record["source_epoch"] == 4 and record["next_epoch"] == 5
+    assert record["preserved_case_visits"] == 20 and record["preserved_optimizer_updates"] == 8
+    assert record["source_microbatch_cases"] == 2 and record["microbatch_cases"] == 4
+    assert json.loads((output / "microbatch_amendment_epoch_0005.json").read_text()) == record
+    for state in amended["optimizer_state_by_name"]["state_by_name"].values():
+        assert int(state["step"].item()) == 12
+    # The next continuation is exact under the amended identity; no further exception is needed.
+    engine = TrainingEngine(replace(config, microbatch_cases=4), device="cpu")
+    engine.fit(model, _ToyProvider(), output, identity=identity, arm="adaptive_detail", stop_after=10,
+        resume_checkpoint=output / "latest_model.pt")
+    final = torch.load(output / "latest_model.pt", map_location="cpu", weights_only=False)
+    assert final["resume_amendments"] == amended["resume_amendments"]
+    assert sum(row["case_visits"] for row in final["history"]) == 50
+    assert sum(row["optimizer_updates"] for row in final["history"]) == 20
+
+
+@pytest.mark.parametrize("changed", ["effective_cases", "seed", "provider_identity", "selection_policy",
+                                     "optimizer_schedule_contract", "recipe_sha256"])
+def test_explicit_microbatch_exception_rejects_any_other_identity_change(changed):
+    saved = {"engine_config": {"microbatch_cases": 2, "effective_cases": 4, "seed": 17},
+             "provider_identity": {"dataset": "fixed"}, "selection_policy": {"field": "native"},
+             "optimizer_schedule_contract": ["sealed"], "recipe_sha256": "sealed"}
+    current = copy.deepcopy(saved)
+    current["engine_config"]["microbatch_cases"] = 4
+    if changed in ("effective_cases", "seed"):
+        current["engine_config"][changed] += 1
+    else:
+        current[changed] = "changed"
+    original = copy.deepcopy(saved)
+    with pytest.raises(ValueError, match="identity, engine config"):
+        runtime._resume_identity_amendment(saved, current, allow_microbatch_change=True)
+    assert saved == original

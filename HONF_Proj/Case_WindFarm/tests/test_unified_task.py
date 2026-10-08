@@ -9,9 +9,11 @@ import pytest
 import torch
 from honf_runtime.unified_training import SamplingKey, TaskBatch
 
+import windfarm.training.unified_task as unified_task_module
 from windfarm.normalization import VelocityNormalizer, VerticalProfileBaseline
 from windfarm.shared_interaction import WindFarmRefinedInteractionModel
 from windfarm.splits import make_group_split
+from windfarm.training.unified_formal import WindFormalRefinementTask
 from windfarm.training.unified_task import (
     DEFAULT_ROLE_QUERY_COUNTS,
     WindReceiverInputs,
@@ -333,3 +335,66 @@ def test_wind_prefit_calibration_replace_rejects_different_query_panel():
 
 def math_isfinite(value: float) -> bool:
     return bool(np.isfinite(float(value)))
+
+
+def test_formal_wind_task_assembles_eight_case_batch_with_separate_limit(monkeypatch):
+    provider = _provider()
+    sampled_rows: list[int] = []
+
+    def fake_native_sample(case, rng, role_query_counts, *, catalogue_cache):
+        del rng, catalogue_cache
+        sampled_rows.append(int(case.index))
+        return SimpleNamespace(
+            coordinates_D=np.full((1024, 3), float(case.index), dtype=np.float32),
+            target_mps=np.full((1024, 3), float(case.index + 1), dtype=np.float32),
+            flat_indices=np.arange(1024, dtype=np.int64),
+            role_sample_counts=dict(role_query_counts),
+        )
+
+    monkeypatch.setattr(unified_task_module, "sample_native_role_queries", fake_native_sample)
+    key = SamplingKey(42, 1, 0, 0, "warmup", "full_detail")
+    with pytest.raises(ValueError, match="limit of 4"):
+        provider.make_batch(tuple(range(5)), key)
+
+    formal = WindFormalRefinementTask(
+        provider.view,
+        train_rows=provider.train_rows,
+        validation_rows=provider.validation_rows,
+        normalizer=provider.normalizer,
+        background_profile=provider.background_profile,
+        manifest=provider.manifest,
+        manifest_path=provider.manifest_path,
+        normalization_path=provider.normalization_path,
+        role_scales=provider.role_scales,
+        role_scale_sha256=provider.role_scale_sha256,
+        formal_recipe={
+            "recipe_sha256": "formal-recipe-sha",
+            "source_metadata_sha256": "metadata-sha",
+            "source_file_inventory": [],
+            "partition_identity": {},
+            "normalization_sha256": "normalization-sha",
+            "normalization_binding_sha256": "normalization-binding-sha",
+            "role_scale_sha256": "role-scale-sha",
+        },
+    )
+    batch = formal.make_batch(tuple(range(8)), key)
+    assert batch.case_keys == tuple(range(8))
+    assert batch.receivers.coordinates_D.shape == (8, 1024, 3)
+    assert batch.targets.velocity_mps.shape == (8, 1024, 3)
+    assert batch.targets.row_indices == tuple(range(8))
+    assert sampled_rows == list(range(8))
+
+    with pytest.raises(ValueError, match="limit of 24"):
+        formal.make_batch(tuple(range(25)), key)
+    with pytest.raises(ValueError, match="outside the sealed"):
+        formal.make_batch((18,), key)
+    with pytest.raises(ValueError, match="cannot repeat"):
+        formal.make_batch((0, 0), key)
+    assert sampled_rows == list(range(8))
+
+    monkeypatch.setattr(unified_task_module, "_sha256", lambda _path: "fixed-normalization-sha")
+    provider.view.token_shape = (2, 2, 2)
+    provider._message_scale = 1.0
+    formal._message_scale = 1.0
+    assert "max_microbatch_cases" not in provider.identity_payload()
+    assert "max_microbatch_cases" not in formal.identity_payload()
