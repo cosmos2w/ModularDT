@@ -255,15 +255,19 @@ class EngineConfig:
     latest_every: int | None = None
     curve_every: int | None = None
     sampling_version: str = SamplingKey.LEGACY_VERSION
+    training_mode: str = "refinement"
 
     def __post_init__(self) -> None:
+        if self.training_mode not in ("refinement", "joint"):
+            raise ValueError("Training mode must be refinement or joint.")
         if self.sampling_version not in SamplingKey.SUPPORTED_VERSIONS:
             raise ValueError(f"Unsupported query sampling version {self.sampling_version!r}.")
         if min(self.microbatch_cases, self.effective_cases, self.total_epochs, self.monitor_every) < 1:
             raise ValueError("Batch sizes, horizon, and monitoring interval must be positive.")
         if self.effective_cases < self.microbatch_cases:
             raise ValueError("Effective batch size must be at least the microbatch size.")
-        if not 1 <= self.warmup_epochs <= self.open_through_epoch < self.soft_through_epoch < self.total_epochs:
+        if (self.training_mode == "refinement" and not
+                1 <= self.warmup_epochs <= self.open_through_epoch < self.soft_through_epoch < self.total_epochs):
             raise ValueError("Warmup/open/soft stages must be ordered inside the declared horizon.")
         if self.gradient_clip <= 0 or not math.isfinite(self.gradient_clip):
             raise ValueError("Gradient clipping must be positive and finite.")
@@ -278,6 +282,8 @@ class EngineConfig:
                 raise ValueError("Latest-state and loss-curve intervals must be positive integers.")
 
     def stage_for_epoch(self, epoch: int) -> str:
+        if self.training_mode == "joint":
+            return "joint"
         if epoch <= self.warmup_epochs:
             return "warmup"
         if epoch <= self.open_through_epoch:
@@ -288,6 +294,9 @@ class EngineConfig:
 
     def temperature_for_epoch(self, epoch: int) -> float:
         """Anneal the smooth phase from 1.0 to 0.1 on absolute epochs."""
+
+        if self.training_mode == "joint":
+            return 1.0
 
         soft_start = self.open_through_epoch + 1
         if epoch <= soft_start:
@@ -303,7 +312,8 @@ def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
     payload = asdict(config)
     for name, default in (("monitor_epochs", ()), ("checkpoint_epochs", None),
                           ("latest_every", None), ("curve_every", None),
-                          ("sampling_version", SamplingKey.LEGACY_VERSION)):
+                          ("sampling_version", SamplingKey.LEGACY_VERSION),
+                          ("training_mode", "refinement")):
         if payload[name] == default:
             payload.pop(name)
     return payload
@@ -423,10 +433,13 @@ def _branch_mathematical_route_amendment(
             "preserved_contract": "exact warmup weights, moments, data, objective, query streams and absolute schedules"}
 
 
-def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str) -> None:
+def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str,
+                        loss_metadata: Mapping[str, Mapping[str, str]] | None = None) -> None:
     """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
+
+    joint_run = any(row.get("phase") == "joint" for row in history)
 
     def objective_at(row: Mapping[str, Any]) -> Mapping[str, Any]:
         objective = row.get("validation_objective")
@@ -436,6 +449,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         return objective if isinstance(objective, Mapping) else {}
 
     def term_group(name: str) -> int:
+        if loss_metadata and name in loss_metadata:
+            return {"native_prediction": 0, "physics": 1, "routing": 2}.get(
+                loss_metadata[name].get("panel", "native_prediction"), 0)
         if name in {"operator_residual", "response"}:
             return 1
         if name in {"base_loss", "router_importance_loss", "expected_work"}:
@@ -445,6 +461,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         return 2
 
     def term_label(name: str) -> str:
+        if loss_metadata and name in loss_metadata:
+            return loss_metadata[name].get("label", name.replace("_", " "))
         if name == "reconstruction":
             return "Field prediction loss"
         if name == "response":
@@ -484,6 +502,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     }
 
     def term_definition(name: str) -> dict[str, str]:
+        if loss_metadata and name in loss_metadata:
+            return dict(loss_metadata[name])
         if name == "reconstruction":
             return {
                 "panel": "native_prediction",
@@ -655,6 +675,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     adaptive_run = any(str(row.get("arm", "")) == "adaptive_detail" for row in history)
     train_validation_path_note = (
         "TRAIN: mean of per-update means\nVALIDATION: pooled valid-element mean\n"
+        "All physical heads and shared blocks train jointly\nVALIDATION: same deployed joint path"
+        if joint_run else
+        "TRAIN: mean of per-update means\nVALIDATION: pooled valid-element mean\n"
         "Adaptive TRAIN: 25% fine-path loss replay\nVALIDATION: hard main path"
         if adaptive_run else
         "TRAIN: mean of per-update means\nVALIDATION: pooled valid-element mean\n"
@@ -688,7 +711,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     physics_axis.set_ylabel("Weighted loss contribution (dimensionless)")
     plot_term_group(routing_axis, 2)
     set_panel_title(
-        routing_axis, "Approximation and routing losses",
+        routing_axis, "Other provider objectives" if joint_run else "Approximation and routing losses",
+        "Provider-defined objectives; no detail-gate curriculum" if joint_run else
         "Coarse/fine prediction mismatch; router probability error vs residual-importance target\n"
         "Penalty on expected selected fine reads",
         fontsize=8.9,
@@ -734,6 +758,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         "cheap_rows": "Cheap-path rows evaluated",
         "gate_rows": "Router gate rows evaluated",
         "operator_rows": "Discrete thermal residual rows evaluated",
+        "node_edge_rows": "Node-to-edge donor rows executed",
+        "receiver_edge_rows": "Receiver-to-edge reads executed",
+        "source_read_rows": "Physical source reads executed",
     }
     work_keys = sorted({key for row in history for key in row.get("work_counts", {})}
                        & set(work_definitions))
@@ -777,7 +804,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     title_parts = [", ".join(arms) if arms else "training"]
     if scope:
         title_parts.append(scope)
-    title_parts.append("TRAIN optimization vs exposed VALIDATION hard inference")
+    title_parts.append("TRAIN optimization vs exposed DEV joint inference" if joint_run
+                       else "TRAIN optimization vs exposed VALIDATION hard inference")
     figure.suptitle(" | ".join(title_parts), fontsize=13)
     epochs = sorted({int(row["epoch"]) for row in history if type(row.get("epoch")) is int})
     if epochs:
@@ -817,6 +845,15 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         "work_counter_definitions": {key: work_definitions[key] for key in work_keys},
         "validation_scope": "exposed held-out validation with hard inference; not an independent TEST result",
     }
+    if joint_run:
+        metadata["validation_scope"] = "fixed exposed DEV joint inference; not an independent TEST result"
+        metadata["prediction_path_comparison"] = "TRAIN and DEV execute the same joint model. TRAIN averages macro-update means across updates; DEV pools valid elements at fixed review weights."
+        metadata["panel_definitions"].update({
+            "shared_name_loss_summary": "Same-named provider physical objectives on TRAIN and exposed DEV. Their reductions differ; this is not a directly comparable objective.",
+            "native_prediction": "Provider-defined joint physical field losses against stored references, in TRAIN-fitted scales.",
+            "routing": "Other provider-defined objectives; this joint family has no B/F gate or routing curriculum.",
+            "train_work": "Executed primitive counter sums; counts alone do not establish sparse executor savings.",
+        })
     _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"
@@ -1116,7 +1153,7 @@ class TrainingEngine:
         leaving no checkpoint or training history behind.
         """
 
-        if arm != "warmup":
+        if self.config.training_mode == "refinement" and arm != "warmup":
             raise ValueError("A disposable preflight update must use the shared warmup arm.")
         model.to(self.device)
         cases = tuple(provider.epoch_cases(1, self.config.seed))
@@ -1254,6 +1291,7 @@ class TrainingEngine:
         self, model: nn.Module, provider: TaskProvider, arm: str, phase: str, epoch: int,
     ) -> dict[str, Any]:
         del phase
+        validation_phase = "joint" if self.config.training_mode == "joint" else "hard"
         previous_mode = model.training
         rng_state = capture_rng_state()
         records: list[Mapping[str, Any]] = []
@@ -1268,7 +1306,7 @@ class TrainingEngine:
                 # The candidate's deployed hard route is always measured here; a
                 # warmup/open or soft training phase must not leak into validation.
                 predictions, auxiliary_state = provider.predict_native(
-                    model, scene, batch.receivers, arm, "hard", epoch=epoch,
+                    model, scene, batch.receivers, arm, validation_phase, epoch=epoch,
                     temperature=self.config.temperature_for_epoch(epoch))
                 records.append(provider.validation_metrics(predictions, batch.targets, auxiliary_state))
                 validation_loss_fn = getattr(provider, "validation_loss_terms", None)
@@ -1312,7 +1350,7 @@ class TrainingEngine:
             result = dict(provider.reduce_native_metrics(records))
             extra_metrics = getattr(provider, "extra_validation_metrics", None)
             if callable(extra_metrics):
-                result.update(extra_metrics(model, arm, "hard"))
+                result.update(extra_metrics(model, arm, validation_phase))
             if loss_totals:
                 result["validation_loss_terms"] = {
                     name: (values["numerator"] / values["denominator"]) * values["weight"]
@@ -1329,7 +1367,7 @@ class TrainingEngine:
             model.train(previous_mode)
             restore_rng_state(rng_state)
         result["validation_execution_mode"] = arm
-        result["validation_route_phase"] = "hard"
+        result["validation_route_phase"] = validation_phase
         return result
 
     def _checkpoint_payload(
@@ -1349,7 +1387,7 @@ class TrainingEngine:
     ) -> dict[str, Any]:
         return {
             "checkpoint_schema_version": 1,
-            "workflow": "unified_interaction_refinement",
+            "workflow": identity.get("workflow", "unified_interaction_refinement"),
             "experiment_identity": _cpu_tree(identity),
             "arm": arm,
             "epoch": int(epoch),
@@ -1446,7 +1484,8 @@ class TrainingEngine:
         # The warmup stage declares the stable parameter groups for the whole
         # run, including router parameters while warmup executes all fine
         # reads. All-fine execution does not imply frozen router gradients.
-        group_specs = tuple(provider.optimizer_groups(model, arm, "warmup"))
+        initial_phase = "joint" if self.config.training_mode == "joint" else "warmup"
+        group_specs = tuple(provider.optimizer_groups(model, arm, initial_phase))
         sampling_dataset_id = (
             _sampling_dataset_id(provider_identity)
             if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION else ""
@@ -1736,6 +1775,17 @@ class TrainingEngine:
                             "train-only PDE or auxiliary terms."
                         ),
                     }
+                    if self.config.training_mode == "joint":
+                        objective.update({
+                            "scope": "fixed exposed DEV panel evaluated with the deployed joint model",
+                            "validation_route_phase": "joint",
+                            "training_prediction_mode": "all physical heads and shared blocks train jointly",
+                            "validation_prediction_mode": "same deployed joint prediction path",
+                            "definition": "Provider-defined physical objectives; TRAIN averages macro-update means, DEV pools valid elements. Stored TRAIN response/operator targets remain separate.",
+                        })
+                    loss_metadata = getattr(provider, "loss_metadata", None)
+                    if callable(loss_metadata):
+                        objective["term_definitions"] = dict(loss_metadata())
                     row["validation_objective"] = objective
                     metrics["loss_objective"] = objective
                     row["validation"] = metrics
@@ -1757,7 +1807,8 @@ class TrainingEngine:
                               else epoch in self.config.checkpoint_epochs)
                              or epoch == stop_after or improved_guarded)
                 curve_due = self.config.curve_every is not None and (
-                    epoch == 1 or epoch % self.config.curve_every == 0 or epoch == stop_after or clean_stop_requested)
+                    (epoch == 1 and self.config.training_mode != "joint")
+                    or epoch % self.config.curve_every == 0 or epoch == stop_after or clean_stop_requested)
                 should_save = (review or milestone or curve_due
                                or (self.config.latest_every is not None and epoch % self.config.latest_every == 0))
                 if should_save:
@@ -1810,6 +1861,8 @@ class TrainingEngine:
                             history,
                             layout.write_path("loss_curves.png").parent,
                             self.selection.field_metric,
+                            **({"loss_metadata": provider.loss_metadata()}
+                               if callable(getattr(provider, "loss_metadata", None)) else {}),
                         )
                     finally:
                         restore_rng_state(curve_rng)

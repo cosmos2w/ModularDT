@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "task": "thermal",
+  "mode": "J-H",
+  "seed": 0,
+  "hidden": 128,
+  "message": 128,
+  "regional_anchors": 16,
+  "depth": 2,
+  "receiver_tile": 512,
+  "primary_queries": 1024,
+  "microbatch_cases": 4,
+  "effective_cases": 48,
+  "formal_full": true,
+  "total_epochs": 5000,
+  "initialization": "fresh_all_trainable",
+  "launch_policy": "manual_only",
+  "dataset_protocol": "original600_train"
+}

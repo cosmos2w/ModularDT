@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "task": "wind",
+  "mode": "J-H",
+  "seed": 42,
+  "hidden": 128,
+  "message": 128,
+  "regional_anchors": 32,
+  "depth": 2,
+  "receiver_tile": 512,
+  "primary_queries": 4096,
+  "microbatch_cases": 1,
+  "effective_cases": 24,
+  "formal_full": true,
+  "total_epochs": 5000,
+  "initialization": "fresh_all_trainable",
+  "launch_policy": "manual_only",
+  "dataset_protocol": "original420_train"
+}
