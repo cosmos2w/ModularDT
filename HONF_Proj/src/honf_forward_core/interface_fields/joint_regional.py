@@ -901,10 +901,16 @@ class JointRegionalFieldCore(nn.Module):
 
     def _truncate_receiver_access(self, prepared: JointRegionalPreparedContext,
                                   access: torch.Tensor, retained_access_mass=None,
-                                  retained_edge_counts: torch.Tensor | None = None):
-        """Apply a dense, renormalized receiver-access approximation for study."""
-        if retained_access_mass is not None and retained_edge_counts is not None:
-            raise ValueError('Choose retained_access_mass or retained_edge_counts, not both.')
+                                  retained_edge_counts: torch.Tensor | None = None,
+                                  fixed_receiver_edge_mask: torch.Tensor | None = None):
+        """Select and renormalize an approximation independently of its executor.
+
+        A fixed mask holds physical edge identities for conditional derivatives;
+        mass/count selection rebuilds support and can switch at a boundary.
+        """
+        if sum(value is not None for value in (
+                retained_access_mass, retained_edge_counts, fixed_receiver_edge_mask)) > 1:
+            raise ValueError('Choose one of retained_access_mass, retained_edge_counts or fixed_receiver_edge_mask.')
         allowed_masses = (1.0, 0.99, 0.95, 0.90)
         if retained_access_mass is not None:
             target = float(retained_access_mass)
@@ -927,7 +933,21 @@ class JointRegionalFieldCore(nn.Module):
             requested = retained_edge_counts.to(device=access.device, dtype=torch.long)
             if bool((requested < 0).any()) or bool((requested > valid_edge_counts).any()):
                 raise ValueError('retained_edge_counts must lie within each receiver valid-edge count.')
-        if edges == 0:
+        if fixed_receiver_edge_mask is not None:
+            if fixed_receiver_edge_mask.shape != access.shape or fixed_receiver_edge_mask.dtype != torch.bool:
+                raise ValueError('fixed_receiver_edge_mask must be boolean [B,Q,G].')
+            if fixed_receiver_edge_mask.device != access.device:
+                raise ValueError('fixed_receiver_edge_mask must use the receiver device.')
+            if bool((fixed_receiver_edge_mask & ~valid_edges[:, None]).any()):
+                raise ValueError('Fixed receiver support cannot select an absent edge.')
+            retained = access * fixed_receiver_edge_mask
+            actual_mass = retained.sum(-1)
+            if edges and bool((actual_mass <= 0).any()):
+                raise ValueError('Every fixed receiver support must retain positive access mass.')
+            selected = retained / actual_mass[..., None].clamp_min(torch.finfo(access.dtype).tiny)
+            counts = fixed_receiver_edge_mask.sum(-1)
+            source = 'fixed-edge-identities'
+        elif edges == 0:
             actual_mass = access.sum(-1)
             counts = torch.zeros(batch, queries, dtype=torch.long, device=access.device)
             selected = access
@@ -998,11 +1018,68 @@ class JointRegionalFieldCore(nn.Module):
         }
         return selected, receipt
 
+    @staticmethod
+    def _regional_read(prepared, access, receipt, executor):
+        """Execute either a dense contraction or an actual packed pair read.
+
+        Scores, context formation and every physical-source read remain dense.
+        The packed path gathers only positive retained receiver/edge pairs; it
+        does not expand a padded Q x K x H value array. Index selection is a
+        conditional support operation, not a smooth support derivative.
+        """
+        if executor not in ('dense', 'subset'):
+            raise ValueError("receiver_edge_executor must be 'dense' or 'subset'.")
+        edges = prepared.group_states
+        batch, queries, edge_count = access.shape
+        approximate = receipt['selection'] in ('mass-threshold', 'exact-count', 'fixed-edge-identities')
+        use_subset = executor == 'subset' and approximate and edge_count > 0
+        if not edge_count:
+            regional = prepared.global_state[:, None].expand(-1, queries, -1)
+            pairs = 0
+        elif use_subset:
+            indices = torch.nonzero(access > 0, as_tuple=False)
+            batch_indices, query_indices, edge_indices = indices.unbind(-1)
+            values = edges.flatten(0, 1).index_select(0, batch_indices * edge_count + edge_indices)
+            weights = access[batch_indices, query_indices, edge_indices]
+            regional = edges.new_zeros(batch * queries, edges.shape[-1]).index_add(
+                0, batch_indices * queries + query_indices, values * weights[:, None])
+            regional = regional.reshape(batch, queries, edges.shape[-1])
+            pairs = indices.shape[0]
+        else:
+            regional = torch.einsum('bqe,beh->bqh', access, edges)
+            pairs = batch * queries * edge_count
+        executed = 'packed-subset' if use_subset else 'dense'
+        receipt.update({
+            'receiver_edge_executor_requested': executor,
+            'receiver_edge_executor_executed': executed,
+            'full_access_fallback': executor == 'subset' and not use_subset,
+            'receiver_edge_score_pairs': batch * queries * edge_count,
+            'receiver_edge_value_pairs': pairs,
+            'physical_source_value_pairs': batch * queries * prepared.centers.shape[1],
+            'execution': (f'dense receiver-edge scoring; {executed} collective value read; '
+                          'all original physical-source slots read'),
+        })
+        return regional
+
+    @staticmethod
+    def _receiver_execution_summary(receipts):
+        return {
+            name: sum(receipt[name] for receipt in receipts)
+            for name in ('receiver_edge_score_pairs', 'receiver_edge_value_pairs', 'physical_source_value_pairs')
+        } | {
+            'executors': sorted({receipt['receiver_edge_executor_executed'] for receipt in receipts}),
+            'full_access_fallback': any(receipt['full_access_fallback'] for receipt in receipts),
+            'scoring_and_context': 'dense',
+            'physical_source_path': 'all original source slots retained',
+        }
+
     def _receiver_access(self, prepared: JointRegionalPreparedContext,
                          receivers: torch.Tensor, features: torch.Tensor,
                          start: int, access_mode: str | None,
                          retained_access_mass=None,
-                         retained_edge_counts: torch.Tensor | None = None
+                         retained_edge_counts: torch.Tensor | None = None,
+                         receiver_edge_executor: str = 'dense',
+                         fixed_receiver_edge_mask: torch.Tensor | None = None
                          ) -> tuple[torch.Tensor, torch.Tensor, dict]:
         edges = prepared.group_states
         batch, queries, _dimension = receivers.shape
@@ -1049,10 +1126,8 @@ class JointRegionalFieldCore(nn.Module):
             weights = torch.exp(logits - maximum) * valid
             access = weights / weights.sum(-1, keepdim=True).clamp_min(torch.finfo(weights.dtype).tiny)
         access, receipt = self._truncate_receiver_access(
-            prepared, access, retained_access_mass, retained_edge_counts)
-        if edge_count == 0:
-            return access, prepared.global_state[:, None].expand(-1, queries, -1), receipt
-        regional = torch.einsum('bqe,beh->bqh', access, edges)
+            prepared, access, retained_access_mass, retained_edge_counts, fixed_receiver_edge_mask)
+        regional = self._regional_read(prepared, access, receipt, receiver_edge_executor)
         return access, regional, receipt
 
     def _read_source_features(self, prepared: JointRegionalPreparedContext,
@@ -1087,18 +1162,31 @@ class JointRegionalFieldCore(nn.Module):
             return 'geometry'
         return selected
 
+    @staticmethod
+    def _validate_receiver_read_options(context, batch, queries, executor, mask):
+        if executor not in ('dense', 'subset'):
+            raise ValueError("receiver_edge_executor must be 'dense' or 'subset'.")
+        if mask is not None and (
+                mask.shape != (batch, queries, context.group_states.shape[1]) or
+                mask.dtype != torch.bool):
+            raise ValueError('fixed_receiver_edge_mask must be boolean [B,Q,G].')
+
     def read_receiver(self, context: JointRegionalPreparedContext, receivers: torch.Tensor,
                       receiver_features: torch.Tensor | None = None, *,
                       chunk_size: int = 512, access_mode: str | None = None,
                       retained_access_mass=None,
-                      retained_edge_counts: torch.Tensor | None = None) -> dict:
-        """Expose the actual dense receiver-to-edge/source read and its receipt."""
+                      retained_edge_counts: torch.Tensor | None = None,
+                      receiver_edge_executor: str = 'dense',
+                      fixed_receiver_edge_mask: torch.Tensor | None = None) -> dict:
+        """Expose actual receiver-to-edge/source reads and primitive work counts."""
         self.assert_owned(context)
         batch, queries, features = self._validate_receivers(context, receivers, receiver_features, chunk_size)
+        self._validate_receiver_read_options(context, batch, queries, receiver_edge_executor, fixed_receiver_edge_mask)
         if retained_edge_counts is not None and retained_edge_counts.shape != (batch, queries):
             raise ValueError('retained_edge_counts must have shape [B,Q].')
         accesses, regional_values, source_values = [], [], []
         actual_masses, retained_counts, valid_counts = [], [], []
+        execution_receipts = []
         for start in range(0, queries, chunk_size):
             stop = min(start + chunk_size, queries)
             query = receivers[:, start:stop]
@@ -1107,7 +1195,8 @@ class JointRegionalFieldCore(nn.Module):
                               else retained_edge_counts[:, start:stop])
             access, regional, receipt = self._receiver_access(
                 context, query, current_features, start, access_mode,
-                retained_access_mass, current_counts)
+                retained_access_mass, current_counts, receiver_edge_executor,
+                None if fixed_receiver_edge_mask is None else fixed_receiver_edge_mask[:, start:stop])
             source_features = self._read_source_features(context, query, current_features, regional)
             accesses.append(access)
             regional_values.append(regional)
@@ -1115,6 +1204,7 @@ class JointRegionalFieldCore(nn.Module):
             actual_masses.append(receipt['retained_access_mass_actual'])
             retained_counts.append(receipt['retained_edge_counts'])
             valid_counts.append(receipt['valid_edge_counts'])
+            execution_receipts.append(receipt)
         cat = lambda values, shape: (torch.cat(values, 1) if values else
                                      receivers.new_empty(shape))
         access = cat(accesses, (batch, 0, context.group_states.shape[1]))
@@ -1134,21 +1224,26 @@ class JointRegionalFieldCore(nn.Module):
             'retained_edge_counts': retained_counts_tensor,
             'valid_edge_counts': valid_counts_tensor,
             'access_mode': self._effective_access_mode(context, access_mode),
-            'execution': 'dense receiver-edge scoring and source reading; optional truncation is a model approximation, not sparse execution',
+            'execution': 'dense receiver-edge scoring/context and all-source reads; collective value executor reported separately',
+            'executor_receipt': self._receiver_execution_summary(execution_receipts),
         }
 
     def predict_fields(self, context: JointRegionalPreparedContext, receivers: torch.Tensor,
                        receiver_features: torch.Tensor | None = None, *, chunk_size: int = 512,
                        access_mode: str | None = None, retained_access_mass=None,
                        retained_edge_counts: torch.Tensor | None = None,
+                       receiver_edge_executor: str = 'dense',
+                       fixed_receiver_edge_mask: torch.Tensor | None = None,
                        return_organization: bool = False):
         """Read nonlinear configuration fields independently at each receiver."""
         self.assert_owned(context)
         batch, queries, features = self._validate_receivers(context, receivers, receiver_features, chunk_size)
+        self._validate_receiver_read_options(context, batch, queries, receiver_edge_executor, fixed_receiver_edge_mask)
         if retained_edge_counts is not None and retained_edge_counts.shape != (batch, queries):
             raise ValueError('retained_edge_counts must have shape [B,Q].')
         outputs = []
         accesses, actual_masses, retained_counts, valid_counts = [], [], [], []
+        execution_receipts = []
         for start in range(0, queries, chunk_size):
             stop = min(start + chunk_size, queries)
             query = receivers[:, start:start + chunk_size]
@@ -1157,7 +1252,8 @@ class JointRegionalFieldCore(nn.Module):
                               else retained_edge_counts[:, start:stop])
             access, regional, receipt = self._receiver_access(
                 context, query, current_features, start, access_mode,
-                retained_access_mass, current_counts)
+                retained_access_mass, current_counts, receiver_edge_executor,
+                None if fixed_receiver_edge_mask is None else fixed_receiver_edge_mask[:, start:stop])
             source_features = self._read_source_features(context, query, current_features, regional)
             source_pool = (source_features * context.source_measure[:, None, :, None]).sum(2)
             field_input = torch.cat((source_pool, regional,
@@ -1170,6 +1266,7 @@ class JointRegionalFieldCore(nn.Module):
                 actual_masses.append(receipt['retained_access_mass_actual'])
                 retained_counts.append(receipt['retained_edge_counts'])
                 valid_counts.append(receipt['valid_edge_counts'])
+                execution_receipts.append(receipt)
         fields = torch.cat(outputs, 1) if outputs else receivers.new_empty(batch, 0, self.field_outputs)
         if not return_organization:
             return fields
@@ -1184,7 +1281,8 @@ class JointRegionalFieldCore(nn.Module):
             'retained_edge_counts': cat(retained_counts, (batch, 0)).long(),
             'valid_edge_counts': cat(valid_counts, (batch, 0)).long(),
             'source_ids': context.source_ids,
-            'execution': 'dense receiver-edge scoring and source reading; optional truncation is a model approximation, not sparse execution',
+            'execution': 'dense receiver-edge scoring/context and all-source reads; collective value executor reported separately',
+            'executor_receipt': self._receiver_execution_summary(execution_receipts),
         }
 
     def predict(self, context, receivers, receiver_features=None, **kwargs):
@@ -1194,12 +1292,15 @@ class JointRegionalFieldCore(nn.Module):
                           receiver_features: torch.Tensor | None = None,
                           receiver_ids: torch.Tensor | None = None, chunk_size: int = 512,
                           access_mode: str | None = None, retained_access_mass=None,
-                          retained_edge_counts: torch.Tensor | None = None) -> PreparedSourceResponse:
+                          retained_edge_counts: torch.Tensor | None = None,
+                          receiver_edge_executor: str = 'dense',
+                          fixed_receiver_edge_mask: torch.Tensor | None = None) -> PreparedSourceResponse:
         """Prepare the source-resolved affine coefficient K(q,i)."""
         self.assert_owned(context)
         if self.affine_outputs == 0:
             raise ValueError('This model has no separately applicable affine output capability.')
         batch, queries, features = self._validate_receivers(context, receivers, receiver_features, chunk_size)
+        self._validate_receiver_read_options(context, batch, queries, receiver_edge_executor, fixed_receiver_edge_mask)
         ids = (torch.arange(queries, device=receivers.device)[None].expand(batch, -1)
                if receiver_ids is None else receiver_ids)
         self._validate_shape(ids, (batch, queries), 'receiver_ids')
@@ -1207,6 +1308,7 @@ class JointRegionalFieldCore(nn.Module):
             raise ValueError('retained_edge_counts must have shape [B,Q].')
         kernels, offsets, accesses, regional_values = [], [], [], []
         actual_masses, retained_counts, valid_counts = [], [], []
+        execution_receipts = []
         for start in range(0, queries, chunk_size):
             stop = min(start + chunk_size, queries)
             query = receivers[:, start:start + chunk_size]
@@ -1215,7 +1317,8 @@ class JointRegionalFieldCore(nn.Module):
                               else retained_edge_counts[:, start:stop])
             access, regional, receipt = self._receiver_access(
                 context, query, current_features, start, access_mode,
-                retained_access_mass, current_counts)
+                retained_access_mass, current_counts, receiver_edge_executor,
+                None if fixed_receiver_edge_mask is None else fixed_receiver_edge_mask[:, start:stop])
             source_features = self._read_source_features(context, query, current_features, regional)
             kernel = self.affine_head(source_features) * context.present[:, None, :, None]
             kernels.append(kernel)
@@ -1224,6 +1327,7 @@ class JointRegionalFieldCore(nn.Module):
             actual_masses.append(receipt['retained_access_mass_actual'])
             retained_counts.append(receipt['retained_edge_counts'])
             valid_counts.append(receipt['valid_edge_counts'])
+            execution_receipts.append(receipt)
             if self.zero_offset:
                 offsets.append(query.new_zeros(batch, query.shape[1], self.affine_outputs))
             else:
@@ -1247,7 +1351,7 @@ class JointRegionalFieldCore(nn.Module):
             far_kernel=far_kernel, receiver_functions=None,
             source_membership=None, environment_membership=None, group_present=None,
             forcing_scale=self.forcing_scale, mode='direct',
-            receiver_versions=_versions((receivers, features, ids)))
+            receiver_versions=_versions((receivers, features, ids, fixed_receiver_edge_mask, retained_edge_counts)))
         response.receiver_access = access
         response.receiver_regional_state = regional
         response.source_features = None
@@ -1262,11 +1366,13 @@ class JointRegionalFieldCore(nn.Module):
                                      torch.empty(batch, 0, dtype=torch.long, device=receivers.device)),
             'valid_edge_counts': (torch.cat(valid_counts, 1).long() if valid_counts else
                                   torch.empty(batch, 0, dtype=torch.long, device=receivers.device)),
-            'selection': ('dense-default' if retained_access_mass is None and retained_edge_counts is None
+            'selection': ('fixed-edge-identities' if fixed_receiver_edge_mask is not None
+                          else 'dense-default' if retained_access_mass is None and retained_edge_counts is None
                           else 'mass-threshold' if retained_access_mass is not None and float(retained_access_mass) < 1
                           else 'all-valid-edges' if retained_access_mass is not None
                           else 'exact-count'),
-            'execution': 'dense receiver-edge scoring and source reading; optional truncation is a model approximation, not sparse execution',
+            'execution': 'dense receiver-edge scoring/context and all-source reads; collective value executor reported separately',
+            'executor_receipt': self._receiver_execution_summary(execution_receipts),
         }
         return response
 
@@ -1341,6 +1447,7 @@ class JointRegionalFieldCore(nn.Module):
                 'retained_edge_counts': receiver_read['retained_edge_counts'],
                 'valid_edge_counts': receiver_read['valid_edge_counts'],
                 'execution': receiver_read['execution'],
+                'executor_receipt': receiver_read.get('executor_receipt'),
             }
         source_measure = prepared.source_measures_raw
         environment_measure = prepared.environment_measures_raw

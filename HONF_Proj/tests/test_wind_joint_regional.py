@@ -159,6 +159,22 @@ def test_wind_joint_model_preserves_native_profile_frame_and_standalone_load() -
         loaded.apply_increment(torch.ones(1))
 
 
+def test_wind_subset_matches_dense_truncation_in_physical_frame_and_preserves_query_vjp():
+    model = _model().eval()
+    scene = _joint_scene_batch((_scene_input(sources=3),), torch.device('cpu'))
+    prepared = model.prepare_scene(scene)
+    receivers = _receivers().requires_grad_(True)
+    outputs = [model.predict_physical(
+        prepared, receivers, retained_access_mass=.90, receiver_edge_executor=executor)
+        for executor in ('dense', 'subset')]
+    torch.testing.assert_close(outputs[0], outputs[1], rtol=3e-6, atol=3e-6)
+    derivatives = [torch.autograd.grad(value[..., 0].sum(), receivers, retain_graph=True)[0] for value in outputs]
+    torch.testing.assert_close(derivatives[0], derivatives[1], rtol=3e-5, atol=3e-5)
+    torch.testing.assert_close(prepared.scene.source_ids, scene.source_ids, rtol=0, atol=0)
+    with pytest.raises(ValueError, match='nonlinear'):
+        model.apply_increment(torch.ones(1, 3))
+
+
 def test_wind_locality_prior_roundtrip_and_native_input_query_derivatives() -> None:
     assert inspect.signature(build_wind_joint_task).parameters["locality_prior_strength"].default == 0.0
     model = _model(locality_prior_strength=1.0)

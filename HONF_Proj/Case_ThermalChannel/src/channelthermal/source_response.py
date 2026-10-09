@@ -318,7 +318,7 @@ class ThermalSourceResponse(nn.Module):
         return NativeStencil(indices, weights, valid)
 
     def prepare_native(self, structure, fluid_xy, *, local_query_points=None, ntheta=64, chunk_size=512,
-                       environment_flow_features=None):
+                       environment_flow_features=None, receiver_read_options=None):
         tensors = self.context_tensors(structure)
         context = self._prepare_context_tensors(tensors, environment_flow_features)
         centers, present, lengths = tensors["centers"], tensors["present"], tensors["lengths"]
@@ -368,7 +368,11 @@ class ThermalSourceResponse(nn.Module):
         union = torch.stack([torch.cat((u, u[:1].expand(width - u.numel()))) for u in unions])
         xy = torch.stack((union % self.nx + 0.5, union // self.nx + 0.5), -1).to(centers)
         grid_receivers = xy * (lengths[:, None] / lengths.new_tensor([self.nx, self.ny]))
-        response = self.core.prepare_receivers(context, grid_receivers, receiver_ids=union, chunk_size=chunk_size)
+        read_options = {} if receiver_read_options is None else dict(receiver_read_options)
+        if {'receiver_ids', 'chunk_size'} & read_options.keys():
+            raise ValueError('Native receiver identities and chunking cannot be overridden by read options.')
+        response = self.core.prepare_receivers(
+            context, grid_receivers, receiver_ids=union, chunk_size=chunk_size, **read_options)
         material = structure["material_params"].to(centers)
         if material.ndim == 1:
             material = material[None].expand(centers.shape[0], -1)

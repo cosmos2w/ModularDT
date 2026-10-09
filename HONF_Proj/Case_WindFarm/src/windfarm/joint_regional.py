@@ -302,6 +302,8 @@ class WindFarmJointRegionalModel(nn.Module):
         *,
         receiver_features: torch.Tensor | None = None,
         chunk_size: int | None = None,
+        retained_access_mass: float | None = None,
+        receiver_edge_executor: str = 'dense',
     ) -> torch.Tensor:
         self._assert_prepared(prepared)
         features = (
@@ -316,6 +318,8 @@ class WindFarmJointRegionalModel(nn.Module):
             receivers_D,
             receiver_features=features,
             chunk_size=self.receiver_tile if chunk_size is None else int(chunk_size),
+            retained_access_mass=retained_access_mass,
+            receiver_edge_executor=receiver_edge_executor,
         )
         if output.shape != (*receivers_D.shape[:2], 3):
             raise RuntimeError("Wind joint regional core returned an invalid three-component field shape.")
@@ -341,8 +345,12 @@ class WindFarmJointRegionalModel(nn.Module):
         receivers_D: torch.Tensor,
         *,
         chunk_size: int | None = None,
+        retained_access_mass: float | None = None,
+        receiver_edge_executor: str = 'dense',
     ) -> torch.Tensor:
-        residual = self.predict_standardized(prepared, receivers_D, chunk_size=chunk_size)
+        residual = self.predict_standardized(
+            prepared, receivers_D, chunk_size=chunk_size,
+            retained_access_mass=retained_access_mass, receiver_edge_executor=receiver_edge_executor)
         scale = residual.new_tensor(self.velocity_transform.safe_std)
         return self.profile_at_receivers(receivers_D) + residual * scale * float(self.velocity_transform.u_ref_mps)
 

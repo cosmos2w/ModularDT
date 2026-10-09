@@ -312,11 +312,19 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         prepared.source_id_catalogue_snapshot = copy.deepcopy(catalogue)
         return prepared
 
-    def prepare_native(self, structure, fluid_xy, *, chunk_size=None, **kwargs):
+    def prepare_native(self, structure, fluid_xy, *, chunk_size=None,
+                       retained_access_mass=None, receiver_edge_executor='dense', **kwargs):
         tile = self.receiver_tile if chunk_size is None else int(chunk_size)
         if tile < 1:
             raise ValueError("Joint Thermal receiver chunk size must be positive.")
-        prepared = super().prepare_native(structure, fluid_xy, chunk_size=tile, **kwargs)
+        if 'receiver_read_options' in kwargs:
+            raise ValueError('Use the joint retained_access_mass and receiver_edge_executor arguments.')
+        read_options = {
+            'retained_access_mass': retained_access_mass,
+            'receiver_edge_executor': receiver_edge_executor,
+        }
+        prepared = super().prepare_native(
+            structure, fluid_xy, chunk_size=tile, receiver_read_options=read_options, **kwargs)
         _, catalogue = self._source_identity(structure, prepared.context.centers, prepared.context.present)
         self._bind_source_id_catalogue(prepared, catalogue)
         prepared.normalization_stats_snapshot = {
@@ -324,11 +332,15 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         }
         prepared.flow_receivers = fluid_xy
         prepared.flow_receiver_snapshot = fluid_xy.detach().clone()
+        prepared.joint_read_options = read_options
+        prepared.joint_read_options_snapshot = dict(read_options)
         return prepared
 
     def validate_prepared(self, prepared, structure=None):
         if not isinstance(prepared, PreparedNativeResponse) or prepared.owner != id(self):
             raise ValueError("Native response preparation belongs to another adapter/request.")
+        if prepared.joint_read_options != prepared.joint_read_options_snapshot:
+            raise ValueError('Prepared joint receiver execution changed; rebuild the native state.')
         if _parameter_signature(self) != prepared.parameter_signature:
             raise ValueError("Prepared Thermal adapter weights changed; rebuild the response operator.")
         if any(not torch.equal(value, snapshot) for value, snapshot in prepared.receiver_snapshots):
@@ -442,6 +454,7 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
                 prepared.context,
                 prepared.flow_receivers,
                 chunk_size=self.receiver_tile,
+                **prepared.joint_read_options,
             )
             if flow_normalized.ndim != 3 or flow_normalized.shape[-1] != 4:
                 raise ValueError("Joint Thermal field head must return standardized [B,Q,4] u/v/p/omega.")

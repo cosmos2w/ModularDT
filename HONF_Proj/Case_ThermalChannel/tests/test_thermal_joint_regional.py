@@ -73,6 +73,29 @@ def _prepare(model, module_count):
     return structure, xy, local, prepared
 
 
+def test_native_subset_and_dense_truncation_preserve_affine_roles_and_heat_null_flow():
+    model = _adapter(locality_prior_strength=1.0).eval()
+    structure, xy, local, _ = _prepare(model, 2)
+    dense, subset = [model.prepare_native(
+        structure, xy, local_query_points=local, ntheta=4,
+        retained_access_mass=.99, receiver_edge_executor=executor)
+        for executor in ('dense', 'subset')]
+    heat = torch.tensor([[.7, 1.1]], dtype=torch.float64)
+    delta = torch.tensor([[.125, -.25]], dtype=torch.float64)
+    outputs = [model.apply_native(state, heat, accumulation_dtype=torch.float64) for state in (dense, subset)]
+    for name in ('pred_field', 'pred_interface', 'pred_internal_temperature'):
+        torch.testing.assert_close(outputs[0][name], outputs[1][name], rtol=3e-6, atol=3e-6)
+    changed = model.apply_native(subset, heat + delta, accumulation_dtype=torch.float64)
+    increment = model.apply_native(subset, delta, increment=True, accumulation_dtype=torch.float64)
+    assert torch.equal(changed['pred_field'][..., :4], outputs[1]['pred_field'][..., :4])
+    for name in ('fluid_temperature', 'pred_interface', 'pred_internal_temperature'):
+        torch.testing.assert_close(changed[name] - outputs[1][name], increment[name], rtol=1e-8, atol=1e-12)
+    assert subset.response.retention_receipt['executor_receipt']['executors'] == ['packed-subset']
+    subset.joint_read_options['retained_access_mass'] = .90
+    with pytest.raises(ValueError, match='receiver execution changed'):
+        model.apply_native(subset, heat)
+
+
 class _ForbiddenTarget:
     def __getattribute__(self, name):
         raise AssertionError(f"forbidden target/input access: {name}")
