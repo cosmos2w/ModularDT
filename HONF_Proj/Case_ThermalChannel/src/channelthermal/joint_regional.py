@@ -451,7 +451,18 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         output["pred_field"] = torch.cat((flow, output["fluid_temperature"]), dim=-1)
         return output
 
-    def predict_native_sample(self, sample: Mapping[str, Any], device=None) -> dict[str, np.ndarray]:
+    def predict_native_sample(
+        self,
+        sample: Mapping[str, Any],
+        device=None,
+        *,
+        ntheta: int = 64,
+    ) -> dict[str, np.ndarray]:
+        if isinstance(ntheta, (bool, np.bool_)) or not isinstance(ntheta, (int, np.integer)):
+            raise TypeError("Native interface receiver count ntheta must be a positive integer.")
+        if ntheta < 1:
+            raise ValueError("Native interface receiver count ntheta must be positive.")
+        ntheta = int(ntheta)
         device = torch.device(device) if device is not None else next(self.parameters()).device
         structure = {}
         for key, value in sample["structure"].items():
@@ -468,7 +479,10 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             local = local[None]
         heat = torch.as_tensor(sample["structure"]["heat_powers"], device=device, dtype=torch.float32)[None]
         with torch.no_grad():
-            output = self.apply_native(self.prepare_native(structure, fluid, local_query_points=local, ntheta=16), heat)
+            output = self.apply_native(
+                self.prepare_native(structure, fluid, local_query_points=local, ntheta=ntheta),
+                heat,
+            )
         ny, nx = np.asarray(sample["x_grid"]).shape
         return {
             "pred_field_grid": output["pred_field"][0].cpu().numpy().reshape(ny, nx, 5),

@@ -406,17 +406,39 @@ def test_predict_native_sample_preserves_large_numpy_physical_ids(monkeypatch):
         return prepared
 
     monkeypatch.setattr(model, "prepare_native", capture_ids)
-    result = model.predict_native_sample(
-        {
-            "structure": structure,
-            "x_grid": x_grid,
-            "y_grid": y_grid,
-            "module_internal_query_points": np.zeros((2, 2), dtype=np.float32),
-        },
-        device="cpu",
-    )
+    sample = {
+        "structure": structure,
+        "x_grid": x_grid,
+        "y_grid": y_grid,
+        "module_internal_query_points": np.zeros((2, 2), dtype=np.float32),
+    }
+    result = model.predict_native_sample(sample, device="cpu")
     assert observed_ids == [2**40 + 117, 2**40 + 904]
     assert result["pred_field_grid"].shape == (4, 8, 5)
+    assert result["pred_interface"].shape == (2, 64, 2)
+    theta = np.arange(64, dtype=np.float32) * (2 * np.pi / 64)
+    expected_angles = np.stack((theta, np.cos(theta), np.sin(theta)), axis=-1)
+    np.testing.assert_allclose(result["pred_port_condition"][0, :, :3], expected_angles, atol=1e-6)
+
+    observed_ids.clear()
+    explicit = model.predict_native_sample(sample, device="cpu", ntheta=16)
+    assert observed_ids == [2**40 + 117, 2**40 + 904]
+    assert explicit["pred_interface"].shape == (2, 16, 2)
+    theta = np.arange(16, dtype=np.float32) * (2 * np.pi / 16)
+    expected_angles = np.stack((theta, np.cos(theta), np.sin(theta)), axis=-1)
+    np.testing.assert_allclose(explicit["pred_port_condition"][0, :, :3], expected_angles, atol=1e-6)
+
+
+@pytest.mark.parametrize("ntheta", [0, -1])
+def test_predict_native_sample_rejects_nonpositive_interface_count(ntheta):
+    with pytest.raises(ValueError, match="ntheta must be positive"):
+        _adapter().predict_native_sample({}, ntheta=ntheta)
+
+
+@pytest.mark.parametrize("ntheta", [16.0, True, "64"])
+def test_predict_native_sample_requires_integer_interface_count(ntheta):
+    with pytest.raises(TypeError, match="ntheta must be a positive integer"):
+        _adapter().predict_native_sample({}, ntheta=ntheta)
 
 
 def test_normalization_mutation_invalidates_prepared_native_state():
