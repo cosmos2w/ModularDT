@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import weakref
 import zlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 
 import torch
 from torch import nn
@@ -314,8 +314,8 @@ class JointRegionalFieldCore(nn.Module):
                      edge_scales: torch.Tensor, edge_states: torch.Tensor,
                      edge_present: torch.Tensor, source_measures: torch.Tensor,
                      present: torch.Tensor, environment_measures: torch.Tensor,
-                     environment_present: torch.Tensor, incidence_mode: str,
-                     matched_mass_shuffle: bool) -> tuple[torch.Tensor, ...]:
+                     environment_present: torch.Tensor, incidence_mode: str
+                     ) -> tuple[torch.Tensor, ...]:
         if edge_centers.shape[1] == 0:
             b_source = source_states.new_empty(source_states.shape[0], 0, source_states.shape[1])
             b_environment = environment_states.new_empty(environment_states.shape[0], 0, environment_states.shape[1])
@@ -341,39 +341,68 @@ class JointRegionalFieldCore(nn.Module):
         b_source, d_source = _masked_measure_softmax(score_source, source_measures, present, edge_present)
         b_environment, d_environment = _masked_measure_softmax(
             score_environment, environment_measures, environment_present, edge_present)
-        if matched_mass_shuffle:
-            b_source = self._matched_mass_shuffle(b_source, source_measures, present)
-            b_environment = self._matched_mass_shuffle(b_environment, environment_measures, environment_present)
-            d_source = torch.where((source_measures * present)[:, None] > 0,
-                                   b_source / source_measures.clamp_min(torch.finfo(b_source.dtype).tiny)[:, None],
-                                   torch.zeros_like(b_source))
-            d_environment = torch.where((environment_measures * environment_present)[:, None] > 0,
-                                        b_environment / environment_measures.clamp_min(torch.finfo(b_environment.dtype).tiny)[:, None],
-                                        torch.zeros_like(b_environment))
         return b_source, b_environment, d_source, d_environment
 
     @staticmethod
     def _matched_mass_shuffle(membership: torch.Tensor, measure: torch.Tensor,
-                              present: torch.Tensor) -> torch.Tensor:
-        """Reassign incidence values to cyclically adjacent, measure-ranked donors."""
+                              present: torch.Tensor,
+                              physical_ids: torch.Tensor | None = None) -> torch.Tensor:
+        """Permute donors per edge within equal-measure/equal-presence buckets.
+
+        The per-edge mass histogram is unchanged exactly.  Restricting each
+        permutation to equal physical measures and presence weights keeps the
+        physical-measure density well defined after donor reassignment. Donor
+        ordering is deterministic from physical IDs, with a stable slot-order
+        tie break.
+        """
         if membership.shape[-1] == 0:
             return membership
-        batches, edges, _nodes = membership.shape
+        batches, _edges, nodes = membership.shape
+        if measure.shape != (batches, nodes) or present.shape != (batches, nodes):
+            raise ValueError('Matched-mass shuffle measure/presence must align with donor nodes.')
+        if physical_ids is None:
+            physical_ids = torch.arange(nodes, device=membership.device)[None].expand(batches, -1)
+        if physical_ids.shape != (batches, nodes):
+            raise ValueError('Matched-mass shuffle IDs must align with donor nodes.')
         rows = []
         for batch_index in range(batches):
-            active = torch.nonzero((measure[batch_index] * present[batch_index]) > 0, as_tuple=False).flatten()
-            replacement = membership[batch_index]
-            if active.numel() > 1:
-                order = active[measure[batch_index, active].argsort(stable=True)]
-                donor_order = order.roll(1)
-                shuffled = replacement.new_zeros(edges, membership.shape[-1])
-                shuffled = shuffled.index_copy(-1, order, replacement.index_select(-1, donor_order))
-                inactive = torch.nonzero((measure[batch_index] * present[batch_index]) <= 0, as_tuple=False).flatten()
-                if inactive.numel():
-                    shuffled = shuffled.index_copy(-1, inactive, replacement.index_select(-1, inactive))
-                replacement = shuffled
-            rows.append(replacement)
+            donor_permutation = torch.arange(nodes, dtype=torch.long, device=membership.device)[None].expand(
+                membership.shape[1], -1).clone()
+            active = (measure[batch_index] > 0) & (present[batch_index] > 0)
+            if bool(active.any()):
+                bucket_keys = torch.stack((measure[batch_index], present[batch_index]), -1)
+                _unique_keys, bucket_ids = torch.unique(
+                    bucket_keys, sorted=True, return_inverse=True, dim=0
+                )
+                for bucket_id in torch.unique(bucket_ids[active], sorted=True):
+                    bucket = torch.nonzero(active & (bucket_ids == bucket_id), as_tuple=False).flatten()
+                    if bucket.numel() < 2:
+                        continue
+                    stable_ids = physical_ids[batch_index, bucket]
+                    ordered = bucket[torch.argsort(stable_ids, stable=True)]
+                    for edge_index in range(membership.shape[1]):
+                        shift = 1 + edge_index % (bucket.numel() - 1)
+                        donor_permutation[edge_index, ordered] = ordered.roll(shift)
+            rows.append(membership[batch_index].gather(-1, donor_permutation))
         return torch.stack(rows, 0)
+
+    @staticmethod
+    def _preserve_context_metadata(original: JointRegionalPreparedContext,
+                                   rebuilt: JointRegionalPreparedContext) -> JointRegionalPreparedContext:
+        """Carry adapter-owned identity/dependency sidecars across rebuilds."""
+        declared = {field.name for field in fields(rebuilt)}
+        for name, value in vars(original).items():
+            if name not in declared:
+                setattr(rebuilt, name, value)
+        return rebuilt
+
+    @staticmethod
+    def _membership_density(membership: torch.Tensor, measure: torch.Tensor,
+                             present: torch.Tensor) -> torch.Tensor:
+        """Recover typed physical density from incidence mass and raw measure."""
+        active = (measure * present) > 0
+        density = membership / measure.clamp_min(torch.finfo(membership.dtype).tiny)[:, None]
+        return torch.where(active[:, None], density, torch.zeros_like(density))
 
     @staticmethod
     def _edge_to_node(membership: torch.Tensor, edge_states: torch.Tensor,
@@ -390,10 +419,31 @@ class JointRegionalFieldCore(nn.Module):
                               environment_present=None, environment_measures=None, source_ids=None,
                               environment_embedding=None, domain_origin=None, incidence_mode=None,
                               remove_collective_content=False, remove_collective_update=False,
-                              matched_mass_shuffle=False, receiver_access='learned',
+                              matched_mass_shuffle=False, block_index=None,
+                              frozen_incidence_plan=None, receiver_access='learned',
                               scene_average_access=None, scene_average_catalogue_ids=None,
                               scene_average_catalogue_versions=()):
         batch, modules, dimension = centers.shape
+        selected_block_index = block_index
+        if block_index is not None:
+            if isinstance(block_index, bool) or not isinstance(block_index, int):
+                raise TypeError('block_index must be a zero-based integer or None for all blocks.')
+            if not (remove_collective_content or remove_collective_update):
+                raise ValueError('block_index is only valid for collective content/update ablations.')
+            if block_index < 0 or block_index >= self.depth:
+                raise ValueError(f'block_index must lie in [0,{self.depth - 1}].')
+        if matched_mass_shuffle:
+            if (incidence_mode is not None or remove_collective_content or remove_collective_update or
+                    block_index is not None):
+                raise ValueError('matched_mass_shuffle is a separate intervention using the prepared incidence histories.')
+            if frozen_incidence_plan is None:
+                raise ValueError('matched_mass_shuffle requires a frozen baseline incidence plan.')
+            if len(frozen_incidence_plan) != self.depth:
+                raise ValueError('Frozen incidence plan must provide source/environment masses for every block.')
+            if self.mode == 'J-direct':
+                raise ValueError('J-direct has no typed regional incidence to shuffle.')
+        elif frozen_incidence_plan is not None:
+            raise ValueError('A frozen incidence plan is only valid for matched_mass_shuffle.')
         if dimension != self.spatial_dim or (self.max_sources is not None and modules > self.max_sources):
             raise ValueError('Source coordinates/capacity disagree with the model configuration.')
         if source_lengths.ndim == 3:
@@ -538,13 +588,31 @@ class JointRegionalFieldCore(nn.Module):
             source_delta = source_states.new_zeros(batch, modules, self.hidden)
             environment_delta = environment_states.new_zeros(batch, environments, self.hidden)
             edge_states = edge_anchor_states
-            for source_content, environment_content, edge_update, source_update, environment_update, global_update in zip(
-                    self.source_content, self.environment_content, self.edge_updates,
-                    self.source_node_updates, self.environment_node_updates, self.global_updates):
-                b_source, b_environment, d_source, d_environment = self._memberships(
-                    source_states, environment_states, centers, source_lengths, environment_coords,
-                    edges, edge_scales, edge_states, edge_present, source_measures, present,
-                    environment_measures, environment_present, incidence_mode, matched_mass_shuffle)
+            blocks = zip(self.source_content, self.environment_content, self.edge_updates,
+                         self.source_node_updates, self.environment_node_updates, self.global_updates,
+                         strict=True)
+            for current_block_index, (source_content, environment_content, edge_update, source_update,
+                                      environment_update, global_update) in enumerate(blocks):
+                if frozen_incidence_plan is None:
+                    b_source, b_environment, d_source, d_environment = self._memberships(
+                        source_states, environment_states, centers, source_lengths, environment_coords,
+                        edges, edge_scales, edge_states, edge_present, source_measures, present,
+                        environment_measures, environment_present, incidence_mode)
+                else:
+                    baseline_source, baseline_environment = frozen_incidence_plan[current_block_index]
+                    if baseline_source.shape != (batch, edges.shape[1], modules):
+                        raise ValueError('Frozen source incidence does not match this block and scene.')
+                    if baseline_environment.shape != (batch, edges.shape[1], environments):
+                        raise ValueError('Frozen environment incidence does not match this block and scene.')
+                    b_source = self._matched_mass_shuffle(
+                        baseline_source, source_measures, present, source_ids)
+                    environment_ids = torch.arange(environments, device=centers.device)[None].expand(
+                        batch, -1)
+                    b_environment = self._matched_mass_shuffle(
+                        baseline_environment, environment_measures, environment_present, environment_ids)
+                    d_source = self._membership_density(b_source, source_measures, present)
+                    d_environment = self._membership_density(
+                        b_environment, environment_measures, environment_present)
                 source_history_list.append(b_source)
                 environment_history_list.append(b_environment)
                 source_density_history_list.append(d_source)
@@ -564,12 +632,14 @@ class JointRegionalFieldCore(nn.Module):
                                                     context[:, None].expand(-1, edges.shape[1], -1),
                                                     stats[:, None].expand(-1, edges.shape[1], -1)), -1))
                 edge_states = (edge_states + edge_delta) * edge_present[..., None]
-                if remove_collective_content:
+                block_ablation = (selected_block_index is None or
+                                  selected_block_index == current_block_index)
+                if block_ablation and remove_collective_content:
                     edge_states = edge_anchor_states
                 edge_state_history_list.append(edge_states)
                 edge_to_source = self._edge_to_node(b_source, edge_states, present)
                 edge_to_environment = self._edge_to_node(b_environment, edge_states, environment_present)
-                if remove_collective_update:
+                if block_ablation and remove_collective_update:
                     edge_to_source = torch.zeros_like(edge_to_source)
                     edge_to_environment = torch.zeros_like(edge_to_environment)
                 edge_to_source_history_list.append(edge_to_source)
@@ -578,7 +648,7 @@ class JointRegionalFieldCore(nn.Module):
                     global_state[:, None].expand(-1, modules, -1), source_context), -1)) * present[..., None]
                 environment_delta = environment_update(torch.cat((environment_states, edge_to_environment,
                     global_state[:, None].expand(-1, environments, -1), environment_context), -1)) * environment_present[..., None]
-                if remove_collective_update:
+                if block_ablation and remove_collective_update:
                     source_delta = torch.zeros_like(source_delta)
                     environment_delta = torch.zeros_like(environment_delta)
                 source_update_history_list.append(source_delta)
@@ -628,7 +698,14 @@ class JointRegionalFieldCore(nn.Module):
                 'incidence': incidence_mode if self.mode != 'J-direct' else 'none',
                 'remove_collective_content': bool(remove_collective_content),
                 'remove_collective_update': bool(remove_collective_update),
+                'block_index': selected_block_index,
+                'ablation_scope': (
+                    'none' if not (remove_collective_content or remove_collective_update) else
+                    'all_blocks' if selected_block_index is None else 'single_block'
+                ),
                 'matched_mass_shuffle': bool(matched_mass_shuffle),
+                'frozen_plan': bool(matched_mass_shuffle),
+                'propagated_updates': bool(matched_mass_shuffle),
                 'receiver_access': receiver_access,
                 'scene_average_catalogue_ids': scene_average_catalogue_ids,
             }, _owner_id=id(self))
@@ -678,12 +755,17 @@ class JointRegionalFieldCore(nn.Module):
                           scene_average_access=None,
                           remove_collective_content: bool = False,
                           remove_collective_update: bool = False,
-                          matched_mass_shuffle: bool = False) -> JointRegionalPreparedContext:
+                          matched_mass_shuffle: bool = False,
+                          block_index: int | None = None) -> JointRegionalPreparedContext:
         """Rebuild an actual fixed-weight intervention from the same scene inputs."""
         self.assert_owned(prepared)
         allowed_access = ('learned', 'geometry', 'scene-average', 'uniform-average')
         if receiver_access is not None and receiver_access not in allowed_access:
             raise ValueError(f'receiver_access must be one of {allowed_access}.')
+        if matched_mass_shuffle and incidence_mode is not None:
+            raise ValueError('matched_mass_shuffle uses the prepared baseline incidence histories.')
+        if matched_mass_shuffle and (remove_collective_content or remove_collective_update or block_index is not None):
+            raise ValueError('matched_mass_shuffle must be evaluated separately from collective ablations.')
         scene_ids = None
         scene_versions = ()
         if isinstance(scene_average_access, dict):
@@ -709,29 +791,42 @@ class JointRegionalFieldCore(nn.Module):
                 scene_ids = torch.empty(0, dtype=torch.long, device=scene_average_access.device)
         elif scene_average_access is not None:
             raise ValueError('scene_average_access is only valid with receiver_access="scene-average".')
-        if incidence_mode is None and not (remove_collective_content or remove_collective_update or matched_mass_shuffle):
+        if incidence_mode is None and not (remove_collective_content or remove_collective_update or
+                                           matched_mass_shuffle or block_index is not None):
             new_versions = _versions((scene_average_access, scene_ids)) + tuple(scene_versions)
-            return replace(prepared, _access_mode=selected_mode,
+            return self._preserve_context_metadata(prepared, replace(prepared, _access_mode=selected_mode,
                            _scene_average_access=scene_average_access,
                            _scene_average_catalogue_ids=scene_ids,
                            input_versions=prepared.input_versions + new_versions,
                            _intervention_receipt={**(prepared._intervention_receipt or {}),
                                                   'receiver_access': selected_mode,
-                                                  'scene_average_catalogue_ids': scene_ids})
-        return self._prepare_context_impl(**prepared._input_args,
+                                                  'scene_average_catalogue_ids': scene_ids}))
+        frozen_plan = None
+        if matched_mass_shuffle:
+            if self.mode == 'J-direct':
+                raise ValueError('J-direct has no typed regional incidence to shuffle.')
+            if len(prepared.source_membership_history) != self.depth or len(
+                    prepared.environment_membership_history) != self.depth:
+                raise ValueError('Prepared context does not contain a complete baseline incidence history.')
+            frozen_plan = tuple((source.detach(), environment.detach()) for source, environment in zip(
+                prepared.source_membership_history, prepared.environment_membership_history, strict=True))
+        rebuilt = self._prepare_context_impl(**prepared._input_args,
             incidence_mode=incidence_mode,
             remove_collective_content=remove_collective_content,
             remove_collective_update=remove_collective_update,
             matched_mass_shuffle=matched_mass_shuffle,
+            block_index=block_index,
+            frozen_incidence_plan=frozen_plan,
             receiver_access=selected_mode,
             scene_average_access=scene_average_access,
             scene_average_catalogue_ids=scene_ids,
             scene_average_catalogue_versions=scene_versions)
+        return self._preserve_context_metadata(prepared, rebuilt)
 
     def restore(self, prepared: JointRegionalPreparedContext) -> JointRegionalPreparedContext:
         """Rebuild the ordinary model state from the original scene tensors."""
         self.assert_owned(prepared)
-        return self.prepare_context(**prepared._input_args)
+        return self._preserve_context_metadata(prepared, self.prepare_context(**prepared._input_args))
 
     def average_receiver_access(self, prepared: JointRegionalPreparedContext,
                                 catalogue_receivers: torch.Tensor,
@@ -1227,6 +1322,7 @@ class JointRegionalFieldCore(nn.Module):
         return {
             'mode': self.mode,
             'source_ids': prepared.source_ids,
+            'source_id_catalogue': getattr(prepared, 'source_id_catalogue', None),
             'source_states': prepared.source_states,
             'environment_states': prepared.environment_states,
             'source_measures': source_measure,

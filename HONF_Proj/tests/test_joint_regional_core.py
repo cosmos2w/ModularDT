@@ -222,8 +222,11 @@ def test_registered_anchors_respect_shifted_domain_and_physical_source_ids():
 
 def test_interventions_change_executed_path_and_restore_original_prediction():
     values = _inputs()
+    values['source_measures'] = torch.ones_like(values['source_measures'])
+    values['environment_measures'] = torch.ones_like(values['environment_measures'])
     core = _core().eval()
     original = _prepare(core, values)
+    original.source_id_catalogue = ('module-20', 'module-21', 'module-22', 'module-23')
     expected = core.predict_fields(original, values['receivers'], values['receiver_features'])
     removed_content = core.intervene_context(original, remove_collective_content=True)
     content_result = core.predict_fields(removed_content, values['receivers'], values['receiver_features'])
@@ -251,13 +254,46 @@ def test_interventions_change_executed_path_and_restore_original_prediction():
     assert not torch.allclose(shuffle_result, expected, rtol=1e-6, atol=1e-7)
     assert not torch.allclose(scene_result, expected, rtol=1e-6, atol=1e-7)
     assert not torch.allclose(uniform_result, expected, rtol=1e-6, atol=1e-7)
-    torch.testing.assert_close(shuffled.source_membership.sum(-1), original.source_membership.sum(-1))
+    receipt = shuffled._intervention_receipt
+    assert receipt['matched_mass_shuffle'] is True
+    assert receipt['frozen_plan'] is True
+    assert receipt['propagated_updates'] is True
+    assert shuffled.source_ids is original.source_ids
+    assert shuffled.source_id_catalogue is original.source_id_catalogue
+    torch.testing.assert_close(shuffled.edge_source_ids, original.edge_source_ids, rtol=0, atol=0)
+    for original_source, shuffled_source, source_density, original_environment, shuffled_environment, environment_density in zip(
+            original.source_membership_history, shuffled.source_membership_history,
+            shuffled.source_membership_density_history, original.environment_membership_history,
+            shuffled.environment_membership_history, shuffled.environment_membership_density_history,
+            strict=True):
+        torch.testing.assert_close(torch.sort(shuffled_source, dim=-1).values,
+                                   torch.sort(original_source, dim=-1).values, rtol=0, atol=0)
+        torch.testing.assert_close(torch.sort(shuffled_environment, dim=-1).values,
+                                   torch.sort(original_environment, dim=-1).values, rtol=0, atol=0)
+        torch.testing.assert_close(shuffled_source.sum(-1), original_source.sum(-1), rtol=2e-7, atol=2e-7)
+        torch.testing.assert_close(shuffled_environment.sum(-1), original_environment.sum(-1),
+                                   rtol=2e-7, atol=2e-7)
+        source_expected = shuffled_source / values['source_measures'][:, None].clamp_min(
+            torch.finfo(shuffled_source.dtype).tiny)
+        environment_expected = shuffled_environment / values['environment_measures'][:, None].clamp_min(
+            torch.finfo(shuffled_environment.dtype).tiny)
+        source_expected = torch.where(values['present'][:, None] > 0, source_expected,
+                                      torch.zeros_like(source_expected))
+        environment_expected = torch.where(values['environment_present'][:, None] > 0,
+                                           environment_expected, torch.zeros_like(environment_expected))
+        torch.testing.assert_close(source_density, source_expected, rtol=0, atol=0)
+        torch.testing.assert_close(environment_density, environment_expected, rtol=0, atol=0)
+    restored_shuffle = core.restore(shuffled)
+    assert restored_shuffle.source_id_catalogue is original.source_id_catalogue
+    torch.testing.assert_close(core.predict_fields(restored_shuffle, values['receivers'], values['receiver_features']),
+                               expected, rtol=0, atol=0)
     assert geometry_access_response.receiver_access.shape == (2, 7, 8)
     assert not torch.allclose(geometry_access_response.receiver_access,
                               core.prepare_receivers(original, values['receivers'], values['receiver_features']).receiver_access)
     torch.testing.assert_close(restored_result, expected, rtol=0, atol=0)
     response = core.prepare_receivers(original, values['receivers'], values['receiver_features'])
     export = core.export_organization(original, response)
+    assert export['source_id_catalogue'] is original.source_id_catalogue
     assert export['receiver_access'].shape == (2, 7, 8)
     assert export['source_membership_density'].shape == export['source_membership_mass'].shape
     assert export['edge_to_source'].shape == (2, 4, core.hidden)
@@ -266,6 +302,42 @@ def test_interventions_change_executed_path_and_restore_original_prediction():
     assert len(export['environment_membership_density_history']) == core.depth
     assert len(export['edge_state_history']) == core.depth
     assert len(export['edge_to_source_history']) == core.depth
+
+
+def test_collective_ablations_distinguish_first_block_from_all_blocks_and_restore():
+    values = _inputs()
+    core = _core().eval()
+    original = _prepare(core, values)
+    expected = core.predict_fields(original, values['receivers'], values['receiver_features'])
+    first_block = core.intervene_context(original, remove_collective_update=True, block_index=0)
+    all_blocks = core.intervene_context(original, remove_collective_update=True)
+    first_content = core.intervene_context(original, remove_collective_content=True, block_index=0)
+    all_content = core.intervene_context(original, remove_collective_content=True)
+    for selected, index in ((first_block, 0), (first_content, 0)):
+        assert selected._intervention_receipt['block_index'] == index
+        assert selected._intervention_receipt['ablation_scope'] == 'single_block'
+        result = core.predict_fields(selected, values['receivers'], values['receiver_features'])
+        assert not torch.allclose(result, expected, rtol=1e-6, atol=1e-7)
+        restored = core.restore(selected)
+        torch.testing.assert_close(core.predict_fields(restored, values['receivers'], values['receiver_features']),
+                                   expected, rtol=0, atol=0)
+    for selected in (all_blocks, all_content):
+        assert selected._intervention_receipt['block_index'] is None
+        assert selected._intervention_receipt['ablation_scope'] == 'all_blocks'
+        result = core.predict_fields(selected, values['receivers'], values['receiver_features'])
+        assert not torch.allclose(result, expected, rtol=1e-6, atol=1e-7)
+        torch.testing.assert_close(core.predict_fields(core.restore(selected), values['receivers'],
+                                                      values['receiver_features']), expected, rtol=0, atol=0)
+    with pytest.raises(ValueError, match='only valid'):
+        core.intervene_context(original, block_index=0)
+    with pytest.raises(ValueError, match='lie in'):
+        core.intervene_context(original, remove_collective_update=True, block_index=-1)
+    with pytest.raises(ValueError, match='lie in'):
+        core.intervene_context(original, remove_collective_content=True, block_index=core.depth)
+    with pytest.raises(TypeError, match='zero-based integer'):
+        core.intervene_context(original, remove_collective_update=True, block_index=True)
+    with pytest.raises(ValueError, match='prepared baseline'):
+        core.intervene_context(original, matched_mass_shuffle=True, incidence_mode='geometry')
 
 
 def test_scene_contract_control_exclusion_and_stale_state_rejection():
