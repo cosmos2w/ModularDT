@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 from dataclasses import replace
@@ -27,6 +28,7 @@ from windfarm.training.joint_task import (
     _role_counts_for_query_count,
     _sampling_dataset_id,
     _transform_cache_payload,
+    build_wind_joint_task,
 )
 
 from honf_runtime.unified_training import SamplingKey, TaskBatch
@@ -95,7 +97,7 @@ def _transforms() -> tuple[VelocityNormalizer, VerticalProfileBaseline]:
     return normalizer, profile
 
 
-def _model(mode: str = "J-H") -> WindFarmJointRegionalModel:
+def _model(mode: str = "J-H", *, locality_prior_strength: float = 0.0) -> WindFarmJointRegionalModel:
     torch.manual_seed(42)
     normalizer, profile = _transforms()
     return WindFarmJointRegionalModel(
@@ -108,6 +110,7 @@ def _model(mode: str = "J-H") -> WindFarmJointRegionalModel:
         depth=2,
         receiver_tile=2,
         seed=42,
+        locality_prior_strength=locality_prior_strength,
     )
 
 
@@ -145,6 +148,7 @@ def test_wind_joint_model_preserves_native_profile_frame_and_standalone_load() -
     assert prediction[0, 0].tolist() == pytest.approx(baseline[0, 0].tolist(), abs=1.0e-6)
 
     config = model.export_config()
+    assert "locality_prior_strength" not in config["core"]
     loaded = WindFarmJointRegionalModel.from_config(config)
     loaded.load_state_dict(model.state_dict())
     loaded.eval()
@@ -153,6 +157,69 @@ def test_wind_joint_model_preserves_native_profile_frame_and_standalone_load() -
     assert config["exact_affine_increments"] is False
     with pytest.raises(ValueError, match="does not support exact affine"):
         loaded.apply_increment(torch.ones(1))
+
+
+def test_wind_locality_prior_roundtrip_and_native_input_query_derivatives() -> None:
+    assert inspect.signature(build_wind_joint_task).parameters["locality_prior_strength"].default == 0.0
+    model = _model(locality_prior_strength=1.0)
+    no_prior = _model()
+    scene = _joint_scene_batch((_scene_input(),), torch.device("cpu"))
+    receivers = _receivers()
+    with torch.no_grad():
+        prior_prepared = model.prepare_scene(scene)
+        baseline_prepared = no_prior.prepare_scene(scene)
+        assert not torch.allclose(
+            prior_prepared.core_context.source_membership,
+            baseline_prepared.core_context.source_membership,
+        )
+        assert not torch.allclose(
+            prior_prepared.core_context.environment_membership,
+            baseline_prepared.core_context.environment_membership,
+        )
+
+    config = model.export_config()
+    assert config["core"]["locality_prior_strength"] == 1.0
+    loaded = WindFarmJointRegionalModel.from_config(config)
+    loaded.load_state_dict(model.state_dict(), strict=True)
+    loaded.eval()
+    torch.testing.assert_close(
+        loaded.predict_physical(loaded.prepare_scene(scene), receivers),
+        model.predict_physical(model.prepare_scene(scene), receivers),
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert loaded.locality_prior_strength == 1.0
+
+    grad_scene = replace(scene, centers=scene.centers.detach().clone().requires_grad_(True))
+    grad_receivers = receivers.detach().clone().requires_grad_(True)
+    scalar = model.predict_physical(model.prepare_scene(grad_scene), grad_receivers)[0, 1, 0]
+    center_grad, query_grad = torch.autograd.grad(scalar, (grad_scene.centers, grad_receivers))
+    center_value = center_grad[0, 0, 0]
+    query_value = query_grad[0, 1, 0]
+    assert torch.isfinite(center_value) and torch.isfinite(query_value)
+    assert abs(float(center_value)) > 1.0e-7
+    assert abs(float(query_value)) > 1.0e-7
+
+    epsilon = 1.0e-2
+    with torch.no_grad():
+        center_plus, center_minus = scene.centers.clone(), scene.centers.clone()
+        center_plus[0, 0, 0] += epsilon
+        center_minus[0, 0, 0] -= epsilon
+        finite_center = (
+            model.predict_physical(model.prepare_scene(replace(scene, centers=center_plus)), receivers)[0, 1, 0]
+            - model.predict_physical(model.prepare_scene(replace(scene, centers=center_minus)), receivers)[0, 1, 0]
+        ) / (2.0 * epsilon)
+        query_plus, query_minus = receivers.clone(), receivers.clone()
+        query_plus[0, 1, 0] += epsilon
+        query_minus[0, 1, 0] -= epsilon
+        finite_query = (
+            model.predict_physical(model.prepare_scene(scene), query_plus)[0, 1, 0]
+            - model.predict_physical(model.prepare_scene(scene), query_minus)[0, 1, 0]
+        ) / (2.0 * epsilon)
+    torch.testing.assert_close(center_value, finite_center, rtol=2.0e-2, atol=2.0e-4)
+    torch.testing.assert_close(query_value, finite_query, rtol=2.0e-2, atol=2.0e-4)
+    with pytest.raises(ValueError, match="only for J-H"):
+        _model("J-geometry", locality_prior_strength=1.0)
 
 
 def test_wind_joint_predictions_are_source_environment_query_and_batch_order_invariant() -> None:

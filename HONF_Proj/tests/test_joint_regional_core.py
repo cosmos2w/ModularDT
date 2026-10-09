@@ -41,12 +41,13 @@ def _inputs(*, batch=2, modules=4, environments=5, dimension=2, query_width=3):
     }
 
 
-def _core(mode='J-H', *, affine_outputs=1, field_outputs=2, dimension=2, query_width=3, seed=321):
+def _core(mode='J-H', *, affine_outputs=1, field_outputs=2, dimension=2, query_width=3, seed=321,
+          locality_prior_strength=0.0):
     return JointRegionalFieldCore(
         4, 2, 3, spatial_dim=dimension, hidden=16, message=12, mode=mode,
         regional_anchors=4, depth=2, field_outputs=field_outputs,
         affine_outputs=affine_outputs, query_width=query_width,
-        initialization_seed=seed)
+        initialization_seed=seed, locality_prior_strength=locality_prior_strength)
 
 
 def _prepare(core, values):
@@ -68,9 +69,107 @@ def test_shared_parameters_initialize_identically_across_geometry_and_learned_mo
         torch.testing.assert_close(learned_parameters[name], geometry_parameters[name], rtol=0, atol=0)
 
 
+def test_locality_prior_config_roundtrip_zero_identity_and_shapes():
+    values = _inputs()
+    baseline = _core(seed=654)
+    explicit_zero = _core(seed=654, locality_prior_strength=0.0)
+    assert 'locality_prior_strength' not in baseline.config
+    assert 'locality_prior_strength' not in explicit_zero.config
+    assert baseline.locality_prior_strength == explicit_zero.locality_prior_strength == 0.0
+    baseline_prepared = _prepare(baseline, values)
+    zero_prepared = _prepare(explicit_zero, values)
+    baseline_fields = baseline.predict_fields(baseline_prepared, values['receivers'], values['receiver_features'])
+    zero_fields = explicit_zero.predict_fields(zero_prepared, values['receivers'], values['receiver_features'])
+    torch.testing.assert_close(zero_fields, baseline_fields, rtol=0, atol=0)
+    for name in ('source_membership', 'environment_membership', 'group_states', 'global_state'):
+        torch.testing.assert_close(getattr(zero_prepared, name), getattr(baseline_prepared, name), rtol=0, atol=0)
+    torch.testing.assert_close(zero_prepared.edge_scale_vectors, baseline_prepared.edge_scale_vectors,
+                               rtol=0, atol=0)
+
+    configured = _core(seed=654, locality_prior_strength=0.4)
+    assert configured.config['locality_prior_strength'] == 0.4
+    assert set(configured.state_dict()) == set(baseline.state_dict())
+    for name, parameter in configured.named_parameters():
+        torch.testing.assert_close(parameter, dict(baseline.named_parameters())[name], rtol=0, atol=0)
+    restored = JointRegionalFieldCore(**configured.config, initialization_seed=0)
+    restored.load_state_dict(configured.state_dict())
+    assert restored.config == configured.config
+    configured_prepared = _prepare(configured, values)
+    restored_prepared = _prepare(restored, values)
+    configured_response = configured.prepare_receivers(
+        configured_prepared, values['receivers'], values['receiver_features'])
+    restored_response = restored.prepare_receivers(
+        restored_prepared, values['receivers'], values['receiver_features'])
+    assert configured_prepared.source_membership.shape == baseline_prepared.source_membership.shape
+    assert configured_prepared.environment_membership.shape == baseline_prepared.environment_membership.shape
+    assert configured_response.receiver_access.shape == (2, 7, 8)
+    assert restored_response.receiver_access.shape == configured_response.receiver_access.shape
+    torch.testing.assert_close(restored.predict_fields(
+        restored_prepared, values['receivers'], values['receiver_features']),
+        configured.predict_fields(configured_prepared, values['receivers'], values['receiver_features']),
+        rtol=0, atol=0)
+    assert not torch.equal(configured_prepared.source_membership, baseline_prepared.source_membership)
+    assert not torch.equal(configured_prepared.environment_membership, baseline_prepared.environment_membership)
+
+
+@pytest.mark.parametrize('strength', [-1.0, float('inf'), float('nan')])
+def test_locality_prior_rejects_invalid_strengths(strength):
+    with pytest.raises(ValueError, match='finite and nonnegative'):
+        _core(locality_prior_strength=strength)
+    with pytest.raises(ValueError, match='only to J-H'):
+        _core('J-geometry', locality_prior_strength=0.1)
+
+
+def test_locality_prior_concentrates_membership_and_receiver_access_toward_geometry():
+    values = _inputs()
+    baseline = _core(seed=923, locality_prior_strength=0.0).eval()
+    moderate = _core(seed=923, locality_prior_strength=0.2).eval()
+    localized = _core(seed=923, locality_prior_strength=0.8).eval()
+    for core in (moderate, localized):
+        core.load_state_dict(baseline.state_dict())
+    cores = (baseline, moderate, localized)
+    contexts = []
+    for core in cores:
+        with torch.no_grad():
+            for module in (core.source_membership_score, core.environment_membership_score,
+                           core.receiver_query, core.edge_key, core.access_geometry):
+                for parameter in module.parameters():
+                    parameter.zero_()
+        contexts.append(_prepare(core, values))
+    local_context = contexts[-1]
+
+    membership_costs = {'source': [], 'environment': []}
+    for coords, presence, use_environment in (
+            (values['centers'], values['present'], False),
+            (values['environment_coords'], values['environment_present'], True)):
+        costs = membership_costs['environment' if use_environment else 'source']
+        for context in contexts:
+            membership = (context.environment_membership if use_environment
+                          else context.source_membership)
+            edge_scales = context.edge_scale_vectors[:, :, None].clamp_min(1e-12)
+            distance = ((coords[:, None] - context.group_centers[:, :, None]) /
+                        edge_scales).square().sum(-1)
+            active = (context.group_present > 0)[:, :, None] & (presence > 0)[:, None]
+            costs.append((membership * distance).masked_select(active).sum() /
+                         active.sum().clamp_min(1))
+        assert costs[0] > costs[1] > costs[2]
+
+    receivers = local_context.group_centers
+    features = receivers.new_zeros(receivers.shape[0], receivers.shape[1], 3)
+    relative = ((receivers[:, :, None] - local_context.group_centers[:, None]) /
+                local_context.edge_scale_vectors[:, None].clamp_min(1e-12))
+    distance = relative.square().sum(-1)
+    valid = local_context.group_present[:, None] > 0
+    access_costs = []
+    for core, context in zip(cores, contexts, strict=True):
+        read = core.read_receiver(context, receivers, features)
+        access_costs.append((read['receiver_access'] * distance * valid).sum(-1).mean())
+    assert access_costs[0] > access_costs[1] > access_costs[2]
+
+
 def test_both_output_heads_train_collective_membership_and_receiver_access():
     values = _inputs()
-    core = _core().train()
+    core = _core(locality_prior_strength=0.2).train()
     prepared = _prepare(core, values)
     fields = core.predict_fields(prepared, values['receivers'], values['receiver_features'])
     response = core.prepare_receivers(prepared, values['receivers'], values['receiver_features'])
@@ -80,19 +179,22 @@ def test_both_output_heads_train_collective_membership_and_receiver_access():
     assert response.dense_kernel().shape == (2, 7, 4, 1)
     assert response.context.source_ids is values['source_ids']
 
-    organizer_parameters = [
-        *core.source_membership_score.parameters(),
-        *core.environment_membership_score.parameters(),
-        *core.edge_updates.parameters(),
-        *core.receiver_query.parameters(), *core.edge_key.parameters(),
-        *core.access_geometry.parameters(),
-    ]
+    organizer_modules = (
+        core.source_membership_score, core.environment_membership_score, core.edge_updates,
+        core.receiver_query, core.edge_key, core.access_geometry,
+    )
+    organizer_parameters = [parameter for module in organizer_modules for parameter in module.parameters()]
     flow_gradients = torch.autograd.grad(fields.square().mean(), organizer_parameters,
                                          allow_unused=True, retain_graph=True)
     thermal_gradients = torch.autograd.grad(thermal.square().mean(), organizer_parameters,
-                                            allow_unused=True)
+                                            allow_unused=True, retain_graph=True)
     for gradients in (flow_gradients, thermal_gradients):
         assert sum(float(gradient.abs().sum()) for gradient in gradients if gradient is not None) > 1e-8
+    for loss in (fields.square().mean(), thermal.square().mean()):
+        for module in organizer_modules:
+            gradients = torch.autograd.grad(
+                loss, tuple(module.parameters()), allow_unused=True, retain_graph=True)
+            assert sum(float(gradient.abs().sum()) for gradient in gradients if gradient is not None) > 1e-8
     assert core.source_membership_score[-1].bias is None
     assert core.environment_membership_score[-1].bias is None
     assert core.access_geometry[-1].bias is None

@@ -942,6 +942,7 @@ def build_thermal_joint_task(
     manifest: Mapping[str, Any] | str | Path | None = None,
     formal_full: bool = False,
     regional_anchors: int = 16,
+    locality_prior_strength: float = 0.0,
     receiver_tile: int = 512,
     seed: int = 0,
     total_epochs: int = 2500,
@@ -962,6 +963,16 @@ def build_thermal_joint_task(
     """
     if mode not in JOINT_THERMAL_MODES:
         raise ValueError(f"Joint Thermal mode must be one of {JOINT_THERMAL_MODES}.")
+    if isinstance(locality_prior_strength, (bool, np.bool_)):
+        raise TypeError("Joint Thermal locality prior strength must be numeric, not boolean.")
+    try:
+        locality_prior_strength = float(locality_prior_strength)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Joint Thermal locality prior strength must be finite and nonnegative.") from error
+    if not math.isfinite(locality_prior_strength) or locality_prior_strength < 0:
+        raise ValueError("Joint Thermal locality prior strength must be finite and nonnegative.")
+    if locality_prior_strength and mode != "J-H":
+        raise ValueError("Joint Thermal locality prior is only supported by J-H.")
     if microbatch_size < 1 or effective_batch_size < 1 or microbatch_size > effective_batch_size:
         raise ValueError("Joint Thermal microbatch must be positive and no larger than its effective batch.")
     if primary_queries < 1 or receiver_tile < 1:
@@ -1014,6 +1025,7 @@ def build_thermal_joint_task(
         regional_anchors=regional_anchors,
         depth=depth,
         receiver_tile=receiver_tile,
+        locality_prior_strength=locality_prior_strength,
         seed=seed,
     ).to(device)
     budget = {

@@ -70,3 +70,17 @@ def test_attached_receiver_motion_is_a_different_derivative_from_eulerian_motion
     _, eulerian = torch.autograd.functional.jvp(lambda centers: read(centers, False), values['centers'], direction)
     _, attached = torch.autograd.functional.jvp(lambda centers: read(centers, True), values['centers'], direction)
     assert (attached - eulerian).norm() > 1e-5
+
+
+def test_locality_configuration_changes_invalidate_fields_and_prepared_heat_operator():
+    values = _inputs()
+    core = _core().eval()
+    prepared = _prepare(core, values)
+    response = core.prepare_receivers(prepared, values['receivers'], values['receiver_features'])
+    core.locality_prior_strength = 1.0
+    with pytest.raises(ValueError, match='locality configuration changed'):
+        core.predict_fields(prepared, values['receivers'], values['receiver_features'])
+    with pytest.raises(ValueError, match='locality configuration changed'):
+        core.apply_forcing(response, torch.ones(2, 4))
+    rebuilt = _prepare(core, values)
+    assert torch.isfinite(core.predict_fields(rebuilt, values['receivers'], values['receiver_features'])).all()

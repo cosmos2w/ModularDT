@@ -30,6 +30,7 @@ RECIPE_KEYS = {
     "formal_full", "total_epochs", "initialization", "launch_policy", "dataset_protocol",
     "response_coefficient", "operator_coefficient",
     "auxiliary_calibration",
+    "locality_prior_strength",
 }
 
 
@@ -66,6 +67,10 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         if name in recipe and (not isinstance(recipe[name], (float, int)) or
                                not math.isfinite(recipe[name]) or recipe[name] < 0):
             raise ValueError(f"Recipe {name} must be finite and nonnegative.")
+    prior = recipe.get('locality_prior_strength', 0.0)
+    if (type(prior) not in (float, int) or not math.isfinite(prior) or prior < 0
+            or (prior and recipe['mode'] != 'J-H')):
+        raise ValueError('Locality prior must be finite, nonnegative and used only by J-H.')
     return recipe
 
 
@@ -75,7 +80,7 @@ def resolved_recipe(args: argparse.Namespace) -> dict[str, Any]:
     task = args.task
     if task is None:
         raise ValueError("Provide --task or --recipe-json.")
-    return validate_recipe({
+    recipe = {
         "schema_version": 1, "task": task, "mode": args.mode,
         "seed": args.seed if args.seed is not None else (0 if task == "thermal" else 42),
         "hidden": args.hidden, "message": args.message,
@@ -87,7 +92,10 @@ def resolved_recipe(args: argparse.Namespace) -> dict[str, Any]:
         "formal_full": False, "total_epochs": 2500,
         "initialization": "fresh_all_trainable", "launch_policy": "bounded_development",
         "dataset_protocol": "fixed25_v1" if task == "thermal" else "wind_shared_fixed24_v1",
-    })
+    }
+    if args.locality_prior_strength:
+        recipe['locality_prior_strength'] = args.locality_prior_strength
+    return validate_recipe(recipe)
 
 
 def seed_all(seed: int) -> None:
@@ -115,7 +123,8 @@ def build(recipe: dict[str, Any], *, device: str):
         from channelthermal.training.joint_task import build_thermal_joint_task as factory
     else:
         from windfarm.training.joint_task import build_wind_joint_task as factory
-    task_options = {name: recipe[name] for name in ("response_coefficient", "operator_coefficient", "auxiliary_calibration")
+    task_options = {name: recipe[name] for name in ("response_coefficient", "operator_coefficient", "auxiliary_calibration",
+                                                 "locality_prior_strength")
                     if name in recipe}
     model, provider = factory(
         mode=recipe["mode"], device=device, seed=recipe["seed"], hidden=recipe["hidden"],
@@ -201,7 +210,7 @@ def validate_manual_recipe(model: Any, provider: Any, engine: Any, identity: dic
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "dry-run", "start", "resume"))
+    parser.add_argument("command", choices=("prepare", "dry-run", "start", "resume", "branch"))
     parser.add_argument("--task", choices=("thermal", "wind"))
     parser.add_argument("--mode", choices=MODES, default="J-H")
     parser.add_argument("--recipe-json")
@@ -213,6 +222,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--receiver-tile", type=int, default=512)
     parser.add_argument("--primary-queries", type=int)
     parser.add_argument("--microbatch-cases", type=int)
+    parser.add_argument('--locality-prior-strength', type=float, default=0.0)
+    parser.add_argument('--branch-from-checkpoint')
+    parser.add_argument('--revision-declaration')
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir")
     parser.add_argument("--stop-after", type=int)
@@ -220,13 +232,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threads", type=int, default=1)
     args = parser.parse_args(argv)
     recipe = resolved_recipe(args)
-    if args.command in ("start", "resume"):
+    if args.command in ("start", "resume", "branch"):
         if not args.output_dir or args.stop_after is None:
             parser.error("Optimization requires --output-dir and --stop-after.")
         if recipe["formal_full"] and not args.manual_formal_launch:
             parser.error("Formal optimization requires explicit --manual-formal-launch; preparation is inert.")
         if not 1 <= args.stop_after <= recipe["total_epochs"]:
             parser.error("Requested stop exceeds the declared horizon.")
+    if args.command == 'branch':
+        if (recipe['formal_full'] or recipe['mode'] != 'J-H'
+                or not args.branch_from_checkpoint or not args.revision_declaration):
+            parser.error('A core revision requires a development J-H recipe, parent checkpoint and sealed declaration.')
+    elif args.branch_from_checkpoint or args.revision_declaration:
+        parser.error('Core revision parent/declaration options are valid only for branch.')
     if args.command in ("prepare", "dry-run"):
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         args.device = "cpu"
@@ -253,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         from honf_runtime.run_layout import resolve_checkpoint
         output = Path(args.output_dir).resolve()
-        if args.command == "start":
+        if args.command in ('start', 'branch'):
             write_json(output / "resolved_recipe.json", recipe)
             write_json(output / "preparation.json", {"cold_setup_seconds": setup_seconds,
                        **summary(model, provider, engine, identity)})
@@ -263,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
             model, provider, output, identity=identity, arm=recipe["mode"],
             stop_after=args.stop_after,
             resume_checkpoint=resolve_checkpoint(output, "latest") if args.command == "resume" else None,
+            branch_from_checkpoint=args.branch_from_checkpoint if args.command == 'branch' else None,
+            joint_core_revision=json.loads(Path(args.revision_declaration).read_text())
+                if args.command == 'branch' else None,
         )
         payload["cold_setup_seconds"] = setup_seconds
         payload["outer_elapsed_seconds"] = time.time() - started

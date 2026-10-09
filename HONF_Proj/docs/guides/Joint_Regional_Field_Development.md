@@ -43,6 +43,18 @@ CUDA_VISIBLE_DEVICES=1 python tools/joint_regional_train.py resume \
   --output-dir PATH_TO_SAME_RUN --stop-after 500
 ```
 
+The optional J-H locality revision adds a fixed Gaussian log prior to the learned typed incidence and receiver access scores; its strength is omitted at zero to preserve v1 identities. Positive strength retains learned residual scores, every physical source column, the same trainable tensors, and the same registered anchors. Changing it invalidates prepared contexts and heat operators. It is a model revision rather than an exact resume option.
+
+A shape-compatible locality child requires an immutable pre-fit diagnosis, its SHA256-bound declaration, a new run directory and the exact parent monitoring checkpoint. The `branch` command preserves parent weights, named optimizer moments, RNG, case/query streams, absolute schedule and cumulative case/update age. It permits only the declared locality scalar change and rejects changes in datasets, normalization, objectives, packing, width or selection policy. Selection is reset because parent scores belong to the old function; inherited history and new-function age remain separately labelled.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python tools/joint_regional_train.py branch \
+  --recipe-json PATH_TO_REVISED_J_H_RECIPE --device cuda:0 \
+  --branch-from-checkpoint PATH_TO_COMMON_PARENT_CHECKPOINT \
+  --revision-declaration PATH_TO_HASH_BOUND_DECLARATION \
+  --output-dir PATH_TO_NEW_CHILD_RUN --stop-after 1000
+```
+
 ## Manual fullTRAIN5000 preparation
 
 The [Thermal recipe](../../src/config_core/forward/joint_regional/thermal_full5000_v1.json) and [Wind recipe](../../src/config_core/forward/joint_regional/wind_full5000_v1.json) are experimental manual-only recipes. They fit transforms on original600 Thermal TRAIN cases or original420 Wind TRAIN rows, initialize all trainable weights freshly, and preserve the test lock. They do not resume segmented checkpoints or import an external learned flow model. The development evidence and final report determine whether a formal recommendation is justified.

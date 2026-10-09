@@ -14,6 +14,7 @@ from channelthermal.joint_regional import (
     JointThermalRegionalAdapter,
     load_joint_thermal_checkpoint,
 )
+from channelthermal.training import joint_task as joint_task_module
 from channelthermal.training.joint_task import JointThermalTask
 
 
@@ -43,7 +44,7 @@ def _structure(module_count: int):
     }
 
 
-def _adapter(mode="J-H"):
+def _adapter(mode="J-H", locality_prior_strength=0.0):
     torch.manual_seed(91)
     return JointThermalRegionalAdapter(
         mode=mode,
@@ -57,6 +58,7 @@ def _adapter(mode="J-H"):
         ny=4,
         environment_nx=4,
         environment_ny=2,
+        locality_prior_strength=locality_prior_strength,
         seed=91,
     )
 
@@ -168,6 +170,146 @@ def test_joint_checkpoint_roundtrip_is_self_contained_and_stale_context_is_rejec
         next(model.parameters()).add_(1.0e-3)
     with pytest.raises(ValueError, match="weights changed"):
         model.apply_native(prepared, torch.ones(1, 3))
+
+
+@pytest.mark.parametrize(
+    ("strength", "error"),
+    [
+        (-1.0, ValueError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (float("-inf"), ValueError),
+        (True, TypeError),
+        ("bad", ValueError),
+    ],
+)
+def test_locality_prior_strength_requires_finite_nonnegative_number(strength, error):
+    with pytest.raises(error, match="locality prior"):
+        _adapter("J-H", locality_prior_strength=strength)
+
+
+def test_locality_prior_zero_preserves_v1_config_and_self_contained_heat_null():
+    default = _adapter("J-H")
+    explicit_zero = _adapter("J-H", locality_prior_strength=0.0)
+    assert default.model_config() == explicit_zero.model_config()
+    assert "locality_prior_strength" not in default.model_config()
+    assert default.core_config == explicit_zero.core_config
+    assert all(torch.equal(left, right) for left, right in zip(default.state_dict().values(), explicit_zero.state_dict().values(), strict=True))
+
+    _, _, _, prepared = _prepare(default, 3)
+    payload = default.checkpoint_payload(provider_identity={"scope": "locality_prior_default_test"})
+    assert "locality_prior_strength" not in payload["model_config"]
+    restored = load_joint_thermal_checkpoint(payload)
+    _, _, _, restored_prepared = _prepare(restored, 3)
+    zero_increment = restored.apply_native(
+        restored_prepared,
+        torch.zeros(1, 3),
+        increment=True,
+    )
+    assert torch.equal(zero_increment["pred_field"], torch.zeros_like(zero_increment["pred_field"]))
+    assert torch.equal(zero_increment["pred_interface"], torch.zeros_like(zero_increment["pred_interface"]))
+    assert torch.equal(zero_increment["pred_internal_temperature"], torch.zeros_like(zero_increment["pred_internal_temperature"]))
+    baseline = default.apply_native(prepared, torch.tensor([[0.5, 0.8, 1.1]]))
+    restored_baseline = restored.apply_native(restored_prepared, torch.tensor([[0.5, 0.8, 1.1]]))
+    for key in ("pred_field", "pred_interface", "pred_internal_temperature"):
+        torch.testing.assert_close(restored_baseline[key], baseline[key], atol=0, rtol=0)
+
+
+def test_locality_prior_jh_roundtrip_and_flow_response_gradients_are_finite():
+    default = _adapter("J-H")
+    revised = _adapter("J-H", locality_prior_strength=1.0)
+    assert revised.model_config()["locality_prior_strength"] == 1.0
+    assert "locality_prior_strength" not in default.model_config()
+    assert list(default.state_dict()) == list(revised.state_dict())
+    assert all(torch.equal(left, right) for left, right in zip(default.state_dict().values(), revised.state_dict().values(), strict=True))
+
+    structure, xy, local, _ = _prepare(revised, 12)
+    prepared = revised.prepare_native(structure, xy, local_query_points=local, ntheta=4, chunk_size=3)
+    heat = torch.linspace(0.2, 1.0, 12)[None]
+    field_output = revised.apply_native(prepared, heat)
+    response_output = revised.apply_native(prepared, torch.full_like(heat, 0.17), increment=True)
+    shared_names = (
+        "core.source_encoder.0.weight",
+        "core.source_read.0.weight",
+        "core.edge_updates.0.0.weight",
+        "core.source_membership_score.0.weight",
+        "core.receiver_query.0.weight",
+    )
+    parameters = dict(revised.named_parameters())
+    for loss in (
+        field_output["pred_field"][..., :4].square().mean(),
+        response_output["fluid_temperature"].square().mean()
+        + response_output["pred_interface"].square().mean()
+        + response_output["pred_internal_temperature"].square().mean(),
+    ):
+        gradients = torch.autograd.grad(loss, tuple(parameters[name] for name in shared_names), retain_graph=True)
+        assert all(torch.isfinite(gradient).all() and gradient.abs().sum() > 0 for gradient in gradients)
+
+    payload = revised.checkpoint_payload(provider_identity={"scope": "locality_prior_roundtrip_test"})
+    assert payload["model_config"]["locality_prior_strength"] == 1.0
+    restored = load_joint_thermal_checkpoint(payload)
+    assert restored.model_config()["locality_prior_strength"] == 1.0
+    _, _, _, restored_prepared = _prepare(restored, 12)
+    restored_output = restored.apply_native(restored_prepared, heat)
+    torch.testing.assert_close(restored_output["pred_field"], field_output["pred_field"], atol=0, rtol=0)
+
+
+def test_locality_prior_is_restricted_to_jh():
+    with pytest.raises(ValueError, match="only supported by J-H"):
+        _adapter("J-geometry", locality_prior_strength=1.0)
+
+
+def test_joint_factory_passes_locality_prior_to_fresh_model(monkeypatch, tmp_path):
+    data_path = tmp_path / "packed_dataset.h5"
+    data_path.write_bytes(b"synthetic factory binding")
+    manifest = {"manifest_sha256": "a" * 64, "source": {"metadata_sha256": "b" * 64}}
+    monkeypatch.setattr(
+        joint_task_module,
+        "_load_data_binding",
+        lambda manifest_arg, data_arg: (manifest, data_path, None),
+    )
+    monkeypatch.setattr(
+        joint_task_module,
+        "development_case_ids",
+        lambda current_manifest, split: tuple(
+            f"train-{index}" for index in range(150)
+        ) if split == "train" else tuple(f"dev-{index}" for index in range(22)),
+    )
+    monkeypatch.setattr(
+        joint_task_module,
+        "fit_global_normalizer",
+        lambda current_path, case_ids: SimpleNamespace(stats=_stats()),
+    )
+    monkeypatch.setattr(
+        joint_task_module,
+        "_read_selected_cases",
+        lambda *args, **kwargs: tuple({} for _ in range(150 if kwargs["split"] == "train" else 22)),
+    )
+    monkeypatch.setattr(
+        joint_task_module,
+        "_load_recipe_helpers",
+        lambda: (lambda cases: (), lambda families: {}),
+    )
+    monkeypatch.setattr(joint_task_module, "_read_response_families", lambda *args: ())
+    captured = {}
+
+    class CapturingTask:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(joint_task_module, "JointThermalTask", CapturingTask)
+    model, _provider = joint_task_module.build_thermal_joint_task(
+        mode="J-H",
+        device="cpu",
+        hidden=12,
+        message=12,
+        regional_anchors=6,
+        locality_prior_strength=1.0,
+    )
+    assert model.locality_prior_strength == 1.0
+    assert model.model_config()["locality_prior_strength"] == 1.0
+    assert captured["model"] is model
+    assert captured["model"].core.locality_prior_strength == 1.0
 
 
 @pytest.mark.parametrize(
@@ -432,6 +574,11 @@ def test_joint_provider_identity_is_strict_json_serializable():
     identity = provider.identity_payload()
     json.dumps(identity, allow_nan=False)
     assert identity["normalization_stats"]["field_mean_by_channel"] == [1.0, -2.0, 0.5, 3.0, 10.0]
+    assert "locality_prior_strength" not in identity["model_config"]
+    provider.model = _adapter("J-H", locality_prior_strength=1.0)
+    revised_identity = provider.identity_payload()
+    json.dumps(revised_identity, allow_nan=False)
+    assert revised_identity["model_config"]["locality_prior_strength"] == 1.0
 
 
 def test_native_metrics_report_near_far_query_counts_and_sampled_module_peaks():

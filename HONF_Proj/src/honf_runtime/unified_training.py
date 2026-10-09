@@ -433,6 +433,74 @@ def _branch_mathematical_route_amendment(
             "preserved_contract": "exact warmup weights, moments, data, objective, query streams and absolute schedules"}
 
 
+def _branch_joint_locality_amendment(
+    saved: Mapping[str, Any], current: Mapping[str, Any], declaration: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind a shape-compatible locality child without relaxing exact resume.
+
+    Only the optional locality scalar can change. All dataset, objective,
+    sampling, initialization, optimizer and absolute schedule identities must
+    remain equal. The changed function resets selection, not learning age.
+    """
+    required = {'kind', 'source_epoch', 'review_stop', 'from_strength', 'to_strength',
+                'evidence_path', 'evidence_sha256', 'reason'}
+    if (set(declaration) != required
+            or declaration['kind'] != 'registered_locality_prior_branch'
+            or type(declaration['source_epoch']) is not int
+            or type(declaration['review_stop']) is not int
+            or declaration['source_epoch'] < 100
+            or declaration['source_epoch'] % 100
+            or declaration['review_stop'] <= declaration['source_epoch']
+            or declaration['from_strength'] != 0.0
+            or declaration['to_strength'] != 1.0
+            or not isinstance(declaration['reason'], str) or not declaration['reason'].strip()):
+        raise ValueError('Joint locality revision requires the sealed 0-to-1 branch declaration.')
+    if (saved.get('engine_config', {}).get('training_mode') != 'joint'
+            or current.get('engine_config', {}).get('training_mode') != 'joint'
+            or saved.get('recipe', {}).get('mode') != 'J-H'
+            or current.get('recipe', {}).get('mode') != 'J-H'
+            or saved.get('recipe', {}).get('formal_full') is not False
+            or current.get('recipe', {}).get('formal_full') is not False):
+        raise ValueError('A joint locality child requires matched J-H development identities.')
+    evidence_path = Path(declaration['evidence_path']).expanduser().resolve()
+    evidence_bytes = evidence_path.read_bytes()
+    if hashlib.sha256(evidence_bytes).hexdigest() != declaration['evidence_sha256']:
+        raise ValueError('Joint revision evidence no longer matches its sealed hash.')
+    evidence = json.loads(evidence_bytes)
+    if (evidence.get('solver_attempts') != 0 or evidence.get('WindTEST_targets') != 'locked'
+            or evidence.get('prefit_optimizer_updates') != 0
+            or evidence.get('change') != 'registered_gaussian_attention_prior'
+            or evidence.get('source_epoch') != declaration['source_epoch']
+            or evidence.get('stopping_boundary') != declaration['review_stop']):
+        raise ValueError('Joint revision requires a pre-fit diagnosis with fixed scope and stopping boundary.')
+    amended = copy.deepcopy(dict(current))
+    paths = [('recipe',), ('provider_identity', 'model_config'),
+             ('provider_identity', 'standalone_model_config', 'core')]
+    changed = []
+    for path in paths:
+        before, after = saved, amended
+        for part in path:
+            before = before.get(part) if isinstance(before, Mapping) else None
+            after = after.get(part) if isinstance(after, Mapping) else None
+        if before is None and after is None:
+            continue
+        if not isinstance(before, Mapping) or not isinstance(after, dict):
+            raise TypeError('Joint revision model configuration binding is incomplete.')
+        if (before.get('locality_prior_strength', 0.0) != declaration['from_strength']
+                or after.get('locality_prior_strength', 0.0) != declaration['to_strength']):
+            raise ValueError('Joint locality configurations differ from the declared scalar change.')
+        if 'locality_prior_strength' in before:
+            after['locality_prior_strength'] = before['locality_prior_strength']
+        else:
+            after.pop('locality_prior_strength', None)
+        changed.append('.'.join((*path, 'locality_prior_strength')))
+    if amended != saved or len(changed) != 2:
+        raise ValueError('A joint core revision cannot change any other experiment binding.')
+    return {**dict(declaration), 'evidence_path': str(evidence_path), 'changed_identity_paths': changed,
+            'preserved_contract': 'weights, named moments, RNG, case/query streams, losses and absolute schedule',
+            'selection_reset': 'only checkpoints evaluated under the new function can be selected'}
+
+
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str,
                         loss_metadata: Mapping[str, Mapping[str, str]] | None = None) -> None:
     """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
@@ -1429,6 +1497,7 @@ class TrainingEngine:
         clean_stop_name: str = "CLEAN_STOP_REQUEST.json",
         allow_microbatch_change: bool = False,
         mathematical_route_branch: Mapping[str, Any] | None = None,
+        joint_core_revision: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
@@ -1465,6 +1534,11 @@ class TrainingEngine:
             raise ValueError("A run cannot be both an exact resume and a new branch.")
         if allow_microbatch_change and resume_checkpoint is None:
             raise ValueError("A microbatch amendment requires an existing run's latest checkpoint.")
+        if joint_core_revision is not None and (
+                branch_from_checkpoint is None or resume_checkpoint is not None
+                or allow_microbatch_change or mathematical_route_branch is not None
+                or self.config.training_mode != 'joint' or arm != 'J-H'):
+            raise ValueError('A joint core revision applies only to a fresh J-H joint child.')
         if mathematical_route_branch is not None and (
                 branch_from_checkpoint is None or resume_checkpoint is not None
                 or allow_microbatch_change or arm not in ("full_detail", "adaptive_detail")):
@@ -1510,7 +1584,14 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if mathematical_route_branch is not None:
+            if joint_core_revision is not None:
+                amendment = _branch_joint_locality_amendment(
+                    source_payload.get('experiment_identity', {}), sealed_identity, joint_core_revision)
+                if (source_payload.get('arm') != arm
+                        or int(source_payload.get('epoch', -1)) != joint_core_revision['source_epoch']
+                        or stop_after != joint_core_revision['review_stop']):
+                    raise ValueError('Joint revision must branch from its declared common age to its review stop.')
+            elif mathematical_route_branch is not None:
                 amendment = _branch_mathematical_route_amendment(
                     source_payload.get("experiment_identity", {}), sealed_identity, mathematical_route_branch)
             else:
@@ -1519,7 +1600,7 @@ class TrainingEngine:
             if resume_checkpoint is not None:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
-            else:
+            elif joint_core_revision is None:
                 if source_payload.get("arm") != "warmup":
                     raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
                 if int(source_payload.get("epoch", -1)) != self.config.warmup_epochs:
@@ -1534,7 +1615,7 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
-        if resume_checkpoint is not None:
+        if resume_checkpoint is not None or joint_core_revision is not None:
             saved_group_names = source_payload.get("optimizer_group_names")
             current_group_names = [group["group_name"] for group in optimizer.param_groups]
             saved_groups = source_payload["optimizer_state_by_name"].get("groups", [])
@@ -1554,9 +1635,11 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
-            amendment_name = ("mathematical_route_amendment" if mathematical_route_branch is not None
-                              else "microbatch_amendment")
-            _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json"), amendment)
+            amendment_name = ('joint_core_revision' if joint_core_revision is not None else
+                              'mathematical_route_amendment' if mathematical_route_branch is not None
+                              else 'microbatch_amendment')
+            _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
+                category='logs' if joint_core_revision is not None else None), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = (copy.deepcopy(source_payload.get("branch_parent"))
@@ -1568,7 +1651,15 @@ class TrainingEngine:
                 "identity": source_payload.get("experiment_identity"),
                 "epoch": int(source_payload["epoch"]),
             }
-            history = []
+            if joint_core_revision is None:
+                history = []
+            else:
+                branch_parent.update(
+                    inherited_case_visits=sum(int(row['case_visits']) for row in history),
+                    inherited_optimizer_updates=sum(int(row['optimizer_updates']) for row in history),
+                    joint_core_revision=copy.deepcopy(amendment),
+                    inherited_history_scope='parent function through the common boundary',
+                )
             best_field = best_guarded = float("inf")
         active = {
             "status": "running", "arm": arm, "identity": sealed_identity, "device": str(self.device),

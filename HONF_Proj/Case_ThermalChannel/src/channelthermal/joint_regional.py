@@ -85,6 +85,7 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         environment_nx: int = 24,
         environment_ny: int = 8,
         forcing_scale: float = 1.0,
+        locality_prior_strength: float = 0.0,
         seed: int = 0,
     ) -> None:
         if mode not in JOINT_THERMAL_MODES:
@@ -95,6 +96,16 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             raise ValueError("Joint Thermal native and environment grids must be positive and nontrivial.")
         if not np.isfinite(forcing_scale) or forcing_scale <= 0:
             raise ValueError("Joint Thermal forcing scale must be positive and finite.")
+        if isinstance(locality_prior_strength, (bool, np.bool_)):
+            raise TypeError("Joint Thermal locality prior strength must be numeric, not boolean.")
+        try:
+            locality_prior_strength = float(locality_prior_strength)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Joint Thermal locality prior strength must be finite and nonnegative.") from error
+        if not np.isfinite(locality_prior_strength) or locality_prior_strength < 0:
+            raise ValueError("Joint Thermal locality prior strength must be finite and nonnegative.")
+        if locality_prior_strength and mode != "J-H":
+            raise ValueError("Joint Thermal locality prior is only supported by J-H.")
 
         # Deliberately bypass ThermalSourceResponse.__init__: it creates the
         # older response operator, whose parameters are not part of this model.
@@ -106,6 +117,7 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         self.nx, self.ny = int(nx), int(ny)
         self.environment_nx, self.environment_ny = int(environment_nx), int(environment_ny)
         self.forcing_scale = float(forcing_scale)
+        self.locality_prior_strength = locality_prior_strength
         self.h_effective_eps, self.h_effective_max = 1.0e-3, 1.0e4
         self.environment_flow_context = False
         self.environment_flow_projection = None
@@ -123,6 +135,7 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             affine_outputs=1,
             query_width=0,
             forcing_scale=self.forcing_scale,
+            locality_prior_strength=self.locality_prior_strength,
         )
         self.core_config = copy.deepcopy(dict(self.core.config))
         self._joint_model_config = {
@@ -139,6 +152,8 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             "forcing_scale": self.forcing_scale,
             "seed": self.seed,
         }
+        if self.locality_prior_strength:
+            self._joint_model_config["locality_prior_strength"] = self.locality_prior_strength
 
     @property
     def interaction_dependency(self):

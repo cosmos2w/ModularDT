@@ -113,6 +113,13 @@ class JointRegionalPreparedContext(PreparedResponseContext):
     _scene_average_catalogue_ids: torch.Tensor | None = None
     _intervention_receipt: dict | None = None
     _owner_id: int | None = None
+    _locality_prior_strength_snapshot: float = 0.0
+
+    def assert_fresh(self):
+        super().assert_fresh()
+        owner = self.model_reference() if self.model_reference is not None else None
+        if owner is not None and owner.locality_prior_strength != self._locality_prior_strength_snapshot:
+            raise ValueError('Prepared joint locality configuration changed; rebuild this request.')
 
 
 class JointRegionalFieldCore(nn.Module):
@@ -130,7 +137,8 @@ class JointRegionalFieldCore(nn.Module):
                  field_outputs: int = 4, affine_outputs: int = 1,
                  query_width: int = 0, max_sources: int | None = None,
                  forcing_scale: float = 1.0, zero_offset: bool = True,
-                 initialization_seed: int | None = None):
+                 initialization_seed: int | None = None,
+                 locality_prior_strength: float = 0.0):
         super().__init__()
         if mode not in ('J-H', 'J-geometry', 'J-direct'):
             raise ValueError("mode must be 'J-H', 'J-geometry' or 'J-direct'.")
@@ -146,6 +154,10 @@ class JointRegionalFieldCore(nn.Module):
             raise ValueError('max_sources must be positive when specified.')
         if not math.isfinite(forcing_scale) or forcing_scale <= 0:
             raise ValueError('forcing_scale must be finite and positive.')
+        if not math.isfinite(locality_prior_strength) or locality_prior_strength < 0:
+            raise ValueError('locality_prior_strength must be finite and nonnegative.')
+        if locality_prior_strength and mode != 'J-H':
+            raise ValueError('A learned locality prior applies only to J-H.')
 
         self.spatial_dim = spatial_dim
         self.hidden = hidden
@@ -167,6 +179,7 @@ class JointRegionalFieldCore(nn.Module):
         self.max_sources = max_sources
         self.forcing_scale = float(forcing_scale)
         self.zero_offset = bool(zero_offset)
+        self.locality_prior_strength = float(locality_prior_strength)
         self.config = {
             'source_width': source_width, 'context_width': context_width,
             'environment_width': environment_width, 'spatial_dim': spatial_dim,
@@ -176,6 +189,10 @@ class JointRegionalFieldCore(nn.Module):
             'query_width': query_width, 'max_sources': max_sources,
             'forcing_scale': float(forcing_scale), 'zero_offset': bool(zero_offset),
         }
+        # Omit the optional zero value so v1 checkpoint identities and exact
+        # resumes retain their original configuration bytes.
+        if self.locality_prior_strength:
+            self.config['locality_prior_strength'] = self.locality_prior_strength
         dgeom = spatial_dim * 9
 
         # Common input and readout modules keep identical qualified names and
@@ -338,6 +355,11 @@ class JointRegionalFieldCore(nn.Module):
                                             environment_relative), -1)
             score_source = self.source_membership_score(source_inputs).squeeze(-1)
             score_environment = self.environment_membership_score(environment_inputs).squeeze(-1)
+            if self.locality_prior_strength:
+                score_source = score_source + self.locality_prior_strength * self._geometry_scores(
+                    centers, edge_centers, edge_scales)
+                score_environment = score_environment + self.locality_prior_strength * self._geometry_scores(
+                    environment_coords, edge_centers, edge_scales)
         b_source, d_source = _masked_measure_softmax(score_source, source_measures, present, edge_present)
         b_environment, d_environment = _masked_measure_softmax(
             score_environment, environment_measures, environment_present, edge_present)
@@ -708,7 +730,8 @@ class JointRegionalFieldCore(nn.Module):
                 'propagated_updates': bool(matched_mass_shuffle),
                 'receiver_access': receiver_access,
                 'scene_average_catalogue_ids': scene_average_catalogue_ids,
-            }, _owner_id=id(self))
+            }, _owner_id=id(self),
+            _locality_prior_strength_snapshot=self.locality_prior_strength)
         return prepared
 
     def prepare_context(self, sources, context, centers, present, lengths, source_lengths,
@@ -1017,6 +1040,8 @@ class JointRegionalFieldCore(nn.Module):
                         prepared.edge_scale_vectors[:, None].clamp_min(1e-12))
             geometry_bias = self.access_geometry(_geometry(relative)).squeeze(-1)
             logits = torch.einsum('bqd,bed->bqe', query, keys) / math.sqrt(query.shape[-1]) + geometry_bias
+            if self.locality_prior_strength:
+                logits = logits - 0.5 * self.locality_prior_strength * relative.square().sum(-1)
             valid = prepared.group_present[:, None] > 0
             logits = logits.masked_fill(~valid, -torch.inf)
             any_valid = valid.any(-1, keepdim=True)

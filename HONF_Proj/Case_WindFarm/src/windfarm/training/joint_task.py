@@ -1234,6 +1234,7 @@ def build_wind_joint_task(
     message: int = 128,
     regional_anchors: int = 32,
     depth: int = 2,
+    locality_prior_strength: float = 0.0,
     formal_full: bool = False,
     data_root: str | Path = DEFAULT_DATA_ROOT,
     derived_root: str | Path = DEFAULT_DERIVED_ROOT,
@@ -1266,6 +1267,11 @@ def build_wind_joint_task(
         raise ValueError("Wind joint supports the 2500-epoch development or 5000-epoch manual formal horizon.")
     if bool(formal_full) != (int(total_epochs) == 5000):
         raise ValueError("The 5000-epoch horizon is reserved for the separate formal_full identity.")
+    locality_prior_strength = float(locality_prior_strength)
+    if not np.isfinite(locality_prior_strength) or locality_prior_strength < 0.0:
+        raise ValueError("Wind locality_prior_strength must be finite and nonnegative.")
+    if locality_prior_strength > 0.0 and mode != "J-H":
+        raise ValueError("Wind locality prior is supported only for J-H.")
     device = torch.device(device)
     data_root = Path(data_root).expanduser().resolve()
     derived_root = Path(derived_root).expanduser().resolve()
@@ -1377,6 +1383,7 @@ def build_wind_joint_task(
             depth=depth,
             receiver_tile=receiver_tile,
             seed=seed,
+            locality_prior_strength=locality_prior_strength,
         ).to(device)
     provider = WindJointRegionalTask(
         view,

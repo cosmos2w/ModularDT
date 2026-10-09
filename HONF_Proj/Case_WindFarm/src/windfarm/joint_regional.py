@@ -150,6 +150,7 @@ class WindFarmJointRegionalModel(nn.Module):
         receiver_tile: int = 512,
         seed: int = 42,
         max_sources: int = 30,
+        locality_prior_strength: float = 0.0,
     ) -> None:
         super().__init__()
         if mode not in {"J-H", "J-geometry", "J-direct"}:
@@ -158,12 +159,18 @@ class WindFarmJointRegionalModel(nn.Module):
             raise ValueError("Wind receiver tile must be positive.")
         if background_profile is None:
             raise ValueError("Wind joint regional prediction requires its TRAIN-fitted height profile.")
+        locality_prior_strength = float(locality_prior_strength)
+        if not np.isfinite(locality_prior_strength) or locality_prior_strength < 0.0:
+            raise ValueError("Wind locality_prior_strength must be finite and nonnegative.")
+        if locality_prior_strength > 0.0 and mode != "J-H":
+            raise ValueError("Wind locality prior is supported only for J-H.")
         self.velocity_transform = velocity_transform
         self.background_profile = background_profile
         self.mode = str(mode)
         self.seed = int(seed)
         self.receiver_tile = int(receiver_tile)
         self.max_sources = int(max_sources)
+        self.locality_prior_strength = locality_prior_strength
         self.core_config = {
             "source_width": 2,
             "context_width": 11,
@@ -179,6 +186,8 @@ class WindFarmJointRegionalModel(nn.Module):
             "query_width": 7,
             "max_sources": self.max_sources,
         }
+        if locality_prior_strength:
+            self.core_config["locality_prior_strength"] = locality_prior_strength
         self.core = JointRegionalFieldCore(**self.core_config)
 
     @classmethod
@@ -210,6 +219,7 @@ class WindFarmJointRegionalModel(nn.Module):
             receiver_tile=int(payload.get("receiver_tile", 512)),
             seed=int(payload.get("seed", 42)),
             max_sources=int(core["max_sources"]),
+            locality_prior_strength=float(core.get("locality_prior_strength", 0.0)),
         )
 
     def export_config(self) -> dict[str, Any]:
