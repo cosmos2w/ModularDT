@@ -31,6 +31,8 @@ RECIPE_KEYS = {
     "response_coefficient", "operator_coefficient",
     "auxiliary_calibration",
     "locality_prior_strength",
+    "validation_scope", "optimizer_schedule", "weight_decay", "native_sampling_protocol",
+    "checkpoint_epochs", "write_initial_artifacts",
 }
 
 
@@ -71,6 +73,39 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
     if (type(prior) not in (float, int) or not math.isfinite(prior) or prior < 0
             or (prior and recipe['mode'] != 'J-H')):
         raise ValueError('Locality prior must be finite, nonnegative and used only by J-H.')
+    formal_options = {"validation_scope", "optimizer_schedule", "weight_decay",
+                      "native_sampling_protocol", "checkpoint_epochs", "write_initial_artifacts"}
+    if not recipe["formal_full"] and formal_options.intersection(recipe):
+        raise ValueError("Formal comparison controls require the separate fullTRAIN identity.")
+    if "validation_scope" in recipe and recipe["validation_scope"] != (
+            "canonical89" if recipe["task"] == "thermal" else "fullVALID90"):
+        raise ValueError("Formal validation scope differs from the dataset's primary panel.")
+    if "native_sampling_protocol" in recipe and recipe["native_sampling_protocol"] != "baseline_formal_v1":
+        raise ValueError("Unsupported formal native sampling protocol.")
+    if "optimizer_schedule" in recipe:
+        from honf_runtime.unified_training import ScheduleSpec
+        schedule = recipe["optimizer_schedule"]
+        keys = {"peak_lr", "warmup_start_lr", "warmup_epochs", "hold_through_epoch", "final_lr"}
+        if not isinstance(schedule, dict) or set(schedule) != keys:
+            raise ValueError("Formal optimizer schedule must declare every rate and clock boundary.")
+        for name in ("peak_lr", "warmup_start_lr", "final_lr"):
+            if type(schedule[name]) not in (int, float):
+                raise ValueError("Formal learning rates must be numeric, not boolean.")
+        for name in ("warmup_epochs", "hold_through_epoch"):
+            if type(schedule[name]) is not int:
+                raise ValueError("Formal schedule clock boundaries must be integers.")
+        ScheduleSpec(total_epochs=recipe["total_epochs"], **schedule)
+    if "weight_decay" in recipe and (type(recipe["weight_decay"]) not in (int, float)
+            or not math.isfinite(recipe["weight_decay"]) or recipe["weight_decay"] < 0):
+        raise ValueError("Formal weight decay must be finite and nonnegative.")
+    if "checkpoint_epochs" in recipe:
+        epochs = recipe["checkpoint_epochs"]
+        if (not isinstance(epochs, list)
+                or any(type(epoch) is not int or not 1 <= epoch <= recipe["total_epochs"] for epoch in epochs)
+                or sorted(set(epochs)) != epochs or recipe["total_epochs"] not in epochs):
+            raise ValueError("Formal checkpoint epochs must be sorted unique and include the horizon.")
+    if "write_initial_artifacts" in recipe and type(recipe["write_initial_artifacts"]) is not bool:
+        raise ValueError("Initial artifact control must be boolean.")
     return recipe
 
 
@@ -117,15 +152,19 @@ def model_digest(model: Any) -> str:
 
 
 def build(recipe: dict[str, Any], *, device: str):
-    from honf_runtime.unified_training import EngineConfig, SelectionPolicy, TrainingEngine
+    from honf_runtime.unified_training import EngineConfig, ScheduleSpec, SelectionPolicy, TrainingEngine
     seed_all(recipe["seed"])
     if recipe["task"] == "thermal":
         from channelthermal.training.joint_task import build_thermal_joint_task as factory
     else:
         from windfarm.training.joint_task import build_wind_joint_task as factory
     task_options = {name: recipe[name] for name in ("response_coefficient", "operator_coefficient", "auxiliary_calibration",
-                                                 "locality_prior_strength")
+                                                 "locality_prior_strength", "validation_scope", "weight_decay",
+                                                 "native_sampling_protocol")
                     if name in recipe}
+    if "optimizer_schedule" in recipe:
+        task_options["optimizer_schedule"] = ScheduleSpec(total_epochs=recipe["total_epochs"],
+                                                          **recipe["optimizer_schedule"])
     model, provider = factory(
         mode=recipe["mode"], device=device, seed=recipe["seed"], hidden=recipe["hidden"],
         message=recipe["message"], regional_anchors=recipe["regional_anchors"], depth=recipe["depth"],
@@ -140,6 +179,8 @@ def build(recipe: dict[str, Any], *, device: str):
         training_mode="joint", sampling_version="case_epoch_v1", monitor_every=100,
         warmup_epochs=20, open_through_epoch=20, soft_through_epoch=20,
         latest_every=100, curve_every=100,
+        checkpoint_epochs=tuple(recipe["checkpoint_epochs"]) if "checkpoint_epochs" in recipe else None,
+        write_initial_artifacts=recipe.get("write_initial_artifacts", False),
     )
     engine = TrainingEngine(config, device=device, selection=SelectionPolicy(field_metric="field_score"))
     identity = {

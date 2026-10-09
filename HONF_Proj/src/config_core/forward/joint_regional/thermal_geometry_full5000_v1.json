@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "task": "thermal",
+  "mode": "J-geometry",
+  "seed": 0,
+  "hidden": 128,
+  "message": 128,
+  "regional_anchors": 16,
+  "depth": 2,
+  "receiver_tile": 512,
+  "primary_queries": 1024,
+  "microbatch_cases": 48,
+  "effective_cases": 48,
+  "formal_full": true,
+  "total_epochs": 5000,
+  "initialization": "fresh_all_trainable",
+  "launch_policy": "manual_only",
+  "dataset_protocol": "original600_train",
+  "validation_scope": "canonical89",
+  "native_sampling_protocol": "baseline_formal_v1",
+  "optimizer_schedule": {
+    "peak_lr": 0.0003,
+    "warmup_start_lr": 0.0003,
+    "warmup_epochs": 0,
+    "hold_through_epoch": 2000,
+    "final_lr": 0.000003
+  },
+  "weight_decay": 0.00001,
+  "checkpoint_epochs": [100, 500, 1000, 2000, 2500, 5000],
+  "write_initial_artifacts": true
+}

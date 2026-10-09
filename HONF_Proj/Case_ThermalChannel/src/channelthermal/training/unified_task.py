@@ -515,6 +515,7 @@ def _sample_primary(
     training: bool,
     budget: Mapping[str, Any],
     device: torch.device,
+    validation_sampling_indices: Mapping[str, int] | None = None,
 ) -> tuple[Mapping[str, Any], str]:
     """Sample the maintained native roles from one provider-owned RNG key."""
     from channelthermal.data.collation import ChannelThermalBatchCollator
@@ -547,7 +548,8 @@ def _sample_primary(
                     int(budget["material_queries_per_module"]), replace=False,
                 )
         else:
-            rng = np.random.default_rng(1000 + int(index) * 104729)
+            sampling_index = int(index) if validation_sampling_indices is None else validation_sampling_indices[case_id]
+            rng = np.random.default_rng(1000 + sampling_index * 104729)
             fluid = rng.choice(len(original["query_xy"]), int(budget["fluid_queries"]), replace=False)
             material = rng.choice(
                 len(original["module_internal_query_points"]),
@@ -1026,6 +1028,7 @@ class ThermalRefinementTask:
             training=training,
             budget=sample_budget,
             device=self.device,
+            validation_sampling_indices=getattr(self, "validation_sampling_indices", None),
         )
         raw_structure = sample["structure"]
         scene_structure = _structure_only(raw_structure)

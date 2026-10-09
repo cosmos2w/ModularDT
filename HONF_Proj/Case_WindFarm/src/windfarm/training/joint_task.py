@@ -14,7 +14,7 @@ import os
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,11 @@ JOINT_WIND_ROLE_SCALE_RULE = (
 )
 JOINT_WIND_ROLE_SCALE_CACHE_SCHEMA = 1
 JOINT_WIND_ROLE_SCALE_CALIBRATION_ID = "wind_joint_e64_native_role_scales_v1"
+JOINT_WIND_BASELINE_FORMAL_SAMPLING_PROTOCOL = "baseline_formal_v1"
+JOINT_WIND_BASELINE_TRAIN_STREAM = "wind_native_role_query"
+JOINT_WIND_BASELINE_VALIDATION_STREAM = "wind_validation_role_query"
+JOINT_WIND_BASELINE_CALIBRATION_STREAM = "wind_role_scale_calibration"
+JOINT_WIND_BASELINE_TRAIN_ROW_SHA256_KEY = "train_rows_sha256"
 DEFAULT_JOINT_WIND_ROLE_SCALE_CACHE_DIR = (
     Path(__file__).resolve().parents[3]
     / "diagnostics/generated/joint_regional_20261009/audit/train_role_scale_cache"
@@ -175,6 +180,7 @@ def _role_scale_cache_key(
     training_fingerprint: str,
     normalizer: Any,
     profile: Any,
+    native_sampling_protocol: str | None = None,
 ) -> dict[str, Any]:
     rows = np.asarray(train_rows, dtype=np.int64)
     layout_by_row = np.asarray(view.metadata["layout_index"], dtype=np.int64)
@@ -184,7 +190,7 @@ def _role_scale_cache_key(
     )
     if len(calibration_layouts) != 4 or len(calibration_rows) != 12:
         raise ValueError("Wind role-scale cache identity requires the first four selected TRAIN layouts and 12 rows.")
-    return {
+    payload = {
         "schema_version": JOINT_WIND_ROLE_SCALE_CACHE_SCHEMA,
         "calibration_id": JOINT_WIND_ROLE_SCALE_CALIBRATION_ID,
         "dataset_profile": str(profile_id),
@@ -219,6 +225,19 @@ def _role_scale_cache_key(
             "target_values_from_windtest": False,
         },
     }
+    if native_sampling_protocol is not None:
+        if native_sampling_protocol != JOINT_WIND_BASELINE_FORMAL_SAMPLING_PROTOCOL:
+            raise ValueError(f"Unsupported Wind native sampling protocol {native_sampling_protocol!r}.")
+        payload["native_sampling_protocol"] = native_sampling_protocol
+        payload["sampling_dataset_id"] = _sampling_dataset_id(
+            profile_id, str(training_fingerprint), native_sampling_protocol
+        )
+        payload["calibration_queries"].update({
+            "stream": JOINT_WIND_BASELINE_CALIBRATION_STREAM,
+            "dataset_key_source": JOINT_WIND_BASELINE_TRAIN_ROW_SHA256_KEY,
+            "role_key_coordinates": ["physical_case_direction_id", "role_name"],
+        })
+    return payload
 
 
 @contextmanager
@@ -440,6 +459,7 @@ def _fit_or_load_role_scales(
     training_fingerprint: str,
     catalogue_cache: NativeRoleCatalogueCache,
     cache_dir: Path,
+    native_sampling_protocol: str | None = None,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     key = _role_scale_cache_key(
         view=view,
@@ -450,6 +470,7 @@ def _fit_or_load_role_scales(
         training_fingerprint=training_fingerprint,
         normalizer=normalizer,
         profile=profile,
+        native_sampling_protocol=native_sampling_protocol,
     )
     key_sha = _stable_json_sha256(key)
     safe_profile = str(key["dataset_profile"]).replace("/", "_")
@@ -661,14 +682,82 @@ def _joint_scene_batch(inputs: Sequence[WindJointSceneInputs], device: torch.dev
     )
 
 
-def _sampling_dataset_id(profile_id: str, fingerprint: str) -> str:
+def _sampling_dataset_id(
+    profile_id: str,
+    fingerprint: str,
+    native_sampling_protocol: str | None = None,
+) -> str:
     # Match the engine's case_epoch_v1 key exactly: dataset plus the sealed
     # TRAIN membership fingerprint. The profile is already bound by that
     # manifest, and must not become a second, incompatible hashing recipe.
     del profile_id
+    if native_sampling_protocol is not None:
+        if native_sampling_protocol != JOINT_WIND_BASELINE_FORMAL_SAMPLING_PROTOCOL:
+            raise ValueError(f"Unsupported Wind native sampling protocol {native_sampling_protocol!r}.")
+        return _runtime_sampling_dataset_id({
+            "dataset": "WindFarm",
+            "native_sampling_identity": {
+                "protocol": native_sampling_protocol,
+                "dataset": "WindFarm",
+                "train_membership_fingerprint": str(fingerprint),
+            },
+        })
     return _runtime_sampling_dataset_id(
         {"dataset": "WindFarm", "subset_manifest_sha256": str(fingerprint)}
     )
+
+
+def _formal_sampling_fingerprint(
+    protocol: str | None,
+    *,
+    manifest_fingerprint: str,
+    train_rows: Sequence[int],
+) -> str:
+    """Resolve the per-case RNG namespace without changing development streams."""
+
+    if protocol is None:
+        return str(manifest_fingerprint)
+    if protocol != JOINT_WIND_BASELINE_FORMAL_SAMPLING_PROTOCOL:
+        raise ValueError(f"Unsupported Wind native sampling protocol {protocol!r}.")
+    return _indices_sha256(np.asarray(train_rows, dtype=np.int64))
+
+
+def _validate_formal_controls(
+    *,
+    formal_full: bool,
+    total_epochs: int,
+    optimizer_schedule: ScheduleSpec | None,
+    weight_decay: float | None,
+    validation_scope: str | None,
+    native_sampling_protocol: str | None,
+) -> None:
+    """Keep optional comparison controls confined to the separate full formal fit."""
+
+    controls = (optimizer_schedule, weight_decay, validation_scope, native_sampling_protocol)
+    if any(value is not None for value in controls) and (not formal_full or int(total_epochs) != 5000):
+        raise ValueError("Wind formal comparison controls are available only for formal_full 5000-epoch fits.")
+    if optimizer_schedule is not None and not isinstance(optimizer_schedule, ScheduleSpec):
+        raise TypeError("Wind optimizer_schedule must be a ScheduleSpec.")
+    if optimizer_schedule is not None and optimizer_schedule.total_epochs != 5000:
+        raise ValueError("Wind formal optimizer_schedule must end at epoch 5000.")
+    if (
+        weight_decay is not None
+        and (
+            isinstance(weight_decay, bool)
+            or not math.isfinite(float(weight_decay))
+            or float(weight_decay) < 0.0
+        )
+    ):
+        raise ValueError("Wind formal weight_decay must be finite and nonnegative.")
+    if validation_scope not in (None, "fullVALID90"):
+        raise ValueError("Wind validation_scope must be omitted or the explicit fullVALID90 scope.")
+    if native_sampling_protocol not in (None, JOINT_WIND_BASELINE_FORMAL_SAMPLING_PROTOCOL):
+        raise ValueError("Unsupported Wind native sampling protocol.")
+    if (
+        native_sampling_protocol == JOINT_WIND_BASELINE_FORMAL_SAMPLING_PROTOCOL
+        and validation_scope != "fullVALID90"
+    ):
+        raise ValueError("Wind baseline_formal_v1 sampling must be paired with validation_scope='fullVALID90'.")
 
 
 class WindJointRegionalTask:
@@ -696,6 +785,10 @@ class WindJointRegionalTask:
         total_epochs: int,
         device: torch.device | str,
         catalogue_cache: NativeRoleCatalogueCache,
+        optimizer_schedule: ScheduleSpec | None = None,
+        weight_decay: float | None = None,
+        validation_scope: str | None = None,
+        native_sampling_protocol: str | None = None,
     ) -> None:
         self.view = view
         self.model = model
@@ -721,7 +814,27 @@ class WindJointRegionalTask:
         self.catalogue_cache = catalogue_cache
         self.sampling_version = SamplingKey.CASE_EPOCH_VERSION
         manifest_fingerprint = str(self.manifest.get("manifest_sha256", self.training_fingerprint))
-        self.sampling_dataset_id = _sampling_dataset_id(self.profile_id, manifest_fingerprint)
+        formal_full = self.profile_id == JOINT_WIND_FORMAL_PROFILE_ID and self.total_epochs == 5000
+        _validate_formal_controls(
+            formal_full=formal_full,
+            total_epochs=self.total_epochs,
+            optimizer_schedule=optimizer_schedule,
+            weight_decay=weight_decay,
+            validation_scope=validation_scope,
+            native_sampling_protocol=native_sampling_protocol,
+        )
+        self.optimizer_schedule = optimizer_schedule
+        self.optimizer_weight_decay = None if weight_decay is None else float(weight_decay)
+        self.validation_scope = validation_scope
+        self.native_sampling_protocol = native_sampling_protocol
+        self.sampling_fingerprint = _formal_sampling_fingerprint(
+            native_sampling_protocol,
+            manifest_fingerprint=manifest_fingerprint,
+            train_rows=self.train_rows,
+        )
+        self.sampling_dataset_id = _sampling_dataset_id(
+            self.profile_id, self.sampling_fingerprint, native_sampling_protocol
+        )
         self._train_row_set = set(map(int, self.train_rows.tolist()))
         self._validation_cache: tuple[TaskBatch, ...] | None = None
         self.training_samples = 0
@@ -740,6 +853,11 @@ class WindJointRegionalTask:
             raise ValueError("Wind joint fixed-profile identity is sealed to initialization/sampling seed 42.")
         if self.total_epochs not in (2500, 5000):
             raise ValueError("Wind joint horizon must be 2500 development or manual-only 5000 formal epochs.")
+        if self.validation_scope == "fullVALID90":
+            layout_indices = np.asarray(self.view.metadata["layout_index"], dtype=np.int64)
+            validation_layouts = np.unique(layout_indices[self.validation_rows])
+            if self.validation_rows.size != 90 or validation_layouts.size != 30:
+                raise ValueError("Wind fullVALID90 scope requires all 90 original validation rows across 30 layouts.")
         if set(self.role_component_scales) != set(ROLE_NAMES) or any(
             scale.shape != (3,) or not np.isfinite(scale).all() or np.any(scale <= 0.0)
             for scale in self.role_component_scales.values()
@@ -747,7 +865,7 @@ class WindJointRegionalTask:
             raise ValueError("Wind joint scales must be positive finite three-component m/s vectors per role.")
 
     def identity_payload(self) -> Mapping[str, Any]:
-        return {
+        payload = {
             "dataset": "WindFarm",
             "family": WindFarmJointRegionalModel.FAMILY,
             "mode": self.model.mode,
@@ -796,16 +914,70 @@ class WindJointRegionalTask:
                 "primary_queries_per_case": self.primary_queries,
                 "total_epochs": self.total_epochs,
                 "optimizer": "AdamW",
-                "peak_lr": 3.0e-4,
-                "warmup_epochs": 20,
-                "hold_through_epoch": 1000,
-                "final_lr": 3.0e-6,
+                "peak_lr": 3.0e-4 if self.optimizer_schedule is None else self.optimizer_schedule.peak_lr,
+                "warmup_epochs": 20 if self.optimizer_schedule is None else self.optimizer_schedule.warmup_epochs,
+                "hold_through_epoch": 1000 if self.optimizer_schedule is None else self.optimizer_schedule.hold_through_epoch,
+                "final_lr": 3.0e-6 if self.optimizer_schedule is None else self.optimizer_schedule.final_lr,
                 "all_parameters_train_from_start": True,
             },
             "catalogue_cache_capacity_bytes": self.catalogue_cache.max_cached_bytes,
             "physical_reference": "stored native OpenFOAM velocity fields; no solver calls",
             "wind_test_target_values_read": False,
         }
+        if self.native_sampling_protocol is not None:
+            payload["native_sampling_identity"] = {
+                "protocol": self.native_sampling_protocol,
+                "dataset": "WindFarm",
+                "train_membership_fingerprint": _indices_sha256(self.train_rows),
+            }
+        if self.validation_scope is not None:
+            payload["validation_scope"] = {
+                "name": self.validation_scope,
+                "rows": int(self.validation_rows.size),
+                "layouts": len({int(self.view.metadata["layout_index"][row]) for row in self.validation_rows}),
+                "row_indices_sha256": _indices_sha256(self.validation_rows),
+                "targets_from_windtest": False,
+            }
+        if self.native_sampling_protocol is not None:
+            payload["native_sampling"] = {
+                "protocol": self.native_sampling_protocol,
+                "sampling_version": self.sampling_version,
+                "seed": self.seed,
+                "dataset_key_source": JOINT_WIND_BASELINE_TRAIN_ROW_SHA256_KEY,
+                "train_rows_sha256": _indices_sha256(self.train_rows),
+                "sampling_dataset_id": self.sampling_dataset_id,
+                "training_stream": JOINT_WIND_BASELINE_TRAIN_STREAM,
+                "validation_stream": JOINT_WIND_BASELINE_VALIDATION_STREAM,
+                "role_calibration_stream": JOINT_WIND_BASELINE_CALIBRATION_STREAM,
+                "per_case_role_key_coordinates": ["physical_case_direction_id", "role_name"],
+            }
+        if self.optimizer_schedule is not None or self.optimizer_weight_decay is not None:
+            schedule = self.optimizer_schedule or ScheduleSpec(
+                peak_lr=3.0e-4,
+                warmup_start_lr=3.0e-5,
+                warmup_epochs=20,
+                hold_through_epoch=1000,
+                total_epochs=self.total_epochs,
+                final_lr=3.0e-6,
+            )
+            payload["training"]["optimizer_schedule"] = asdict(schedule)
+            payload["training"]["optimizer_weight_decay"] = (
+                1.0e-5 if self.optimizer_weight_decay is None else self.optimizer_weight_decay
+            )
+            payload["training"]["optimizer_betas"] = [0.9, 0.999]
+            payload["training"]["optimizer_eps"] = 1.0e-8
+        formal_controls_enabled = any((
+            self.optimizer_schedule is not None,
+            self.optimizer_weight_decay is not None,
+            self.validation_scope is not None,
+            self.native_sampling_protocol is not None,
+        ))
+        if self.profile_id == JOINT_WIND_FORMAL_PROFILE_ID and formal_controls_enabled:
+            payload["training"]["case_visits_per_epoch"] = int(self.train_rows.size)
+            payload["training"]["horizon_updates_per_epoch"] = math.ceil(
+                self.train_rows.size / self.effective_batch_size
+            )
+        return payload
 
     def preparation_summary(self) -> dict[str, Any]:
         """Return JSON-safe setup and native-cache accounting before optimization."""
@@ -889,10 +1061,16 @@ class WindJointRegionalTask:
     ) -> tuple[WindJointSceneInputs, Any]:
         case = self.view.run(int(row))
         physical_id = _physical_case_direction_id(case)
-        stream = "wind_joint_validation_role_query" if validation else "wind_joint_native_role_query"
+        if self.native_sampling_protocol == JOINT_WIND_BASELINE_FORMAL_SAMPLING_PROTOCOL:
+            stream = JOINT_WIND_BASELINE_VALIDATION_STREAM if validation else JOINT_WIND_BASELINE_TRAIN_STREAM
+            fallback_tag = 0x56414C31 if validation else 0x57494E44
+            fallback_rng = key.numpy_rng(stream, int(row), fallback_tag)
+        else:
+            stream = "wind_joint_validation_role_query" if validation else "wind_joint_native_role_query"
+            fallback_rng = key.numpy_rng(f"{stream}_fallback", physical_id)
         sample = sample_native_role_queries(
             case,
-            key.numpy_rng(f"{stream}_fallback", physical_id),
+            fallback_rng,
             self.role_query_counts,
             catalogue_cache=self.catalogue_cache,
             rng_by_role={
@@ -1195,8 +1373,9 @@ class WindJointRegionalTask:
             hold_through_epoch=1000,
             total_epochs=self.total_epochs,
             final_lr=3.0e-6,
-        )
-        return (OptimizerGroupSpec("wind_joint_regional", names, schedule),)
+        ) if self.optimizer_schedule is None else self.optimizer_schedule
+        weight_decay = 1.0e-5 if self.optimizer_weight_decay is None else self.optimizer_weight_decay
+        return (OptimizerGroupSpec("wind_joint_regional", names, schedule, weight_decay=weight_decay),)
 
 
 def _formal_split_manifest(split: GroupSplit, view: WindFarmNativeView) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
@@ -1244,6 +1423,10 @@ def build_wind_joint_task(
     normalization_binding_path: str | Path | None = None,
     role_scale_cache_dir: str | Path = DEFAULT_JOINT_WIND_ROLE_SCALE_CACHE_DIR,
     catalogue_cache_bytes: int = DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
+    optimizer_schedule: ScheduleSpec | None = None,
+    weight_decay: float | None = None,
+    validation_scope: str | None = None,
+    native_sampling_protocol: str | None = None,
 ) -> tuple[WindFarmJointRegionalModel, WindJointRegionalTask]:
     """Build a fresh Wind model and provider from the sealed development or formal split.
 
@@ -1267,6 +1450,14 @@ def build_wind_joint_task(
         raise ValueError("Wind joint supports the 2500-epoch development or 5000-epoch manual formal horizon.")
     if bool(formal_full) != (int(total_epochs) == 5000):
         raise ValueError("The 5000-epoch horizon is reserved for the separate formal_full identity.")
+    _validate_formal_controls(
+        formal_full=bool(formal_full),
+        total_epochs=int(total_epochs),
+        optimizer_schedule=optimizer_schedule,
+        weight_decay=weight_decay,
+        validation_scope=validation_scope,
+        native_sampling_protocol=native_sampling_protocol,
+    )
     locality_prior_strength = float(locality_prior_strength)
     if not np.isfinite(locality_prior_strength) or locality_prior_strength < 0.0:
         raise ValueError("Wind locality_prior_strength must be finite and nonnegative.")
@@ -1293,6 +1484,10 @@ def build_wind_joint_task(
     split = _load_original_split(view, derived_root)
     if formal_full:
         manifest, train_rows, validation_rows = _formal_split_manifest(split, view)
+        if validation_scope == "fullVALID90":
+            validation_layout_count = len({int(view.metadata["layout_index"][row]) for row in validation_rows})
+            if validation_rows.size != 90 or validation_layout_count != 30:
+                raise ValueError("Wind fullVALID90 scope requires the original 90 rows across 30 validation layouts.")
         train_layouts = manifest["train_layout_indices"]
         normalizer, profile, transform_cache_binding = _fit_or_load_formal_transforms(
             view=view,
@@ -1345,6 +1540,11 @@ def build_wind_joint_task(
         "profile": profile_id,
         "train_row_indices_sha256": _indices_sha256(train_rows),
     })))
+    role_scale_fingerprint = _formal_sampling_fingerprint(
+        native_sampling_protocol,
+        manifest_fingerprint=training_fingerprint,
+        train_rows=train_rows,
+    )
     catalogue_cache = NativeRoleCatalogueCache(max_cached_bytes=int(catalogue_cache_bytes))
     calibration, cache_identity = _fit_or_load_role_scales(
         view=view,
@@ -1353,9 +1553,10 @@ def build_wind_joint_task(
         profile=profile,
         normalizer=normalizer,
         manifest=manifest,
-        training_fingerprint=training_fingerprint,
+        training_fingerprint=role_scale_fingerprint,
         catalogue_cache=catalogue_cache,
         cache_dir=Path(role_scale_cache_dir).expanduser().resolve(),
+        native_sampling_protocol=native_sampling_protocol,
     )
     role_scales = {
         role: tuple(float(value) for value in calibration["component_role_scales_mps"][role])
@@ -1405,6 +1606,10 @@ def build_wind_joint_task(
         total_epochs=total_epochs,
         device=device,
         catalogue_cache=catalogue_cache,
+        optimizer_schedule=optimizer_schedule,
+        weight_decay=weight_decay,
+        validation_scope=validation_scope,
+        native_sampling_protocol=native_sampling_protocol,
     )
     return model, provider
 

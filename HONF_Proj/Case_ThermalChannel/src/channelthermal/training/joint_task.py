@@ -8,6 +8,7 @@ import json
 import math
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +165,10 @@ class JointThermalTask(ThermalRefinementTask):
         operator_rows_per_case: int = OPERATOR_ROWS_PER_CASE,
         atlas_directory: Path = DEFAULT_ATLAS_DIRECTORY,
         auxiliary_calibration: Mapping[str, Any] | None = None,
+        validation_scope: str | None = None,
+        optimizer_schedule: ScheduleSpec | None = None,
+        weight_decay: float | None = None,
+        native_sampling_protocol: str | None = None,
     ) -> None:
         if mode not in JOINT_THERMAL_MODES or model.mode != mode:
             raise ValueError("Joint Thermal task mode must match its freshly initialized adapter.")
@@ -179,6 +184,10 @@ class JointThermalTask(ThermalRefinementTask):
         self.data_path = Path(data_path).resolve()
         self.source_binding = copy.deepcopy(dict(source_binding))
         self.formal_full = bool(formal_full)
+        self.formal_validation_scope = validation_scope
+        self.formal_optimizer_schedule = optimizer_schedule
+        self.formal_weight_decay = weight_decay
+        self.native_sampling_protocol = native_sampling_protocol
         self.effective_batch_size = int(effective_batch_size)
         self.total_epochs = int(total_epochs)
         self.operator_rows_per_case = int(operator_rows_per_case)
@@ -246,7 +255,7 @@ class JointThermalTask(ThermalRefinementTask):
         normalization_stats = {
             str(name): np.asarray(value).tolist() for name, value in self.stats.items()
         }
-        return {
+        payload = {
             "task": "ThermalChannel",
             "task_provider": "thermal_joint_regional_v1",
             "training_mode": JOINT_TRAINING_MODE,
@@ -303,6 +312,27 @@ class JointThermalTask(ThermalRefinementTask):
             "formal_full_run_policy": "manual_only_not_launched" if self.formal_full else None,
             "solver_attempts": 0,
         }
+        if getattr(self, "formal_validation_scope", None) == "canonical89":
+            payload["manifest_binding_scope"] = "fixed25_v1_source_metadata_only"
+            payload["validation_scope"] = "formal_canonical89_exposed_validation"
+        schedule = getattr(self, "formal_optimizer_schedule", None)
+        weight_decay = getattr(self, "formal_weight_decay", None)
+        if schedule is not None:
+            payload["schedule"].update(asdict(schedule))
+        if schedule is not None or weight_decay is not None:
+            payload["schedule"].update({"weight_decay": 1.0e-4 if weight_decay is None else weight_decay,
+                                        "betas": [0.9, 0.999], "eps": 1.0e-8})
+        if getattr(self, "native_sampling_protocol", None) == "baseline_formal_v1":
+            payload["native_sampling_identity"] = {
+                "protocol": "baseline_formal_v1", "dataset": "ThermalChannel",
+                "train_membership_fingerprint": _json_hash(train_ids),
+                "primary_stream": "primary_native_queries",
+                "response_stream": "response_addendum",
+                "validation_sampling_indices": dict(self.validation_sampling_indices),
+                "validation_seed_rule": "1000 + original90_index * 104729",
+                "operator_seed_rule": "originalTRAIN_index * 104729 + epoch * 1000003 + 17",
+            }
+        return payload
 
     def _build_loss_metadata(self) -> dict[str, dict[str, str]]:
         result: dict[str, dict[str, str]] = {}
@@ -722,6 +752,8 @@ class JointThermalTask(ThermalRefinementTask):
             raise ValueError("Joint Thermal validation must visit the exact exposed fixed cohort once per case.")
         result: dict[str, Any] = {
             "scope": (
+                "formal canonical89 primary; exposed validation; equal-case native measurements"
+                if getattr(self, "formal_validation_scope", None) == "canonical89" else
                 "manual originalTRAIN600 preparation; fixed25_v1 exposed DEV22 sanity panel only"
                 if self.formal_full else "fixed25_v1 exposed DEV22; equal-case native measurements"
             ),
@@ -774,7 +806,7 @@ class JointThermalTask(ThermalRefinementTask):
         names = tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
         if not names or any(not name.startswith("core.") for name in names):
             raise ValueError("Every active Thermal joint parameter must belong to the one fresh core.")
-        schedule = ScheduleSpec(
+        schedule = getattr(self, "formal_optimizer_schedule", None) or ScheduleSpec(
             peak_lr=3.0e-4,
             warmup_start_lr=3.0e-5,
             warmup_epochs=min(20, self.total_epochs - 1),
@@ -782,7 +814,9 @@ class JointThermalTask(ThermalRefinementTask):
             total_epochs=self.total_epochs,
             final_lr=3.0e-6,
         )
-        return (OptimizerGroupSpec("joint", names, schedule, weight_decay=1.0e-4),)
+        weight_decay = getattr(self, "formal_weight_decay", None)
+        return (OptimizerGroupSpec("joint", names, schedule,
+                                   weight_decay=1.0e-4 if weight_decay is None else weight_decay),)
 
     def work_counts(self, batch: TaskBatch, predictions, auxiliary_state) -> Mapping[str, int | float]:
         del batch
@@ -954,6 +988,10 @@ def build_thermal_joint_task(
     depth: int = 2,
     validation_queries: int | None = None,
     auxiliary_calibration: Mapping[str, Any] | None = None,
+    validation_scope: str | None = None,
+    optimizer_schedule: ScheduleSpec | None = None,
+    weight_decay: float | None = None,
+    native_sampling_protocol: str | None = None,
 ) -> tuple[JointThermalRegionalAdapter, JointThermalTask]:
     """Construct a fresh joint candidate and its fixed25_v1 provider.
 
@@ -981,6 +1019,21 @@ def build_thermal_joint_task(
         raise ValueError("The declared joint Thermal objective requires exactly128 operator rows per case.")
     if formal_full and total_epochs != 5000:
         raise ValueError("The manual fullTRAIN joint recipe is bound to a5000-epoch horizon.")
+    if any(option is not None for option in (validation_scope, optimizer_schedule, weight_decay,
+                                            native_sampling_protocol)) and not formal_full:
+        raise ValueError("Formal comparison controls require the separate fullTRAIN identity.")
+    if validation_scope not in (None, "canonical89"):
+        raise ValueError("Joint Thermal formal validation scope must be canonical89.")
+    if optimizer_schedule is not None and (not isinstance(optimizer_schedule, ScheduleSpec)
+                                          or optimizer_schedule.total_epochs != total_epochs):
+        raise ValueError("Formal optimizer schedule must match the declared horizon.")
+    if weight_decay is not None and (type(weight_decay) not in (int, float)
+                                    or not math.isfinite(weight_decay) or weight_decay < 0):
+        raise ValueError("Formal weight decay must be finite and nonnegative.")
+    if native_sampling_protocol not in (None, "baseline_formal_v1"):
+        raise ValueError("Unsupported formal native sampling protocol.")
+    if native_sampling_protocol is not None and validation_scope != "canonical89":
+        raise ValueError("Baseline formal sampling requires the canonical89 primary panel.")
 
     resolved_manifest, resolved_data_path, manifest_path = _load_data_binding(manifest, data_path)
     if formal_full:
@@ -989,6 +1042,13 @@ def build_thermal_joint_task(
         validation_ids = development_case_ids(resolved_manifest, "test")
         if len(train_ids) != 600:
             raise ValueError("Manual joint Thermal fullTRAIN preparation requires the original600 TRAIN cases.")
+        if validation_scope == "canonical89":
+            original90 = tuple(record["case_id"] for record in catalog if record["split"] == "test")
+            validation_ids = tuple(case_id for case_id in original90 if case_id != "0273")
+            if (len(original90) != 90 or original90.count("0273") != 1
+                    or len(validation_ids) != 89 or len(set(validation_ids)) != 89
+                    or set(train_ids).intersection(validation_ids)):
+                raise ValueError("Formal validation requires original90 with duplicate0273 excluded from canonical89.")
     else:
         train_ids = development_case_ids(resolved_manifest, "train")
         validation_ids = development_case_ids(resolved_manifest, "test")
@@ -1075,7 +1135,14 @@ def build_thermal_joint_task(
         operator_rows_per_case=operator_rows_per_case,
         atlas_directory=Path(atlas_directory).expanduser().resolve(),
         auxiliary_calibration=auxiliary_calibration,
+        validation_scope=validation_scope,
+        optimizer_schedule=optimizer_schedule,
+        weight_decay=weight_decay,
+        native_sampling_protocol=native_sampling_protocol,
     )
     if validation_budget is not None:
         provider.validation_budget = validation_budget
+    if native_sampling_protocol == "baseline_formal_v1":
+        provider.validation_sampling_indices = {case_id: index for index, case_id in enumerate(original90)
+                                                if case_id in set(validation_ids)}
     return model, provider

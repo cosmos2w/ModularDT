@@ -31,7 +31,7 @@ from windfarm.training.joint_task import (
     build_wind_joint_task,
 )
 
-from honf_runtime.unified_training import SamplingKey, TaskBatch
+from honf_runtime.unified_training import SamplingKey, ScheduleSpec, TaskBatch
 from honf_runtime.unified_training import _sampling_dataset_id as runtime_sampling_dataset_id
 
 
@@ -473,6 +473,22 @@ def test_wind_joint_task_provider_keeps_case_epoch_queries_and_losses_packing_in
         ),
     )
     assert provider.sampling_dataset_id == runtime_sampling_dataset_id(provider.identity_payload())
+    default_identity = provider.identity_payload()
+    assert "native_sampling_identity" not in default_identity
+    assert "native_sampling" not in default_identity
+    assert "validation_scope" not in default_identity
+    assert "optimizer_schedule" not in default_identity["training"]
+    assert "horizon_updates_per_epoch" not in default_identity["training"]
+    default_group = provider.optimizer_groups(model)[0]
+    assert default_group.schedule == ScheduleSpec(
+        peak_lr=3.0e-4,
+        warmup_start_lr=3.0e-5,
+        warmup_epochs=20,
+        hold_through_epoch=1000,
+        total_epochs=2500,
+        final_lr=3.0e-6,
+    )
+    assert default_group.weight_decay == 1.0e-5
     key = SamplingKey(
         42,
         7,
@@ -542,6 +558,217 @@ def test_wind_joint_task_provider_keeps_case_epoch_queries_and_losses_packing_in
     validation = engine._evaluate(model, provider, "J-H", "joint", epoch=1)
     assert validation["row_count"] == 2
     assert [row["row_index"] for row in validation["rows"]] == [2, 3]
+
+
+def test_wind_formal_baseline_protocol_binds_full_validation_and_historical_sampling(monkeypatch) -> None:
+    from windfarm.training import joint_task
+
+    template = _scene_input()
+    support = SimpleNamespace(
+        lower_D=template.support_lower_D,
+        upper_D=template.support_upper_D,
+        extent_D=template.support_extent_D,
+    )
+    layout_by_row = np.repeat(np.arange(200, dtype=np.int64), 3)
+
+    class FakeView:
+        def __init__(self):
+            self.metadata = {"layout_index": layout_by_row}
+
+        @staticmethod
+        def run(row: int):
+            layout = int(row) // 3
+            return SimpleNamespace(
+                index=int(row),
+                case=f"layout-{layout}",
+                layout_index=layout,
+                wind_direction_deg=(270.0, 285.0, 300.0)[int(row) % 3],
+                module_centers=template.module_centers,
+                module_present=template.module_present,
+                module_features=template.module_features,
+                global_context=template.global_context,
+                support=support,
+                env_coords=template.env_coords,
+                env_features=template.env_features,
+                env_weights=template.env_weights,
+            )
+
+    def fake_sample(case, rng, role_counts, *, rng_by_role, **_kwargs):
+        del case, rng
+        coordinates = np.concatenate(
+            [
+                rng_by_role[role].random((role_counts[role], 3)).astype(np.float32)
+                for role in joint_task.ROLE_NAMES
+            ],
+            axis=0,
+        )
+        return SimpleNamespace(
+            coordinates_D=coordinates,
+            target_mps=np.zeros_like(coordinates),
+            role_sample_counts=role_counts,
+        )
+
+    monkeypatch.setattr(joint_task, "sample_native_role_queries", fake_sample)
+    train_rows = np.arange(420, dtype=np.int64)
+    validation_rows = np.arange(420, 510, dtype=np.int64)
+    manifest = {
+        "subset_id": joint_task.JOINT_WIND_FORMAL_PROFILE_ID,
+        "manifest_sha256": "a" * 64,
+    }
+    common = {
+        "view": FakeView(),
+        "model": _model(),
+        "train_rows": train_rows,
+        "validation_rows": validation_rows,
+        "manifest": manifest,
+        "profile_id": joint_task.JOINT_WIND_FORMAL_PROFILE_ID,
+        "training_fingerprint": "formal-training-fingerprint",
+        "role_component_scales": {role: (0.4, 0.3, 0.2) for role in joint_task.ROLE_NAMES},
+        "role_scale_calibration": {"method": "synthetic test calibration"},
+        "role_scale_cache_identity": {"cache_key_sha256": "synthetic-cache-key"},
+        "role_scale_source_sha256": "scale-test-sha",
+        "normalizer_source": {"kind": "synthetic test transforms"},
+        "seed": 42,
+        "primary_queries": 4096,
+        "microbatch_size": 24,
+        "effective_batch_size": 24,
+        "total_epochs": 5000,
+        "device": "cpu",
+        "catalogue_cache": SimpleNamespace(max_cached_bytes=0, summary=dict),
+    }
+    schedule = ScheduleSpec(
+        peak_lr=3.0e-4,
+        warmup_start_lr=3.0e-4,
+        warmup_epochs=0,
+        hold_through_epoch=2000,
+        total_epochs=5000,
+        final_lr=3.0e-6,
+    )
+    provider = WindJointRegionalTask(
+        **common,
+        optimizer_schedule=schedule,
+        weight_decay=1.0e-5,
+        validation_scope="fullVALID90",
+        native_sampling_protocol="baseline_formal_v1",
+    )
+
+    identity = provider.identity_payload()
+    train_fingerprint = joint_task._indices_sha256(train_rows)
+    assert identity["native_sampling_identity"] == {
+        "protocol": "baseline_formal_v1",
+        "dataset": "WindFarm",
+        "train_membership_fingerprint": train_fingerprint,
+    }
+    assert provider.sampling_fingerprint == train_fingerprint
+    assert provider.sampling_dataset_id == runtime_sampling_dataset_id(identity)
+    assert provider.sampling_dataset_id == joint_task._sampling_dataset_id("WindFarm", train_fingerprint)
+    assert identity["native_sampling"]["role_calibration_stream"] == "wind_role_scale_calibration"
+    assert identity["validation_scope"]["rows"] == 90
+    assert identity["validation_scope"]["layouts"] == 30
+    assert identity["training"]["optimizer_schedule"] == {
+        "peak_lr": 3.0e-4,
+        "warmup_start_lr": 3.0e-4,
+        "warmup_epochs": 0,
+        "hold_through_epoch": 2000,
+        "total_epochs": 5000,
+        "final_lr": 3.0e-6,
+    }
+    assert identity["training"]["optimizer_weight_decay"] == 1.0e-5
+    assert identity["training"]["case_visits_per_epoch"] == 420
+    assert identity["training"]["horizon_updates_per_epoch"] == 18
+    assert provider.optimizer_groups(provider.model)[0].schedule == schedule
+    assert provider.optimizer_groups(provider.model)[0].weight_decay == 1.0e-5
+
+    train_key = SamplingKey(
+        42,
+        7,
+        17,
+        1,
+        "train",
+        "J-geometry",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+        dataset_id=provider.sampling_dataset_id,
+    )
+    train_batch = provider.make_batch((0,), train_key)
+    train_case = FakeView.run(0)
+    train_id = f"{train_case.case}|layout={train_case.layout_index}|wd={train_case.wind_direction_deg:.6f}"
+    expected_train = np.concatenate(
+        [
+            train_key.numpy_rng("wind_native_role_query", train_id, role)
+            .random((provider.role_query_counts[role], 3))
+            .astype(np.float32)
+            for role in joint_task.ROLE_NAMES
+        ],
+        axis=0,
+    )
+    np.testing.assert_array_equal(train_batch.receivers.coordinates_D[0], expected_train)
+
+    validation_batch = next(iter(provider.validation_batches()))
+    validation_case = FakeView.run(420)
+    validation_id = (
+        f"{validation_case.case}|layout={validation_case.layout_index}|wd={validation_case.wind_direction_deg:.6f}"
+    )
+    validation_key = SamplingKey(
+        42,
+        0,
+        0,
+        0,
+        "validation",
+        "shared",
+        sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+        dataset_id=provider.sampling_dataset_id,
+    )
+    expected_validation = np.concatenate(
+        [
+            validation_key.numpy_rng("wind_validation_role_query", validation_id, role)
+            .random((provider.role_query_counts[role], 3))
+            .astype(np.float32)
+            for role in joint_task.ROLE_NAMES
+        ],
+        axis=0,
+    )
+    np.testing.assert_array_equal(validation_batch.receivers.coordinates_D[0], expected_validation)
+
+    legacy_formal = WindJointRegionalTask(**common)
+    legacy_identity = legacy_formal.identity_payload()
+    assert "native_sampling_identity" not in legacy_identity
+    assert "native_sampling" not in legacy_identity
+    assert "validation_scope" not in legacy_identity
+    assert "optimizer_schedule" not in legacy_identity["training"]
+    assert "case_visits_per_epoch" not in legacy_identity["training"]
+    assert "horizon_updates_per_epoch" not in legacy_identity["training"]
+
+
+def test_wind_formal_comparison_controls_reject_nonformal_and_unpaired_scope() -> None:
+    from windfarm.training import joint_task
+
+    with pytest.raises(ValueError, match="only for formal_full 5000-epoch"):
+        joint_task._validate_formal_controls(
+            formal_full=False,
+            total_epochs=2500,
+            optimizer_schedule=None,
+            weight_decay=None,
+            validation_scope="fullVALID90",
+            native_sampling_protocol=None,
+        )
+    with pytest.raises(ValueError, match="paired with validation_scope='fullVALID90'"):
+        joint_task._validate_formal_controls(
+            formal_full=True,
+            total_epochs=5000,
+            optimizer_schedule=None,
+            weight_decay=None,
+            validation_scope=None,
+            native_sampling_protocol="baseline_formal_v1",
+        )
+    with pytest.raises(ValueError, match="must end at epoch 5000"):
+        joint_task._validate_formal_controls(
+            formal_full=True,
+            total_epochs=5000,
+            optimizer_schedule=ScheduleSpec(peak_lr=1.0e-4, total_epochs=2500),
+            weight_decay=None,
+            validation_scope=None,
+            native_sampling_protocol=None,
+        )
 
 
 def test_wind_role_scale_cache_is_checksummed_and_exact_source_bound(tmp_path) -> None:

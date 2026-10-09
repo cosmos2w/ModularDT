@@ -70,6 +70,23 @@ python tools/joint_regional_train.py dry-run \
 
 A separately requested manual launch additionally requires the explicit --manual-formal-launch option, a fresh output directory, a reviewed GPU, and a declared absolute stop. No formal run is launched by the development workflow.
 
+## Matched J-geometry formal comparison
+
+The separate [Thermal J-geometry recipe](../../src/config_core/forward/joint_regional/thermal_geometry_full5000_v1.json) and [Wind J-geometry recipe](../../src/config_core/forward/joint_regional/wind_geometry_full5000_v1.json) support explicitly requested fresh 5000-epoch comparisons to Thermal3904 and Wind2202. They retain original TRAIN600/420, initialization seeds 0/42, effective and micro batches 48/24, fluid Q1024 or five-role Q4096, and TRAIN-only transforms. Thermal monitors canonical89, excluding the known TRAIN duplicate0273, while preserving original90 indices for the baseline's fixed validation query seeds; Wind monitors original VALID90/30 layouts with WindTEST targets locked. The formal native sampling protocol derives the dataset key from the baseline's full-TRAIN fingerprint rather than the development manifest and retains the baseline native query streams. Preparation receipts must verify the actual dataset keys, memberships, transforms, budgets and optimizer groups before launch.
+
+Both comparison recipes use AdamW with learning rate 3e-4 from initialization through epoch2000, then cosine decay to 3e-6 at epoch5000, weight decay 1e-5, betas (0.9,0.999), epsilon 1e-8 and clipping 1. Every physical head and shared block trains from epoch1. This optimizer clock is separate from the older models' routing curriculum; the joint models have no detail-gate phase curriculum. Immutable checkpoints are limited to 100/500/1000/2000/2500/5000, with latest and best-field aliases overwritten. Epoch1 writes initial latest state and loss curves without adding a milestone or validation review; curves, latest and exposed validation subsequently update every100 epochs. The old experimental manual recipes and their completed development evidence retain their original bindings.
+
+These are matched data and training-budget comparisons of different model recipes. Thermal3904 optimizes temperature refinement with an external frozen flow component; the new Thermal model learns fresh flow and temperature heads together, with the joint equal-family objective and TRAIN-calibrated response/operator terms. Widths, parameter groups, collective organization and objectives differ, so scalar total losses and old selector scores are not common accuracy measures. Compare common native physical fields on the same primary panels and report measured training/inference cost separately. Saved Thermal3904 validation files do not contain native point digests; reconstructing its unchanged original90 sampler demonstrates point agreement but does not add missing historical query receipts.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python tools/joint_regional_train.py start \
+  --recipe-json src/config_core/forward/joint_regional/thermal_geometry_full5000_v1.json \
+  --manual-formal-launch --device cuda:0 --stop-after 5000 --output-dir PATH_TO_NEW_THERMAL_RUN
+CUDA_VISIBLE_DEVICES=2 python tools/joint_regional_train.py start \
+  --recipe-json src/config_core/forward/joint_regional/wind_geometry_full5000_v1.json \
+  --manual-formal-launch --device cuda:0 --stop-after 5000 --output-dir PATH_TO_NEW_WIND_RUN
+```
+
 ## Evidence and retention
 
 The [completed 2026-10-09 development report](../reports/HONF_Joint_Field_Regional_Development_20261009.md) binds the mature selected comparisons, both locality revisions, native fields, actual graph interventions, numerical limits and complete cost receipts. Thermal prefers learned locality organization for fluid-temperature/vorticity gains with retained flow and response misses; Wind prefers geometric regional organization after the mature learned revision still loses near-wake Ux/Uy. These are fixed exposed development results, and both manual fullTRAIN recipes remain experimental.

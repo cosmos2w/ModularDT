@@ -256,10 +256,13 @@ class EngineConfig:
     curve_every: int | None = None
     sampling_version: str = SamplingKey.LEGACY_VERSION
     training_mode: str = "refinement"
+    write_initial_artifacts: bool = False
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("refinement", "joint"):
             raise ValueError("Training mode must be refinement or joint.")
+        if type(self.write_initial_artifacts) is not bool:
+            raise ValueError("Initial artifact control must be boolean.")
         if self.sampling_version not in SamplingKey.SUPPORTED_VERSIONS:
             raise ValueError(f"Unsupported query sampling version {self.sampling_version!r}.")
         if min(self.microbatch_cases, self.effective_cases, self.total_epochs, self.monitor_every) < 1:
@@ -313,7 +316,7 @@ def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
     for name, default in (("monitor_epochs", ()), ("checkpoint_epochs", None),
                           ("latest_every", None), ("curve_every", None),
                           ("sampling_version", SamplingKey.LEGACY_VERSION),
-                          ("training_mode", "refinement")):
+                          ("training_mode", "refinement"), ("write_initial_artifacts", False)):
         if payload[name] == default:
             payload.pop(name)
     return payload
@@ -352,6 +355,18 @@ def _sampling_dataset_id(provider_identity: Mapping[str, Any]) -> str:
     """Build a small stable key from dataset and sealed TRAIN membership."""
 
     dataset = provider_identity.get("dataset", provider_identity.get("task", "unspecified"))
+    native_identity = provider_identity.get("native_sampling_identity")
+    if native_identity is not None:
+        if (not isinstance(native_identity, Mapping)
+                or native_identity.get("protocol") != "baseline_formal_v1"
+                or native_identity.get("dataset") != dataset
+                or not isinstance(native_identity.get("train_membership_fingerprint"), str)
+                or len(native_identity["train_membership_fingerprint"]) != 64
+                or any(char not in "0123456789abcdef" for char in native_identity["train_membership_fingerprint"])):
+            raise ValueError("Formal native sampling identity requires a matching dataset and TRAIN fingerprint.")
+        payload = json.dumps([str(dataset), native_identity["train_membership_fingerprint"]],
+                             separators=(",", ":")).encode("utf-8")
+        return f"{dataset}:{hashlib.sha256(payload).hexdigest()}"
     subset = next((provider_identity[name] for name in (
         "subset_manifest_sha256", "manifest_fingerprint", "manifest_sha256", "manifest",
         "train_rows_sha256", "training_case_ids_sha256", "train_case_ids_sha256",
@@ -1908,7 +1923,8 @@ class TrainingEngine:
                               else epoch in self.config.checkpoint_epochs)
                              or epoch == stop_after or improved_guarded)
                 curve_due = self.config.curve_every is not None and (
-                    (epoch == 1 and self.config.training_mode != "joint")
+                    (epoch == 1 and (self.config.training_mode != "joint"
+                                     or self.config.write_initial_artifacts))
                     or epoch % self.config.curve_every == 0 or epoch == stop_after or clean_stop_requested)
                 should_save = (review or milestone or curve_due
                                or (self.config.latest_every is not None and epoch % self.config.latest_every == 0))
