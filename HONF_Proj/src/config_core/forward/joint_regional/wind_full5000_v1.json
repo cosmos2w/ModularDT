@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task": "wind",
-  "mode": "J-H",
+  "mode": "J-geometry",
   "seed": 42,
   "hidden": 128,
   "message": 128,
