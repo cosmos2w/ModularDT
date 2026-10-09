@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -169,6 +170,121 @@ def test_joint_checkpoint_roundtrip_is_self_contained_and_stale_context_is_rejec
         model.apply_native(prepared, torch.ones(1, 3))
 
 
+@pytest.mark.parametrize(
+    "physical_ids",
+    [
+        [117, 904],
+        np.asarray([117, 904], dtype=np.int64),
+        torch.tensor([117, 904], dtype=torch.int64),
+    ],
+    ids=("list", "numpy", "tensor"),
+)
+def test_numeric_physical_source_ids_survive_slot_mapping(physical_ids):
+    model = _adapter("J-H")
+    structure = _structure(2)
+    structure["module_source_ids"] = physical_ids
+    tensors = model.context_tensors(structure)
+    assert tensors["source_ids"].tolist() == [[117, 904]]
+
+    prepared_structure = _structure(2)
+    prepared_structure["module_source_ids"] = physical_ids
+    xy = torch.tensor([[[0.75, 0.75], [3.75, 2.25]]], dtype=torch.float32)
+    local = torch.zeros(1, 2, 2, 2, dtype=torch.float32)
+    prepared = model.prepare_native(prepared_structure, xy, local_query_points=local, ntheta=4)
+    assert prepared.context.source_ids.tolist() == [[117, 904]]
+    assert prepared.source_id_catalogue == (117, 904)
+    assert prepared.context.source_id_catalogue == (117, 904)
+    assert prepared.response.source_id_catalogue == (117, 904)
+
+
+@pytest.mark.parametrize(
+    ("physical_ids", "error"),
+    [
+        ([17, 17], ValueError),
+        ([-1, 18], ValueError),
+        ([17.5, 18.0], ValueError),
+        ([float("nan"), 18.0], ValueError),
+        ([2**63, 18], ValueError),
+        ([True, False], TypeError),
+    ],
+)
+def test_numeric_physical_source_ids_reject_invalid_active_catalogues(physical_ids, error):
+    model = _adapter("J-H")
+    structure = _structure(2)
+    structure["module_source_ids"] = physical_ids
+    with pytest.raises(error):
+        model.context_tensors(structure)
+
+
+def test_mutated_numpy_source_identity_invalidates_prepared_native_state():
+    model = _adapter("J-H")
+    structure = _structure(2)
+    physical_ids = np.asarray([117, 904], dtype=np.int64)
+    structure["module_source_ids"] = physical_ids
+    xy = torch.tensor([[[0.75, 0.75], [3.75, 2.25]]], dtype=torch.float32)
+    local = torch.zeros(1, 2, 2, 2, dtype=torch.float32)
+    prepared = model.prepare_native(structure, xy, local_query_points=local, ntheta=4)
+    physical_ids[0] = 118
+    with pytest.raises(ValueError, match="Geometry/context changed"):
+        model.apply_native(prepared, torch.ones(1, 2))
+
+
+def test_inactive_source_identity_may_use_reserved_sentinel():
+    model = _adapter("J-H")
+    structure = _structure(2)
+    structure["module_present"] = torch.tensor([[1.0, 0.0]])
+    structure["module_source_ids"] = np.asarray([2**40 + 117, -1], dtype=np.int64)
+    tensors = model.context_tensors(structure)
+    assert tensors["source_ids"].tolist() == [[2**40 + 117, -1]]
+
+
+def test_predict_native_sample_preserves_large_numpy_physical_ids(monkeypatch):
+    model = _adapter("J-H")
+    base_structure = _structure(2)
+    structure = {
+        "module_centers": base_structure["module_centers"][0].numpy(),
+        "module_present": base_structure["module_present"][0].numpy(),
+        "material_params": base_structure["material_params"][0].numpy(),
+        "re": np.asarray([50.0], dtype=np.float32),
+        "u_in": np.asarray([1.0], dtype=np.float32),
+        "domain_length_x": np.asarray([12.0], dtype=np.float32),
+        "domain_length_y": np.asarray([6.0], dtype=np.float32),
+        "module_source_ids": np.asarray([2**40 + 117, 2**40 + 904], dtype=np.int64),
+        "heat_powers": np.asarray([0.75, 1.0], dtype=np.float32),
+    }
+    x = (np.arange(8, dtype=np.float32) + 0.5) * 1.5
+    y = (np.arange(4, dtype=np.float32) + 0.5) * 1.5
+    x_grid, y_grid = np.meshgrid(x, y)
+    observed_ids = []
+    prepare_native = model.prepare_native
+
+    def capture_ids(current_structure, fluid_xy, **kwargs):
+        prepared = prepare_native(current_structure, fluid_xy, **kwargs)
+        observed_ids.extend(prepared.context.source_ids[0].cpu().tolist())
+        return prepared
+
+    monkeypatch.setattr(model, "prepare_native", capture_ids)
+    result = model.predict_native_sample(
+        {
+            "structure": structure,
+            "x_grid": x_grid,
+            "y_grid": y_grid,
+            "module_internal_query_points": np.zeros((2, 2), dtype=np.float32),
+        },
+        device="cpu",
+    )
+    assert observed_ids == [2**40 + 117, 2**40 + 904]
+    assert result["pred_field_grid"].shape == (4, 8, 5)
+
+
+def test_normalization_mutation_invalidates_prepared_native_state():
+    model = _adapter("J-H")
+    _, _, _, prepared = _prepare(model, 2)
+    model.normalization_stats["field_mean_by_channel"][0] += 0.25
+    with pytest.raises(ValueError, match="normalization changed"):
+        model.apply_native(prepared, torch.ones(1, 2))
+
+
 def test_native_record_increment_returns_flow_null_and_precise_temperature_roles():
     model = _adapter("J-H")
     module = SimpleNamespace(
@@ -285,6 +401,37 @@ def test_joint_provider_has_one_all_parameter_group_and_balanced_native_loss_fam
     assert metadata["q_proxy"]["weight"] == "0.05 outside the equal flow/thermal group balance"
     assert metadata["flow/u"]["panel"] == "native_prediction"
     assert metadata["operator_residual"]["panel"] == "physics"
+
+
+def test_joint_provider_identity_is_strict_json_serializable():
+    provider = object.__new__(JointThermalTask)
+    provider._train_ids = ("train-a", "train-b")
+    provider._validation_ids = ("dev-a",)
+    provider.manifest = {
+        "manifest_sha256": "a" * 64,
+        "partitions": {"train": {"case_ids": ["train-a", "train-b"]}},
+    }
+    provider.formal_full = False
+    provider.source_binding = {"dataset_id": "synthetic_identity_test", "metadata_sha256": "b" * 64}
+    provider.model = _adapter("J-H")
+    provider.stats = _stats()
+    provider.joint_mode = "J-H"
+    provider.budget = {"fluid_queries": 1024, "material_queries_per_module": 32}
+    provider.effective_batch_size = 48
+    provider.operator_rows_per_case = 128
+    provider.train_families = ({"family_id": "0001"},)
+    provider.response_scales = {"fluid": 1.0, "surface": 1.0, "material": 1.0}
+    provider.flow_role_weights = {role: 0.5 / 4 for role in ("u", "v", "p", "omega")}
+    provider.thermal_role_weights = {role: 0.5 / 3 for role in ("fluid", "surface", "material")}
+    provider.q_proxy_weight = 0.05
+    provider.response_weight = 1.0
+    provider.operator_weight = 1.0
+    provider.auxiliary_calibration = None
+    provider.total_epochs = 2500
+
+    identity = provider.identity_payload()
+    json.dumps(identity, allow_nan=False)
+    assert identity["normalization_stats"]["field_mean_by_channel"] == [1.0, -2.0, 0.5, 3.0, 10.0]
 
 
 def test_native_metrics_report_near_far_query_counts_and_sampled_module_peaks():

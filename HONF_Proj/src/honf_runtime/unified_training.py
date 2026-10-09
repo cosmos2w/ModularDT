@@ -728,7 +728,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         except (KeyError, TypeError, ValueError):
             continue
     if selector_points:
-        selector_label = ("HELD-OUT VALIDATION: Held-out field prediction error"
+        selector_label = (f"EXPOSED DEV: {field_metric}" if joint_run else
+                          "HELD-OUT VALIDATION: Held-out field prediction error"
                           if field_metric == "field_score" else f"HELD-OUT VALIDATION: {field_metric}")
         masked_count_total += plot_series(
             selector_axis, [point[0] for point in selector_points], [point[1] for point in selector_points],
@@ -743,7 +744,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     selector_explanation = ("Normalized field MSE for checkpoint selection; not a loss"
                             if field_metric == "field_score"
                             else "Checkpoint selector, shown separately from loss")
-    set_panel_title(selector_axis, "Held-out field prediction error" if field_metric == "field_score"
+    set_panel_title(selector_axis, "Exposed DEV checkpoint selector" if joint_run else
+                    "Held-out field prediction error" if field_metric == "field_score"
                     else "Held-out checkpoint metric", selector_explanation)
     selector_axis.set_xlabel("Completed epoch")
     selector_axis.set_ylabel(
@@ -851,6 +853,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         metadata["panel_definitions"].update({
             "shared_name_loss_summary": "Same-named provider physical objectives on TRAIN and exposed DEV. Their reductions differ; this is not a directly comparable objective.",
             "native_prediction": "Provider-defined joint physical field losses against stored references, in TRAIN-fitted scales.",
+            "field_selector": f"Exposed DEV {field_metric} used for checkpoint selection; not independent TEST evidence.",
             "routing": "Other provider-defined objectives; this joint family has no B/F gate or routing curriculum.",
             "train_work": "Executed primitive counter sums; counts alone do not establish sparse executor savings.",
         })
@@ -1299,6 +1302,11 @@ class TrainingEngine:
         loss_batch_counts: dict[str, int] = {}
         batch_count = 0
         model.eval()
+        previous_grad_mode = torch.is_grad_enabled()
+        if self.config.training_mode == "joint":
+            # Native DEV metrics need the deployed values, not retained
+            # backward graphs for a full receiver catalogue.
+            torch.set_grad_enabled(False)
         try:
             for batch in provider.validation_batches():
                 batch_count += 1
@@ -1364,6 +1372,7 @@ class TrainingEngine:
                     "then multiplied by the provider objective weight"
                 )
         finally:
+            torch.set_grad_enabled(previous_grad_mode)
             model.train(previous_mode)
             restore_rng_state(rng_state)
         result["validation_execution_mode"] = arm
@@ -1781,6 +1790,7 @@ class TrainingEngine:
                             "validation_route_phase": "joint",
                             "training_prediction_mode": "all physical heads and shared blocks train jointly",
                             "validation_prediction_mode": "same deployed joint prediction path",
+                            "comparability_note": "TRAIN averages macro-update means over changing joint weights; exposed DEV pools valid elements at fixed review weights. Neither is independent TEST evidence.",
                             "definition": "Provider-defined physical objectives; TRAIN averages macro-update means, DEV pools valid elements. Stored TRAIN response/operator targets remain separate.",
                         })
                     loss_metadata = getattr(provider, "loss_metadata", None)

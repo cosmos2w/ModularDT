@@ -28,6 +28,9 @@ from honf_runtime.unified_training import (
     ScheduleSpec,
     TaskBatch,
 )
+from honf_runtime.unified_training import (
+    _sampling_dataset_id as _runtime_sampling_dataset_id,
+)
 from torch import nn
 
 from ..data import WindFarmNativeView
@@ -659,8 +662,13 @@ def _joint_scene_batch(inputs: Sequence[WindJointSceneInputs], device: torch.dev
 
 
 def _sampling_dataset_id(profile_id: str, fingerprint: str) -> str:
-    payload = json.dumps([profile_id, fingerprint], sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return f"{profile_id}:{hashlib.sha256(payload).hexdigest()}"
+    # Match the engine's case_epoch_v1 key exactly: dataset plus the sealed
+    # TRAIN membership fingerprint. The profile is already bound by that
+    # manifest, and must not become a second, incompatible hashing recipe.
+    del profile_id
+    return _runtime_sampling_dataset_id(
+        {"dataset": "WindFarm", "subset_manifest_sha256": str(fingerprint)}
+    )
 
 
 class WindJointRegionalTask:
@@ -712,7 +720,8 @@ class WindJointRegionalTask:
         self.total_epochs = int(total_epochs)
         self.catalogue_cache = catalogue_cache
         self.sampling_version = SamplingKey.CASE_EPOCH_VERSION
-        self.sampling_dataset_id = _sampling_dataset_id(self.profile_id, self.training_fingerprint)
+        manifest_fingerprint = str(self.manifest.get("manifest_sha256", self.training_fingerprint))
+        self.sampling_dataset_id = _sampling_dataset_id(self.profile_id, manifest_fingerprint)
         self._train_row_set = set(map(int, self.train_rows.tolist()))
         self._validation_cache: tuple[TaskBatch, ...] | None = None
         self.training_samples = 0
@@ -798,6 +807,60 @@ class WindJointRegionalTask:
             "wind_test_target_values_read": False,
         }
 
+    def preparation_summary(self) -> dict[str, Any]:
+        """Return JSON-safe setup and native-cache accounting before optimization."""
+
+        manifest_id = str(self.manifest.get("subset_id", self.profile_id))
+        manifest_sha = str(self.manifest.get("manifest_sha256", self.training_fingerprint))
+        train_rows = int(self.train_rows.size)
+        validation_rows = int(self.validation_rows.size)
+        train_layouts = {
+            int(self.view.metadata["layout_index"][row]) for row in self.train_rows
+        }
+        validation_layouts = {
+            int(self.view.metadata["layout_index"][row]) for row in self.validation_rows
+        }
+        training_cases_sampled = int(self.training_samples)
+        validation_cases_sampled = int(self.validation_samples)
+        return {
+            "status": "prepared_only",
+            "subset_id": manifest_id,
+            "subset_manifest_sha256": manifest_sha,
+            "dataset_profile": str(self.profile_id),
+            "train_rows": train_rows,
+            "validation_rows": validation_rows,
+            "train_layout_count": len(train_layouts),
+            "validation_layout_count": len(validation_layouts),
+            "train_row_indices_sha256": _indices_sha256(self.train_rows),
+            "validation_row_indices_sha256": _indices_sha256(self.validation_rows),
+            "training_cases_sampled": training_cases_sampled,
+            "validation_cases_sampled": validation_cases_sampled,
+            "training_query_samples": training_cases_sampled * self.primary_queries,
+            "validation_query_samples": validation_cases_sampled * self.primary_queries,
+            "role_query_counts": {
+                str(role): int(count) for role, count in self.role_query_counts.items()
+            },
+            "primary_queries_per_case": int(self.primary_queries),
+            "effective_batch_size": int(self.effective_batch_size),
+            "microbatch_size": int(self.max_microbatch_cases),
+            "total_epochs": int(self.total_epochs),
+            "sampling_version": str(self.sampling_version),
+            "environment_representation": {
+                "record_count": JOINT_WIND_ENVIRONMENT_COUNT,
+                "token_shape": list(JOINT_WIND_ENVIRONMENT_SHAPE),
+                "geometry_only": True,
+                "field_sensors": False,
+            },
+            "normalizer_and_background_source": dict(self.normalizer_source),
+            "role_scale_calibration": dict(self.role_scale_calibration),
+            "role_scale_cache_binding": dict(self.role_scale_cache_identity),
+            "role_scale_source_sha256": str(self.role_scale_source_sha256),
+            "native_role_catalogue_cache": self.catalogue_cache.summary(),
+            "optimizer_started": False,
+            "solver_attempts": 0,
+            "wind_test_target_values_read": False,
+        }
+
     def loss_metadata(self) -> Mapping[str, Mapping[str, str]]:
         return {
             f"native_role/{role}": {
@@ -846,7 +909,7 @@ class WindJointRegionalTask:
         return _scene_inputs(case), sample
 
     def _make_batch(self, rows: Sequence[int], key: SamplingKey, *, training: bool) -> TaskBatch:
-        if not rows:
+        if len(rows) == 0:
             raise ValueError("Wind joint batches cannot be empty.")
         if len(rows) > self.max_microbatch_cases:
             raise ValueError("Wind joint batch exceeds its declared case microbatch size.")

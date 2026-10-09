@@ -243,6 +243,9 @@ class JointThermalTask(ThermalRefinementTask):
         fixed25_train_hash = _case_ids_hash(development_case_ids(self.manifest, "train"))
         if self.formal_full and training_hash == fixed25_train_hash:
             raise ValueError("Manual fullTRAIN identity cannot reuse fixed25_v1 quarter TRAIN membership.")
+        normalization_stats = {
+            str(name): np.asarray(value).tolist() for name, value in self.stats.items()
+        }
         return {
             "task": "ThermalChannel",
             "task_provider": "thermal_joint_regional_v1",
@@ -267,7 +270,7 @@ class JointThermalTask(ThermalRefinementTask):
             "adapter_config": self.model.adapter_config(),
             "normalization_scope": "all_original_train_only" if self.formal_full else "selected_fixed25_train_only",
             "normalization_stats_sha256": _tensor_digest(self.stats),
-            "normalization_stats": copy.deepcopy(self.stats),
+            "normalization_stats": normalization_stats,
             "native_query_budget": dict(self.budget),
             "native_metric_supports": {
                 "fluid_temperature_near": f"valid fixed primary receivers within {JOINT_NEAR_RADIUS_MULTIPLE:g} local physical source radii of the nearest active module",

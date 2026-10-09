@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,6 +30,7 @@ from windfarm.training.joint_task import (
 )
 
 from honf_runtime.unified_training import SamplingKey, TaskBatch
+from honf_runtime.unified_training import _sampling_dataset_id as runtime_sampling_dataset_id
 
 
 def _scene_input(row: int = 0, *, sources: int = 2, shift: float = 0.0) -> WindJointSceneInputs:
@@ -106,6 +109,15 @@ def _model(mode: str = "J-H") -> WindFarmJointRegionalModel:
         receiver_tile=2,
         seed=42,
     )
+
+
+def _joint_cli_module():
+    cli_path = Path(__file__).resolve().parents[1] / "tools" / "joint_regional_train.py"
+    spec = importlib.util.spec_from_file_location("wind_joint_regional_train_test", cli_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _receivers(batch: int = 1) -> torch.Tensor:
@@ -279,7 +291,12 @@ def test_wind_joint_role_mixture_and_native_vector_objective_are_exact() -> None
 def test_wind_joint_task_provider_keeps_case_epoch_queries_and_losses_packing_invariant(monkeypatch) -> None:
     from windfarm.training import joint_task
 
-    items = [_scene_input(0, sources=2), _scene_input(1, sources=3, shift=0.3), _scene_input(2, sources=1)]
+    items = [
+        _scene_input(0, sources=2),
+        _scene_input(1, sources=3, shift=0.3),
+        _scene_input(2, sources=1),
+        _scene_input(3, sources=2, shift=0.15),
+    ]
     cases = []
     for item in items:
         support = SimpleNamespace(
@@ -306,7 +323,7 @@ def test_wind_joint_task_provider_keeps_case_epoch_queries_and_losses_packing_in
 
     class FakeView:
         def __init__(self):
-            self.metadata = {"layout_index": np.asarray([0, 1, 2], dtype=np.int64)}
+            self.metadata = {"layout_index": np.asarray([0, 1, 2, 3], dtype=np.int64)}
 
         @staticmethod
         def run(row: int):
@@ -337,13 +354,14 @@ def test_wind_joint_task_provider_keeps_case_epoch_queries_and_losses_packing_in
     monkeypatch.setattr(joint_task, "sample_native_role_queries", fake_sample)
     model = _model()
     role_scales = {role: (0.4, 0.3, 0.2) for role in joint_task.ROLE_NAMES}
-    fingerprint = "fixed-test-fingerprint"
+    fingerprint = "fixed-test-training-fingerprint"
+    manifest_fingerprint = "fixed-test-manifest-fingerprint"
     provider = WindJointRegionalTask(
         FakeView(),
         model=model,
         train_rows=[0, 1],
-        validation_rows=[2],
-        manifest={"subset_id": "wind_shared_fixed24_v1", "manifest_sha256": fingerprint},
+        validation_rows=[2, 3],
+        manifest={"subset_id": "wind_shared_fixed24_v1", "manifest_sha256": manifest_fingerprint},
         profile_id="wind_shared_fixed24_v1",
         training_fingerprint=fingerprint,
         role_component_scales=role_scales,
@@ -357,8 +375,21 @@ def test_wind_joint_task_provider_keeps_case_epoch_queries_and_losses_packing_in
         effective_batch_size=24,
         total_epochs=2500,
         device="cpu",
-        catalogue_cache=SimpleNamespace(max_cached_bytes=0),
+        catalogue_cache=SimpleNamespace(
+            max_cached_bytes=0,
+            summary=lambda: {
+                "catalogue_count": 0,
+                "catalogue_build_count": 0,
+                "cache_hit_count": 0,
+                "cache_miss_count": 0,
+                "cache_eviction_count": 0,
+                "cache_oversize_bypass_count": 0,
+                "cache_capacity_bytes": 0,
+                "cached_bytes": 0,
+            },
+        ),
     )
+    assert provider.sampling_dataset_id == runtime_sampling_dataset_id(provider.identity_payload())
     key = SamplingKey(
         42,
         7,
@@ -367,7 +398,7 @@ def test_wind_joint_task_provider_keeps_case_epoch_queries_and_losses_packing_in
         "train",
         "J-H",
         sampling_version=SamplingKey.CASE_EPOCH_VERSION,
-        dataset_id=_sampling_dataset_id(provider.profile_id, provider.training_fingerprint),
+        dataset_id=_sampling_dataset_id(provider.profile_id, provider.manifest["manifest_sha256"]),
     )
     packed = provider.make_batch((0, 1), key)
     first = provider.make_batch((0,), key)
@@ -395,6 +426,39 @@ def test_wind_joint_task_provider_keeps_case_epoch_queries_and_losses_packing_in
     assert provider.phase_metadata() == {
         "training_mode": "joint", "phase": "joint", "gate_schedule": None, "active_parameters": "all"
     }
+    validation_batches = tuple(provider.validation_batches())
+    assert len(validation_batches) == 1
+    assert validation_batches[0].case_keys == (2, 3)
+    assert validation_batches[0].targets.row_indices == (2, 3)
+
+    from honf_runtime.unified_training import EngineConfig, SelectionPolicy, TrainingEngine
+
+    cli = _joint_cli_module()
+    engine = TrainingEngine(
+        EngineConfig(
+            seed=42,
+            microbatch_cases=2,
+            effective_cases=24,
+            total_epochs=2500,
+            training_mode="joint",
+            sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+        ),
+        device="cpu",
+        selection=SelectionPolicy(field_metric="field_score"),
+    )
+    setup = provider.preparation_summary()
+    assert setup["status"] == "prepared_only"
+    assert setup["optimizer_started"] is False
+    assert setup["training_query_samples"] == provider.training_samples * provider.primary_queries
+    payload = cli.summary(model, provider, engine, {"recipe": {"mode": "J-H"}})
+    serialized = json.dumps(payload, allow_nan=False)
+    assert json.loads(serialized)["preparation"]["wind_test_target_values_read"] is False
+    preflight = engine.preflight_one_update(model, provider, arm="J-H")
+    assert preflight["optimizer_updates"] == 1
+    assert preflight["case_keys"] == [0]
+    validation = engine._evaluate(model, provider, "J-H", "joint", epoch=1)
+    assert validation["row_count"] == 2
+    assert [row["row_index"] for row in validation["rows"]] == [2, 3]
 
 
 def test_wind_role_scale_cache_is_checksummed_and_exact_source_bound(tmp_path) -> None:
@@ -558,3 +622,48 @@ def test_wind_fulltrain_transform_fit_cache_reuses_only_exact_source_membership(
         cache_dir=tmp_path / "cache",
     )
     assert len(calls) == 3
+
+
+def test_joint_cli_rejects_manual_formal_start_without_explicit_launch_flag(tmp_path, capsys) -> None:
+    cli = _joint_cli_module()
+    recipe_path = tmp_path / "manual-wind-formal.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "task": "wind",
+                "mode": "J-H",
+                "seed": 42,
+                "hidden": 128,
+                "message": 128,
+                "regional_anchors": 32,
+                "depth": 2,
+                "receiver_tile": 512,
+                "primary_queries": 4096,
+                "microbatch_cases": 24,
+                "effective_cases": 24,
+                "formal_full": True,
+                "total_epochs": 5000,
+                "initialization": "fresh_all_trainable",
+                "launch_policy": "manual_only",
+                "dataset_protocol": "original420_train",
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "must-not-start"
+    with pytest.raises(SystemExit) as error:
+        cli.main(
+            [
+                "start",
+                "--recipe-json",
+                str(recipe_path),
+                "--output-dir",
+                str(output_dir),
+                "--stop-after",
+                "100",
+            ]
+        )
+    assert error.value.code == 2
+    assert "Formal optimization requires explicit --manual-formal-launch" in capsys.readouterr().err
+    assert not output_dir.exists()

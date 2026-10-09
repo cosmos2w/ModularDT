@@ -25,7 +25,9 @@ from .source_response import (
     ENVIRONMENT_WIDTH,
     SOURCE_WIDTH,
     THERMAL_INTERACTION_CONTROL_UNITS,
+    PreparedNativeResponse,
     ThermalSourceResponse,
+    _parameter_signature,
     _thermal_interaction_dependency,
 )
 
@@ -151,6 +153,111 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         """Laws for the two distinct output blocks in this joint model."""
         return {"flow": "nonlinear", "temperature_response": "affine"}
 
+    @staticmethod
+    def _source_identity(structure, centers, present):
+        """Return the core's integer IDs and an ordered external identity catalogue."""
+        batch, modules = centers.shape[:2]
+        if modules < 1:
+            raise ValueError("Thermal source identity catalogues require at least one source slot.")
+        raw = structure.get("module_source_ids")
+        catalogue_rows = None
+        if raw is None:
+            source_ids = torch.arange(modules, device=centers.device, dtype=torch.long)[None].expand(batch, -1)
+            catalogue_rows = source_ids.detach().cpu().tolist()
+        elif torch.is_tensor(raw):
+            values = raw.to(device=centers.device)
+            if values.ndim == 1 and values.shape[0] == modules:
+                values = values[None].expand(batch, -1)
+            if tuple(values.shape) != (batch, modules):
+                raise ValueError("Thermal source identities must match the [B,M] source-slot catalogue.")
+            if values.dtype == torch.bool or values.dtype.is_complex:
+                raise TypeError("Thermal source identities must be integer-valued physical IDs or typed strings.")
+            if values.is_floating_point():
+                if (
+                    not bool(torch.isfinite(values).all())
+                    or not bool((values == values.round()).all())
+                    or bool((values < -(2**63)).any())
+                    or bool((values >= 2**63).any())
+                ):
+                    raise ValueError("Numeric Thermal source identities must be finite integral int64 values.")
+            elif values.dtype == torch.uint64 and bool((values > torch.iinfo(torch.int64).max).any()):
+                raise ValueError("Numeric Thermal source identities must fit in int64.")
+            source_ids = values.to(dtype=torch.long)
+            catalogue_rows = source_ids.detach().cpu().tolist()
+        else:
+            try:
+                values = np.asarray(raw)
+            except (TypeError, ValueError) as error:
+                raise TypeError("Thermal source identities must be numeric IDs or a rectangular typed catalogue.") from error
+            if values.ndim == 1 and values.shape[0] == modules:
+                values = np.broadcast_to(values[None], (batch, modules))
+            if tuple(values.shape) != (batch, modules):
+                raise ValueError("Thermal source identities must match the [B,M] source-slot catalogue.")
+
+            numeric = values.dtype.kind in "iu" or (
+                values.dtype.kind == "f" and np.isfinite(values).all() and np.equal(values, np.rint(values)).all()
+            )
+            if values.dtype.kind == "f" and not numeric:
+                raise ValueError("Numeric Thermal source identities must be finite integral int64 values.")
+            if numeric:
+                if values.dtype.kind == "u" and values.size and int(values.max()) > np.iinfo(np.int64).max:
+                    raise ValueError("Numeric Thermal source identities must fit in int64.")
+                if values.dtype.kind == "f" and values.size and (
+                    float(values.min()) < -(2**63) or float(values.max()) >= 2**63
+                ):
+                    raise ValueError("Numeric Thermal source identities must fit in int64.")
+                source_ids = torch.as_tensor(np.array(values, dtype=np.int64, copy=True), device=centers.device)
+                catalogue_rows = source_ids.detach().cpu().tolist()
+            else:
+                flat = values.reshape(-1).tolist()
+                if not all(isinstance(value, (str, bytes, np.str_, np.bytes_)) for value in flat):
+                    raise TypeError("Typed Thermal source identities must contain only strings or bytes.")
+                typed_rows = [
+                    [value.decode("utf-8") if isinstance(value, (bytes, np.bytes_)) else str(value)
+                     for value in row]
+                    for row in values.tolist()
+                ]
+                if any(not value for row in typed_rows for value in row):
+                    raise ValueError("Typed Thermal source identities must not be empty.")
+                source_ids = torch.arange(modules, device=centers.device, dtype=torch.long)[None].expand(batch, -1)
+                catalogue_rows = typed_rows
+
+        active = present.detach() > 0.5
+        for row_index in range(batch):
+            active_ids = source_ids[row_index, active[row_index]]
+            if bool((active_ids == -1).any()):
+                raise ValueError("Active Thermal physical source identity -1 is reserved for inactive edge slots.")
+            if active_ids.numel() != torch.unique(active_ids).numel():
+                raise ValueError("Active Thermal physical source identities must be unique within each case.")
+            typed_row = catalogue_rows[row_index]
+            if typed_row and isinstance(typed_row[0], str):
+                active_typed = [typed_row[index] for index in active[row_index].nonzero().flatten().cpu().tolist()]
+                if len(active_typed) != len(set(active_typed)):
+                    raise ValueError("Active Thermal typed source identities must be unique within each case.")
+
+        if batch == 1:
+            catalogue = tuple(catalogue_rows[0])
+        else:
+            catalogue = tuple(tuple(row) for row in catalogue_rows)
+        return source_ids, catalogue
+
+    def context_tensors(self, structure):
+        """Preserve numeric physical IDs; map typed IDs through an explicit slot catalogue."""
+        tensors = super().context_tensors(structure)
+        source_ids, _ = self._source_identity(structure, tensors["centers"], tensors["present"])
+        tensors["source_ids"] = source_ids
+        return tensors
+
+    @staticmethod
+    def _bind_source_id_catalogue(prepared, catalogue):
+        snapshot = copy.deepcopy(catalogue)
+        prepared.source_id_catalogue = catalogue
+        prepared.source_id_catalogue_snapshot = snapshot
+        prepared.context.source_id_catalogue = catalogue
+        prepared.context.source_id_catalogue_snapshot = copy.deepcopy(snapshot)
+        prepared.response.source_id_catalogue = catalogue
+        prepared.response.source_id_catalogue_snapshot = copy.deepcopy(snapshot)
+
     def adapter_config(self) -> dict[str, Any]:
         return {
             "nx": self.nx,
@@ -182,21 +289,100 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         prepared.model_output_laws = self.interaction_output_laws
         return prepared
 
+    def prepare_context(self, structure, *, environment_flow_features=None):
+        tensors = self.context_tensors(structure)
+        prepared = self._prepare_context_tensors(tensors, environment_flow_features)
+        _, catalogue = self._source_identity(structure, tensors["centers"], tensors["present"])
+        prepared.source_id_catalogue = catalogue
+        prepared.source_id_catalogue_snapshot = copy.deepcopy(catalogue)
+        return prepared
+
     def prepare_native(self, structure, fluid_xy, *, chunk_size=None, **kwargs):
         tile = self.receiver_tile if chunk_size is None else int(chunk_size)
         if tile < 1:
             raise ValueError("Joint Thermal receiver chunk size must be positive.")
         prepared = super().prepare_native(structure, fluid_xy, chunk_size=tile, **kwargs)
+        _, catalogue = self._source_identity(structure, prepared.context.centers, prepared.context.present)
+        self._bind_source_id_catalogue(prepared, catalogue)
+        prepared.normalization_stats_snapshot = {
+            name: value.copy() for name, value in self.normalization_stats.items()
+        }
         prepared.flow_receivers = fluid_xy
         prepared.flow_receiver_snapshot = fluid_xy.detach().clone()
         return prepared
 
     def validate_prepared(self, prepared, structure=None):
-        super().validate_prepared(prepared, structure=structure)
+        if not isinstance(prepared, PreparedNativeResponse) or prepared.owner != id(self):
+            raise ValueError("Native response preparation belongs to another adapter/request.")
+        if _parameter_signature(self) != prepared.parameter_signature:
+            raise ValueError("Prepared Thermal adapter weights changed; rebuild the response operator.")
+        if any(not torch.equal(value, snapshot) for value, snapshot in prepared.receiver_snapshots):
+            raise ValueError("Native receiver catalogue changed; rebuild the response operator.")
+        structure = prepared.structure if structure is None else structure
+        current = {key: value for key, value in structure.items() if key in CONTEXT_KEYS}
+        if set(current) != set(prepared.input_snapshot) or any(
+            not self._native_input_equal(current[key], value)
+            for key, value in prepared.input_snapshot.items()
+        ):
+            raise ValueError("Geometry/context changed; rebuild the response operator.")
+        stats_snapshot = getattr(prepared, "normalization_stats_snapshot", None)
+        if (
+            stats_snapshot is None
+            or set(stats_snapshot) != set(self.normalization_stats)
+            or any(
+                not np.array_equal(self.normalization_stats[name], stats_snapshot[name])
+                for name in stats_snapshot
+            )
+        ):
+            raise ValueError("Joint Thermal normalization changed; rebuild the prepared native state.")
         receivers = getattr(prepared, "flow_receivers", None)
         snapshot = getattr(prepared, "flow_receiver_snapshot", None)
         if not torch.is_tensor(receivers) or not torch.is_tensor(snapshot) or not torch.equal(receivers, snapshot):
             raise ValueError("Joint Thermal flow receiver catalogue changed; rebuild the prepared state.")
+        catalogue = getattr(prepared, "source_id_catalogue", None)
+        catalogue_snapshot = getattr(prepared, "source_id_catalogue_snapshot", None)
+        response_catalogue = getattr(prepared.response, "source_id_catalogue", None)
+        context_catalogue = getattr(prepared.context, "source_id_catalogue", None)
+        response_catalogue_snapshot = getattr(prepared.response, "source_id_catalogue_snapshot", None)
+        context_catalogue_snapshot = getattr(prepared.context, "source_id_catalogue_snapshot", None)
+        if (
+            catalogue is None
+            or catalogue != catalogue_snapshot
+            or catalogue != response_catalogue
+            or catalogue != response_catalogue_snapshot
+            or catalogue != context_catalogue
+            or catalogue != context_catalogue_snapshot
+        ):
+            raise ValueError("Joint Thermal physical source-ID catalogue changed; rebuild the prepared state.")
+
+    @staticmethod
+    def _native_input_equal(left, right):
+        if torch.is_tensor(left) or torch.is_tensor(right):
+            return torch.is_tensor(left) and torch.is_tensor(right) and torch.equal(left, right)
+        if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+            try:
+                return np.array_equal(np.asarray(left), np.asarray(right))
+            except (TypeError, ValueError):
+                return False
+        if isinstance(left, Mapping) or isinstance(right, Mapping):
+            return (
+                isinstance(left, Mapping)
+                and isinstance(right, Mapping)
+                and set(left) == set(right)
+                and all(JointThermalRegionalAdapter._native_input_equal(left[key], right[key]) for key in left)
+            )
+        if isinstance(left, (tuple, list)) or isinstance(right, (tuple, list)):
+            return (
+                isinstance(left, (tuple, list))
+                and isinstance(right, (tuple, list))
+                and len(left) == len(right)
+                and all(JointThermalRegionalAdapter._native_input_equal(a, b) for a, b in zip(left, right, strict=True))
+            )
+        try:
+            value = left == right
+            return bool(value) if not torch.is_tensor(value) else value.numel() == 1 and bool(value)
+        except (TypeError, ValueError, RuntimeError):
+            return False
 
     def _apply_native_fp32(self, prepared, physical_heat, increment, compression):
         """Apply the all-source joint affine read without legacy compression kwargs."""
@@ -252,15 +438,14 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
 
     def predict_native_sample(self, sample: Mapping[str, Any], device=None) -> dict[str, np.ndarray]:
         device = torch.device(device) if device is not None else next(self.parameters()).device
-        structure = {
-            key: (
-                copy.deepcopy(value)
-                if key == "module_source_ids" and not torch.is_tensor(value) and not isinstance(value, np.ndarray)
-                else torch.as_tensor(value, device=device, dtype=torch.float32)[None]
-            )
-            for key, value in sample["structure"].items()
-            if key in CONTEXT_KEYS
-        }
+        structure = {}
+        for key, value in sample["structure"].items():
+            if key not in CONTEXT_KEYS:
+                continue
+            if key == "module_source_ids":
+                structure[key] = value.to(device=device) if torch.is_tensor(value) else copy.deepcopy(value)
+            else:
+                structure[key] = torch.as_tensor(value, device=device, dtype=torch.float32)[None]
         fluid_xy = np.stack((np.asarray(sample["x_grid"]).reshape(-1), np.asarray(sample["y_grid"]).reshape(-1)), -1)
         fluid = torch.as_tensor(fluid_xy, device=device, dtype=torch.float32)[None]
         local = torch.as_tensor(sample["module_internal_query_points"], device=device, dtype=torch.float32)

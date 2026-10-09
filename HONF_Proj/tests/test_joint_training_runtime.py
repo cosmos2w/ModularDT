@@ -24,15 +24,27 @@ def test_joint_exact_resume_and_validation_keep_all_heads_active(tmp_path, monke
     torch.manual_seed(71)
     initial = torch.nn.Linear(1, 1).state_dict()
 
+    class JointProvider(_ToyProvider):
+        def __init__(self):
+            super().__init__()
+            self.dev_grad_states = []
+
+        def predict_native(self, model, *args, **kwargs):
+            if not model.training:
+                self.dev_grad_states.append(torch.is_grad_enabled())
+            return super().predict_native(model, *args, **kwargs)
+
     def run(directory, stop, resume=False):
         model = torch.nn.Linear(1, 1)
         model.load_state_dict(initial)
-        provider = _ToyProvider()
+        provider = JointProvider()
         engine = TrainingEngine(_joint_config(), device="cpu")
         engine.fit(model, provider, directory, identity={"workflow": "joint_test"},
                    arm="J-H", stop_after=stop,
                    resume_checkpoint=resolve_checkpoint(directory, "latest") if resume else None)
         assert all(phase[0] == "joint" for phase in provider.validation_phases)
+        assert provider.dev_grad_states and not any(provider.dev_grad_states)
+        assert torch.is_grad_enabled()
         return load_trusted_checkpoint(resolve_checkpoint(directory, "latest"), map_location="cpu")
 
     complete = run(tmp_path / "complete", 10)
