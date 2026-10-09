@@ -9,7 +9,7 @@
   "depth": 2,
   "receiver_tile": 512,
   "primary_queries": 4096,
-  "microbatch_cases": 1,
+  "microbatch_cases": 24,
   "effective_cases": 24,
   "formal_full": true,
   "total_epochs": 5000,
