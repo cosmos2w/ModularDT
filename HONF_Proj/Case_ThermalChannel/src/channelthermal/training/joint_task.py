@@ -24,10 +24,12 @@ from ..data.development_split import (
     validate_development_manifest,
 )
 from ..joint_regional import (
+    INTERACTION_PRESERVING_THERMAL_MODES,
     JOINT_THERMAL_CHANNEL_ORDER,
     JOINT_THERMAL_ID,
     JOINT_THERMAL_MODES,
     JointThermalRegionalAdapter,
+    InteractionPreservingThermalAdapter,
 )
 from .unified_task import (
     DEFAULT_ATLAS_DIRECTORY,
@@ -46,6 +48,7 @@ from .unified_task import (
 )
 
 JOINT_TRAINING_MODE = "joint"
+THERMAL_RECOVERY_MODES = tuple(JOINT_THERMAL_MODES) + tuple(INTERACTION_PRESERVING_THERMAL_MODES)
 JOINT_MICROBATCH_DEFAULT = 4
 JOINT_EFFECTIVE_BATCH_DEFAULT = 48
 JOINT_PRIMARY_QUERY_DEFAULT = 1024
@@ -63,6 +66,42 @@ def _case_ids_hash(values: Sequence[str]) -> str:
     digest = hashlib.sha256()
     for value in values:
         digest.update(str(value).encode("utf-8") + b"\0")
+    return digest.hexdigest()
+
+
+def _shared_direct_state_sha256(model: torch.nn.Module) -> str:
+    """Hash only the common pair/source-read path shared by P, P-G and P-H."""
+    mode_specific = (
+        "collective_", "source_membership_score", "environment_membership_score",
+        "receiver_query", "edge_key", "access_geometry",
+    )
+    digest = hashlib.sha256()
+    names = [name for name in model.state_dict() if not any(part in name for part in mode_specific)]
+    if not names or any(not name.startswith("core.") for name in names):
+        raise ValueError("Thermal fresh-P calibration could not identify the common direct-core state.")
+    for name in sorted(names):
+        tensor = model.state_dict()[name].detach().cpu().contiguous()
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(str((tuple(tensor.shape), str(tensor.dtype))).encode("ascii") + b"\0")
+        digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _state_sha256(model: torch.nn.Module) -> str:
+    digest = hashlib.sha256()
+    for name, tensor in model.state_dict().items():
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(str((tuple(value.shape), str(value.dtype))).encode("ascii") + b"\0")
+        digest.update(value.numpy().tobytes())
     return digest.hexdigest()
 
 
@@ -170,7 +209,7 @@ class JointThermalTask(ThermalRefinementTask):
         weight_decay: float | None = None,
         native_sampling_protocol: str | None = None,
     ) -> None:
-        if mode not in JOINT_THERMAL_MODES or model.mode != mode:
+        if mode not in THERMAL_RECOVERY_MODES or model.mode != mode:
             raise ValueError("Joint Thermal task mode must match its freshly initialized adapter.")
         if operator_rows_per_case != OPERATOR_ROWS_PER_CASE:
             raise ValueError("The sealed Thermal joint operator uses exactly128 rows per TRAIN case.")
@@ -218,7 +257,7 @@ class JointThermalTask(ThermalRefinementTask):
                 "operator_constraint": "qualified",
                 "reason": "new joint Thermal family retains the established TRAIN-only native discrete operator",
             },
-            "weight_decay": 1.0e-4,
+            "weight_decay": 1.0e-4 if weight_decay is None else float(weight_decay),
             "manifest_sha256": manifest["manifest_sha256"],
         }
         super().__init__(
@@ -244,6 +283,8 @@ class JointThermalTask(ThermalRefinementTask):
         self.operator_coefficient = self.operator_weight
         self._geometry_helper = model
         self._joint_loss_metadata = self._build_loss_metadata()
+        if self.joint_mode in INTERACTION_PRESERVING_THERMAL_MODES and self.auxiliary_calibration is not None:
+            self._validate_auxiliary_calibration(self.auxiliary_calibration)
 
     def identity_payload(self) -> Mapping[str, Any]:
         train_ids = list(self._train_ids)
@@ -274,7 +315,7 @@ class JointThermalTask(ThermalRefinementTask):
             "validation_case_count": len(validation_ids),
             "validation_scope": "fixed25_v1_exposed_DEV22_sanity_only" if self.formal_full else "fixed25_v1_exposed_DEV22",
             "source_binding": copy.deepcopy(self.source_binding),
-            "model_family": JOINT_THERMAL_ID,
+            "model_family": getattr(self.model, "FAMILY", JOINT_THERMAL_ID),
             "model_config": self.model.model_config(),
             "adapter_config": self.model.adapter_config(),
             "normalization_scope": "all_original_train_only" if self.formal_full else "selected_fixed25_train_only",
@@ -441,7 +482,7 @@ class JointThermalTask(ThermalRefinementTask):
     ):
         del phase, epoch, temperature, threshold
         if model is not self.model or execution_mode != self.joint_mode:
-            raise ValueError("Joint Thermal prediction requires its own candidate and J-mode arm label.")
+            raise ValueError("Joint Thermal prediction requires its own candidate and declared mode label.")
         from honf_runtime.compat import recursive_to_device
 
         rx = recursive_to_device(receivers, self.device)
@@ -819,8 +860,115 @@ class JointThermalTask(ThermalRefinementTask):
                                    weight_decay=1.0e-4 if weight_decay is None else weight_decay),)
 
     def work_counts(self, batch: TaskBatch, predictions, auxiliary_state) -> Mapping[str, int | float]:
-        del batch
-        return {name: float(value) for name, value in auxiliary_state.get("work", predictions.work).items()}
+        result: dict[str, int | float] = {
+            name: float(value) for name, value in auxiliary_state.get("work", predictions.work).items()
+        }
+        if self.joint_mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+            return result
+        contexts = []
+        main_native = predictions.native_prepared
+        contexts.append(("main", main_native.context, int(main_native.flow_receivers.shape[1]),
+                         int(main_native.grid_indices.shape[1])))
+        if predictions.response_prepared is not None:
+            response_native = predictions.response_prepared
+            contexts.append(("response", response_native.context,
+                             int(response_native.flow_receivers.shape[1]),
+                             int(response_native.grid_indices.shape[1])))
+
+        pair_rounds = 2
+        pair_mm = pair_me = pair_em = 0
+        pair_mm_logical_no_self = pair_mm_logical_with_self = pair_me_logical = pair_em_logical = 0
+        padding_source_slots = 0
+        collective_groups = 0
+        collective_source_score_slots = collective_environment_score_slots = 0
+        collective_source_edges = collective_environment_edges = 0
+        collective_receiver_score_slots = 0
+        flow_read_pairs = main_temp_read_pairs = response_temp_read_pairs = 0
+        active_source_receiver_pairs = active_flow_read_pairs = 0
+        active_main_temp_read_pairs = active_response_temp_read_pairs = 0
+        native_flow_queries = native_temp_union_queries = response_temp_union_queries = 0
+        for name, prepared, flow_queries, union_queries in contexts:
+            batch_count, source_capacity = prepared.present.shape
+            environment_capacity = prepared.environment_coords.shape[1]
+            active_by_scene = (prepared.present > 0).sum(dim=1).to(torch.int64)
+            active_total = int(active_by_scene.sum().item())
+            source_capacity = int(source_capacity)
+            environment_capacity = int(environment_capacity)
+            pair_mm += pair_rounds * int(batch_count) * source_capacity * source_capacity
+            pair_me += pair_rounds * int(batch_count) * source_capacity * environment_capacity
+            pair_em += pair_rounds * int(batch_count) * environment_capacity * source_capacity
+            pair_mm_logical_no_self += pair_rounds * int((active_by_scene * (active_by_scene - 1)).sum().item())
+            pair_mm_logical_with_self += pair_rounds * int((active_by_scene * active_by_scene).sum().item())
+            pair_me_logical += pair_rounds * active_total * environment_capacity
+            pair_em_logical += pair_rounds * active_total * environment_capacity
+            padding_source_slots += int(batch_count * source_capacity - active_total)
+
+            flow_pairs = int(batch_count * flow_queries * source_capacity)
+            affine_pairs = int(batch_count * union_queries * source_capacity)
+            active_flow_pairs = int(flow_queries * active_total)
+            active_affine_pairs = int(union_queries * active_total)
+            flow_read_pairs += flow_pairs
+            active_flow_read_pairs += active_flow_pairs
+            active_source_receiver_pairs += active_flow_pairs
+            if name == "main":
+                main_temp_read_pairs += affine_pairs
+                active_main_temp_read_pairs += active_affine_pairs
+                native_flow_queries += batch_count * flow_queries
+                native_temp_union_queries += batch_count * union_queries
+            else:
+                response_temp_read_pairs += affine_pairs
+                active_response_temp_read_pairs += active_affine_pairs
+                response_temp_union_queries += batch_count * union_queries
+
+            groups = prepared.group_states
+            group_count = int(groups.shape[1]) if torch.is_tensor(groups) else 0
+            collective_groups += group_count
+            if group_count:
+                collective_source_score_slots += int(batch_count * group_count * source_capacity)
+                collective_environment_score_slots += int(batch_count * group_count * environment_capacity)
+                source_membership = getattr(prepared, "source_membership", None)
+                environment_membership = getattr(prepared, "environment_membership", None)
+                if torch.is_tensor(source_membership):
+                    collective_source_edges += int(torch.count_nonzero(source_membership > 0).item())
+                if torch.is_tensor(environment_membership):
+                    collective_environment_edges += int(torch.count_nonzero(environment_membership > 0).item())
+                # Distinct source-conditioned flow and affine-head reads each compute receiver access.
+                collective_receiver_score_slots += int(batch_count * (flow_queries + union_queries) * group_count)
+
+        batch_cases = len(getattr(batch.targets, "case_ids", ()))
+        operator_rows = batch_cases * int(self.operator_rows_per_case) if self.use_operator else 0
+        result.update({
+            "pair_contexts_prepared": len(contexts),
+            "pair_rounds_per_context": pair_rounds,
+            "pair_MM_executed_slots_including_self": pair_mm,
+            "pair_MM_active_logical_pairs_excluding_self": pair_mm_logical_no_self,
+            "pair_MM_active_logical_pairs_including_self": pair_mm_logical_with_self,
+            "pair_ME_executed_slots": pair_me,
+            "pair_ME_active_logical_pairs": pair_me_logical,
+            "pair_EM_executed_slots": pair_em,
+            "pair_EM_active_logical_pairs": pair_em_logical,
+            "pair_padding_source_slots_per_context": padding_source_slots,
+            "native_flow_receivers": native_flow_queries,
+            "native_temperature_union_receivers": native_temp_union_queries,
+            "response_temperature_union_receivers": response_temp_union_queries,
+            "source_conditioned_flow_read_executed_pairs": flow_read_pairs,
+            "source_conditioned_flow_read_active_pairs": active_flow_read_pairs,
+            "temperature_affine_union_read_executed_pairs": main_temp_read_pairs,
+            "temperature_affine_union_read_active_pairs": active_main_temp_read_pairs,
+            "response_affine_union_read_executed_pairs": response_temp_read_pairs,
+            "response_affine_union_read_active_pairs": active_response_temp_read_pairs,
+            "active_physical_source_receiver_pairs": active_source_receiver_pairs,
+            "collective_groups_across_prepared_contexts": collective_groups,
+            "collective_source_membership_score_slots": collective_source_score_slots,
+            "collective_environment_membership_score_slots": collective_environment_score_slots,
+            "collective_source_memberships_nonzero": collective_source_edges,
+            "collective_environment_memberships_nonzero": collective_environment_edges,
+            "collective_receiver_access_score_slots": collective_receiver_score_slots,
+            "native_operator_rows_supervised": operator_rows,
+            "full_access_fallback": 0,
+            "sparse_executor_savings_measured": 0,
+        })
+        return result
 
     def training_state_dict(self) -> Mapping[str, Any]:
         return {
@@ -838,16 +986,123 @@ class JointThermalTask(ThermalRefinementTask):
             if float(state.get(name, float("nan"))) != current:
                 raise ValueError(f"Saved joint Thermal {name} differs from the active recipe.")
         saved = state.get("auxiliary_calibration")
-        self.auxiliary_calibration = None if saved is None else copy.deepcopy(dict(saved))
+        saved_receipt = None if saved is None else copy.deepcopy(dict(saved))
+        if self.joint_mode in INTERACTION_PRESERVING_THERMAL_MODES:
+            if self.auxiliary_calibration is None or saved_receipt != self.auxiliary_calibration:
+                raise ValueError("Saved P-family task state has no sealed fresh-P calibration receipt.")
+        self.auxiliary_calibration = saved_receipt
 
     def calibrate_auxiliary_coefficients(self) -> Mapping[str, Any]:
+        """Keep the historical J calibration contract and seal fresh P separately."""
+        if self.joint_mode in JOINT_THERMAL_MODES:
+            return self._calibrate_legacy_auxiliary_coefficients()
+        if self.joint_mode in INTERACTION_PRESERVING_THERMAL_MODES:
+            return self._calibrate_interaction_preserving_auxiliary_coefficients()
+        raise ValueError("Unsupported Thermal auxiliary-calibration family.")
+
+    def _calibrate_legacy_auxiliary_coefficients(self) -> Mapping[str, Any]:
+        """Retain the pre-recovery J-family TRAIN calibration schema verbatim."""
+        if self.auxiliary_calibration is not None:
+            raise RuntimeError("Joint Thermal auxiliary coefficients are already calibrated and sealed.")
+        module_counts = [int(np.asarray(case["structure"]["module_present"]).sum()) for case in self.training_cases]
+        selected_indices = [next((index for index, count in enumerate(module_counts) if count == desired), None)
+                            for desired in (1, 3, 10, 12)]
+        if any(index is None for index in selected_indices):
+            raise ValueError("Joint Thermal calibration requires TRAIN examples at1,3,10,12 modules.")
+        parameters = tuple(parameter for parameter in self.model.parameters() if parameter.requires_grad)
+        field_gradient_norms: list[float] = []
+        flow_gradient_norms: list[float] = []
+        thermal_gradient_norms: list[float] = []
+        operator_gradient_norms: list[float] = []
+        for update_index, index in enumerate(selected_indices):
+            key = SamplingKey(
+                0, 1, update_index, 0, "joint_auxiliary_calibration", self.joint_mode,
+                sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="thermal_fixed25_v1",
+            )
+            batch = self._batch_from_indices([int(index)], 1, key=key, training=True,
+                                             include_response=False, budget=self.budget)
+            scene = self.make_scene(batch.scene_inputs)
+            predictions, _ = self.predict_native(self.model, scene, batch.receivers, self.joint_mode, "joint")
+            values = self._native_role_losses(predictions.native_main, predictions.native_prepared, batch.targets)
+            flow_obj = 0.5 * values["flow_group"].mean()
+            thermal_obj = 0.5 * values["thermal_group"].mean()
+            base_obj = flow_obj + thermal_obj
+            flow_gradient_norms.append(_gradient_norm(flow_obj, parameters, retain_graph=True))
+            thermal_gradient_norms.append(_gradient_norm(thermal_obj, parameters, retain_graph=True))
+            field_gradient_norms.append(_gradient_norm(base_obj, parameters, retain_graph=True))
+            operator_values, _receipt = self._operator_loss(predictions, batch.targets)
+            if operator_values is not None:
+                operator_gradient_norms.append(_gradient_norm(operator_values.mean(), parameters))
+
+        response_gradient_norms = []
+        for update_index, family in enumerate(self.train_families):
+            key = SamplingKey(
+                0, 1, update_index, 0, "joint_response_calibration", self.joint_mode,
+                sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="thermal_fixed25_v1",
+            )
+            response_target = self._prepare_response_sample(family, training=True, key=key, budget=self.budget)
+            structure = {name: value.to(self.device) for name, value in response_target["structure"].items()}
+            prepared = self.model.prepare_native(
+                structure, response_target["fluid_xy"].to(self.device),
+                local_query_points=response_target["local"].to(self.device), ntheta=16,
+                chunk_size=self.model.receiver_tile,
+            )
+            output = self.model.apply_native(
+                prepared, response_target["heat"].to(self.device), increment=True,
+            )
+            targets = self._response_targets_from_sample(response_target, self.device)
+            response_loss = self._response_loss(output, targets)
+            response_gradient_norms.append(_gradient_norm(response_loss, parameters))
+
+        field_norm = float(np.mean(field_gradient_norms))
+        response_norm = float(np.mean(response_gradient_norms))
+        operator_norm = float(np.mean(operator_gradient_norms)) if operator_gradient_norms else 0.0
+        target_added_gradient_ratio = 0.5
+        response_coefficient = min(1.0, target_added_gradient_ratio * field_norm / max(response_norm, 1.0e-12))
+        operator_coefficient = min(1.0, target_added_gradient_ratio * field_norm / max(operator_norm, 1.0e-12))
+        receipt = {
+            "method": "fresh_joint_init_fixed_train_gradient_ratio_v1",
+            "calibration_mode": self.joint_mode,
+            "calibration_case_ids": [self._train_ids[int(index)] for index in selected_indices],
+            "calibration_module_counts": [1, 3, 10, 12],
+            "response_family_ids": [str(item["family_id"]) for item in self.train_families],
+            "flow_group_gradient_norms": flow_gradient_norms,
+            "thermal_group_gradient_norms": thermal_gradient_norms,
+            "balanced_field_gradient_norms": field_gradient_norms,
+            "response_gradient_norms": response_gradient_norms,
+            "operator_gradient_norms": operator_gradient_norms,
+            "target_added_gradient_ratio": target_added_gradient_ratio,
+            "response_coefficient": float(response_coefficient),
+            "operator_coefficient": float(operator_coefficient),
+            "q_proxy_coefficient": self.q_proxy_weight,
+            "validation_values_read": False,
+            "optimizer_steps": 0,
+            "stored_velocity_used_only_for_operator_supervision": True,
+        }
+        self.response_weight = float(response_coefficient)
+        self.operator_weight = float(operator_coefficient)
+        self.response_coefficient = self.response_weight
+        self.operator_coefficient = self.operator_weight
+        self.auxiliary_calibration = receipt
+        self._joint_loss_metadata = self._build_loss_metadata()
+        return copy.deepcopy(receipt)
+
+    def _calibrate_interaction_preserving_auxiliary_coefficients(self) -> Mapping[str, Any]:
         """Measure one fresh TRAIN-only response/operator gradient ratio.
 
         The root campaign calls this on its designated calibration arm/device,
         then passes the sealed coefficients unchanged to sibling modes.
         """
+        if self.joint_mode != "P":
+            raise ValueError("Thermal auxiliary calibration must run on the fresh direct P model.")
+        if self._validation_ids:
+            raise ValueError("Fresh-P calibration must use calibration_only provider construction with no DEV cases loaded.")
         if self.auxiliary_calibration is not None:
             raise RuntimeError("Joint Thermal auxiliary coefficients are already calibrated and sealed.")
+        if len(self._train_ids) != 150:
+            raise ValueError("Fresh-P auxiliary calibration is bound to the fixed25_v1 150-case TRAIN cohort.")
+        initialization_sha256 = _state_sha256(self.model)
+        direct_path_sha256 = _shared_direct_state_sha256(self.model)
         module_counts = [int(np.asarray(case["structure"]["module_present"]).sum()) for case in self.training_cases]
         selected_indices = [next((index for index, count in enumerate(module_counts) if count == desired), None)
                             for desired in (1, 3, 10, 12)]
@@ -924,12 +1179,36 @@ class JointThermalTask(ThermalRefinementTask):
         target_added_gradient_ratio = 0.5
         response_coefficient = min(1.0, target_added_gradient_ratio * field_norm / max(response_norm, 1.0e-12))
         operator_coefficient = min(1.0, target_added_gradient_ratio * field_norm / max(operator_norm, 1.0e-12))
+        family_hashes = {
+            str(item["family_id"]): _sha256_file(self.atlas_directory / f"train_{item['family_id']}_responses.npz")
+            for item in self.train_families
+        }
+        if tuple(family_hashes) != tuple(TRAIN_RESPONSE_IDS):
+            raise ValueError("Fresh-P calibration did not preserve the four declared TRAIN response families in order.")
         receipt = {
+            "schema_version": 1,
             "method": "fresh_joint_init_fixed_train_gradient_ratio_v1",
-            "calibration_mode": self.joint_mode,
+            "calibration_mode": "P",
+            "compatible_modes": list(INTERACTION_PRESERVING_THERMAL_MODES),
+            "initial_model_state_sha256": initialization_sha256,
+            "shared_direct_path_sha256": direct_path_sha256,
+            "initialization_seed": int(getattr(self.model, "seed", -1)),
+            "dataset_protocol": "fixed25_v1",
+            "manifest_sha256": str(self.manifest["manifest_sha256"]),
+            "training_membership_sha256": _case_ids_hash(self._train_ids),
+            "training_case_ids": list(self._train_ids),
+            "source_binding": copy.deepcopy(self.source_binding),
+            "normalization_stats_sha256": _tensor_digest(self.stats),
+            "primary_query_count": int(self.budget["fluid_queries"]),
+            "operator_rows_per_case": int(self.operator_rows_per_case),
+            "response_surface_stride": int(self.budget["surface_stride"]),
+            "response_material_queries_per_module": int(self.budget["material_queries_per_module"]),
             "calibration_case_ids": [self._train_ids[int(index)] for index in selected_indices],
             "calibration_module_counts": [1, 3, 10, 12],
             "response_family_ids": [str(item["family_id"]) for item in self.train_families],
+            "response_family_source_sha256": family_hashes,
+            "response_family_partition": "original TRAIN response addendum; all four fixed families",
+            "primary_partition": "fixed25_v1 TRAIN only",
             "flow_group_gradient_norms": flow_gradient_norms,
             "thermal_group_gradient_norms": thermal_gradient_norms,
             "balanced_field_gradient_norms": field_gradient_norms,
@@ -940,6 +1219,8 @@ class JointThermalTask(ThermalRefinementTask):
             "operator_coefficient": float(operator_coefficient),
             "q_proxy_coefficient": self.q_proxy_weight,
             "validation_values_read": False,
+            "validation_cases_materialized": 0,
+            "development_response_families_loaded": False,
             "optimizer_steps": 0,
             "stored_velocity_used_only_for_operator_supervision": True,
         }
@@ -949,7 +1230,64 @@ class JointThermalTask(ThermalRefinementTask):
         self.operator_coefficient = self.operator_weight
         self.auxiliary_calibration = receipt
         self._joint_loss_metadata = self._build_loss_metadata()
+        self._validate_auxiliary_calibration(receipt)
         return copy.deepcopy(receipt)
+
+    def _validate_auxiliary_calibration(self, receipt: Mapping[str, Any]) -> None:
+        """Reject calibration from J/H, another cohort, or another direct initialization."""
+        if self.joint_mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+            raise ValueError("Only P-family Thermal tasks accept a fresh-P auxiliary calibration receipt.")
+        module_counts = [int(np.asarray(case["structure"]["module_present"]).sum()) for case in self.training_cases]
+        expected_case_ids = [
+            self._train_ids[next(index for index, count in enumerate(module_counts) if count == desired)]
+            for desired in (1, 3, 10, 12)
+        ]
+        if (
+            receipt.get("schema_version") != 1
+            or receipt.get("method") != "fresh_joint_init_fixed_train_gradient_ratio_v1"
+            or receipt.get("calibration_mode") != "P"
+            or receipt.get("compatible_modes") != list(INTERACTION_PRESERVING_THERMAL_MODES)
+            or receipt.get("dataset_protocol") != "fixed25_v1"
+            or receipt.get("training_membership_sha256") != _case_ids_hash(self._train_ids)
+            or receipt.get("training_case_ids") != list(self._train_ids)
+            or receipt.get("manifest_sha256") != str(self.manifest["manifest_sha256"])
+            or receipt.get("source_binding") != self.source_binding
+            or receipt.get("normalization_stats_sha256") != _tensor_digest(self.stats)
+            or receipt.get("primary_query_count") != int(self.budget["fluid_queries"])
+            or receipt.get("operator_rows_per_case") != int(self.operator_rows_per_case)
+            or receipt.get("response_surface_stride") != int(self.budget["surface_stride"])
+            or receipt.get("response_material_queries_per_module") != int(self.budget["material_queries_per_module"])
+            or receipt.get("response_family_ids") != list(TRAIN_RESPONSE_IDS)
+            or receipt.get("response_family_partition") != "original TRAIN response addendum; all four fixed families"
+            or receipt.get("primary_partition") != "fixed25_v1 TRAIN only"
+            or receipt.get("validation_values_read") is not False
+            or receipt.get("validation_cases_materialized") != 0
+            or receipt.get("development_response_families_loaded") is not False
+            or receipt.get("optimizer_steps") != 0
+            or receipt.get("stored_velocity_used_only_for_operator_supervision") is not True
+            or receipt.get("target_added_gradient_ratio") != 0.5
+            or receipt.get("q_proxy_coefficient") != float(Q_PROXY_COEFFICIENT)
+            or receipt.get("initialization_seed") != int(getattr(self.model, "seed", -1))
+            or not isinstance(receipt.get("initial_model_state_sha256"), str)
+            or len(receipt["initial_model_state_sha256"]) != 64
+            or receipt.get("shared_direct_path_sha256") != _shared_direct_state_sha256(self.model)
+            or tuple(receipt.get("calibration_module_counts", ())) != (1, 3, 10, 12)
+            or receipt.get("calibration_case_ids") != expected_case_ids
+            or receipt.get("response_family_source_sha256") != {
+                str(item["family_id"]): _sha256_file(
+                    self.atlas_directory / f"train_{item['family_id']}_responses.npz"
+                ) for item in self.train_families
+            }
+        ):
+            raise ValueError("Thermal auxiliary calibration receipt is not the current fresh-P, fixed25 TRAIN artifact.")
+        for name in ("response_coefficient", "operator_coefficient"):
+            value = receipt.get(name)
+            if type(value) not in (int, float) or not math.isfinite(float(value)) or not 0 <= float(value) <= 1:
+                raise ValueError(f"Thermal calibration receipt {name} is invalid.")
+        if (float(receipt["response_coefficient"]) != self.response_weight
+                or float(receipt["operator_coefficient"]) != self.operator_weight):
+            raise ValueError("Thermal auxiliary coefficients differ from their sealed fresh-P receipt.")
+
 
     @staticmethod
     def _response_targets_from_sample(sample: Mapping[str, Any], device: torch.device):
@@ -992,6 +1330,9 @@ def build_thermal_joint_task(
     optimizer_schedule: ScheduleSpec | None = None,
     weight_decay: float | None = None,
     native_sampling_protocol: str | None = None,
+    collective_width: int = 64,
+    max_sources: int = 12,
+    calibration_only: bool = False,
 ) -> tuple[JointThermalRegionalAdapter, JointThermalTask]:
     """Construct a fresh joint candidate and its fixed25_v1 provider.
 
@@ -999,8 +1340,8 @@ def build_thermal_joint_task(
     normalizers on those cases, but only returns a manual-only recipe/provider;
     this factory never starts or advances training.
     """
-    if mode not in JOINT_THERMAL_MODES:
-        raise ValueError(f"Joint Thermal mode must be one of {JOINT_THERMAL_MODES}.")
+    if mode not in THERMAL_RECOVERY_MODES:
+        raise ValueError(f"Joint Thermal mode must be one of {THERMAL_RECOVERY_MODES}.")
     if isinstance(locality_prior_strength, (bool, np.bool_)):
         raise TypeError("Joint Thermal locality prior strength must be numeric, not boolean.")
     try:
@@ -1009,8 +1350,18 @@ def build_thermal_joint_task(
         raise ValueError("Joint Thermal locality prior strength must be finite and nonnegative.") from error
     if not math.isfinite(locality_prior_strength) or locality_prior_strength < 0:
         raise ValueError("Joint Thermal locality prior strength must be finite and nonnegative.")
-    if locality_prior_strength and mode != "J-H":
+    if mode in JOINT_THERMAL_MODES and locality_prior_strength and mode != "J-H":
         raise ValueError("Joint Thermal locality prior is only supported by J-H.")
+    if mode == "P" and locality_prior_strength != 0:
+        raise ValueError("Thermal P has no collective locality prior.")
+    if mode in ("P-G", "P-H") and locality_prior_strength != 1.0:
+        raise ValueError("The recovery Thermal P-G/P-H geometric locality prior is sealed to 1.0.")
+    if mode in INTERACTION_PRESERVING_THERMAL_MODES and formal_full:
+        raise ValueError("P-family full-TRAIN recipes remain unavailable until separately justified and authorized.")
+    if calibration_only and (mode != "P" or formal_full or auxiliary_calibration is not None):
+        raise ValueError("Calibration-only construction is reserved for a fresh P model with no supplied receipt.")
+    if mode in INTERACTION_PRESERVING_THERMAL_MODES and not calibration_only and auxiliary_calibration is None:
+        raise ValueError("Every P-family Thermal comparison requires the sealed fresh-P TRAIN calibration receipt.")
     if microbatch_size < 1 or effective_batch_size < 1 or microbatch_size > effective_batch_size:
         raise ValueError("Joint Thermal microbatch must be positive and no larger than its effective batch.")
     if primary_queries < 1 or receiver_tile < 1:
@@ -1019,9 +1370,11 @@ def build_thermal_joint_task(
         raise ValueError("The declared joint Thermal objective requires exactly128 operator rows per case.")
     if formal_full and total_epochs != 5000:
         raise ValueError("The manual fullTRAIN joint recipe is bound to a5000-epoch horizon.")
-    if any(option is not None for option in (validation_scope, optimizer_schedule, weight_decay,
-                                            native_sampling_protocol)) and not formal_full:
-        raise ValueError("Formal comparison controls require the separate fullTRAIN identity.")
+    if any(option is not None for option in (validation_scope, native_sampling_protocol)) and not formal_full:
+        raise ValueError("Formal validation and sampling controls require the separate fullTRAIN identity.")
+    if (optimizer_schedule is not None or weight_decay is not None) and not formal_full \
+            and mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+        raise ValueError("Explicit development optimizer controls are reserved for the P-family recovery recipes.")
     if validation_scope not in (None, "canonical89"):
         raise ValueError("Joint Thermal formal validation scope must be canonical89.")
     if optimizer_schedule is not None and (not isinstance(optimizer_schedule, ScheduleSpec)
@@ -1063,7 +1416,7 @@ def build_thermal_joint_task(
         normalizer=normalizer,
         include_grid=True,
     )
-    validation_cases = _read_selected_cases(
+    validation_cases = [] if calibration_only else _read_selected_cases(
         resolved_data_path,
         validation_ids,
         split="test",
@@ -1077,17 +1430,25 @@ def build_thermal_joint_task(
     from honf_runtime.compat import set_seed
 
     set_seed(int(seed))
-    model = JointThermalRegionalAdapter(
-        mode=mode,
-        normalization_stats=normalizer.stats,
-        hidden=hidden,
-        message=message,
-        regional_anchors=regional_anchors,
-        depth=depth,
-        receiver_tile=receiver_tile,
-        locality_prior_strength=locality_prior_strength,
-        seed=seed,
-    ).to(device)
+    model_factory = (
+        InteractionPreservingThermalAdapter
+        if mode in INTERACTION_PRESERVING_THERMAL_MODES
+        else JointThermalRegionalAdapter
+    )
+    model_options = {
+        "mode": mode,
+        "normalization_stats": normalizer.stats,
+        "hidden": hidden,
+        "message": message,
+        "regional_anchors": regional_anchors,
+        "depth": depth,
+        "receiver_tile": receiver_tile,
+        "locality_prior_strength": locality_prior_strength,
+        "seed": seed,
+    }
+    if mode in INTERACTION_PRESERVING_THERMAL_MODES:
+        model_options.update({"collective_width": collective_width, "max_sources": max_sources})
+    model = model_factory(**model_options).to(device)
     budget = {
         "fluid_queries": int(primary_queries),
         "material_queries_per_module": 32,

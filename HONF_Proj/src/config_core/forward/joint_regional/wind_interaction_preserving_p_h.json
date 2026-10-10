@@ -1,0 +1,182 @@
+{
+  "checkpoint_epochs": [
+    100,
+    200,
+    300,
+    400,
+    500,
+    600,
+    700,
+    800,
+    900,
+    1000,
+    1100,
+    1200,
+    1300,
+    1400,
+    1500,
+    1600,
+    1700,
+    1800,
+    1900,
+    2000,
+    2100,
+    2200,
+    2300,
+    2400,
+    2500
+  ],
+  "collective_width": 64,
+  "dataset_protocol": "wind_shared_fixed24_v1",
+  "depth": 2,
+  "effective_cases": 24,
+  "engine_schedule": {
+    "curve_every": 100,
+    "latest_every": 100,
+    "monitor_every": 100,
+    "open_through_epoch": 20,
+    "sampling_version": "case_epoch_v1",
+    "soft_through_epoch": 20,
+    "training_mode": "joint",
+    "warmup_epochs": 20
+  },
+  "environment_token_shape": [
+    2,
+    2,
+    2
+  ],
+  "formal_full": false,
+  "gradient_clip_norm": 1.0,
+  "hidden": 128,
+  "initialization": "fresh_all_trainable",
+  "launch_policy": "bounded_development",
+  "locality_prior_strength": 1.0,
+  "max_sources": 30,
+  "message": 128,
+  "microbatch_cases": 16,
+  "mode": "P-H",
+  "model_contract": {
+    "collective": {
+      "enabled": true,
+      "initialization": "zero node/environment/receiver output projections recover P exactly at initialization",
+      "membership": "source and geometry-token measure-aware softmax; physical measure enters donor mass exactly once",
+      "mode_incidence_and_access": "P-G uses fixed geometric incidence/access; P-H adds learned score residuals over the same lambda=1 geometric prior, with zero-initialized residual scores",
+      "physical_source_edges": "one edge centered on each active source; Thermal scale is physical source radius; Wind scale is rotor diameter in D",
+      "placement": "one typed block between the two pair-message rounds",
+      "regional_anchor_scale": "per-axis domain lengths / K^(1/spatial_dimension)",
+      "regional_anchors": "K deterministic Halton anchors from radical-inverse bases (2,3) in 2D or (2,3,5) in 3D, indices 1..K mapped over domain_origin + unit * lengths",
+      "return_rule": "normalized transpose of typed donor incidence for context sharing"
+    },
+    "environment": {
+      "count": 8,
+      "feature_width": 7,
+      "features": [
+        "(x-support_lower_x)/50D",
+        "(y-support_lower_y)/38D",
+        "(z-support_lower_z)/6.25D",
+        "(support_upper_x-x)/50D",
+        "(support_upper_y-y)/38D",
+        "(support_upper_z-z)/6.25D",
+        "absolute_z/6.25D"
+      ],
+      "measure": "native domain-support quadrature volume in rotor_diameters^3 per geometry-only token",
+      "shape": [
+        2,
+        2,
+        2
+      ],
+      "target_free": true
+    },
+    "input_frame": "Wind native rotor-diameter coordinates; rotor locations, support and receivers remain in D",
+    "readouts": {
+      "affine_outputs": 0,
+      "field_head": {
+        "law": "nonlinear source-conditioned standardized velocity residual",
+        "order": [
+          "Ux",
+          "Uy",
+          "Uz"
+        ],
+        "outputs": 3
+      },
+      "physical_output": "TRAIN height profile m/s + residual * u_ref_mps * safe_std"
+    },
+    "receivers": {
+      "feature_quantities": [
+        "receiver_minus_domain_origin/scale_D",
+        "domain_upper_minus_receiver/scale_D",
+        "absolute_height/6.25_D"
+      ],
+      "feature_scale_D": [
+        50.0,
+        38.0,
+        6.25
+      ],
+      "feature_width": 7,
+      "frame": "rotor_diameters",
+      "tile": 512
+    },
+    "source": {
+      "context_inventory": [
+        "wind_direction_one_hot_270",
+        "wind_direction_one_hot_285",
+        "wind_direction_one_hot_300",
+        "active_turbines/30",
+        "U_ref/U_REF",
+        "support_lower_x_D/50",
+        "support_lower_y_D/38",
+        "support_lower_z_D/6.25",
+        "support_extent_x_D/50",
+        "support_extent_y_D/38",
+        "support_extent_z_D/6.25"
+      ],
+      "context_width": 11,
+      "feature_inventory": [
+        "rotor_radius_D",
+        "hub_height_D"
+      ],
+      "feature_width": 2,
+      "identity": "original turbine slot IDs; explicit and unique among active sources",
+      "max_sources": 30,
+      "measure": "source presence; source length is rotor diameter in D"
+    }
+  },
+  "objective_contract": {
+    "component_scales": "sealed corrected TRAIN-profile residual RMS by role and velocity component; same E64 calibration cache as J controls",
+    "objective": "equal-weight five-role component-balanced velocity residual",
+    "primary_cohort": "wind_shared_fixed24_v1: matched selected TRAIN/validation rows and fixed query stream",
+    "primary_queries_per_case": 4096,
+    "role_query_counts": {
+      "background": 816,
+      "downstream_envelope": 820,
+      "hub_slab": 820,
+      "near_turbine": 820,
+      "volume": 820
+    },
+    "role_vector_rmse": "sqrt(sum of three component MSE); no divide by three",
+    "role_weight": 0.2,
+    "windtest": "locked; no WindTEST targets read and zero solver attempts"
+  },
+  "optimizer_betas": [
+    0.9,
+    0.999
+  ],
+  "optimizer_eps": 1e-08,
+  "optimizer_name": "AdamW",
+  "optimizer_schedule": {
+    "final_lr": 3e-06,
+    "hold_through_epoch": 1000,
+    "peak_lr": 0.0003,
+    "warmup_epochs": 20,
+    "warmup_start_lr": 3e-05
+  },
+  "primary_queries": 4096,
+  "receiver_tile": 512,
+  "regional_anchors": 32,
+  "run_id": "W2403",
+  "schema_version": 1,
+  "seed": 42,
+  "task": "wind",
+  "total_epochs": 2500,
+  "weight_decay": 1e-05
+}

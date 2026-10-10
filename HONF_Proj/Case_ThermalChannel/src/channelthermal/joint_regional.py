@@ -18,6 +18,7 @@ import torch
 from torch import nn
 
 from honf_forward_core.interface_fields.joint_regional import JointRegionalFieldCore
+from honf_forward_core.interface_fields.interaction_preserving_joint import InteractionPreservingJointCore
 
 from .source_response import (
     CONTEXT_KEYS,
@@ -35,6 +36,7 @@ JOINT_THERMAL_ID = "thermal_joint_regional_v1"
 JOINT_THERMAL_CHECKPOINT_SCHEMA = "thermal_joint_regional_checkpoint_v1"
 JOINT_THERMAL_CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
 JOINT_THERMAL_MODES = ("J-direct", "J-geometry", "J-H")
+INTERACTION_PRESERVING_THERMAL_MODES = ("P", "P-G", "P-H")
 
 
 def _validated_normalization_stats(stats: Mapping[str, Any]) -> dict[str, np.ndarray]:
@@ -631,6 +633,160 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         return payload
 
 
+class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
+    """Opt-in Thermal wrapper around the source-conditioned P-family core.
+
+    The native Thermal role extraction and affine physical-heat application
+    remain shared with ``JointThermalRegionalAdapter``. The only differences
+    are the freshly constructed core and its explicit mode/configuration.
+    """
+
+    FAMILY = "thermal_interaction_preserving_joint_v1"
+
+    def __init__(
+        self,
+        *,
+        mode: str = "P",
+        normalization_stats: Mapping[str, Any],
+        hidden: int = 128,
+        message: int = 128,
+        regional_anchors: int = 0,
+        depth: int = 2,
+        receiver_tile: int = 512,
+        nx: int = 128,
+        ny: int = 64,
+        environment_nx: int = 24,
+        environment_ny: int = 8,
+        forcing_scale: float = 1.0,
+        collective_width: int = 64,
+        locality_prior_strength: float | None = None,
+        seed: int = 0,
+        max_sources: int = 12,
+    ) -> None:
+        if mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+            raise ValueError(f"Interaction-preserving Thermal mode must be one of {INTERACTION_PRESERVING_THERMAL_MODES}.")
+        if depth != 2:
+            raise ValueError("The interaction-preserving Thermal core has exactly two pair rounds.")
+        if mode == "P":
+            if regional_anchors != 0 or locality_prior_strength not in (None, 0, 0.0):
+                raise ValueError("Thermal P has no collective anchors or locality prior.")
+        else:
+            if regional_anchors < 1 or locality_prior_strength is None:
+                raise ValueError("Thermal P-G/P-H require explicit collective anchors and locality strength.")
+        if receiver_tile < 1 or nx < 2 or ny < 2 or environment_nx < 1 or environment_ny < 1:
+            raise ValueError("Interaction-preserving Thermal grids and receiver tile must be positive.")
+        if not np.isfinite(forcing_scale) or forcing_scale <= 0:
+            raise ValueError("Interaction-preserving Thermal forcing scale must be positive and finite.")
+        if max_sources < 1:
+            raise ValueError("Thermal source capacity must be positive.")
+
+        # Initialize only the base adapter state; do not construct or serialize
+        # an intermediate J core. Pair and collective tensors are initialized
+        # under the P core's common seed contract.
+        nn.Module.__init__(self)
+        self.mode = str(mode)
+        self.seed = int(seed)
+        self.normalization_stats = _validated_normalization_stats(normalization_stats)
+        self.receiver_tile = int(receiver_tile)
+        self.nx, self.ny = int(nx), int(ny)
+        self.environment_nx, self.environment_ny = int(environment_nx), int(environment_ny)
+        self.forcing_scale = float(forcing_scale)
+        self.locality_prior_strength = 0.0 if locality_prior_strength is None else float(locality_prior_strength)
+        if not np.isfinite(self.locality_prior_strength) or self.locality_prior_strength < 0:
+            raise ValueError("Interaction-preserving Thermal locality strength must be finite and nonnegative.")
+        if mode == "P" and self.locality_prior_strength != 0:
+            raise ValueError("Thermal P has no locality prior.")
+        if mode == "P-G" and self.locality_prior_strength != 1.0:
+            raise ValueError("The recovery P-G geometric locality prior is sealed to 1.0.")
+        if mode == "P-H" and self.locality_prior_strength != 1.0:
+            raise ValueError("The recovery P-H locality prior is sealed to 1.0.")
+        self.h_effective_eps, self.h_effective_max = 1.0e-3, 1.0e4
+        self.environment_flow_context = False
+        self.environment_flow_projection = None
+        self.core = InteractionPreservingJointCore(
+            SOURCE_WIDTH,
+            CONTEXT_WIDTH,
+            ENVIRONMENT_WIDTH,
+            spatial_dim=2,
+            hidden=int(hidden),
+            message=int(message),
+            mode=self.mode,
+            collective_width=int(collective_width),
+            regional_anchors=int(regional_anchors),
+            field_outputs=4,
+            affine_outputs=1,
+            query_width=0,
+            max_sources=int(max_sources),
+            forcing_scale=self.forcing_scale,
+            zero_offset=True,
+            initialization_seed=int(seed),
+            locality_prior_strength=(self.locality_prior_strength if mode != "P" else None),
+        )
+        self.core_config = copy.deepcopy(dict(self.core.config))
+        self._joint_model_config = {
+            "family": self.FAMILY,
+            "mode": self.mode,
+            "source_width": SOURCE_WIDTH,
+            "context_width": CONTEXT_WIDTH,
+            "environment_width": ENVIRONMENT_WIDTH,
+            "spatial_dim": 2,
+            "hidden": int(hidden),
+            "message": int(message),
+            "collective_width": int(collective_width),
+            "regional_anchors": int(regional_anchors),
+            "depth": int(depth),
+            "max_sources": int(max_sources),
+            "field_outputs": 4,
+            "affine_outputs": 1,
+            "query_width": 0,
+            "receiver_tile": self.receiver_tile,
+            "nx": self.nx,
+            "ny": self.ny,
+            "environment_nx": self.environment_nx,
+            "environment_ny": self.environment_ny,
+            "forcing_scale": self.forcing_scale,
+            "zero_offset": True,
+            "seed": self.seed,
+        }
+        if mode != "P":
+            self._joint_model_config["locality_prior_strength"] = self.locality_prior_strength
+
+    def prepare_native(self, structure, fluid_xy, *, chunk_size=None, retained_access_mass=None,
+                       receiver_edge_executor="dense", **kwargs):
+        """Use the inherited physical receiver builder without J-only read knobs."""
+        if retained_access_mass is not None or receiver_edge_executor != "dense":
+            raise ValueError("The interaction-preserving Thermal core uses its declared dense direct read.")
+        tile = self.receiver_tile if chunk_size is None else int(chunk_size)
+        if tile < 1:
+            raise ValueError("Thermal receiver chunk size must be positive.")
+        if "receiver_read_options" in kwargs:
+            raise ValueError("P-family receiver preparation does not accept legacy retained-access options.")
+        prepared = ThermalSourceResponse.prepare_native(
+            self, structure, fluid_xy, chunk_size=tile, **kwargs
+        )
+        _, catalogue = self._source_identity(
+            structure, prepared.context.centers, prepared.context.present
+        )
+        self._bind_source_id_catalogue(prepared, catalogue)
+        prepared.normalization_stats_snapshot = {
+            name: value.copy() for name, value in self.normalization_stats.items()
+        }
+        prepared.flow_receivers = fluid_xy
+        prepared.flow_receiver_snapshot = fluid_xy.detach().clone()
+        prepared.joint_read_options = {}
+        prepared.joint_read_options_snapshot = {}
+        return prepared
+
+    def model_config(self) -> dict[str, Any]:
+        return copy.deepcopy(self._joint_model_config)
+
+    def checkpoint_payload(self, *, provider_identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        payload = super().checkpoint_payload(provider_identity=provider_identity)
+        payload["model_family"] = self.FAMILY
+        payload["checkpoint_schema"] = "thermal_interaction_preserving_joint_checkpoint_v1"
+        return payload
+
+
 def load_joint_thermal_checkpoint(source: Mapping[str, Any] | str | Path, device="cpu") -> JointThermalRegionalAdapter:
     """Load one standalone candidate without consulting any legacy model path."""
     if isinstance(source, Mapping):
@@ -656,4 +812,181 @@ def load_joint_thermal_checkpoint(source: Mapping[str, Any] | str | Path, device
     model.load_state_dict(state, strict=True)
     if any(not name.startswith("core.") for name, _ in model.named_parameters()):
         raise RuntimeError("Joint Thermal adapter registered parameters outside the new joint core.")
+    return model.to(device)
+
+
+def load_interaction_preserving_thermal_checkpoint(
+    source: Mapping[str, Any] | str | Path, device="cpu"
+) -> InteractionPreservingThermalAdapter:
+    """Load a P-family Thermal model or an engine checkpoint without legacy parents.
+
+    The maintained trainer saves ``model_state_dict`` inside its generic engine
+    checkpoint, while standalone exports use the explicit adapter schema. Both
+    paths are validated against the same native dimensions, coordinate frame,
+    output laws, initialization seed, and forcing contract before strict state
+    loading.
+    """
+    if isinstance(source, Mapping):
+        payload = dict(source)
+    else:
+        payload = torch.load(Path(source), map_location="cpu", weights_only=False)
+    if not isinstance(payload, Mapping):
+        raise TypeError("Interaction-preserving Thermal checkpoint must be a mapping.")
+    if any(key in payload for key in (
+        "parent_checkpoint", "flow_checkpoint", "thermal_parent", "flow_parent", "parent_model"
+    )):
+        raise ValueError("Interaction-preserving Thermal checkpoints cannot bind an external learned parent.")
+
+    engine_identity = None
+    if payload.get("checkpoint_schema") == "thermal_interaction_preserving_joint_checkpoint_v1":
+        if payload.get("model_family") != InteractionPreservingThermalAdapter.FAMILY:
+            raise ValueError("Thermal P-family standalone checkpoint family differs from its schema.")
+        if payload.get("channel_order") != list(JOINT_THERMAL_CHANNEL_ORDER):
+            raise ValueError("Thermal P-family channel order must be native u/v/p/omega/temperature.")
+        config = payload.get("model_config")
+        adapter = payload.get("adapter_config")
+        stats = payload.get("global_normalization_stats")
+        state = payload.get("model_state_dict")
+    elif payload.get("checkpoint_schema_version") == 1:
+        if payload.get("workflow") != "joint_regional_fields_v1":
+            raise ValueError("Engine checkpoint workflow is not the maintained joint regional trainer.")
+        engine_identity = payload.get("experiment_identity")
+        if not isinstance(engine_identity, Mapping):
+            raise TypeError("Engine checkpoint has no sealed experiment identity.")
+        provider_identity = engine_identity.get("provider_identity")
+        recipe = engine_identity.get("recipe")
+        if not isinstance(provider_identity, Mapping) or not isinstance(recipe, Mapping):
+            raise TypeError("Engine checkpoint must bind both provider identity and the resolved recipe.")
+        if (recipe.get("task") != "thermal" or recipe.get("mode") not in INTERACTION_PRESERVING_THERMAL_MODES
+                or engine_identity.get("external_learned_field_files") != []):
+            raise ValueError("Engine checkpoint is not a fresh, self-contained Thermal P-family run.")
+        if payload.get("arm") != recipe.get("mode"):
+            raise ValueError("Engine checkpoint arm differs from its sealed P-family recipe.")
+        if provider_identity.get("task") != "ThermalChannel":
+            raise ValueError("Engine checkpoint provider is not the maintained Thermal task.")
+        if provider_identity.get("model_family") != InteractionPreservingThermalAdapter.FAMILY:
+            raise ValueError("Engine checkpoint provider model family is not the P-family Thermal adapter.")
+        contract = recipe.get("model_contract")
+        if not isinstance(contract, Mapping):
+            raise TypeError("Engine checkpoint recipe has no explicit Thermal frame/architecture contract.")
+        source_contract = contract.get("source")
+        environment_contract = contract.get("environment")
+        receiver_contract = contract.get("receivers")
+        collective_contract = contract.get("collective")
+        if not all(isinstance(value, Mapping) for value in (
+            source_contract, environment_contract, receiver_contract, collective_contract
+        )):
+            raise TypeError("Engine checkpoint Thermal source, environment, receiver and collective contracts are incomplete.")
+        graph_mode = recipe.get("mode") != "P"
+        expected_collective = (
+            {"enabled": False, "placement": "none"} if not graph_mode else {
+                "enabled": True,
+                "placement": "one typed block between the two pair-message rounds",
+                "physical_source_edges": "one edge centered on each active source; Thermal scale is physical source radius; Wind scale is rotor diameter in D",
+                "regional_anchors": "K deterministic Halton anchors from radical-inverse bases (2,3) in 2D or (2,3,5) in 3D, indices 1..K mapped over domain_origin + unit * lengths",
+                "regional_anchor_scale": "per-axis domain lengths / K^(1/spatial_dimension)",
+                "membership": "source and geometry-token measure-aware softmax; physical measure enters donor mass exactly once",
+                "mode_incidence_and_access": "P-G uses fixed geometric incidence/access; P-H adds learned score residuals over the same lambda=1 geometric prior, with zero-initialized residual scores",
+                "return_rule": "normalized transpose of typed donor incidence for context sharing",
+                "initialization": "zero node/environment/receiver output projections recover P exactly at initialization",
+            }
+        )
+        if (contract.get("input_frame") != "packed Thermal native x-y coordinates; source centres/radii normalized by physical domain lengths"
+                or contract.get("native_shared_grid_shape") != [128, 64]
+                or source_contract.get("feature_width") != 8
+                or source_contract.get("context_width") != 14
+                or source_contract.get("max_sources") != 12
+                or environment_contract.get("feature_width") != 8
+                or environment_contract.get("shape") != [24, 8]
+                or environment_contract.get("count") != 192
+                or receiver_contract.get("frame") != "packed native x-y physical coordinates"
+                or receiver_contract.get("feature_width") != 0
+                or receiver_contract.get("tile") != 512
+                or dict(collective_contract) != expected_collective):
+            raise ValueError("Engine checkpoint Thermal frame, grid, or collective placement is not canonical.")
+        readouts = contract.get("readouts", {})
+        if (readouts.get("flow_head") != {
+                "law": "nonlinear source-conditioned field read", "outputs": 4,
+                "order": ["u", "v", "p", "omega"]}
+                or readouts.get("temperature_head") != {
+                    "law": "source-resolved affine heat response", "outputs": 1, "zero_offset": True}
+                or readouts.get("source_read_networks") != {
+                    "flow": "field_source_read", "temperature": "affine_source_read", "distinct": True}
+                or readouts.get("forcing_scale") != 1.0):
+            raise ValueError("Engine checkpoint Thermal output/read-network/forcing contract is not canonical.")
+        config = provider_identity.get("model_config")
+        adapter = provider_identity.get("adapter_config")
+        stats = provider_identity.get("normalization_stats")
+        state = payload.get("model_state_dict")
+    else:
+        raise ValueError("Checkpoint is neither a standalone Thermal P-family export nor an engine checkpoint.")
+
+    if not all(isinstance(value, Mapping) for value in (config, adapter, stats, state)):
+        raise TypeError("Thermal P-family config, adapter, normalization and state must be mappings.")
+    config = dict(config)
+    adapter = dict(adapter)
+    if config.get("family") != InteractionPreservingThermalAdapter.FAMILY:
+        raise ValueError("Thermal P-family checkpoint config has a different model family.")
+    mode = config.get("mode")
+    anchors = 0 if mode == "P" else 16
+    expected_config = {
+        "family": InteractionPreservingThermalAdapter.FAMILY,
+        "mode": mode,
+        "source_width": 8,
+        "context_width": 14,
+        "environment_width": 8,
+        "spatial_dim": 2,
+        "hidden": 128,
+        "message": 128,
+        "collective_width": 64,
+        "regional_anchors": anchors,
+        "depth": 2,
+        "max_sources": 12,
+        "field_outputs": 4,
+        "affine_outputs": 1,
+        "query_width": 0,
+        "receiver_tile": 512,
+        "nx": 128,
+        "ny": 64,
+        "environment_nx": 24,
+        "environment_ny": 8,
+        "forcing_scale": 1.0,
+        "zero_offset": True,
+        "seed": 0,
+    }
+    if mode != "P":
+        expected_config["locality_prior_strength"] = 1.0
+    if config != expected_config:
+        raise ValueError("Thermal P-family model config differs from the sealed 8/14/8, H128, E192 native contract.")
+    expected_adapter = {
+        "nx": 128,
+        "ny": 64,
+        "environment_nx": 24,
+        "environment_ny": 8,
+        "forcing_scale": 1.0,
+        "h_effective_eps": 1.0e-3,
+        "h_effective_max": 1.0e4,
+        "joint_output_laws": {"flow": "nonlinear", "temperature_response": "affine"},
+    }
+    if adapter != expected_adapter:
+        raise ValueError("Thermal P-family adapter frame/grid/output/forcing contract differs from the native contract.")
+    if engine_identity is not None:
+        recipe = engine_identity["recipe"]
+        if recipe.get("seed") != expected_config["seed"]:
+            raise ValueError("Thermal engine checkpoint seed differs from the sealed fresh initialization seed.")
+        if recipe.get("regional_anchors") != anchors:
+            raise ValueError("Thermal engine checkpoint anchor count differs from its P-family mode.")
+    constructor_config = {
+        name: value for name, value in config.items()
+        if name not in {"family", "source_width", "context_width", "environment_width", "spatial_dim",
+                        "field_outputs", "affine_outputs", "query_width", "zero_offset"}
+    }
+    model = InteractionPreservingThermalAdapter(normalization_stats=stats, **constructor_config)
+    if model.model_config() != config:
+        raise ValueError("Thermal P-family model config does not round-trip canonically.")
+    if any(not isinstance(name, str) or not name.startswith("core.") for name in state):
+        raise ValueError("Thermal P-family checkpoint tensors must belong to its one active core.")
+    model.load_state_dict(state, strict=True)
+    if any(not name.startswith("core.") for name, _ in model.named_parameters()):
+        raise RuntimeError("Thermal P-family adapter registered parameters outside the new joint core.")
     return model.to(device)

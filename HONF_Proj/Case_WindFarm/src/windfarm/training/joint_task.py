@@ -35,6 +35,7 @@ from torch import nn
 
 from ..data import WindFarmNativeView
 from ..joint_regional import WindFarmJointRegionalModel
+from ..interaction_preserving import INTERACTION_PRESERVING_WIND_MODES, InteractionPreservingWindModel
 from ..normalization import (
     VelocityNormalizer,
     VerticalProfileBaseline,
@@ -606,17 +607,22 @@ def _role_ids(counts: Mapping[str, int]) -> np.ndarray:
     return np.concatenate([np.full(int(counts[name]), _ROLE_INDEX[name], dtype=np.int8) for name in ROLE_NAMES])
 
 
-def _joint_scene_batch(inputs: Sequence[WindJointSceneInputs], device: torch.device) -> InteractionScene:
+def _joint_scene_batch(
+    inputs: Sequence[WindJointSceneInputs], device: torch.device, *, environment_count: int = JOINT_WIND_ENVIRONMENT_COUNT
+) -> InteractionScene:
     if not inputs:
         raise ValueError("Wind joint scene batches cannot be empty.")
     batch = len(inputs)
     source_count = max(int(item.module_centers.shape[0]) for item in inputs)
     if source_count > 30:
         raise ValueError("Wind joint source inventory exceeds the 30 physical turbine slots.")
-    if any(int(item.env_coords.shape[0]) != JOINT_WIND_ENVIRONMENT_COUNT for item in inputs):
-        raise ValueError("Wind joint scenes require exactly 64 geometry-only environment records.")
-    if any(item.env_features.shape != (JOINT_WIND_ENVIRONMENT_COUNT, 7) for item in inputs):
-        raise ValueError("Wind geometry-only environment features must have shape [64,7].")
+    environment_count = int(environment_count)
+    if environment_count < 1:
+        raise ValueError("Wind scene environment count must be positive.")
+    if any(int(item.env_coords.shape[0]) != environment_count for item in inputs):
+        raise ValueError(f"Wind joint scenes require exactly {environment_count} geometry-only environment records.")
+    if any(item.env_features.shape != (environment_count, 7) for item in inputs):
+        raise ValueError(f"Wind geometry-only environment features must have shape [{environment_count},7].")
 
     sources = torch.zeros((batch, source_count, 2), device=device, dtype=torch.float32)
     centers = torch.zeros((batch, source_count, 3), device=device, dtype=torch.float32)
@@ -626,9 +632,9 @@ def _joint_scene_batch(inputs: Sequence[WindJointSceneInputs], device: torch.dev
     source_ids = torch.full((batch, source_count), -1, device=device, dtype=torch.long)
     contexts = torch.zeros((batch, 11), device=device, dtype=torch.float32)
     lengths = torch.zeros((batch, 3), device=device, dtype=torch.float32)
-    environment_tokens = torch.zeros((batch, JOINT_WIND_ENVIRONMENT_COUNT, 7), device=device, dtype=torch.float32)
-    environment_coords = torch.zeros((batch, JOINT_WIND_ENVIRONMENT_COUNT, 3), device=device, dtype=torch.float32)
-    environment_measures = torch.zeros((batch, JOINT_WIND_ENVIRONMENT_COUNT), device=device, dtype=torch.float32)
+    environment_tokens = torch.zeros((batch, environment_count, 7), device=device, dtype=torch.float32)
+    environment_coords = torch.zeros((batch, environment_count, 3), device=device, dtype=torch.float32)
+    environment_measures = torch.zeros((batch, environment_count), device=device, dtype=torch.float32)
 
     for index, item in enumerate(inputs):
         count = int(item.module_centers.shape[0])
@@ -640,10 +646,10 @@ def _joint_scene_batch(inputs: Sequence[WindJointSceneInputs], device: torch.dev
             raise ValueError("Wind module IDs must be unique native physical source identities.")
         if item.global_context.shape != (11,) or item.support_extent_D.shape != (3,):
             raise ValueError("Wind joint context/support dimensions differ from the native adapter contract.")
-        if item.env_coords.shape != (JOINT_WIND_ENVIRONMENT_COUNT, 3):
-            raise ValueError("Wind environment coordinates must have shape [64,3].")
-        if item.env_weights.shape != (JOINT_WIND_ENVIRONMENT_COUNT,) or np.any(item.env_weights < 0.0):
-            raise ValueError("Wind environment D^3 quadrature measures must be nonnegative and align with E64.")
+        if item.env_coords.shape != (environment_count, 3):
+            raise ValueError(f"Wind environment coordinates must have shape [{environment_count},3].")
+        if item.env_weights.shape != (environment_count,) or np.any(item.env_weights < 0.0):
+            raise ValueError("Wind environment D^3 quadrature measures must be nonnegative and align with the declared E.")
         centers[index, :count] = torch.tensor(item.module_centers, device=device)
         sources[index, :count] = torch.tensor(item.module_features, device=device)
         present[index, :count] = torch.tensor(item.module_present, device=device)
@@ -731,16 +737,25 @@ def _validate_formal_controls(
     weight_decay: float | None,
     validation_scope: str | None,
     native_sampling_protocol: str | None,
+    allow_development_optimizer_controls: bool = False,
 ) -> None:
-    """Keep optional comparison controls confined to the separate full formal fit."""
+    """Keep legacy formal controls sealed while allowing P-family dev schedules."""
 
-    controls = (optimizer_schedule, weight_decay, validation_scope, native_sampling_protocol)
-    if any(value is not None for value in controls) and (not formal_full or int(total_epochs) != 5000):
-        raise ValueError("Wind formal comparison controls are available only for formal_full 5000-epoch fits.")
+    if allow_development_optimizer_controls:
+        if not formal_full and (validation_scope is not None or native_sampling_protocol is not None):
+            raise ValueError("Wind formal data controls require formal_full.")
+    else:
+        controls = (optimizer_schedule, weight_decay, validation_scope, native_sampling_protocol)
+        if any(value is not None for value in controls) and (not formal_full or int(total_epochs) != 5000):
+            raise ValueError("Wind formal comparison controls are available only for formal_full 5000-epoch fits.")
     if optimizer_schedule is not None and not isinstance(optimizer_schedule, ScheduleSpec):
         raise TypeError("Wind optimizer_schedule must be a ScheduleSpec.")
-    if optimizer_schedule is not None and optimizer_schedule.total_epochs != 5000:
-        raise ValueError("Wind formal optimizer_schedule must end at epoch 5000.")
+    if optimizer_schedule is not None:
+        expected_epochs = int(total_epochs) if allow_development_optimizer_controls else 5000
+        if optimizer_schedule.total_epochs != expected_epochs:
+            if allow_development_optimizer_controls:
+                raise ValueError("Wind optimizer_schedule must match the declared training horizon.")
+            raise ValueError("Wind formal optimizer_schedule must end at epoch 5000.")
     if (
         weight_decay is not None
         and (
@@ -749,7 +764,7 @@ def _validate_formal_controls(
             or float(weight_decay) < 0.0
         )
     ):
-        raise ValueError("Wind formal weight_decay must be finite and nonnegative.")
+        raise ValueError("Wind weight_decay must be finite and nonnegative.")
     if validation_scope not in (None, "fullVALID90"):
         raise ValueError("Wind validation_scope must be omitted or the explicit fullVALID90 scope.")
     if native_sampling_protocol not in (None, JOINT_WIND_BASELINE_FORMAL_SAMPLING_PROTOCOL):
@@ -763,6 +778,9 @@ def _validate_formal_controls(
 
 class WindJointRegionalTask:
     """Fresh joint Wind provider with component-balanced native supervision."""
+
+    environment_token_shape = JOINT_WIND_ENVIRONMENT_SHAPE
+    environment_count = JOINT_WIND_ENVIRONMENT_COUNT
 
     def __init__(
         self,
@@ -790,9 +808,19 @@ class WindJointRegionalTask:
         weight_decay: float | None = None,
         validation_scope: str | None = None,
         native_sampling_protocol: str | None = None,
+        environment_token_shape: Sequence[int] = JOINT_WIND_ENVIRONMENT_SHAPE,
     ) -> None:
         self.view = view
         self.model = model
+        self.environment_token_shape = tuple(int(value) for value in environment_token_shape)
+        if len(self.environment_token_shape) != 3 or any(value < 1 for value in self.environment_token_shape):
+            raise ValueError("Wind geometry token shape must contain three positive dimensions.")
+        self.environment_count = int(np.prod(self.environment_token_shape))
+        view_token_shape = getattr(view, "token_shape", None)
+        if view_token_shape is not None and tuple(view_token_shape) != self.environment_token_shape:
+            raise ValueError("Wind native view tokenization differs from the provider identity.")
+        if model.mode in INTERACTION_PRESERVING_WIND_MODES and view_token_shape is None:
+            raise ValueError("Wind P-family providers require the native view's explicit token_shape.")
         self.train_rows = np.asarray(train_rows, dtype=np.int64)
         self.validation_rows = np.asarray(validation_rows, dtype=np.int64)
         self.manifest = dict(manifest)
@@ -823,6 +851,7 @@ class WindJointRegionalTask:
             weight_decay=weight_decay,
             validation_scope=validation_scope,
             native_sampling_protocol=native_sampling_protocol,
+            allow_development_optimizer_controls=model.mode in INTERACTION_PRESERVING_WIND_MODES,
         )
         self.optimizer_schedule = optimizer_schedule
         self.optimizer_weight_decay = None if weight_decay is None else float(weight_decay)
@@ -868,7 +897,7 @@ class WindJointRegionalTask:
     def identity_payload(self) -> Mapping[str, Any]:
         payload = {
             "dataset": "WindFarm",
-            "family": WindFarmJointRegionalModel.FAMILY,
+            "family": getattr(self.model, "FAMILY", WindFarmJointRegionalModel.FAMILY),
             "mode": self.model.mode,
             "dataset_profile": self.profile_id,
             "profile_is_formal_fulltrain": self.profile_id == JOINT_WIND_FORMAL_PROFILE_ID,
@@ -884,8 +913,8 @@ class WindJointRegionalTask:
             ),
             "directions_deg": [270.0, 285.0, 300.0],
             "environment_representation": {
-                "token_shape": list(JOINT_WIND_ENVIRONMENT_SHAPE),
-                "record_count": JOINT_WIND_ENVIRONMENT_COUNT,
+                "token_shape": list(self.environment_token_shape),
+                "record_count": self.environment_count,
                 "measure": "geometry-only native domain-support quadrature in rotor_diameters^3",
                 "field_sensors": False,
             },
@@ -1019,8 +1048,8 @@ class WindJointRegionalTask:
             "total_epochs": int(self.total_epochs),
             "sampling_version": str(self.sampling_version),
             "environment_representation": {
-                "record_count": JOINT_WIND_ENVIRONMENT_COUNT,
-                "token_shape": list(JOINT_WIND_ENVIRONMENT_SHAPE),
+                "record_count": self.environment_count,
+                "token_shape": list(self.environment_token_shape),
                 "geometry_only": True,
                 "field_sensors": False,
             },
@@ -1145,7 +1174,7 @@ class WindJointRegionalTask:
     def make_scene(self, scene_inputs: Sequence[WindJointSceneInputs]) -> InteractionScene:
         if any(not isinstance(item, WindJointSceneInputs) for item in scene_inputs):
             raise TypeError("Wind joint prediction accepts only target-free WindJointSceneInputs.")
-        return _joint_scene_batch(scene_inputs, self.device)
+        return _joint_scene_batch(scene_inputs, self.device, environment_count=self.environment_count)
 
     def _checked_role_ids(self, batch: TaskBatch) -> np.ndarray:
         coordinates = np.asarray(batch.receivers.coordinates_D, dtype=np.float32)
@@ -1188,7 +1217,8 @@ class WindJointRegionalTask:
     ) -> tuple[WindJointPredictions, Mapping[str, Any]]:
         del epoch, temperature
         self.phase_metadata(phase)
-        if execution_mode not in {"joint", "full", "all", "all_fine", "J-H", "J-geometry", "J-direct"}:
+        if execution_mode not in {"joint", "full", "all", "all_fine", "J-H", "J-geometry", "J-direct",
+                                  *INTERACTION_PRESERVING_WIND_MODES}:
             raise ValueError("Wind joint regional prediction does not support legacy gate/detail execution modes.")
         if not isinstance(model, WindFarmJointRegionalModel):
             raise TypeError("Wind joint provider requires a standalone WindFarmJointRegionalModel.")
@@ -1346,15 +1376,58 @@ class WindJointRegionalTask:
         prepared = predictions.auxiliary.get("prepared_context")
         group_states = getattr(prepared, "group_states", None)
         edge_count = int(group_states.shape[1]) if torch.is_tensor(group_states) and group_states.ndim >= 3 else 0
-        return {
+        counts: dict[str, int | float] = {
             "native_receivers": int(batch_size * query_count),
             "active_physical_sources": int(active_sources),
             "physical_source_receiver_capacity": int(active_sources * query_count),
             "regional_edges_per_scene": int(edge_count),
             "receiver_edge_read_capacity": int(batch_size * query_count * edge_count),
-            "environment_records": int(batch_size * JOINT_WIND_ENVIRONMENT_COUNT),
+            "environment_records": int(batch_size * self.environment_count),
             "complete_native_prediction": 1,
         }
+        if self.model.mode not in INTERACTION_PRESERVING_WIND_MODES:
+            return counts
+        if prepared is None:
+            raise ValueError("Wind P-family work accounting requires its prepared pair context.")
+        core_context = prepared
+        present = core_context.present
+        source_capacity = int(present.shape[1])
+        environment_capacity = int(core_context.environment_coords.shape[1])
+        active_by_scene = (present > 0).sum(dim=1).to(torch.int64)
+        batch_count = int(present.shape[0])
+        active_pair_square = int((active_by_scene * active_by_scene).sum().item())
+        active_pair_no_self = int((active_by_scene * (active_by_scene - 1)).sum().item())
+        group_states = core_context.group_states
+        groups = int(group_states.shape[1]) if torch.is_tensor(group_states) else 0
+        source_membership = getattr(core_context, "source_membership", None)
+        environment_membership = getattr(core_context, "environment_membership", None)
+        pair_rounds = 2
+        counts.update({
+            "pair_rounds_per_context": pair_rounds,
+            "pair_MM_executed_slots_including_self": pair_rounds * batch_count * source_capacity * source_capacity,
+            "pair_MM_active_logical_pairs_excluding_self": pair_rounds * active_pair_no_self,
+            "pair_MM_active_logical_pairs_including_self": pair_rounds * active_pair_square,
+            "pair_ME_executed_slots": pair_rounds * batch_count * source_capacity * environment_capacity,
+            "pair_ME_active_logical_pairs": pair_rounds * int((active_by_scene * environment_capacity).sum().item()),
+            "pair_EM_executed_slots": pair_rounds * batch_count * environment_capacity * source_capacity,
+            "pair_EM_active_logical_pairs": pair_rounds * int((active_by_scene * environment_capacity).sum().item()),
+            "pair_padding_source_slots_per_scene": int(batch_count * source_capacity - active_by_scene.sum().item()),
+            "source_conditioned_receiver_read_executed_pairs": int(batch_count * query_count * source_capacity),
+            "source_conditioned_receiver_read_active_pairs": int(query_count * int(active_by_scene.sum().item())),
+            "collective_groups_per_scene": groups,
+            "collective_source_membership_score_slots": (0 if not groups else
+                int(batch_count * groups * source_capacity)),
+            "collective_environment_membership_score_slots": (0 if not groups else
+                int(batch_count * groups * environment_capacity)),
+            "collective_source_memberships_nonzero": (0 if not torch.is_tensor(source_membership) else
+                int(torch.count_nonzero(source_membership > 0).item())),
+            "collective_environment_memberships_nonzero": (0 if not torch.is_tensor(environment_membership) else
+                int(torch.count_nonzero(environment_membership > 0).item())),
+            "collective_receiver_access_score_slots": int(batch_count * query_count * groups),
+            "full_access_fallback": 0,
+            "sparse_executor_savings_measured": 0,
+        })
+        return counts
 
     def optimizer_groups(
         self, model: nn.Module, arm: str = "J-H", stage: str = "joint"
@@ -1428,6 +1501,9 @@ def build_wind_joint_task(
     weight_decay: float | None = None,
     validation_scope: str | None = None,
     native_sampling_protocol: str | None = None,
+    environment_token_shape: Sequence[int] | None = None,
+    collective_width: int = 64,
+    max_sources: int = 30,
 ) -> tuple[WindFarmJointRegionalModel, WindJointRegionalTask]:
     """Build a fresh Wind model and provider from the sealed development or formal split.
 
@@ -1437,8 +1513,9 @@ def build_wind_joint_task(
     """
 
     mode = str(mode)
-    if mode not in {"J-H", "J-geometry", "J-direct"}:
-        raise ValueError("Wind joint mode must be one of J-H, J-geometry, or J-direct.")
+    all_modes = {"J-H", "J-geometry", "J-direct", *INTERACTION_PRESERVING_WIND_MODES}
+    if mode not in all_modes:
+        raise ValueError(f"Wind joint mode must be one of {sorted(all_modes)}.")
     if int(seed) != 42:
         raise ValueError("Wind joint initialization and sampling are sealed to seed 42.")
     if int(effective_batch_size) != 24:
@@ -1458,12 +1535,27 @@ def build_wind_joint_task(
         weight_decay=weight_decay,
         validation_scope=validation_scope,
         native_sampling_protocol=native_sampling_protocol,
+        allow_development_optimizer_controls=mode in INTERACTION_PRESERVING_WIND_MODES,
     )
     locality_prior_strength = float(locality_prior_strength)
     if not np.isfinite(locality_prior_strength) or locality_prior_strength < 0.0:
         raise ValueError("Wind locality_prior_strength must be finite and nonnegative.")
-    if locality_prior_strength > 0.0 and mode != "J-H":
-        raise ValueError("Wind locality prior is supported only for J-H.")
+    if mode in {"J-H", "J-geometry", "J-direct"} and locality_prior_strength > 0.0 and mode != "J-H":
+        raise ValueError("Wind joint locality prior is supported only for J-H.")
+    if mode == "P" and locality_prior_strength != 0.0:
+        raise ValueError("Wind P has no collective locality prior.")
+    if mode in ("P-G", "P-H") and locality_prior_strength != 1.0:
+        raise ValueError("The recovery Wind P-G/P-H geometric locality prior is sealed to 1.0.")
+    if mode in INTERACTION_PRESERVING_WIND_MODES and bool(formal_full):
+        raise ValueError("P-family full-TRAIN recipes remain unavailable until separately justified and authorized.")
+    resolved_environment_shape = tuple(int(value) for value in (
+        environment_token_shape if environment_token_shape is not None else
+        ((2, 2, 2) if mode in INTERACTION_PRESERVING_WIND_MODES else JOINT_WIND_ENVIRONMENT_SHAPE)
+    ))
+    if len(resolved_environment_shape) != 3 or any(value < 1 for value in resolved_environment_shape):
+        raise ValueError("Wind environment_token_shape must contain three positive dimensions.")
+    if mode in INTERACTION_PRESERVING_WIND_MODES and resolved_environment_shape != (2, 2, 2):
+        raise ValueError("The Wind P-family recipe is bound to the deployed E8 token shape (2,2,2).")
     device = torch.device(device)
     data_root = Path(data_root).expanduser().resolve()
     derived_root = Path(derived_root).expanduser().resolve()
@@ -1480,7 +1572,7 @@ def build_wind_joint_task(
     view = WindFarmNativeView(
         data_root,
         allow_npz_metadata_fallback=True,
-        token_shape=JOINT_WIND_ENVIRONMENT_SHAPE,
+        token_shape=resolved_environment_shape,
     )
     split = _load_original_split(view, derived_root)
     if formal_full:
@@ -1550,8 +1642,20 @@ def build_wind_joint_task(
         persistent_dir=training_catalogue_cache_directory(),
         max_cached_bytes=int(catalogue_cache_bytes),
     )
+    # The corrected role/component scales are an environment-independent
+    # TRAIN-profile residual calibration. Reuse the existing sealed E64
+    # cache namespace for P-family runs so the five physical role objectives
+    # remain exactly comparable with the mature J controls; only the model
+    # scene itself uses the deployed E8 representation.
+    scale_view = view
+    if mode in INTERACTION_PRESERVING_WIND_MODES:
+        scale_view = WindFarmNativeView(
+            data_root,
+            allow_npz_metadata_fallback=True,
+            token_shape=JOINT_WIND_ENVIRONMENT_SHAPE,
+        )
     calibration, cache_identity = _fit_or_load_role_scales(
-        view=view,
+        view=scale_view,
         train_rows=train_rows,
         train_layouts=train_layouts,
         profile=profile,
@@ -1578,18 +1682,31 @@ def build_wind_joint_task(
         torch.manual_seed(seed)
         if devices:
             torch.cuda.manual_seed_all(seed)
-        model = WindFarmJointRegionalModel(
-            velocity_transform=normalizer,
-            background_profile=profile,
-            mode=mode,
-            hidden=hidden,
-            message=message,
-            regional_anchors=regional_anchors,
-            depth=depth,
-            receiver_tile=receiver_tile,
-            seed=seed,
-            locality_prior_strength=locality_prior_strength,
-        ).to(device)
+        model_factory = (
+            InteractionPreservingWindModel
+            if mode in INTERACTION_PRESERVING_WIND_MODES
+            else WindFarmJointRegionalModel
+        )
+        model_options = {
+            "velocity_transform": normalizer,
+            "background_profile": profile,
+            "mode": mode,
+            "hidden": hidden,
+            "message": message,
+            "regional_anchors": regional_anchors,
+            "depth": depth,
+            "receiver_tile": receiver_tile,
+            "seed": seed,
+        }
+        if mode in INTERACTION_PRESERVING_WIND_MODES:
+            model_options.update({
+                "collective_width": collective_width,
+                "max_sources": max_sources,
+                "locality_prior_strength": (locality_prior_strength if mode != "P" else None),
+            })
+        else:
+            model_options["locality_prior_strength"] = locality_prior_strength
+        model = model_factory(**model_options).to(device)
     provider = WindJointRegionalTask(
         view,
         model=model,
@@ -1614,6 +1731,7 @@ def build_wind_joint_task(
         weight_decay=weight_decay,
         validation_scope=validation_scope,
         native_sampling_protocol=native_sampling_protocol,
+        environment_token_shape=resolved_environment_shape,
     )
     return model, provider
 
