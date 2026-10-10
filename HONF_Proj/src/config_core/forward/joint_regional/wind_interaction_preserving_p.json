@@ -53,7 +53,7 @@
   "locality_prior_strength": 0.0,
   "max_sources": 30,
   "message": 128,
-  "microbatch_cases": 16,
+  "microbatch_cases": 8,
   "mode": "P",
   "model_contract": {
     "collective": {
