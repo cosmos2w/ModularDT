@@ -178,7 +178,8 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                  affine_outputs: int = 0, query_width: int = 0,
                  max_sources: int | None = None, forcing_scale: float = 1.0,
                  zero_offset: bool = True, initialization_seed: int = 0,
-                 locality_prior_strength: float | None = None):
+                 locality_prior_strength: float | None = None,
+                 initialization_reference_field_outputs: int | None = None):
         if mode not in ('P', 'P-G', 'P-H'):
             raise ValueError("mode must be 'P', 'P-G' or 'P-H'.")
         if field_outputs is None:
@@ -187,6 +188,13 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             raise ValueError('field_outputs and output_width must agree when both are supplied.')
         if field_outputs < 1 or affine_outputs < 0:
             raise ValueError('Field outputs must be positive and affine outputs nonnegative.')
+        if initialization_reference_field_outputs is None:
+            reference_field_outputs = field_outputs
+        else:
+            if (type(initialization_reference_field_outputs) is not int or
+                    initialization_reference_field_outputs < field_outputs):
+                raise ValueError('Initialization reference width must be an integer at least as wide as the actual field head.')
+            reference_field_outputs = initialization_reference_field_outputs
         if collective_width < 1 or regional_anchors < 0:
             raise ValueError('Collective width must be positive and anchor count nonnegative.')
         if mode == 'P' and regional_anchors != 0:
@@ -210,7 +218,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             torch.manual_seed(initialization_seed)
             super().__init__(source_width, context_width, environment_width,
                              spatial_dim=spatial_dim, hidden=hidden,
-                             message=message, output_width=field_outputs,
+                             message=message, output_width=reference_field_outputs,
                              query_width=query_width, max_sources=max_sources)
             self.mode = mode
             self.collective_width = collective_width
@@ -284,6 +292,23 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                         self.receiver_query[-1].weight.zero_()
                         self.access_geometry[-1].weight.zero_()
 
+            # Construct every inherited and mode-specific module at the declared
+            # reference width before slicing only the final nonlinear field rows.
+            # This preserves seed-0 shared-core and affine/collective initialization.
+            if reference_field_outputs > field_outputs:
+                final_projection = self.field_head[-1]
+                if not isinstance(final_projection, nn.Linear):
+                    raise TypeError('The inherited nonlinear field head must end in Linear.')
+                with torch.no_grad():
+                    final_projection.weight = nn.Parameter(
+                        final_projection.weight[:field_outputs].detach().clone())
+                    if final_projection.bias is not None:
+                        final_projection.bias = nn.Parameter(
+                            final_projection.bias[:field_outputs].detach().clone())
+                final_projection.out_features = field_outputs
+                self.output_width = field_outputs
+                self.config['output_width'] = field_outputs
+            self.initialization_reference_field_outputs = reference_field_outputs
             self.config.update({
                 'mode': mode, 'collective_width': collective_width,
                 'regional_anchors': regional_anchors, 'field_outputs': field_outputs,
@@ -293,6 +318,8 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             })
             if mode != 'P':
                 self.config['locality_prior_strength'] = self.locality_prior_strength
+            if initialization_reference_field_outputs is not None:
+                self.config['initialization_reference_field_outputs'] = reference_field_outputs
 
     @staticmethod
     def _validate_ids(ids: torch.Tensor, present: torch.Tensor, shape: tuple[int, int],

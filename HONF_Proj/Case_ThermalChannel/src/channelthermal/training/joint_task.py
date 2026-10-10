@@ -12,6 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import h5py
 import numpy as np
 import torch
 
@@ -23,13 +24,14 @@ from ..data.development_split import (
     read_case_catalog,
     validate_development_manifest,
 )
+from ..flow_curl import NATIVE_CURL_READOUT_LAW
 from ..joint_regional import (
     INTERACTION_PRESERVING_THERMAL_MODES,
     JOINT_THERMAL_CHANNEL_ORDER,
     JOINT_THERMAL_ID,
     JOINT_THERMAL_MODES,
-    JointThermalRegionalAdapter,
     InteractionPreservingThermalAdapter,
+    JointThermalRegionalAdapter,
 )
 from .unified_task import (
     DEFAULT_ATLAS_DIRECTORY,
@@ -93,6 +95,176 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _stored_binary_mask(value: Any, *, expected_shape: tuple[int, int], source: str) -> tuple[np.ndarray, str, str]:
+    """Validate one stored geometry mask and hash its logical 0/1 cells."""
+    raw = np.asarray(value)
+    if raw.ndim != 2 or tuple(raw.shape) != tuple(expected_shape):
+        raise ValueError(f"{source} must have the declared native grid shape {expected_shape}.")
+    if raw.dtype.kind not in "bui" or not np.isin(raw, (0, 1)).all():
+        raise ValueError(f"{source} must contain only stored boolean/0/1 geometry values.")
+    mask = np.ascontiguousarray(raw.astype(bool, copy=True))
+    digest = hashlib.sha256()
+    digest.update(json.dumps({"shape": list(mask.shape), "logical_dtype": "bool"},
+                             sort_keys=True, separators=(",", ":")).encode("ascii") + b"\0")
+    digest.update(np.ascontiguousarray(mask, dtype=np.uint8).tobytes())
+    return mask, digest.hexdigest(), str(raw.dtype)
+
+
+def _read_fixed_native_mask_catalog(
+    data_path: Path, training_ids: Sequence[str], validation_ids: Sequence[str], *,
+    expected_shape: tuple[int, int] = (64, 128),
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Read only input-only H5 `module_mask` datasets for the sealed 150/22 panel."""
+    if len(training_ids) != 150 or len(validation_ids) != 22:
+        raise ValueError("The native-curl recovery mask catalog requires exactly fixed25 TRAIN150/DEV22 IDs.")
+    ordered_ids = tuple(map(str, training_ids)) + tuple(map(str, validation_ids))
+    if len(set(ordered_ids)) != len(ordered_ids):
+        raise ValueError("Fixed25 native mask IDs must be unique across TRAIN and DEV.")
+    masks: dict[str, np.ndarray] = {}
+    hashes: dict[str, str] = {}
+    stored_dtypes: dict[str, str] = {}
+    with h5py.File(data_path, "r") as packed:
+        cases = packed["cases"]
+        for case_id in ordered_ids:
+            if case_id not in cases or "module_mask" not in cases[case_id]:
+                raise ValueError(f"Bound H5 is missing geometry-only cases/{case_id}/module_mask.")
+            mask, mask_sha256, stored_dtype = _stored_binary_mask(
+                cases[case_id]["module_mask"][...], expected_shape=expected_shape,
+                source=f"cases/{case_id}/module_mask",
+            )
+            masks[case_id] = mask
+            hashes[case_id] = mask_sha256
+            stored_dtypes[case_id] = stored_dtype
+    split_records = {
+        "training_case_ids": list(map(str, training_ids)),
+        "validation_case_ids": list(map(str, validation_ids)),
+        "mask_sha256_by_case_id": hashes,
+        "stored_dtype_by_case_id": stored_dtypes,
+    }
+    binding = {
+        "source": "bound packed H5 cases/<case_id>/module_mask only",
+        "target_data_keys_read": [],
+        "mask_shape_ny_nx": list(expected_shape),
+        **split_records,
+        "catalog_sha256": _json_hash(split_records),
+    }
+    return masks, binding
+
+
+def _last_indexed_frame_name(index_path: Path) -> str:
+    """Read only the final indexed filename; do not load frame outputs or row metrics."""
+    with index_path.open("rb") as stream:
+        header = stream.readline().decode("utf-8").rstrip("\r\n").split(",")
+        try:
+            filename_index = header.index("file")
+        except ValueError as error:
+            raise ValueError(f"Solver frame index lacks its filename column: {index_path}") from error
+        stream.seek(0, 2)
+        position = stream.tell()
+        if position <= 0:
+            raise ValueError(f"Solver frame index is empty: {index_path}")
+        stream.seek(position - 1)
+        if stream.read(1) == b"\n":
+            position -= 1
+        while position > 0:
+            stream.seek(position - 1)
+            if stream.read(1) == b"\n":
+                break
+            position -= 1
+        stream.seek(position)
+        last = stream.readline().decode("utf-8").rstrip("\r\n").split(",")
+    if filename_index >= len(last):
+        raise ValueError(f"Final solver frame index row is malformed: {index_path}")
+    filename = last[filename_index]
+    if not filename or Path(filename).name != filename or not filename.endswith(".npz"):
+        raise ValueError(f"Final solver frame index contains an unsafe filename: {filename!r}")
+    return filename
+
+
+def _read_train_response_native_masks(
+    atlas_directory: Path, families: Sequence[Mapping[str, Any]], *,
+    expected_shape: tuple[int, int] = (64, 128),
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Read geometry masks only from fixed TRAIN response-family final solver frames."""
+    masks: dict[str, np.ndarray] = {}
+    provenance: dict[str, Any] = {}
+    atlas_root = atlas_directory.resolve().parent
+    expected_ids = tuple(TRAIN_RESPONSE_IDS)
+    if tuple(str(item["family_id"]) for item in families) != expected_ids:
+        raise ValueError("Response mask catalog requires the four ordered original-TRAIN families.")
+    for family in families:
+        family_id = str(family["family_id"])
+        atlas_path = atlas_directory / f"train_{family_id}_responses.npz"
+        with np.load(atlas_path, allow_pickle=False) as archive:
+            metadata = json.loads(str(archive["family_metadata_json"]))
+        if metadata.get("source_dataset_split") != "train" or metadata.get("anchor_id") != family_id:
+            raise ValueError(f"Response mask metadata is not the fixed original-TRAIN family {family_id}.")
+        raw_root = (atlas_root / "raw" / "train" / family_id).resolve()
+        tag = "reference_solver"
+        variants = {}
+        variant_masks = []
+        for label in ("baseline", "heat_transfer_plus", "heat_transfer_minus"):
+            pattern = f"case_atlas_{family_id}_{label}_*_{tag}"
+            record_dirs = [path for path in raw_root.glob(pattern) if path.is_dir()]
+            if len(record_dirs) != 1:
+                raise ValueError(f"Expected exactly one stored TRAIN {family_id}/{label} solver record.")
+            record_dir = record_dirs[0].resolve()
+            config_path = record_dir / "case_config.json"
+            index_path = record_dir / "frame_index.csv"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config_save = config.get("save", {})
+            if (config_save.get("case_id") != f"atlas_{family_id}_{label}"
+                    or config_save.get("tag") != tag
+                    or Path(str(config_save.get("root_dir", ""))).expanduser().resolve() != raw_root):
+                raise ValueError(f"Stored response mask record changed identity for {family_id}/{label}.")
+            runtime = config.get("runtime", {})
+            if runtime.get("converged") is not True:
+                raise ValueError(f"Stored response mask record is not converged for {family_id}/{label}.")
+            frame_name = _last_indexed_frame_name(index_path)
+            frame_path = (record_dir / "scene" / frame_name).resolve()
+            if frame_path.parent != (record_dir / "scene").resolve() or not frame_path.is_file():
+                raise ValueError(f"Stored response mask frame is missing for {family_id}/{label}.")
+            with np.load(frame_path, allow_pickle=False) as frame:
+                if "module_mask" not in frame.files:
+                    raise ValueError(f"Stored response frame lacks geometry-only module_mask for {family_id}/{label}.")
+                mask, mask_sha256, stored_dtype = _stored_binary_mask(
+                    frame["module_mask"], expected_shape=expected_shape,
+                    source=f"{family_id}/{label}/module_mask",
+                )
+            variant_masks.append(mask)
+            variants[label] = {
+                "record_directory": str(record_dir),
+                "case_config_sha256": _sha256_file(config_path),
+                "frame_index_path": str(index_path),
+                "final_frame_filename": frame_name,
+                "final_frame_step": int(runtime.get("final_step", -1)),
+                "module_mask_sha256": mask_sha256,
+                "module_mask_stored_dtype": stored_dtype,
+                "module_mask_shape_ny_nx": list(mask.shape),
+            }
+        if any(not np.array_equal(variant_masks[0], mask) for mask in variant_masks[1:]):
+            raise ValueError(f"Stored baseline/plus/minus geometry masks differ for TRAIN family {family_id}.")
+        fluid_valid = np.asarray(family["fluid_valid"], dtype=bool).reshape(-1)
+        if not np.array_equal(~variant_masks[0].reshape(-1), fluid_valid):
+            raise ValueError(f"Stored TRAIN family {family_id} response grid does not match its solver-frame mask.")
+        masks[family_id] = variant_masks[0]
+        provenance[family_id] = {
+            "partition": "original TRAIN response family",
+            "mask_source": "stored final baseline/heat-transfer-plus/heat-transfer-minus solver-frame module_mask",
+            "mask_sha256": variants["baseline"]["module_mask_sha256"],
+            "solver_record_variants": variants,
+            "all_three_geometry_masks_bit_identical": True,
+            "atlas_fluid_valid_equals_complement": True,
+        }
+    return masks, {
+        "source": "existing TRAIN atlas raw solver frames; module_mask arrays only",
+        "target_arrays_read_from_frames": [],
+        "family_order": list(expected_ids),
+        "families": provenance,
+        "catalog_sha256": _json_hash(provenance),
+    }
 
 
 def _state_sha256(model: torch.nn.Module) -> str:
@@ -208,6 +380,7 @@ class JointThermalTask(ThermalRefinementTask):
         optimizer_schedule: ScheduleSpec | None = None,
         weight_decay: float | None = None,
         native_sampling_protocol: str | None = None,
+        flow_readout_law: str | None = None,
     ) -> None:
         if mode not in THERMAL_RECOVERY_MODES or model.mode != mode:
             raise ValueError("Joint Thermal task mode must match its freshly initialized adapter.")
@@ -220,6 +393,13 @@ class JointThermalTask(ThermalRefinementTask):
             raise ValueError("Joint Thermal schedule horizon must be at least two epochs.")
 
         self.joint_mode = mode
+        self.flow_readout_law = flow_readout_law
+        if self.flow_readout_law not in (None, NATIVE_CURL_READOUT_LAW):
+            raise ValueError("Joint Thermal provider received an unsupported flow readout law.")
+        if self.flow_readout_law and mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+            raise ValueError("The native-curl readout belongs only to fresh P-family providers.")
+        if getattr(model, "flow_readout_law", None) != self.flow_readout_law:
+            raise ValueError("Joint Thermal provider and adapter flow readout laws must match exactly.")
         self.data_path = Path(data_path).resolve()
         self.source_binding = copy.deepcopy(dict(source_binding))
         self.formal_full = bool(formal_full)
@@ -315,7 +495,7 @@ class JointThermalTask(ThermalRefinementTask):
             "validation_case_count": len(validation_ids),
             "validation_scope": "fixed25_v1_exposed_DEV22_sanity_only" if self.formal_full else "fixed25_v1_exposed_DEV22",
             "source_binding": copy.deepcopy(self.source_binding),
-            "model_family": getattr(self.model, "FAMILY", JOINT_THERMAL_ID),
+            "model_family": getattr(self.model, "family_id", getattr(self.model, "FAMILY", JOINT_THERMAL_ID)),
             "model_config": self.model.model_config(),
             "adapter_config": self.model.adapter_config(),
             "normalization_scope": "all_original_train_only" if self.formal_full else "selected_fixed25_train_only",
@@ -373,6 +553,9 @@ class JointThermalTask(ThermalRefinementTask):
                 "validation_seed_rule": "1000 + original90_index * 104729",
                 "operator_seed_rule": "originalTRAIN_index * 104729 + epoch * 1000003 + 17",
             }
+        flow_readout_law = getattr(self, "flow_readout_law", None)
+        if flow_readout_law is not None:
+            payload["flow_readout_law"] = flow_readout_law
         return payload
 
     def _build_loss_metadata(self) -> dict[str, dict[str, str]]:
@@ -486,24 +669,36 @@ class JointThermalTask(ThermalRefinementTask):
         from honf_runtime.compat import recursive_to_device
 
         rx = recursive_to_device(receivers, self.device)
+        main_mask_options = {}
+        if self.flow_readout_law == NATIVE_CURL_READOUT_LAW:
+            if rx.native_solid_mask is None:
+                raise ValueError("Native-curl primary flow requires its saved geometry-only mask.")
+            main_mask_options["native_solid_mask"] = rx.native_solid_mask
         main_prepared = model.prepare_native(
             scene.structure,
             rx.fluid_xy,
             local_query_points=rx.local_query_points,
             ntheta=16,
             chunk_size=model.receiver_tile,
+            **main_mask_options,
         )
         main = model.apply_native(main_prepared, rx.heat)
         response_prepared = response_main = None
         if rx.response_fluid_xy is not None:
             if scene.response_structure is None or rx.response_local_query_points is None or rx.response_heat is None:
                 raise ValueError("Joint Thermal response addendum is missing native input receivers or heat increment.")
+            response_mask_options = {}
+            if self.flow_readout_law == NATIVE_CURL_READOUT_LAW:
+                if rx.response_native_solid_mask is None:
+                    raise ValueError("Native-curl TRAIN response requires its saved solver-frame geometry mask.")
+                response_mask_options["native_solid_mask"] = rx.response_native_solid_mask
             response_prepared = model.prepare_native(
                 scene.response_structure,
                 rx.response_fluid_xy,
                 local_query_points=rx.response_local_query_points,
                 ntheta=16,
                 chunk_size=model.receiver_tile,
+                **response_mask_options,
             )
             response_main = model.apply_native(response_prepared, rx.response_heat, increment=True)
         work = {
@@ -867,13 +1062,15 @@ class JointThermalTask(ThermalRefinementTask):
             return result
         contexts = []
         main_native = predictions.native_prepared
-        contexts.append(("main", main_native.context, int(main_native.flow_receivers.shape[1]),
-                         int(main_native.grid_indices.shape[1])))
+        main_flow_receivers = getattr(main_native, "flow_query_receivers", main_native.flow_receivers)
+        contexts.append(("main", main_native.context, main_native,
+                         int(main_flow_receivers.shape[1]), int(main_native.grid_indices.shape[1])))
         if predictions.response_prepared is not None:
             response_native = predictions.response_prepared
-            contexts.append(("response", response_native.context,
-                             int(response_native.flow_receivers.shape[1]),
-                             int(response_native.grid_indices.shape[1])))
+            # Increment application has no nonlinear flow read. The response
+            # context still executes its pair rounds and affine heat reader.
+            contexts.append(("response", response_native.context, response_native,
+                             0, int(response_native.grid_indices.shape[1])))
 
         pair_rounds = 2
         pair_mm = pair_me = pair_em = 0
@@ -887,7 +1084,9 @@ class JointThermalTask(ThermalRefinementTask):
         active_source_receiver_pairs = active_flow_read_pairs = 0
         active_main_temp_read_pairs = active_response_temp_read_pairs = 0
         native_flow_queries = native_temp_union_queries = response_temp_union_queries = 0
-        for name, prepared, flow_queries, union_queries in contexts:
+        native_primary_label_queries = native_primary_unique_queries = native_flow_logical_unique_queries = 0
+        native_curl_neighbor_unique_queries = native_curl_padding_receiver_slots = 0
+        for name, prepared, native_prepared, flow_queries, union_queries in contexts:
             batch_count, source_capacity = prepared.present.shape
             environment_capacity = prepared.environment_coords.shape[1]
             active_by_scene = (prepared.present > 0).sum(dim=1).to(torch.int64)
@@ -903,17 +1102,45 @@ class JointThermalTask(ThermalRefinementTask):
             pair_em_logical += pair_rounds * active_total * environment_capacity
             padding_source_slots += int(batch_count * source_capacity - active_total)
 
-            flow_pairs = int(batch_count * flow_queries * source_capacity)
             affine_pairs = int(batch_count * union_queries * source_capacity)
-            active_flow_pairs = int(flow_queries * active_total)
             active_affine_pairs = int(union_queries * active_total)
-            flow_read_pairs += flow_pairs
-            active_flow_read_pairs += active_flow_pairs
-            active_source_receiver_pairs += active_flow_pairs
             if name == "main":
+                stencil = getattr(native_prepared, "native_curl_stencil", None)
+                label_queries = int(native_prepared.flow_receivers.shape[1])
+                if stencil is not None and torch.is_tensor(getattr(stencil, "unique_counts", None)):
+                    logical_counts = stencil.unique_counts.to(device=active_by_scene.device, dtype=torch.int64)
+                    gather_indices = getattr(stencil, "gather_indices", None)
+                    if (not torch.is_tensor(gather_indices) or gather_indices.ndim != 3
+                            or gather_indices.shape[:2] != (batch_count, label_queries)
+                            or gather_indices.shape[-1] != 5):
+                        raise ValueError("Native-curl receiver union is missing its per-label five-point gather map.")
+                    primary_counts = torch.tensor(
+                        [torch.unique(gather_indices[row, :, 0]).numel() for row in range(batch_count)],
+                        device=active_by_scene.device,
+                        dtype=torch.int64,
+                    )
+                    if (logical_counts.shape != (batch_count,) or primary_counts.shape != (batch_count,)
+                            or bool((logical_counts < primary_counts).any())
+                            or bool((logical_counts > flow_queries).any())):
+                        raise ValueError("Native-curl receiver union counts do not match the primary batch.")
+                    logical_total = int(logical_counts.sum().item())
+                    active_flow_pairs = int((logical_counts * active_by_scene).sum().item())
+                    native_primary_unique_queries += int(primary_counts.sum().item())
+                    native_curl_neighbor_unique_queries += int((logical_counts - primary_counts).sum().item())
+                    native_curl_padding_receiver_slots += int(batch_count * flow_queries - logical_total)
+                else:
+                    logical_total = int(batch_count * flow_queries)
+                    active_flow_pairs = int(flow_queries * active_total)
+                    native_primary_unique_queries += batch_count * label_queries
+                flow_pairs = int(batch_count * flow_queries * source_capacity)
+                flow_read_pairs += flow_pairs
+                active_flow_read_pairs += active_flow_pairs
+                active_source_receiver_pairs += active_flow_pairs
                 main_temp_read_pairs += affine_pairs
                 active_main_temp_read_pairs += active_affine_pairs
                 native_flow_queries += batch_count * flow_queries
+                native_primary_label_queries += batch_count * label_queries
+                native_flow_logical_unique_queries += logical_total
                 native_temp_union_queries += batch_count * union_queries
             else:
                 response_temp_read_pairs += affine_pairs
@@ -932,7 +1159,8 @@ class JointThermalTask(ThermalRefinementTask):
                     collective_source_edges += int(torch.count_nonzero(source_membership > 0).item())
                 if torch.is_tensor(environment_membership):
                     collective_environment_edges += int(torch.count_nonzero(environment_membership > 0).item())
-                # Distinct source-conditioned flow and affine-head reads each compute receiver access.
+                # Main flow plus affine reads for this context. Response
+                # increments have only the affine read; their flow_queries=0.
                 collective_receiver_score_slots += int(batch_count * (flow_queries + union_queries) * group_count)
 
         batch_cases = len(getattr(batch.targets, "case_ids", ()))
@@ -949,6 +1177,11 @@ class JointThermalTask(ThermalRefinementTask):
             "pair_EM_active_logical_pairs": pair_em_logical,
             "pair_padding_source_slots_per_context": padding_source_slots,
             "native_flow_receivers": native_flow_queries,
+            "native_primary_label_receivers": native_primary_label_queries,
+            "native_primary_unique_receivers": native_primary_unique_queries,
+            "native_flow_logical_unique_receivers": native_flow_logical_unique_queries,
+            "native_curl_neighbor_added_unique_receivers": native_curl_neighbor_unique_queries,
+            "native_curl_union_padding_receiver_slots": native_curl_padding_receiver_slots,
             "native_temperature_union_receivers": native_temp_union_queries,
             "response_temperature_union_receivers": response_temp_union_queries,
             "source_conditioned_flow_read_executed_pairs": flow_read_pairs,
@@ -957,6 +1190,8 @@ class JointThermalTask(ThermalRefinementTask):
             "temperature_affine_union_read_active_pairs": active_main_temp_read_pairs,
             "response_affine_union_read_executed_pairs": response_temp_read_pairs,
             "response_affine_union_read_active_pairs": active_response_temp_read_pairs,
+            "response_increment_flow_read_executed_receivers": 0,
+            "response_increment_flow_read_executed_pairs": 0,
             "active_physical_source_receiver_pairs": active_source_receiver_pairs,
             "collective_groups_across_prepared_contexts": collective_groups,
             "collective_source_membership_score_slots": collective_source_score_slots,
@@ -1042,10 +1277,16 @@ class JointThermalTask(ThermalRefinementTask):
             )
             response_target = self._prepare_response_sample(family, training=True, key=key, budget=self.budget)
             structure = {name: value.to(self.device) for name, value in response_target["structure"].items()}
+            response_mask_options = {}
+            if self.flow_readout_law == NATIVE_CURL_READOUT_LAW:
+                if "native_solid_mask" not in response_target:
+                    raise ValueError("Native-curl calibration response is missing its saved TRAIN mask.")
+                response_mask_options["native_solid_mask"] = response_target["native_solid_mask"].to(self.device)
             prepared = self.model.prepare_native(
                 structure, response_target["fluid_xy"].to(self.device),
                 local_query_points=response_target["local"].to(self.device), ntheta=16,
                 chunk_size=self.model.receiver_tile,
+                **response_mask_options,
             )
             output = self.model.apply_native(
                 prepared, response_target["heat"].to(self.device), increment=True,
@@ -1155,12 +1396,18 @@ class JointThermalTask(ThermalRefinementTask):
             )
             response_target = self._prepare_response_sample(family, training=True, key=key, budget=self.budget)
             structure = {key: value.to(self.device) for key, value in response_target["structure"].items()}
+            response_mask_options = {}
+            if self.flow_readout_law == NATIVE_CURL_READOUT_LAW:
+                if "native_solid_mask" not in response_target:
+                    raise ValueError("Native-curl calibration response is missing its saved TRAIN mask.")
+                response_mask_options["native_solid_mask"] = response_target["native_solid_mask"].to(self.device)
             prepared = self.model.prepare_native(
                 structure,
                 response_target["fluid_xy"].to(self.device),
                 local_query_points=response_target["local"].to(self.device),
                 ntheta=16,
                 chunk_size=self.model.receiver_tile,
+                **response_mask_options,
             )
             output = self.model.apply_native(
                 prepared,
@@ -1224,6 +1471,8 @@ class JointThermalTask(ThermalRefinementTask):
             "optimizer_steps": 0,
             "stored_velocity_used_only_for_operator_supervision": True,
         }
+        if getattr(self, "flow_readout_law", None) is not None:
+            receipt["flow_readout_law"] = self.flow_readout_law
         self.response_weight = float(response_coefficient)
         self.operator_weight = float(operator_coefficient)
         self.response_coefficient = self.response_weight
@@ -1237,6 +1486,13 @@ class JointThermalTask(ThermalRefinementTask):
         """Reject calibration from J/H, another cohort, or another direct initialization."""
         if self.joint_mode not in INTERACTION_PRESERVING_THERMAL_MODES:
             raise ValueError("Only P-family Thermal tasks accept a fresh-P auxiliary calibration receipt.")
+        active_flow_readout_law = getattr(self, "flow_readout_law", None)
+        receipt_flow_readout_law = receipt.get("flow_readout_law")
+        if active_flow_readout_law is not None:
+            if receipt_flow_readout_law != active_flow_readout_law:
+                raise ValueError("Thermal auxiliary calibration receipt belongs to a different flow readout law.")
+        elif receipt_flow_readout_law is not None:
+            raise ValueError("Legacy Thermal auxiliary calibration cannot accept a changed flow readout law.")
         module_counts = [int(np.asarray(case["structure"]["module_present"]).sum()) for case in self.training_cases]
         expected_case_ids = [
             self._train_ids[next(index for index, count in enumerate(module_counts) if count == desired)]
@@ -1333,6 +1589,7 @@ def build_thermal_joint_task(
     collective_width: int = 64,
     max_sources: int = 12,
     calibration_only: bool = False,
+    flow_readout_law: str | None = None,
 ) -> tuple[JointThermalRegionalAdapter, JointThermalTask]:
     """Construct a fresh joint candidate and its fixed25_v1 provider.
 
@@ -1342,6 +1599,12 @@ def build_thermal_joint_task(
     """
     if mode not in THERMAL_RECOVERY_MODES:
         raise ValueError(f"Joint Thermal mode must be one of {THERMAL_RECOVERY_MODES}.")
+    if flow_readout_law not in (None, NATIVE_CURL_READOUT_LAW):
+        raise ValueError("Unsupported opt-in Thermal flow readout law.")
+    if flow_readout_law is not None and mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+        raise ValueError("The native-curl readout is a P-family-only model identity.")
+    if flow_readout_law is not None and formal_full:
+        raise ValueError("Native-curl full-TRAIN recipes require a separately authorized campaign.")
     if isinstance(locality_prior_strength, (bool, np.bool_)):
         raise TypeError("Joint Thermal locality prior strength must be numeric, not boolean.")
     try:
@@ -1426,6 +1689,19 @@ def build_thermal_joint_task(
     build_balances, _response_scales = _load_recipe_helpers()
     balances = build_balances(training_cases)
     families = _read_response_families(Path(atlas_directory).expanduser().resolve(), TRAIN_RESPONSE_IDS)
+    native_mask_binding = None
+    response_mask_binding = None
+    if flow_readout_law == NATIVE_CURL_READOUT_LAW:
+        native_masks, native_mask_binding = _read_fixed_native_mask_catalog(
+            resolved_data_path, train_ids, validation_ids,
+        )
+        for case in (*training_cases, *validation_cases):
+            case["native_solid_mask"] = native_masks[str(case["case_id"])]
+        response_masks, response_mask_binding = _read_train_response_native_masks(
+            Path(atlas_directory).expanduser().resolve(), families,
+        )
+        for family in families:
+            family["native_solid_mask"] = response_masks[str(family["family_id"])]
 
     from honf_runtime.compat import set_seed
 
@@ -1448,6 +1724,8 @@ def build_thermal_joint_task(
     }
     if mode in INTERACTION_PRESERVING_THERMAL_MODES:
         model_options.update({"collective_width": collective_width, "max_sources": max_sources})
+    if flow_readout_law is not None:
+        model_options["flow_readout_law"] = flow_readout_law
     model = model_factory(**model_options).to(device)
     budget = {
         "fluid_queries": int(primary_queries),
@@ -1475,6 +1753,12 @@ def build_thermal_joint_task(
         "development_manifest_sha256": resolved_manifest["manifest_sha256"],
         "formal_scope": "original_train_600" if formal_full else "fixed25_v1_train_150",
     }
+    if flow_readout_law is not None:
+        source_binding.update({
+            "flow_readout_law": flow_readout_law,
+            "native_geometry_mask_catalog": native_mask_binding,
+            "response_geometry_mask_catalog": response_mask_binding,
+        })
     provider = JointThermalTask(
         model=model,
         training_cases=training_cases,
@@ -1500,6 +1784,7 @@ def build_thermal_joint_task(
         optimizer_schedule=optimizer_schedule,
         weight_decay=weight_decay,
         native_sampling_protocol=native_sampling_protocol,
+        flow_readout_law=flow_readout_law,
     )
     if validation_budget is not None:
         provider.validation_budget = validation_budget

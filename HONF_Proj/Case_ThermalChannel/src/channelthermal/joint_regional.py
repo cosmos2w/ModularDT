@@ -17,9 +17,16 @@ import numpy as np
 import torch
 from torch import nn
 
-from honf_forward_core.interface_fields.joint_regional import JointRegionalFieldCore
 from honf_forward_core.interface_fields.interaction_preserving_joint import InteractionPreservingJointCore
+from honf_forward_core.interface_fields.joint_regional import JointRegionalFieldCore
 
+from .flow_curl import (
+    NATIVE_CURL_READOUT_LAW,
+    NativeCurlReadStencil,
+    build_native_curl_read_stencil,
+    native_curl_readout_contract,
+    physical_uvp_native_curl,
+)
 from .source_response import (
     CONTEXT_KEYS,
     CONTEXT_WIDTH,
@@ -37,6 +44,8 @@ JOINT_THERMAL_CHECKPOINT_SCHEMA = "thermal_joint_regional_checkpoint_v1"
 JOINT_THERMAL_CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
 JOINT_THERMAL_MODES = ("J-direct", "J-geometry", "J-H")
 INTERACTION_PRESERVING_THERMAL_MODES = ("P", "P-G", "P-H")
+NATIVE_CURL_THERMAL_FAMILY = "thermal_interaction_preserving_native_curl_v1"
+NATIVE_CURL_THERMAL_CHECKPOINT_SCHEMA = "thermal_interaction_preserving_native_curl_checkpoint_v1"
 
 
 def _validated_normalization_stats(stats: Mapping[str, Any]) -> dict[str, np.ndarray]:
@@ -495,7 +504,11 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         heat = torch.as_tensor(sample["structure"]["heat_powers"], device=device, dtype=torch.float32)[None]
         with torch.no_grad():
             output = self.apply_native(
-                self.prepare_native(structure, fluid, local_query_points=local, ntheta=ntheta),
+                self.prepare_native(
+                    structure, fluid, local_query_points=local, ntheta=ntheta,
+                    **({"native_solid_mask": torch.as_tensor(sample["module_mask"], device=device, dtype=torch.bool)[None]}
+                       if getattr(self, "flow_readout_law", None) == NATIVE_CURL_READOUT_LAW else {}),
+                ),
                 heat,
             )
         ny, nx = np.asarray(sample["x_grid"]).shape
@@ -507,7 +520,7 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             "initial_port_status": output["initial_port_status"],
         }
 
-    def prepare_record(self, record, device=None, *, chunk_size=None):
+    def prepare_record(self, record, device=None, *, chunk_size=None, native_solid_mask=None):
         """Prepare native physical receivers from source IDs and input metadata."""
         device = torch.device(device) if device is not None else next(self.parameters()).device
         modules, context = record.design.modules, record.context.values
@@ -552,6 +565,7 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             local_query_points=local,
             ntheta=ntheta,
             chunk_size=chunk_size,
+            **({"native_solid_mask": native_solid_mask} if native_solid_mask is not None else {}),
         )
         prepared.record_source_ids = ids
         prepared.interface_rows = interface_rows
@@ -662,7 +676,12 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
         locality_prior_strength: float | None = None,
         seed: int = 0,
         max_sources: int = 12,
+        flow_readout_law: str | None = None,
     ) -> None:
+        if flow_readout_law not in (None, NATIVE_CURL_READOUT_LAW):
+            raise ValueError("Unknown interaction-preserving Thermal flow readout law.")
+        if flow_readout_law and (nx != 128 or ny != 64):
+            raise ValueError("The native-curl Thermal model is bound to the generator's 128x64 grid.")
         if mode not in INTERACTION_PRESERVING_THERMAL_MODES:
             raise ValueError(f"Interaction-preserving Thermal mode must be one of {INTERACTION_PRESERVING_THERMAL_MODES}.")
         if depth != 2:
@@ -686,6 +705,8 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
         nn.Module.__init__(self)
         self.mode = str(mode)
         self.seed = int(seed)
+        self.flow_readout_law = flow_readout_law
+        self.family_id = NATIVE_CURL_THERMAL_FAMILY if flow_readout_law else self.FAMILY
         self.normalization_stats = _validated_normalization_stats(normalization_stats)
         self.receiver_tile = int(receiver_tile)
         self.nx, self.ny = int(nx), int(ny)
@@ -713,7 +734,8 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
             mode=self.mode,
             collective_width=int(collective_width),
             regional_anchors=int(regional_anchors),
-            field_outputs=4,
+            field_outputs=3 if flow_readout_law else 4,
+            **({"initialization_reference_field_outputs": 4} if flow_readout_law else {}),
             affine_outputs=1,
             query_width=0,
             max_sources=int(max_sources),
@@ -724,7 +746,7 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
         )
         self.core_config = copy.deepcopy(dict(self.core.config))
         self._joint_model_config = {
-            "family": self.FAMILY,
+            "family": self.family_id,
             "mode": self.mode,
             "source_width": SOURCE_WIDTH,
             "context_width": CONTEXT_WIDTH,
@@ -736,7 +758,7 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
             "regional_anchors": int(regional_anchors),
             "depth": int(depth),
             "max_sources": int(max_sources),
-            "field_outputs": 4,
+            "field_outputs": 3 if flow_readout_law else 4,
             "affine_outputs": 1,
             "query_width": 0,
             "receiver_tile": self.receiver_tile,
@@ -748,11 +770,14 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
             "zero_offset": True,
             "seed": self.seed,
         }
+        if flow_readout_law:
+            self._joint_model_config["flow_readout_law"] = flow_readout_law
+            self._joint_model_config["initialization_reference_field_outputs"] = 4
         if mode != "P":
             self._joint_model_config["locality_prior_strength"] = self.locality_prior_strength
 
     def prepare_native(self, structure, fluid_xy, *, chunk_size=None, retained_access_mass=None,
-                       receiver_edge_executor="dense", **kwargs):
+                       receiver_edge_executor="dense", native_solid_mask=None, **kwargs):
         """Use the inherited physical receiver builder without J-only read knobs."""
         if retained_access_mass is not None or receiver_edge_executor != "dense":
             raise ValueError("The interaction-preserving Thermal core uses its declared dense direct read.")
@@ -775,15 +800,80 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
         prepared.flow_receiver_snapshot = fluid_xy.detach().clone()
         prepared.joint_read_options = {}
         prepared.joint_read_options_snapshot = {}
+        if self.flow_readout_law:
+            if native_solid_mask is None:
+                raise ValueError("Native-curl preparation requires the saved geometry-only native_solid_mask.")
+            stencil = build_native_curl_read_stencil(
+                fluid_xy, prepared.context.lengths, native_solid_mask, nx=self.nx, ny=self.ny,
+            )
+            prepared.native_curl_stencil = stencil
+            prepared.native_curl_stencil_snapshot = {
+                name: value.detach().clone() for name, value in vars(stencil).items()
+            }
+            prepared.native_solid_mask = native_solid_mask
+            prepared.native_solid_mask_snapshot = native_solid_mask.detach().clone()
+            prepared.flow_query_receivers = stencil.query_xy
+        elif native_solid_mask is not None:
+            raise ValueError("Independent-head preparation does not accept native-curl mask metadata.")
         return prepared
+
+    def validate_prepared(self, prepared, structure=None):
+        super().validate_prepared(prepared, structure)
+        if self.flow_readout_law:
+            stencil = getattr(prepared, "native_curl_stencil", None)
+            snapshot = getattr(prepared, "native_curl_stencil_snapshot", None)
+            if (not isinstance(stencil, NativeCurlReadStencil) or not isinstance(snapshot, dict)
+                    or set(vars(stencil)) != set(snapshot)
+                    or any(not torch.equal(getattr(stencil, name), saved) for name, saved in snapshot.items())):
+                raise ValueError("Prepared native-curl stencil changed; rebuild the receiver state.")
+            mask = getattr(prepared, "native_solid_mask", None)
+            saved_mask = getattr(prepared, "native_solid_mask_snapshot", None)
+            if (not torch.is_tensor(mask) or not torch.is_tensor(saved_mask)
+                    or not torch.equal(mask, saved_mask)
+                    or not torch.equal(prepared.flow_query_receivers, snapshot["query_xy"])):
+                raise ValueError("Prepared native-curl geometry mask or node receivers changed; rebuild the state.")
+
+    def apply_native(self, prepared, physical_heat, *, increment=False, compression=None, accumulation_dtype=None):
+        if not self.flow_readout_law:
+            return super().apply_native(
+                prepared, physical_heat, increment=increment, compression=compression,
+                accumulation_dtype=accumulation_dtype,
+            )
+        # Apply the same affine temperature extraction, then the actual three
+        # nonlinear configuration projections and differentiable native curl.
+        output = ThermalSourceResponse.apply_native(
+            self, prepared, physical_heat, increment=increment, compression=compression,
+            accumulation_dtype=accumulation_dtype,
+        )
+        if increment:
+            flow = output["fluid_temperature"].new_zeros((*output["fluid_temperature"].shape[:-1], 4))
+        else:
+            normalized_uvp = self.core.predict_fields(
+                prepared.context, prepared.flow_query_receivers, chunk_size=self.receiver_tile,
+            )
+            flow = physical_uvp_native_curl(
+                normalized_uvp, prepared.native_curl_stencil,
+                self.normalization_stats["field_mean_by_channel"],
+                self.normalization_stats["field_std_by_channel"],
+            )
+        output["pred_field"] = torch.cat((flow, output["fluid_temperature"]), dim=-1)
+        return output
+
+    def adapter_config(self):
+        config = super().adapter_config()
+        if self.flow_readout_law:
+            config["flow_readout_law"] = self.flow_readout_law
+            config["native_curl_contract"] = native_curl_readout_contract()
+        return config
 
     def model_config(self) -> dict[str, Any]:
         return copy.deepcopy(self._joint_model_config)
 
     def checkpoint_payload(self, *, provider_identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = super().checkpoint_payload(provider_identity=provider_identity)
-        payload["model_family"] = self.FAMILY
-        payload["checkpoint_schema"] = "thermal_interaction_preserving_joint_checkpoint_v1"
+        payload["model_family"] = self.family_id
+        payload["checkpoint_schema"] = (NATIVE_CURL_THERMAL_CHECKPOINT_SCHEMA if self.flow_readout_law
+                                        else "thermal_interaction_preserving_joint_checkpoint_v1")
         return payload
 
 
@@ -838,8 +928,12 @@ def load_interaction_preserving_thermal_checkpoint(
         raise ValueError("Interaction-preserving Thermal checkpoints cannot bind an external learned parent.")
 
     engine_identity = None
-    if payload.get("checkpoint_schema") == "thermal_interaction_preserving_joint_checkpoint_v1":
-        if payload.get("model_family") != InteractionPreservingThermalAdapter.FAMILY:
+    if payload.get("checkpoint_schema") in (
+        "thermal_interaction_preserving_joint_checkpoint_v1", NATIVE_CURL_THERMAL_CHECKPOINT_SCHEMA,
+    ):
+        native_curl = payload.get("checkpoint_schema") == NATIVE_CURL_THERMAL_CHECKPOINT_SCHEMA
+        expected_family = NATIVE_CURL_THERMAL_FAMILY if native_curl else InteractionPreservingThermalAdapter.FAMILY
+        if payload.get("model_family") != expected_family:
             raise ValueError("Thermal P-family standalone checkpoint family differs from its schema.")
         if payload.get("channel_order") != list(JOINT_THERMAL_CHANNEL_ORDER):
             raise ValueError("Thermal P-family channel order must be native u/v/p/omega/temperature.")
@@ -864,7 +958,11 @@ def load_interaction_preserving_thermal_checkpoint(
             raise ValueError("Engine checkpoint arm differs from its sealed P-family recipe.")
         if provider_identity.get("task") != "ThermalChannel":
             raise ValueError("Engine checkpoint provider is not the maintained Thermal task.")
-        if provider_identity.get("model_family") != InteractionPreservingThermalAdapter.FAMILY:
+        native_curl = recipe.get("flow_readout_law") == NATIVE_CURL_READOUT_LAW
+        if recipe.get("flow_readout_law") not in (None, NATIVE_CURL_READOUT_LAW):
+            raise ValueError("Unknown sealed Thermal flow readout law.")
+        expected_family = NATIVE_CURL_THERMAL_FAMILY if native_curl else InteractionPreservingThermalAdapter.FAMILY
+        if provider_identity.get("model_family") != expected_family:
             raise ValueError("Engine checkpoint provider model family is not the P-family Thermal adapter.")
         contract = recipe.get("model_contract")
         if not isinstance(contract, Mapping):
@@ -905,9 +1003,21 @@ def load_interaction_preserving_thermal_checkpoint(
                 or dict(collective_contract) != expected_collective):
             raise ValueError("Engine checkpoint Thermal frame, grid, or collective placement is not canonical.")
         readouts = contract.get("readouts", {})
-        if (readouts.get("flow_head") != {
-                "law": "nonlinear source-conditioned field read", "outputs": 4,
-                "order": ["u", "v", "p", "omega"]}
+        expected_flow_head = {
+            "law": "nonlinear source-conditioned field read", "outputs": 4,
+            "order": ["u", "v", "p", "omega"],
+        }
+        if native_curl:
+            expected_flow_head = {
+                "law": "nonlinear source-conditioned field read", "outputs": 3,
+                "order": ["u", "v", "p"], "initialization_reference_field_outputs": 4,
+            }
+            if (readouts.get("derived_omega") != native_curl_readout_contract()
+                    or receiver_contract.get("native_solid_mask") != "saved boolean [B,ny,nx] geometry-only receiver metadata; excluded from learned context"):
+                raise ValueError("Engine checkpoint native-curl operator/mask contract is not canonical.")
+        elif "derived_omega" in readouts or "native_solid_mask" in receiver_contract:
+            raise ValueError("Independent-head checkpoint cannot declare a derived-omega readout.")
+        if (readouts.get("flow_head") != expected_flow_head
                 or readouts.get("temperature_head") != {
                     "law": "source-resolved affine heat response", "outputs": 1, "zero_offset": True}
                 or readouts.get("source_read_networks") != {
@@ -925,12 +1035,12 @@ def load_interaction_preserving_thermal_checkpoint(
         raise TypeError("Thermal P-family config, adapter, normalization and state must be mappings.")
     config = dict(config)
     adapter = dict(adapter)
-    if config.get("family") != InteractionPreservingThermalAdapter.FAMILY:
+    if config.get("family") != expected_family:
         raise ValueError("Thermal P-family checkpoint config has a different model family.")
     mode = config.get("mode")
     anchors = 0 if mode == "P" else 16
     expected_config = {
-        "family": InteractionPreservingThermalAdapter.FAMILY,
+        "family": expected_family,
         "mode": mode,
         "source_width": 8,
         "context_width": 14,
@@ -942,7 +1052,7 @@ def load_interaction_preserving_thermal_checkpoint(
         "regional_anchors": anchors,
         "depth": 2,
         "max_sources": 12,
-        "field_outputs": 4,
+        "field_outputs": 3 if native_curl else 4,
         "affine_outputs": 1,
         "query_width": 0,
         "receiver_tile": 512,
@@ -954,6 +1064,9 @@ def load_interaction_preserving_thermal_checkpoint(
         "zero_offset": True,
         "seed": 0,
     }
+    if native_curl:
+        expected_config["flow_readout_law"] = NATIVE_CURL_READOUT_LAW
+        expected_config["initialization_reference_field_outputs"] = 4
     if mode != "P":
         expected_config["locality_prior_strength"] = 1.0
     if config != expected_config:
@@ -968,6 +1081,9 @@ def load_interaction_preserving_thermal_checkpoint(
         "h_effective_max": 1.0e4,
         "joint_output_laws": {"flow": "nonlinear", "temperature_response": "affine"},
     }
+    if native_curl:
+        expected_adapter["flow_readout_law"] = NATIVE_CURL_READOUT_LAW
+        expected_adapter["native_curl_contract"] = native_curl_readout_contract()
     if adapter != expected_adapter:
         raise ValueError("Thermal P-family adapter frame/grid/output/forcing contract differs from the native contract.")
     if engine_identity is not None:
@@ -979,7 +1095,8 @@ def load_interaction_preserving_thermal_checkpoint(
     constructor_config = {
         name: value for name, value in config.items()
         if name not in {"family", "source_width", "context_width", "environment_width", "spatial_dim",
-                        "field_outputs", "affine_outputs", "query_width", "zero_offset"}
+                        "field_outputs", "affine_outputs", "query_width", "zero_offset",
+                        "initialization_reference_field_outputs"}
     }
     model = InteractionPreservingThermalAdapter(normalization_stats=stats, **constructor_config)
     if model.model_config() != config:

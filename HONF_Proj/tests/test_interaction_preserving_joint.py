@@ -372,3 +372,53 @@ def test_learned_collective_recipe_requires_explicit_prior_and_widths_are_bound(
     assert model.config['mode'] == 'P-H'
     assert model.config['collective_width'] == 6
     assert model.config['locality_prior_strength'] == 1.0
+
+
+@pytest.mark.parametrize('mode', ['P', 'P-G', 'P-H'])
+def test_native_curl_three_output_head_is_exact_four_output_initialization_trim(mode):
+    anchors = 0 if mode == 'P' else 3
+    prior = None if mode == 'P' else 1.0
+    common = {
+        "source_width": 4,
+        "context_width": 3,
+        "environment_width": 5,
+        "spatial_dim": 2,
+        "hidden": 12,
+        "message": 8,
+        "mode": mode,
+        "collective_width": 6,
+        "regional_anchors": anchors,
+        "affine_outputs": 1,
+        "query_width": 2,
+        "initialization_seed": 703,
+        "locality_prior_strength": prior,
+    }
+    torch.manual_seed(9927)
+    before = torch.random.get_rng_state().clone()
+    reference = InteractionPreservingJointCore(**common, field_outputs=4).double()
+    torch.testing.assert_close(torch.random.get_rng_state(), before, rtol=0, atol=0)
+    trimmed = InteractionPreservingJointCore(
+        **common, field_outputs=3, initialization_reference_field_outputs=4
+    ).double()
+    torch.testing.assert_close(torch.random.get_rng_state(), before, rtol=0, atol=0)
+    assert reference.field_outputs == 4 and trimmed.field_outputs == 3
+    assert trimmed.output_width == trimmed.config['output_width'] == 3
+    assert trimmed.config['initialization_reference_field_outputs'] == 4
+    ref_state, trim_state = reference.state_dict(), trimmed.state_dict()
+    assert set(ref_state) == set(trim_state)
+    for name, ref_tensor in ref_state.items():
+        if name in {'field_head.2.weight', 'field_head.2.bias'}:
+            torch.testing.assert_close(trim_state[name], ref_tensor[:3], rtol=0, atol=0)
+        else:
+            torch.testing.assert_close(trim_state[name], ref_tensor, rtol=0, atol=0)
+    values = _inputs()
+    reference_value = reference.predict_fields(_prepare(reference, values), values['receivers'],
+                                              values['receiver_features'])
+    trimmed_value = trimmed.predict_fields(_prepare(trimmed, values), values['receivers'],
+                                           values['receiver_features'])
+    torch.testing.assert_close(trimmed_value, reference_value[..., :3], rtol=1e-14, atol=2e-16)
+
+def test_initialization_reference_width_cannot_be_narrower_than_actual_head():
+    with pytest.raises(ValueError, match='at least as wide as the actual field head'):
+        InteractionPreservingJointCore(4, 3, 5, field_outputs=4,
+                                       initialization_reference_field_outputs=3)

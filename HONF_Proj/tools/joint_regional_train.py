@@ -8,15 +8,15 @@ requires the explicit --manual-formal-launch switch.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
 import os
 import random
+import subprocess
 import sys
 import time
-import subprocess
-import copy
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +37,7 @@ RECIPE_KEYS = {
     "model_contract", "objective_contract", "engine_schedule", "optimizer_name",
     "optimizer_betas", "optimizer_eps", "gradient_clip_norm",
     "validation_scope", "optimizer_schedule", "weight_decay", "native_sampling_protocol",
-    "checkpoint_epochs", "write_initial_artifacts",
+    "checkpoint_epochs", "write_initial_artifacts", "flow_readout_law",
 }
 
 RECOVERY_OPTIMIZER_SCHEDULE = {
@@ -90,7 +90,22 @@ RECOVERY_SOURCE_FILES = (
 )
 
 
-def _recovery_model_contract(task: str, mode: str) -> dict[str, Any]:
+NATIVE_CURL_THERMAL_LAW = "native_curl_cell_centred_v1"
+NATIVE_CURL_FLOW_SOURCE = (
+    "HONF_Proj/Case_ThermalChannel/src/channelthermal/flow_curl.py"
+)
+
+
+def _recovery_source_files(flow_readout_law: str | None = None) -> tuple[str, ...]:
+    if flow_readout_law is None:
+        return RECOVERY_SOURCE_FILES
+    if flow_readout_law != NATIVE_CURL_THERMAL_LAW:
+        raise ValueError("Unsupported optional Thermal flow readout law.")
+    return RECOVERY_SOURCE_FILES + (NATIVE_CURL_FLOW_SOURCE,)
+
+
+def _recovery_model_contract(task: str, mode: str,
+                             flow_readout_law: str | None = None) -> dict[str, Any]:
     if task == "thermal":
         contract = {
             "input_frame": "packed Thermal native x-y coordinates; source centres/radii normalized by physical domain lengths",
@@ -120,7 +135,23 @@ def _recovery_model_contract(task: str, mode: str) -> dict[str, Any]:
                 "forcing_scale": 1.0,
             },
         }
+        if flow_readout_law is not None:
+            if flow_readout_law != NATIVE_CURL_THERMAL_LAW:
+                raise ValueError("Unsupported optional Thermal flow readout law.")
+            from channelthermal.flow_curl import native_curl_readout_contract
+            contract["readouts"]["flow_head"] = {
+                "law": "nonlinear source-conditioned field read",
+                "outputs": 3,
+                "order": ["u", "v", "p"],
+                "initialization_reference_field_outputs": 4,
+            }
+            contract["readouts"]["derived_omega"] = native_curl_readout_contract()
+            contract["receivers"]["native_solid_mask"] = (
+                "saved boolean [B,ny,nx] geometry-only receiver metadata; excluded from learned context"
+            )
     else:
+        if flow_readout_law is not None:
+            raise ValueError("A native Thermal curl readout is invalid for Wind.")
         contract = {
             "input_frame": "Wind native rotor-diameter coordinates; rotor locations, support and receivers remain in D",
             "source": {
@@ -214,6 +245,13 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Joint recipe schema/task is invalid.")
     if recipe.get("mode") not in MODES or recipe.get("initialization") != "fresh_all_trainable":
         raise ValueError("Joint recipes require a declared mode and fresh trainable weights.")
+    flow_readout_law = recipe.get("flow_readout_law")
+    if flow_readout_law is not None:
+        if (recipe["task"] != "thermal" or recipe["mode"] not in ("P", "P-G", "P-H")
+                or recipe["formal_full"]):
+            raise ValueError("The native curl law is limited to bounded fresh Thermal P-family recipes.")
+        if flow_readout_law != NATIVE_CURL_THERMAL_LAW:
+            raise ValueError("Unsupported optional Thermal flow readout law.")
     if recipe.get("formal_full") and recipe.get("launch_policy") != "manual_only":
         raise ValueError("Formal recipes must be manual-only.")
     for name in ("hidden", "message", "depth", "receiver_tile", "primary_queries",
@@ -288,8 +326,11 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_recovery_recipe(recipe: dict[str, Any]) -> None:
     task, mode = recipe["task"], recipe["mode"]
-    expected_id = ({"P": "T4101", "P-G": "T4102", "P-H": "T4103"} if task == "thermal"
-                   else {"P": "W2401", "P-G": "W2402", "P-H": "W2403"})[mode]
+    if task == "thermal" and recipe.get("flow_readout_law") == NATIVE_CURL_THERMAL_LAW:
+        expected_id = {"P": "T4111", "P-G": "T4112", "P-H": "T4113"}[mode]
+    else:
+        expected_id = ({"P": "T4101", "P-G": "T4102", "P-H": "T4103"} if task == "thermal"
+                       else {"P": "W2401", "P-G": "W2402", "P-H": "W2403"})[mode]
     expected_seed = 0 if task == "thermal" else 42
     expected_anchors = 0 if mode == "P" else (16 if task == "thermal" else 32)
     expected_shape = [24, 8] if task == "thermal" else [2, 2, 2]
@@ -323,7 +364,8 @@ def _validate_recovery_recipe(recipe: dict[str, Any]) -> None:
         "dataset_protocol": "fixed25_v1" if task == "thermal" else "wind_shared_fixed24_v1",
         "max_sources": expected_sources,
         "environment_token_shape": expected_shape,
-        "model_contract": _recovery_model_contract(task, mode),
+        "model_contract": _recovery_model_contract(
+            task, mode, recipe.get("flow_readout_law")),
         "objective_contract": _recovery_objective_contract(task),
         "engine_schedule": RECOVERY_ENGINE_SCHEDULE,
         "optimizer_name": "AdamW",
@@ -343,15 +385,27 @@ def _validate_recovery_recipe(recipe: dict[str, Any]) -> None:
         raise ValueError("Recovery recipe must retain the shared 2500-epoch review/checkpoint boundaries.")
     if task == "thermal":
         descriptor = recipe["calibration_receipt"]
-        expected_path = "diagnostics/generated/interaction_recovery_20261010/thermal_fresh_P_calibration.json"
+        native_curl = recipe.get("flow_readout_law") == NATIVE_CURL_THERMAL_LAW
+        expected_path = (
+            "diagnostics/generated/interaction_recovery_20261010/thermal_native_curl_fresh_P_calibration.json"
+            if native_curl else
+            "diagnostics/generated/interaction_recovery_20261010/thermal_fresh_P_calibration.json"
+        )
         basic_descriptor = (isinstance(descriptor, dict)
                             and descriptor.get("receipt_path") == expected_path
                             and isinstance(descriptor.get("required_payload_sha256"), str))
         if not basic_descriptor:
             raise ValueError("Thermal recovery recipe must bind the maintained fresh-P TRAIN receipt location.")
         digest = descriptor["required_payload_sha256"]
-        if digest == "sealed_after_fresh_P_calibration":
-            if set(descriptor) != {"receipt_path", "required_payload_sha256"} or "auxiliary_calibration" in recipe:
+        expected_sentinel = ("sealed_after_fresh_P_native_curl_calibration" if native_curl
+                             else "sealed_after_fresh_P_calibration")
+        if digest == expected_sentinel:
+            invalid_auxiliary_calibration = (
+                recipe.get("auxiliary_calibration") is not None if native_curl else
+                "auxiliary_calibration" in recipe
+            )
+            if (set(descriptor) != {"receipt_path", "required_payload_sha256"}
+                    or invalid_auxiliary_calibration):
                 raise ValueError("Unresolved Thermal calibration descriptor has unexpected receipt fields.")
         else:
             valid_digest = len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
@@ -414,12 +468,24 @@ def _bind_calibration_receipt(recipe: dict[str, Any]) -> dict[str, Any]:
     actual_digest = _canonical_payload_sha256(receipt)
     if receipt.get("payload_sha256") != actual_digest:
         raise ValueError("Thermal calibration receipt payload digest is missing or invalid.")
-    active_source_identity = training_source_identity(require_clean=True)
+    flow_readout_law = recipe.get("flow_readout_law")
+    active_source_identity = (
+        training_source_identity(require_clean=True) if flow_readout_law is None else
+        training_source_identity(require_clean=True, flow_readout_law=flow_readout_law)
+    )
     if receipt.get("training_source_identity") != active_source_identity:
         raise ValueError("Thermal calibration receipt was produced by a different committed training source revision.")
-    if descriptor["required_payload_sha256"] != "sealed_after_fresh_P_calibration":
-        if descriptor["required_payload_sha256"] != actual_digest:
-            raise ValueError("Thermal recipe calibration digest differs from the external TRAIN receipt.")
+    if (recipe.get("flow_readout_law") is not None
+            and receipt.get("flow_readout_law") != recipe.get("flow_readout_law")):
+        raise ValueError("Thermal calibration receipt binds a different flow readout law.")
+    expected_sentinel = (
+        "sealed_after_fresh_P_native_curl_calibration"
+        if flow_readout_law == NATIVE_CURL_THERMAL_LAW else
+        "sealed_after_fresh_P_calibration"
+    )
+    if (descriptor["required_payload_sha256"] != expected_sentinel
+            and descriptor["required_payload_sha256"] != actual_digest):
+        raise ValueError("Thermal recipe calibration digest differs from the external TRAIN receipt.")
     resolved = copy.deepcopy(recipe)
     resolved["calibration_receipt"] = {
         "receipt_path": descriptor["receipt_path"],
@@ -445,10 +511,12 @@ def _check_fresh_calibration_destinations(recipe: dict[str, Any], output_dir: st
     return receipt_path, invocation_path
 
 
-def training_source_identity(*, require_clean: bool) -> dict[str, Any]:
+def training_source_identity(*, require_clean: bool,
+                             flow_readout_law: str | None = None) -> dict[str, Any]:
     repo_root = ROOT.parent
+    source_files = _recovery_source_files(flow_readout_law)
     dirty = subprocess.run(
-        ["git", "status", "--porcelain", "--", *RECOVERY_SOURCE_FILES],
+        ["git", "status", "--porcelain", "--", *source_files],
         cwd=repo_root, check=True, text=True, capture_output=True,
     ).stdout.splitlines()
     if require_clean and dirty:
@@ -457,13 +525,13 @@ def training_source_identity(*, require_clean: bool) -> dict[str, Any]:
             f"dirty source paths: {dirty}"
         )
     hashes = {}
-    for relative in RECOVERY_SOURCE_FILES:
+    for relative in source_files:
         path = repo_root / relative
         if not path.is_file():
             raise FileNotFoundError(f"Recovery source identity is missing {relative}.")
         hashes[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     source_commit = subprocess.run(
-        ["git", "log", "-1", "--format=%H", "--", *RECOVERY_SOURCE_FILES],
+        ["git", "log", "-1", "--format=%H", "--", *source_files],
         cwd=repo_root, check=True, text=True, capture_output=True,
     ).stdout.strip()
     body = {"source_git_commit": source_commit, "source_sha256": hashes}
@@ -505,7 +573,7 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
         from windfarm.training.joint_task import build_wind_joint_task as factory
     task_options = {name: recipe[name] for name in ("response_coefficient", "operator_coefficient", "auxiliary_calibration",
                                                  "locality_prior_strength", "validation_scope", "weight_decay",
-                                                 "native_sampling_protocol")
+                                                 "native_sampling_protocol", "flow_readout_law")
                     if name in recipe}
     if "optimizer_schedule" in recipe:
         task_options["optimizer_schedule"] = ScheduleSpec(total_epochs=recipe["total_epochs"],
@@ -543,7 +611,12 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
         write_initial_artifacts=recipe.get("write_initial_artifacts", False),
     )
     engine = TrainingEngine(config, device=device, selection=SelectionPolicy(field_metric="field_score"))
-    source_identity = training_source_identity(require_clean=require_clean_source)
+    flow_readout_law = recipe.get("flow_readout_law")
+    source_identity = (
+        training_source_identity(require_clean=require_clean_source)
+        if flow_readout_law is None else
+        training_source_identity(require_clean=require_clean_source, flow_readout_law=flow_readout_law)
+    )
     identity = {
         "workflow": "joint_regional_fields_v1", "recipe": recipe,
         "training_source_identity": source_identity,
@@ -649,7 +722,7 @@ def main(argv: list[str] | None = None) -> int:
     recipe = resolved_recipe(args)
     if args.command == "calibrate-thermal":
         if (recipe["task"] != "thermal" or recipe["mode"] != "P" or recipe["formal_full"]
-                or "auxiliary_calibration" in recipe):
+                or recipe.get("auxiliary_calibration") is not None):
             parser.error("calibrate-thermal requires an unresolved fresh Thermal P recipe only.")
         if not args.output_dir:
             parser.error("calibrate-thermal requires --output-dir for its auditable invocation record.")

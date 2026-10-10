@@ -363,7 +363,17 @@ def test_wind_prepared_state_rejects_transform_mutation():
 def test_six_recovery_recipes_validate_and_seal_graph_interventions():
     cli = _joint_recipe_module()
     config_dir = REPO_ROOT / "src" / "config_core" / "forward" / "joint_regional"
-    paths = sorted(config_dir.glob("*_interaction_preserving_p*.json"))
+    paths = [
+        config_dir / name
+        for name in (
+            "thermal_interaction_preserving_p.json",
+            "thermal_interaction_preserving_p_g.json",
+            "thermal_interaction_preserving_p_h.json",
+            "wind_interaction_preserving_p.json",
+            "wind_interaction_preserving_p_g.json",
+            "wind_interaction_preserving_p_h.json",
+        )
+    ]
     recipes = [cli.read_recipe(path) for path in paths]
     assert len(recipes) == 6
     assert {(recipe["task"], recipe["mode"]) for recipe in recipes} == {

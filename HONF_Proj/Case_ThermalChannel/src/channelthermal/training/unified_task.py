@@ -130,6 +130,8 @@ class ThermalReceivers:
     response_fluid_xy: torch.Tensor | None = None
     response_local_query_points: torch.Tensor | None = None
     response_heat: torch.Tensor | None = None
+    native_solid_mask: torch.Tensor | None = None
+    response_native_solid_mask: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -993,7 +995,7 @@ class ThermalRefinementTask:
             material_ids = rng.choice(len(family["material_local"]), material_count, replace=False)
         surface_stride = int(sample_budget.get("surface_stride", RESPONSE_SURFACE_STRIDE))
         tensor = lambda value: torch.as_tensor(value, dtype=torch.float32)
-        return {
+        sample = {
             "family_id": str(family["family_id"]),
             "structure": {name: tensor(value)[None] for name, value in family["structure"].items()},
             "fluid_xy": tensor(family["fluid_xy"][fluid_ids])[None],
@@ -1007,6 +1009,12 @@ class ThermalRefinementTask:
             "fluid_ids": np.asarray(fluid_ids, dtype=np.int64),
             "material_ids": np.asarray(material_ids, dtype=np.int64),
         }
+        if "native_solid_mask" in family:
+            mask = np.asarray(family["native_solid_mask"])
+            if mask.dtype != np.bool_ or mask.ndim != 2:
+                raise ValueError("Bound TRAIN response native_solid_mask must be a stored boolean [ny,nx] array.")
+            sample["native_solid_mask"] = torch.as_tensor(mask.copy(), dtype=torch.bool)[None]
+        return sample
 
     def _prepare_response_sample(
         self, family: Mapping[str, Any], *, training: bool, key: SamplingKey | None,
@@ -1030,6 +1038,19 @@ class ThermalRefinementTask:
             device=self.device,
             validation_sampling_indices=getattr(self, "validation_sampling_indices", None),
         )
+        selected_cases = (self.training_cases if training else self.validation_cases)
+        selected_records = [selected_cases[index] for index in indices]
+        primary_masks = [case.get("native_solid_mask") for case in selected_records]
+        native_solid_mask = None
+        if any(mask is not None for mask in primary_masks):
+            if any(mask is None for mask in primary_masks):
+                raise ValueError("Native curl requires one saved geometry mask for every primary case in a batch.")
+            mask_arrays = [np.asarray(mask) for mask in primary_masks]
+            if any(mask.dtype != np.bool_ or mask.ndim != 2 for mask in mask_arrays):
+                raise ValueError("Primary native_solid_mask entries must be stored boolean [ny,nx] arrays.")
+            if len({tuple(mask.shape) for mask in mask_arrays}) != 1:
+                raise ValueError("Primary native_solid_mask grids differ within the physical batch.")
+            native_solid_mask = torch.as_tensor(np.stack(mask_arrays), dtype=torch.bool, device=self.device)
         raw_structure = sample["structure"]
         scene_structure = _structure_only(raw_structure)
         response_sample = None
@@ -1039,6 +1060,11 @@ class ThermalRefinementTask:
                 self._train_family_by_id[TRAIN_RESPONSE_IDS[family_index]], training=True, key=key,
                 budget=sample_budget)
         response_structure = None if response_sample is None else response_sample["structure"]
+        response_native_solid_mask = (
+            None if response_sample is None else response_sample.get("native_solid_mask")
+        )
+        if response_native_solid_mask is not None:
+            response_native_solid_mask = response_native_solid_mask.to(device=self.device, dtype=torch.bool)
         fluid_xy = sample["query_xy"]
         local = sample["module_internal_query_points"]
         receivers = ThermalReceivers(
@@ -1048,6 +1074,8 @@ class ThermalRefinementTask:
             response_fluid_xy=None if response_sample is None else response_sample["fluid_xy"].to(self.device),
             response_local_query_points=None if response_sample is None else response_sample["local"].to(self.device),
             response_heat=None if response_sample is None else response_sample["heat"].to(self.device),
+            native_solid_mask=native_solid_mask,
+            response_native_solid_mask=response_native_solid_mask,
         )
         response_target = None
         if response_sample is not None:
