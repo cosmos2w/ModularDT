@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -18,6 +19,7 @@ import time
 from collections import Counter, OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -51,6 +53,7 @@ from .native_cover_panel import (
     freeze_organizer_layout_split,
     select_training_layouts,
 )
+from .native_role_cache import NativeRoleCatalogueStore
 from .train_forward import _compact_metadata, _json_write, _resolved_path
 
 ROLE_NAMES = (
@@ -130,7 +133,12 @@ class NativeRoleCatalogueCache:
     reusable NumPy arrays under a fixed host-memory budget.
     """
 
-    def __init__(self, *, max_cached_bytes: int = DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES) -> None:
+    def __init__(
+        self,
+        *,
+        max_cached_bytes: int = DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
+        persistent_dir: str | Path | None = None,
+    ) -> None:
         if isinstance(max_cached_bytes, bool) or not isinstance(max_cached_bytes, int) or max_cached_bytes <= 0:
             raise ValueError("role catalogue cache byte limit must be a positive integer")
         self.max_cached_bytes = int(max_cached_bytes)
@@ -143,11 +151,20 @@ class NativeRoleCatalogueCache:
         self.miss_count = 0
         self.eviction_count = 0
         self.oversize_bypass_count = 0
+        self.persistent_dir = None if persistent_dir is None else Path(persistent_dir)
+        self._store: NativeRoleCatalogueStore | None = None
+        self.disk_hit_count = 0
+        self.disk_write_count = 0
 
     @staticmethod
     def _geometry_sha256(case: Any) -> str:
         digest = hashlib.sha256()
         run = case.run
+        if int(run.cell_count) != int(run.nx) * int(run.ny) * int(run.nz):
+            raise ValueError("Native catalogue cell count disagrees with its grid shape.")
+        centers = np.asarray(case.module_centers)
+        if centers.ndim != 2 or centers.shape[1] != 3:
+            raise ValueError("Native catalogue turbine centers must have shape [modules, 3].")
         metadata = {
             "layout_index": int(case.layout_index),
             "shape_nxyz": [int(run.nx), int(run.ny), int(run.nz)],
@@ -160,9 +177,12 @@ class NativeRoleCatalogueCache:
             digest.update(str(array.dtype).encode("ascii"))
             digest.update(str(array.shape).encode("ascii"))
             digest.update(memoryview(array).cast("B"))
-        active = np.asarray(case.module_centers, dtype=np.float32)[
-            np.asarray(case.module_present) > 0.5
-        ]
+        active = centers[np.asarray(case.module_present) > 0.5]
+        # Preserve the existing native float32 identity. Higher-precision input
+        # must not be rounded to float32 before checking geometry for reuse.
+        if active.dtype != np.dtype("float32"):
+            digest.update(str(active.dtype).encode("ascii"))
+            digest.update(str(active.shape).encode("ascii"))
         digest.update(memoryview(np.ascontiguousarray(active)).cast("B"))
         return digest.hexdigest()
 
@@ -189,6 +209,86 @@ class NativeRoleCatalogueCache:
             return cached
         self.miss_count += 1
 
+        if self.persistent_dir is None:
+            catalogue = self._build_catalogue(case, geometry_sha256)
+            self.build_count += 1
+        else:
+            if self._store is None:
+                self._store = NativeRoleCatalogueStore(
+                    self.persistent_dir, _native_role_catalogue_recipe(), ROLE_NAMES,
+                )
+            with self._store.locked(layout_index, geometry_sha256):
+                loaded = self._store.load(layout_index, geometry_sha256, int(case.run.cell_count))
+                if loaded is None:
+                    catalogue = self._build_catalogue(case, geometry_sha256)
+                    self.build_count += 1
+                    arrays = {"coordinates": catalogue.coordinates_D}
+                    arrays.update({f"cdf_{role}": value for role, value in catalogue.role_cdf.items()})
+                    arrays.update({f"indices_{role}": value for role, value in catalogue.role_indices.items()})
+                    self._store.write(
+                        layout_index, geometry_sha256, arrays, dict(catalogue.role_support_volume_m3),
+                    )
+                    self.disk_write_count += 1
+                else:
+                    arrays, supports = loaded
+                    catalogue = NativeRoleCatalogue(
+                        layout_index=layout_index,
+                        geometry_sha256=geometry_sha256,
+                        coordinates_D=arrays["coordinates"],
+                        role_indices=MappingProxyType({
+                            role: arrays[f"indices_{role}"] for role in ROLE_NAMES if role != "volume"
+                        }),
+                        role_cdf=MappingProxyType({role: arrays[f"cdf_{role}"] for role in ROLE_NAMES}),
+                        role_support_volume_m3=MappingProxyType(supports),
+                        cached_nbytes=sum(int(array.nbytes) for array in arrays.values()),
+                    )
+                    self.disk_hit_count += 1
+        if catalogue.cached_nbytes > self.max_cached_bytes:
+            self.oversize_bypass_count += 1
+            return catalogue
+        self._catalogues[key] = catalogue
+        self._catalogues.move_to_end(key)
+        self._cached_bytes += catalogue.cached_nbytes
+        while self._cached_bytes > self.max_cached_bytes:
+            _, evicted = self._catalogues.popitem(last=False)
+            self._cached_bytes -= evicted.cached_nbytes
+            self.eviction_count += 1
+        self.peak_cached_bytes = max(self.peak_cached_bytes, self._cached_bytes)
+        return catalogue
+
+    def summary(self) -> dict[str, Any]:
+        result = {
+            "catalogue_count": len(self._catalogues),
+            "catalogue_build_count": self.build_count,
+            "cache_hit_count": self.hit_count,
+            "cache_miss_count": self.miss_count,
+            "cache_eviction_count": self.eviction_count,
+            "cache_oversize_bypass_count": self.oversize_bypass_count,
+            "cache_capacity_bytes": self.max_cached_bytes,
+            "cached_bytes": self._cached_bytes,
+            "peak_cached_bytes": self.peak_cached_bytes,
+            "cache_byte_measure": "sum of retained NumPy array nbytes; excludes Python metadata",
+            "identities": [
+                {
+                    "layout_index": item.layout_index,
+                    "geometry_sha256": item.geometry_sha256,
+                    "native_cell_count": int(item.coordinates_D.shape[0]),
+                    "cached_bytes": item.cached_nbytes,
+                }
+                for item in self._catalogues.values()
+            ],
+        }
+        if self.persistent_dir is not None:
+            result.update({
+                "persistent_directory": str(self.persistent_dir.expanduser().resolve()),
+                "persistent_disk_hit_count": self.disk_hit_count,
+                "persistent_disk_write_count": self.disk_write_count,
+                "persistent_verification": "exact geometry, recipe, array shapes/dtypes and SHA256 payloads",
+            })
+        return result
+
+    def _build_catalogue(self, case: Any, geometry_sha256: str) -> NativeRoleCatalogue:
+        layout_index = int(case.layout_index)
         coordinates, masks, cell_weights = _native_role_masks(case)
         coordinates = coordinates.astype(np.float32, copy=False)
         coordinates.setflags(write=False)
@@ -220,7 +320,7 @@ class NativeRoleCatalogueCache:
             cached_arrays.append(cdf)
 
         cached_nbytes = sum(int(array.nbytes) for array in cached_arrays)
-        catalogue = NativeRoleCatalogue(
+        return NativeRoleCatalogue(
             layout_index=layout_index,
             geometry_sha256=geometry_sha256,
             coordinates_D=coordinates,
@@ -229,42 +329,6 @@ class NativeRoleCatalogueCache:
             role_support_volume_m3=MappingProxyType(role_support),
             cached_nbytes=cached_nbytes,
         )
-        self.build_count += 1
-        if catalogue.cached_nbytes > self.max_cached_bytes:
-            self.oversize_bypass_count += 1
-            return catalogue
-        self._catalogues[key] = catalogue
-        self._catalogues.move_to_end(key)
-        self._cached_bytes += catalogue.cached_nbytes
-        while self._cached_bytes > self.max_cached_bytes:
-            _, evicted = self._catalogues.popitem(last=False)
-            self._cached_bytes -= evicted.cached_nbytes
-            self.eviction_count += 1
-        self.peak_cached_bytes = max(self.peak_cached_bytes, self._cached_bytes)
-        return catalogue
-
-    def summary(self) -> dict[str, Any]:
-        return {
-            "catalogue_count": len(self._catalogues),
-            "catalogue_build_count": self.build_count,
-            "cache_hit_count": self.hit_count,
-            "cache_miss_count": self.miss_count,
-            "cache_eviction_count": self.eviction_count,
-            "cache_oversize_bypass_count": self.oversize_bypass_count,
-            "cache_capacity_bytes": self.max_cached_bytes,
-            "cached_bytes": self._cached_bytes,
-            "peak_cached_bytes": self.peak_cached_bytes,
-            "cache_byte_measure": "sum of retained NumPy array nbytes; excludes Python metadata",
-            "identities": [
-                {
-                    "layout_index": item.layout_index,
-                    "geometry_sha256": item.geometry_sha256,
-                    "native_cell_count": int(item.coordinates_D.shape[0]),
-                    "cached_bytes": item.cached_nbytes,
-                }
-                for item in self._catalogues.values()
-            ],
-        }
 
 
 _DEFAULT_ROLE_CATALOGUE_CACHE = NativeRoleCatalogueCache()
@@ -514,6 +578,28 @@ def _native_role_masks(case: Any) -> tuple[np.ndarray, dict[str, np.ndarray], np
         "background": background,
     }
     return coords, masks, quadrature
+
+
+@lru_cache(maxsize=1)
+def _native_role_catalogue_recipe() -> dict[str, Any]:
+    """Separate stores when numerical implementation or role policy changes."""
+    from .. import geometry, study_spatial
+
+    return {
+        "schema_version": 1,
+        "numpy_version": np.__version__,
+        "roles": list(ROLE_NAMES),
+        "hub_slab_half_width_D": HUB_SLAB_HALF_WIDTH_D,
+        "downstream_length_D": DOWNSTREAM_LENGTH_D,
+        "downstream_radius_D": DOWNSTREAM_RADIUS_D,
+        "near_turbine_radius_D": NEAR_TURBINE_RADIUS_D,
+        "implementation_sha256": hashlib.sha256(
+            inspect.getsource(_native_role_masks).encode()
+            + inspect.getsource(NativeRoleCatalogueCache._build_catalogue).encode()
+            + Path(geometry.__file__).read_bytes()
+            + Path(study_spatial.__file__).read_bytes()
+        ).hexdigest(),
+    }
 
 
 def sample_native_role_queries(

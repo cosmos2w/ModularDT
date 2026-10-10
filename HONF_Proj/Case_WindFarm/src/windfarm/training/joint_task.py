@@ -48,6 +48,7 @@ from ..workflows.joint_forward import (
     NativeRoleCatalogueCache,
     sample_native_role_queries,
 )
+from ..workflows.native_role_cache import training_catalogue_cache_directory
 from .unified_task import (
     DEFAULT_DATA_ROOT,
     DEFAULT_DERIVED_ROOT,
@@ -1545,7 +1546,10 @@ def build_wind_joint_task(
         manifest_fingerprint=training_fingerprint,
         train_rows=train_rows,
     )
-    catalogue_cache = NativeRoleCatalogueCache(max_cached_bytes=int(catalogue_cache_bytes))
+    catalogue_cache = NativeRoleCatalogueCache(
+        persistent_dir=training_catalogue_cache_directory(),
+        max_cached_bytes=int(catalogue_cache_bytes),
+    )
     calibration, cache_identity = _fit_or_load_role_scales(
         view=view,
         train_rows=train_rows,

@@ -47,6 +47,7 @@ from ..workflows.joint_forward import (
     NativeRoleCatalogueCache,
     sample_native_role_queries,
 )
+from ..workflows.native_role_cache import training_catalogue_cache_directory
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[3] / "Dataset/links/wind_farm"
 DEFAULT_DERIVED_ROOT = Path(__file__).resolve().parents[3] / "Dataset/derived/forward_velocity_v1"
@@ -763,7 +764,10 @@ class WindRefinementTask:
         }
         if catalogue_cache is not None and catalogue_cache.max_cached_bytes != int(catalogue_cache_bytes):
             raise ValueError("Injected Wind catalogue cache capacity differs from the provider binding.")
-        self.catalogue_cache = catalogue_cache or NativeRoleCatalogueCache(max_cached_bytes=int(catalogue_cache_bytes))
+        self.catalogue_cache = catalogue_cache or NativeRoleCatalogueCache(
+            persistent_dir=training_catalogue_cache_directory(),
+            max_cached_bytes=int(catalogue_cache_bytes),
+        )
         self.max_microbatch_cases = 24 if self.recipe is not None else 4
         requested_weights = dict(objective_weights or {})
         if requested_weights and requested_weights != {
@@ -1823,7 +1827,10 @@ def _fit_train_role_scales(
     train_set = set(map(int, rows.tolist()))
     if any(row not in train_set for row in calibration_rows):
         raise ValueError("Wind role-scale calibration panel escaped the selected TRAIN rows.")
-    cache = catalogue_cache or NativeRoleCatalogueCache(max_cached_bytes=DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES)
+    cache = catalogue_cache or NativeRoleCatalogueCache(
+        persistent_dir=training_catalogue_cache_directory(),
+        max_cached_bytes=DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
+    )
     sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
     squared_sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
     residual_squared_sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
@@ -2000,7 +2007,10 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTas
     if normalizer.source_rows != 72 or normalizer.sample_count_per_row != 8192 or normalizer.seed != 42:
         raise ValueError("Wind normalization differs from the frozen 72-row TRAIN fitting protocol.")
     catalogue_cache_bytes = int(config.get("catalogue_cache_bytes", DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES))
-    catalogue_cache = None if recipe is None else NativeRoleCatalogueCache(max_cached_bytes=catalogue_cache_bytes)
+    catalogue_cache = None if recipe is None else NativeRoleCatalogueCache(
+        persistent_dir=training_catalogue_cache_directory(),
+        max_cached_bytes=catalogue_cache_bytes,
+    )
     role_component_scales = None
     role_scale_calibration = None
     role_scale_profile = None

@@ -35,15 +35,16 @@ from ..workflows.joint_forward import (
     NativeRoleCatalogueCache,
     sample_native_role_queries,
 )
+from ..workflows.native_role_cache import training_catalogue_cache_directory
 from .unified_task import (
     DEFAULT_ROLE_QUERY_COUNTS,
     WindRefinementTask,
     _fit_train_role_scales,
     _indices_sha256,
     _load_original_split,
-    resolve_wind_recipe,
     _sha256,
     _stable_json_sha256,
+    resolve_wind_recipe,
 )
 
 FORMAL_RECIPE_ID = "windfarm_original_seed42_fulltrain_refinement_v1"
@@ -356,7 +357,10 @@ def prepare_recipe(config: Mapping[str, Any], *, metadata_only: bool = False) ->
         training_recipe = resolve_wind_recipe(recipe=dict(recipe["wind_training_recipe"]))
         if training_recipe is None:
             raise RuntimeError("The prepared formal Wind training recipe disappeared.")
-        cache = NativeRoleCatalogueCache(max_cached_bytes=FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES)
+        cache = NativeRoleCatalogueCache(
+            persistent_dir=training_catalogue_cache_directory(),
+            max_cached_bytes=FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES,
+        )
         calibration = _fit_train_role_scales(
             view,
             split.train,
@@ -463,7 +467,10 @@ def _fit_formal_role_scales(view: WindFarmNativeView, train_rows: np.ndarray) ->
     if rows.shape != (420,) or np.unique(rows).size != rows.size:
         raise ValueError("Formal role-scale fitting requires the 420 unique original TRAIN rows.")
     counts = {name: int(DEFAULT_ROLE_QUERY_COUNTS[name]) for name in ROLE_NAMES}
-    cache = NativeRoleCatalogueCache(max_cached_bytes=DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES)
+    cache = NativeRoleCatalogueCache(
+        persistent_dir=training_catalogue_cache_directory(),
+        max_cached_bytes=DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
+    )
     sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
     squared_sums = {name: np.zeros(3, dtype=np.float64) for name in ROLE_NAMES}
     sample_counts = {name: 0 for name in ROLE_NAMES}
@@ -826,7 +833,10 @@ def create_task(
         velocity_transform=normalizer,
         background_profile=profile,
     ).to(torch.device(device))
-    catalogue_cache = NativeRoleCatalogueCache(max_cached_bytes=FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES)
+    catalogue_cache = NativeRoleCatalogueCache(
+        persistent_dir=training_catalogue_cache_directory(),
+        max_cached_bytes=FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES,
+    )
     provider = WindFormalRefinementTask(
         view,
         train_rows=split.train.astype(np.int64),

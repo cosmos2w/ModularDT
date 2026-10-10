@@ -17,6 +17,8 @@ Stage-1–6 exchangeable, adaptive, entmax, additive, and gathered modes remain 
 
 The opt-in [unified training and source-preserving refinement family](docs/guides/Unified_Interaction_Training_and_Refinement.md) uses one real training engine and shared context/base/organizer code for Thermal and Wind, with separate weights and dataset-owned affine/nonlinear laws. Every source retains a cheap read while receiver-specific gates select fine corrections. Its development identities, exact-resume requirements, compiled packet path and physical-evidence boundaries are separate from the historical default profiles.
 
+Joint and unified Wind training reuse [persistent geometry-verified native role catalogues](docs/guides/Wind_Native_Catalogue_Cache.md) across launches. The CPU preparation tool covers either full TRAIN/VALID or the fixed segmented subset, shares geometry entries between both scopes, and leaves targets and query sampling uncached.
+
 The opt-in [Thermal source-response interface](docs/guides/Thermal_Source_Response.md)
 prepares geometry-dependent temperature kernels and applies heating separately,
 with a frozen heat-independent flow reader. Its independently trained direct
