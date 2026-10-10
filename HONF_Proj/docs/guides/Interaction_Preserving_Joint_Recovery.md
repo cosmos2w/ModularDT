@@ -12,6 +12,8 @@ Both organized arms start with the same Gaussian geometry prior of strength 1. P
 
 Thermal shares the pair context but uses separate nonlinear source reads for the four flow outputs and the affine temperature coefficients. Heat is absent from context, memberships, flow prediction, and coefficient preparation; only the final physical heat contraction changes with heating. Wind retains the inherited source-conditioned nonlinear velocity read and the TRAIN-fitted height-profile output transform. No learned historical checkpoint initializes these fits.
 
+The resolved recipe's `field_source_read` label describes the flow read operation; its registered PyTorch parameter path is `core.source_read`. The temperature path is registered as `core.affine_source_read`. Gradient diagnostics and optimizer audits use these actual parameter names.
+
 | Contract | Thermal | Wind |
 |---|---|---|
 | Source/context/environment feature widths | 8/14/8 | 2/11/7 |
@@ -67,7 +69,7 @@ The goal begins 2026-10-10 19:14:23Z. Training must end by 2026-10-11 09:14:23Z,
 
 ## Measurements and decision
 
-At 100, 500, and selected final checkpoints, compare fixed-weight TRAIN probes with the same DEV metric panel. Report each Thermal physical channel, temperature role and peak/tail, and all 15 Wind role/component errors and tails. Frozen-weight gradients by physical loss and parameter family, their norms/cosines, and actual residual magnitudes distinguish optimization reach from useful learned content. Native curl/omega consistency is valid for the Thermal reference; an incompressibility constraint is not part of this dataset.
+At 100, 500, and selected final checkpoints, compare fixed-weight TRAIN probes with the same DEV metric panel. Report each Thermal physical channel, temperature role and peak/tail, and all 15 Wind role/component errors and tails. Frozen-weight gradients by named parameter/module and physical loss family, per-parameter unused-gradient flags, shared-core loss-family cosines on one fixed zero-filled named basis, state/residual norms, and per-head output effects distinguish optimization reach from useful learned content. For P-H, separately verify that learned source/environment membership-score and typed-value MLP parameters receive nonzero e100 gradients. The protocol label `field_source_read` maps to the inherited registered `core.source_read` module (or another `*.source_read` name) and is grouped with physical flow-read heads; `affine_source_read` is the separate affine temperature read. Native curl/omega consistency is valid for the Thermal reference; an incompressibility constraint is not part of this dataset.
 
 Compare independently trained P, P-G, and P-H. On a small fixed panel, supplement that comparison with same-weight collective removal, learned-to-geometry replacement, and physical-ID matched-mass donor reassignment. Count actual changed donors and singleton buckets, retain the direct/global/own-anchor paths explicitly, and verify restored outputs. Intervention effects show reliance; they do not by themselves show an advantage over P or physical causality.
 
