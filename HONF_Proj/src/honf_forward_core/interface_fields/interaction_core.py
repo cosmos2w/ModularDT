@@ -71,6 +71,9 @@ class PreparedResponseContext:
     input_versions: tuple
     model_reference: object | None = None
     parameter_signature: tuple = ()
+    # Optional payload produced by an explicitly inserted shared-core block.
+    # Legacy operators leave this unset and retain their original behavior.
+    intermediate_context: object | None = None
 
     def assert_fresh(self):
         _check_versions(self.input_versions)
@@ -189,7 +192,8 @@ class InteractionContextCore(nn.Module):
     def prepare_context(self, sources, context, centers, present, lengths, source_lengths,
                         source_measures=None, environment_tokens=None, environment_coords=None,
                         environment_present=None, environment_measures=None, source_ids=None,
-                        environment_embedding=None):
+                        environment_embedding=None, _between_rounds=None,
+                        _extra_version_tensors=()):
         """Explicit geometry/prescribed tensors; no current forcing argument.
 
         sources[B,M,F], context[B,C], centers[B,M,D], present/measures[B,M],
@@ -230,7 +234,8 @@ class InteractionContextCore(nn.Module):
         source_ids = torch.arange(modules, device=centers.device)[None].expand(batch, -1) if source_ids is None else source_ids
         self._validate_shape(source_ids, (batch, modules), 'source_ids')
         versions = _versions((sources, context, centers, present, lengths, source_lengths, source_measures,
-            environment_tokens, environment_coords, environment_present, environment_measures, source_ids, environment_embedding))
+            environment_tokens, environment_coords, environment_present, environment_measures, source_ids,
+            environment_embedding, *_extra_version_tensors))
         source_mass = _normalized_measure(source_measures, present)
         environment_mass = _normalized_measure(environment_measures, environment_present)
         source_context = context[:, None].expand(-1, modules, -1)
@@ -247,8 +252,9 @@ class InteractionContextCore(nn.Module):
         self_mask = 1 - torch.eye(modules, device=centers.device, dtype=centers.dtype)[None]
         donor_mass = source_mass[:, None] * self_mask
         donor_mass = donor_mass / donor_mass.sum(-1, keepdim=True).clamp_min(torch.finfo(state.dtype).tiny)
-        for module_message, environment_message, source_update, environment_update in zip(
-                self.module_messages, self.environment_messages, self.source_updates, self.environment_updates):
+        intermediate_context = None
+        for round_index, (module_message, environment_message, source_update, environment_update) in enumerate(zip(
+                self.module_messages, self.environment_messages, self.source_updates, self.environment_updates)):
             left = state[:, :, None].expand(-1, -1, modules, -1)
             right = state[:, None].expand(-1, modules, -1, -1)
             module_aggregate = (module_message(torch.cat((left, right, relative_mm), -1)) * donor_mass[..., None]).sum(2)
@@ -259,11 +265,26 @@ class InteractionContextCore(nn.Module):
             env_pool = (environment * environment_mass[..., None]).sum(1)[:, None].expand(-1, environments, -1)
             state = (state + source_update(torch.cat((state, module_aggregate, env_aggregate, source_context), -1))) * present[..., None]
             environment = (environment + environment_update(torch.cat((environment, source_aggregate, env_pool, environment_context), -1))) * environment_present[..., None]
+            if round_index == 0 and _between_rounds is not None:
+                result = _between_rounds(state, environment)
+                if not isinstance(result, tuple) or len(result) != 3:
+                    raise TypeError('_between_rounds must return (source_states, environment_states, auxiliary_context).')
+                state, environment, intermediate_context = result
+                self._validate_shape(state, (batch, modules, self.hidden), 'intermediate source states')
+                self._validate_shape(environment, (batch, environments, self.hidden),
+                                     'intermediate environment states')
+                if bool((state.masked_select((present <= 0)[..., None].expand_as(state)) != 0).any()):
+                    raise ValueError('Intermediate source states must keep absent slots at zero.')
+                if bool((environment.masked_select(
+                        (environment_present <= 0)[..., None].expand_as(environment)) != 0).any()):
+                    raise ValueError('Intermediate environment states must keep absent slots at zero.')
         global_state = self.global_encoder(torch.cat(((state * source_mass[..., None]).sum(1),
             (environment * environment_mass[..., None]).sum(1), context), -1))
-        prepared = PreparedResponseContext(state, environment, global_state, centers,
+        prepared_type = getattr(self, 'prepared_context_type', PreparedResponseContext)
+        prepared = prepared_type(state, environment, global_state, centers,
             source_lengths, present, source_mass, environment_coords, environment_present,
             environment_mass, lengths, source_ids, None, None, None, None, None, None, versions)
+        prepared.intermediate_context = intermediate_context
         prepared.owner = id(self)
         prepared.model_reference = weakref.ref(self)
         prepared.parameter_signature = _parameter_signature(self)
