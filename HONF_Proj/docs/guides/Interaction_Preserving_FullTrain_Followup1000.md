@@ -10,6 +10,8 @@ Thermal uses all 600 original TRAIN cases and the established canonical89 expose
 
 Wind uses all 420 original TRAIN direction rows across 140 layouts and the fixed fullVALID90 panel across 30 layouts. The original 90 TEST rows across 30 layouts remain locked. The profile, normalization, and componentwise role scales are fitted on TRAIN only in the separate follow-up cache namespace. Model environment tokens remain E8; the normalization-fit view is a distinct preparation detail.
 
+Thermal provider membership hashes preserve the existing NUL-delimited ID encoding. Historical canonical89 physical-panel hashes use canonical JSON instead. Compare the exact ordered IDs across those interfaces and retain each labelled digest; an encoding difference must not change the membership or permit an unrelated panel.
+
 ## Execution boundary
 
 The optimizer retains the selected mechanism, loss weights, queries, microbatch size, effective case batch, initialization seed, and gradient clipping. Its declared schedule has a 5,000-epoch horizon: 20 warmup epochs from 3e-5 to 3e-4, a hold through epoch 1,000, and cosine decay thereafter toward 3e-6. Declaring that schedule does not authorize training beyond epoch 1,000.

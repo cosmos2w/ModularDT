@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -14,7 +16,20 @@ for source in (ROOT / "Case_ThermalChannel/src", ROOT / "Case_WindFarm/src", ROO
 
 from channelthermal.training import joint_task as thermal_provider
 from full_train_followup_contract import DATA as FOLLOWUP_DATA
+from full_train_followup_contract import _case_ids_sha256
 from windfarm.training import joint_task as wind_provider
+
+
+def test_canonical89_provider_binding_preserves_nul_encoding_separate_from_saved_panel() -> None:
+    ids = [f"{index:04d}" for index in (*range(274, 303), *range(633, 693))]
+    provider_hash = hashlib.sha256(b"".join(value.encode() + b"\0" for value in ids)).hexdigest()
+    saved_panel_hash = hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest()
+    assert len(ids) == 89
+    assert provider_hash == "1c33b4cc5ebddb1720a6ba6adcd9ad88beb988302008c58623cf55b2fdea41ab"
+    assert saved_panel_hash == "51f0bea2278c26b24a994a29a52ad6b8af1e3e85941dc75d9b20bbebce5d8728"
+    assert thermal_provider._case_ids_hash(ids) == _case_ids_sha256(ids) == provider_hash
+    assert FOLLOWUP_DATA["thermal"]["validation_sha256"] == provider_hash
+    assert provider_hash != saved_panel_hash
 
 
 def test_provider_sealed_membership_constants_match_runner_contract() -> None:

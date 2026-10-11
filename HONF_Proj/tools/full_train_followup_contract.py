@@ -35,9 +35,9 @@ DATA = {
     "thermal": {
         "dataset_protocol": "thermal_original600_train_canonical89_validation_followup_v1",
         "train_count": 600,
-        "train_sha256": "c991acbcdced62e887385bc2763d4da7f4686256f72e44f797b69185522f3e3e",
+        "train_sha256": "3e255541359ec6551863bbcd122591b782d075b4477145c63d4d5f4f7adb3b25",
         "validation_count": 89,
-        "validation_sha256": "51f0bea2278c26b24a994a29a52ad6b8af1e3e85941dc75d9b20bbebce5d8728",
+        "validation_sha256": "1c33b4cc5ebddb1720a6ba6adcd9ad88beb988302008c58623cf55b2fdea41ab",
         "excluded_validation_id": "0273",
         "excluded_validation_reason": "historical duplicate in original90 validation; preserve canonical89",
         "source_metadata_sha256": "1bba5ab5c0535fabab2f2434de33eccb67184ef3fd7d7881eb01f5088e15e211",
