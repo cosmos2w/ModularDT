@@ -259,7 +259,7 @@ def _wind_transforms():
     return normalizer, profile
 
 
-def _wind_model():
+def _wind_model(*, factorized_affine_execution=False):
     normalizer, profile = _wind_transforms()
     torch.manual_seed(42)
     return InteractionPreservingWindModel(
@@ -275,6 +275,7 @@ def _wind_model():
         seed=42,
         max_sources=30,
         locality_prior_strength=1.0,
+        factorized_affine_execution=factorized_affine_execution,
     )
 
 
@@ -339,6 +340,16 @@ def test_wind_config_roundtrip_preserves_physical_frame_and_scaling():
         restored.predict_physical(restored.prepare_scene(scene), receivers), actual, rtol=0.0, atol=0.0
     )
     assert restored.export_config() == config
+    factored = _wind_model(factorized_affine_execution=True).eval()
+    factored.load_state_dict(model.state_dict(), strict=True)
+    factored_config = factored.export_config()
+    assert factored_config["core"]["factorized_affine_execution"] is True
+    factored_restored = InteractionPreservingWindModel.from_config(factored_config).eval()
+    factored_restored.load_state_dict(factored.state_dict(), strict=True)
+    torch.testing.assert_close(
+        factored_restored.predict_physical(factored_restored.prepare_scene(scene), receivers),
+        factored.predict_physical(factored.prepare_scene(scene), receivers), rtol=0.0, atol=0.0
+    )
     with pytest.raises(ValueError, match="frame|feature inventory|output law"):
         broken = copy.deepcopy(config)
         broken["native_coordinate_frame"] = "shifted-origin"

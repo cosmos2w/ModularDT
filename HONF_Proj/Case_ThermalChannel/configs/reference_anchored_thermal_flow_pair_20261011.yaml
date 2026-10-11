@@ -1,0 +1,100 @@
+# Sealed record of the completed C2 objective diagnostic. This file is
+# declarative documentation; it is not auto-loaded and does not launch work.
+schema_version: 1
+status: completed_reference_record
+execution_policy: documentation_only_no_auto_launch
+question: >-
+  Measure the whole thermal-family supervision tradeoff against ordinary joint
+  training from the same T4111 checkpoint, optimizer state, native P function,
+  and fixed TRAIN case/query protocol.
+
+entrypoint:
+  cli: HONF_Proj/tools/diagnostics/reference_anchored_diagnose.py
+  mode: fit-branch
+  context_factory_contract: "factory(config, checkpoint_payload) -> (model, provider, engine)"
+  invocation_inputs: [checkpoint, context_factory, factory_config, fit_plan, run_output, output]
+  note: >-
+    Supply an existing provider factory explicitly. The CLI restores the
+    hash-pinned checkpoint and delegates native sampling, LossTerm reduction,
+    validation, and fitting to the existing provider and TrainingEngine.
+
+source:
+  run: T4111
+  epoch: 1000
+  arm: P
+  checkpoint: HONF_Proj/diagnostics/generated/interaction_recovery_20261010/runs/T4111/checkpoints/epoch_1000_model.pt
+  checkpoint_sha256: 917771696ec6558047cf8b025e8733b13edb519461b6c013026a07f9e1783c36
+  identity: HONF_Proj/diagnostics/generated/interaction_recovery_20261010/runs/T4111/configs/experiment_identity.json
+  identity_sha256: 2167f4964d14ff041cf7a720a002cb6bfa6a7bbc55a01fc16baeec6c2a7c0c30
+  development_manifest_fingerprint: 933b0138ba2f8447a1ecadfe31fd0bb2cb4a05607d3ac3d9f0dc79419f196044
+  development_manifest_file_sha256: 3a8adc105637dc20ea4d1eaf0e5640e45fc7db8dffd6d5f15a8a5d5f0af16e32
+  train_normalization_stats_sha256: 9162379696b687d45f3b0ac5942c01ee787021d5b0361986e6b0572f5bcb1bc1
+  calibration: checkpoint-owned; reuse exact saved P calibration, no refit
+  optimizer: restore exact named AdamW moments and original parameter groups
+  function: preserve source architecture, parameters, and native-curl output
+
+selection:
+  protocol: fixed25_v1
+  fit_partition: TRAIN
+  fit_case_count: 150
+  fit_case_keys_sha256: bd2345d4f809cbb2f2ee4c9b6435aeea99ce3faf98cd4c76fe9e42379b511f6d
+  evidence_sha256: 61e783cc6aafbede303c1cb8e5b98b6ac79d00d77c2ad02e562b0f255e5c8426
+  exposed_validation_cases: 22
+  validation_is_independent_test: false
+  TEST: locked; no TEST targets read
+  solver_attempts: 0
+
+protocol:
+  absolute_child_epochs: [1001, 1100]
+  sampling_version: case_epoch_v1
+  training_mode: joint
+  execution_arm: P
+  query_count_per_case: 1024
+  effective_cases: 48
+  microbatch_cases: 8
+  updates_per_child_epoch: 4
+  gradient_clip_norm: 1.0
+  inherit_optimizer_schedule: true
+  inherit_all_model_parameters: true
+  preserve_parent_exposure_and_identity: true
+  maximum_updates_per_arm: 400
+  maximum_paired_updates: 800
+  reviews:
+    - {epoch: 1025, updates_per_arm: 100}
+    - {epoch: 1050, updates_per_arm: 200}
+    - {epoch: 1100, updates_per_arm: 400}
+
+arms:
+  ordinary_joint:
+    loss_weight_overrides: {}
+    output_roles: all original flow, temperature, q, response, and operator outputs
+  flow_only_diagnostic:
+    loss_weight_overrides:
+      temperature/fluid: 0.0
+      temperature/surface: 0.0
+      temperature/material: 0.0
+      q_proxy: 0.0
+      response: 0.0
+      operator_residual: 0.0
+    preserved_flow_loss_weights: original provider coefficients, unchanged
+    output_roles: all original outputs and parameters remain present
+    interpretation: diagnostic tradeoff; not a proposed joint-model replacement
+
+selection_decision:
+  selected_after: fixed TRAIN gradient and cloned-AdamW evidence
+  wind_pair: rejected; shared-context gradient fraction was 1.4%, and the
+    base-loss probe changed by only -0.2039% between cloned updates
+  no_third_recipe: true
+
+reporting:
+  physical_units: packed native dataset units; dimensional conversion unavailable
+  required: [actual_case_visits, optimizer_updates, query_and_work_counts, elapsed_time, per_field_mean_p95_worst]
+  sparse_executor_savings_measured: false
+  full_access_fallback_count: 0
+
+completed_artifacts:
+  campaign_root: /data/wanglz/ModularDT/diagnostics/reference_anchored_20261011/campaign/thermal_flow_pair
+  final_review: thermal_c2_final_review_v1.json
+  final_review_sha256: f99ca48475d193f087a552bb2d0b4a162aac37a201fd99aa684f737f15fba231
+  protected_e1100_cpu_replay: ordinary_joint_vs_protected_T4111_e1100_cpu_state_comparison.json
+  protected_e1100_cpu_replay_sha256: 01c062c62db0910f7c731db21737d3edd87a29d540eeaf6be72701bdeb47d746

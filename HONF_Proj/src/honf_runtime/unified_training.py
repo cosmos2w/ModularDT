@@ -516,6 +516,109 @@ def _branch_joint_locality_amendment(
             'selection_reset': 'only checkpoints evaluated under the new function can be selected'}
 
 
+def _diagnostic_age_branch_amendment(
+    saved: Mapping[str, Any], current: Mapping[str, Any], declaration: Mapping[str, Any],
+    *, source_sha256: str, case_keys: Sequence[Any], stop_after: int,
+) -> dict[str, Any]:
+    """Seal a bounded objective diagnostic without relaxing exact resume.
+
+    The child retains the parent's tensors, named moments, native contract and
+    absolute schedules. Only an explicit diagnostic declaration and monitoring
+    cadence may differ. Its shorter fitting inventory remains within the
+    parent's TRAIN exposure, which is retained separately from child visits.
+    """
+    required = {"kind", "source_epoch", "source_checkpoint_sha256", "review_stop",
+                "review_epochs", "fit_case_keys", "scientific_update_limit",
+                "evidence_path", "evidence_sha256", "reason", "loss_weight_overrides"}
+    if (set(declaration) != required
+            or declaration["kind"] != "reference_anchored_objective_diagnostic"
+            or declaration["source_checkpoint_sha256"] != source_sha256
+            or type(declaration["source_epoch"]) is not int
+            or type(declaration["scientific_update_limit"]) is not int
+            or not 1 <= declaration["scientific_update_limit"] <= 400
+            or not isinstance(declaration["reason"], str) or not declaration["reason"].strip()):
+        raise ValueError("A diagnostic age branch requires its explicit hash-bound bounded declaration.")
+    reviews = declaration["review_epochs"]
+    if (not isinstance(reviews, (tuple, list)) or not reviews
+            or any(type(epoch) is not int or epoch <= declaration["source_epoch"] for epoch in reviews)
+            or list(reviews) != sorted(set(reviews))
+            or declaration["review_stop"] != reviews[-1] or stop_after not in reviews):
+        raise ValueError("Diagnostic stops must be predeclared review ages after the source age.")
+    keys = list(case_keys)
+    if (not keys or len(set(keys)) != len(keys)
+            or set(keys) != set(declaration["fit_case_keys"])):
+        raise ValueError("Diagnostic case visitation differs from its frozen fitting inventory.")
+    parent_provider = saved.get("provider_identity", {})
+    child_provider = copy.deepcopy(current.get("provider_identity", {}))
+    diagnostic = child_provider.pop("diagnostic", None)
+    if (child_provider != parent_provider or not isinstance(diagnostic, Mapping)
+            or set(diagnostic) != {"fit_case_keys", "loss_weight_overrides"}
+            or set(diagnostic.get("fit_case_keys", ())) != set(keys)):
+        raise ValueError("A diagnostic child must preserve every parent provider binding outside its declaration.")
+    overrides = declaration["loss_weight_overrides"]
+    if (not isinstance(overrides, Mapping)
+            or any(not isinstance(name, str) or not name
+                   or type(value) not in (int, float)
+                   or not math.isfinite(value) or value < 0
+                   for name, value in overrides.items())
+            or dict(overrides) != diagnostic["loss_weight_overrides"]):
+        raise ValueError("Diagnostic objective overrides must match their finite, explicit declaration.")
+    # Only the child run label may change outside the explicitly checked
+    # provider/objective and monitoring presentation. Bind initialization,
+    # data, workflow, source recipe and sampling fields without an allow-all
+    # escape hatch for additional top-level controls.
+    checked_fields = {"provider_identity", "engine_config", "optimizer_schedule_contract",
+                      "selection_policy", "run", "run_identity"}
+    parent_other = {name: value for name, value in saved.items() if name not in checked_fields}
+    child_other = {name: value for name, value in current.items() if name not in checked_fields}
+    if parent_other != child_other:
+        raise ValueError("Diagnostic initialization, workflow, data and sampling identity must remain unchanged.")
+    parent_cases = next((parent_provider[name] for name in
+                         ("training_case_ids", "train_case_ids", "train_rows")
+                         if name in parent_provider), None)
+    if parent_cases is None and parent_provider.get("dataset") == "WindFarm":
+        # Wind's immutable native view orders the three direction rows per layout.
+        if parent_provider.get("directions_deg") != [270.0, 285.0, 300.0]:
+            raise ValueError("Diagnostic Wind membership requires the original three-direction row binding.")
+        parent_cases = [3 * int(layout) + direction
+                        for layout in parent_provider.get("train_layout_indices", ())
+                        for direction in range(3)]
+    if parent_cases is None or not set(keys) <= set(parent_cases):
+        raise ValueError("Every diagnostic fitting case must belong to the parent's declared TRAIN exposure.")
+    old_engine = dict(saved.get("engine_config", {}))
+    new_engine = dict(current.get("engine_config", {}))
+    for name in ("monitor_every", "monitor_epochs", "checkpoint_epochs", "latest_every",
+                 "curve_every", "write_initial_artifacts"):
+        old_engine.pop(name, None)
+        new_engine.pop(name, None)
+    if (old_engine != new_engine
+            or saved.get("optimizer_schedule_contract") != current.get("optimizer_schedule_contract")
+            or saved.get("selection_policy") != current.get("selection_policy")):
+        raise ValueError("Diagnostic batches, sampler, native stages, selection and absolute optimizer schedules must remain unchanged.")
+    updates_per_epoch = math.ceil(len(keys) / int(new_engine["effective_cases"]))
+    requested_updates = updates_per_epoch * (reviews[-1] - declaration["source_epoch"])
+    if requested_updates > declaration["scientific_update_limit"]:
+        raise ValueError("Diagnostic review horizon exceeds its explicit scientific update limit.")
+    evidence_path = Path(declaration["evidence_path"]).expanduser().resolve()
+    evidence_bytes = evidence_path.read_bytes()
+    if hashlib.sha256(evidence_bytes).hexdigest() != declaration["evidence_sha256"]:
+        raise ValueError("Diagnostic TRAIN evidence changed after its choice was sealed.")
+    evidence = json.loads(evidence_bytes)
+    if (evidence.get("selection_partition") != "TRAIN"
+            or evidence.get("WindTEST_targets") != "locked"
+            or evidence.get("solver_attempts") != 0):
+        raise ValueError("Diagnostic selection requires TRAIN-only evidence with locked TEST and no solves.")
+    allowed_overrides = evidence.get("allowed_loss_weight_overrides")
+    if (not isinstance(allowed_overrides, list) or not allowed_overrides
+            or not all(isinstance(item, Mapping) for item in allowed_overrides)
+            or dict(overrides) not in allowed_overrides):
+        raise ValueError("Diagnostic objective overrides were not selected in the sealed TRAIN evidence.")
+    return {**copy.deepcopy(dict(declaration)), "evidence_path": str(evidence_path),
+            "updates_per_epoch": updates_per_epoch, "planned_optimizer_updates": requested_updates,
+            "parent_train_exposure_retained": True,
+            "child_history_scope": "only new diagnostic visits and updates; inherited fitting exposure retained in parent identity"}
+
+
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str,
                         loss_metadata: Mapping[str, Mapping[str, str]] | None = None) -> None:
     """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
@@ -1052,6 +1155,54 @@ def named_optimizer_state(model: nn.Module, optimizer: torch.optim.Optimizer) ->
     return {"state_by_name": state, "groups": group_names}
 
 
+def optimizer_state_provenance(
+    payload: Mapping[str, Any] | None,
+    *,
+    expected_groups: Sequence[OptimizerGroupSpec] | None = None,
+) -> dict[str, Any]:
+    """Summarize named AdamW moments without exposing or changing the state."""
+
+    if payload is None:
+        return {"source": "not_supplied", "state_parameter_count": 0, "step_counts": {}}
+    states = payload.get("state_by_name", payload)
+    if not isinstance(states, Mapping):
+        raise TypeError("Named optimizer state must map parameter names to state mappings.")
+    groups = payload.get("groups", ())
+    group_membership = [
+        {"name": str(group.get("name", "")), "parameter_names": list(group.get("parameter_names", ()))}
+        for group in groups
+        if isinstance(group, Mapping)
+    ]
+    step_counts: dict[str, int] = {}
+    moment_summaries: dict[str, dict[str, float]] = {}
+    for name, values in states.items():
+        if not isinstance(values, Mapping):
+            raise TypeError(f"Optimizer state for {name!r} is not a mapping.")
+        step = values.get("step")
+        if step is not None:
+            step_value = int(step.item()) if torch.is_tensor(step) else int(step)
+            step_counts[str(step_value)] = step_counts.get(str(step_value), 0) + 1
+        moments = {}
+        for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+            value = values.get(key)
+            if torch.is_tensor(value):
+                moments[key] = math.sqrt(float(value.detach().double().square().sum().item()))
+        if moments:
+            moment_summaries[str(name)] = moments
+    expected = None if expected_groups is None else [
+        {"name": spec.name, "parameter_names": list(spec.parameter_names)} for spec in expected_groups
+    ]
+    return {
+        "source": "checkpoint_named_state",
+        "state_parameter_count": len(states),
+        "step_counts": step_counts,
+        "group_membership": group_membership,
+        "expected_group_membership": expected,
+        "group_membership_matches": None if expected is None else group_membership == expected,
+        "moment_l2_norms_by_parameter": moment_summaries,
+    }
+
+
 def _load_named_optimizer_state(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -1293,6 +1444,641 @@ class TrainingEngine:
         for group in optimizer.param_groups:
             group["lr"] = by_name[group["group_name"]].schedule.value(epoch)
 
+    def diagnose_macro_update(
+        self,
+        model: nn.Module,
+        provider: TaskProvider,
+        microbatches: Sequence[TaskBatch],
+        *,
+        phase: str,
+        arm: str,
+        epoch: int,
+        term_groups: Mapping[str, Sequence[str]] | None = None,
+        training_mode: bool = True,
+        include_gradient_tensors: bool = False,
+        optimizer_state_by_name: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Measure the exact engine objective and its grouped gradients without stepping.
+
+        This uses the provider's native samplers, target-only denominator prepass,
+        predictions, and :class:`LossTerm` values just like ``_run_update``. The
+        only difference is that it retains a named gradient decomposition and
+        stops before clipping or calling AdamW. ``term_groups`` must partition
+        the declared loss names; when omitted, each loss term is its own group.
+        """
+
+        if not microbatches:
+            raise ValueError("A macro-update diagnosis requires at least one fixed microbatch.")
+        planned = {
+            name: _denominator(value)
+            for name, value in provider.loss_denominators(microbatches, phase, arm).items()
+        }
+        if not planned or any(not name for name in planned):
+            raise ValueError("A diagnostic update requires named loss denominators.")
+        if any(value <= 0 for value in planned.values()):
+            raise ValueError("Every diagnosed loss term must have a positive exact denominator.")
+
+        specs = tuple(provider.optimizer_groups(model, arm, phase))
+        if not specs or len({spec.name for spec in specs}) != len(specs):
+            raise ValueError("Providers must declare uniquely named optimizer groups for diagnosis.")
+        named = dict(model.named_parameters())
+        group_by_parameter: dict[str, str] = {}
+        for spec in specs:
+            if not spec.parameter_names:
+                raise ValueError(f"Optimizer group {spec.name!r} has no parameters.")
+            for name in spec.parameter_names:
+                if name not in named or not named[name].requires_grad or name in group_by_parameter:
+                    raise ValueError(f"Invalid or duplicate diagnosed optimizer parameter {name!r}.")
+                group_by_parameter[name] = spec.name
+        trainable_names = {name for name, parameter in named.items() if parameter.requires_grad}
+        if set(group_by_parameter) != trainable_names:
+            raise ValueError("Optimizer groups must cover every trainable parameter exactly once.")
+
+        if term_groups is None:
+            groups = {name: (name,) for name in planned}
+        else:
+            groups = {str(name): tuple(members) for name, members in term_groups.items()}
+            if not groups or any(not name or not members for name, members in groups.items()):
+                raise ValueError("Gradient groups must be named and nonempty.")
+        term_group: dict[str, str] = {}
+        for group_name, member_names in groups.items():
+            for term_name in member_names:
+                if term_name not in planned:
+                    raise ValueError(f"Gradient group {group_name!r} references undeclared loss {term_name!r}.")
+                if term_name in term_group:
+                    raise ValueError(f"Loss term {term_name!r} appears in multiple gradient groups.")
+                term_group[term_name] = group_name
+        if set(term_group) != set(planned):
+            raise ValueError("Gradient groups must partition all declared loss terms exactly once.")
+
+        parameters = [(name, parameter) for name, parameter in named.items() if parameter.requires_grad]
+        parameter_values = [parameter for _, parameter in parameters]
+        gradients: dict[str, dict[str, torch.Tensor]] = {name: {} for name in groups}
+        observed = {name: 0.0 for name in planned}
+        loss_values = {name: 0.0 for name in planned}
+        term_numerators = {name: 0.0 for name in planned}
+        term_weights: dict[str, float | None] = {name: None for name in planned}
+        sampling_records: list[str] = []
+        work: dict[str, float] = {}
+        batch_records: list[dict[str, Any]] = []
+        rng_state = capture_rng_state()
+        original_training = model.training
+        buffer_snapshot = {
+            name: value.detach().clone() for name, value in model.named_buffers()
+        } if training_mode else None
+        provider_state_reader = getattr(provider, "training_state_dict", None)
+        provider_state_loader = getattr(provider, "load_training_state_dict", None)
+        provider_state = copy.deepcopy(provider_state_reader()) if callable(provider_state_reader) else None
+        model.train(bool(training_mode))
+        try:
+            for batch in microbatches:
+                batch_auxiliary = batch.auxiliary if isinstance(batch.auxiliary, Mapping) else {}
+                sample_hash = batch_auxiliary.get("query_sampling_sha256")
+                if sample_hash is not None:
+                    if not isinstance(sample_hash, str) or len(sample_hash) != 64:
+                        raise ValueError("Provider query-sampling receipt must be a SHA256 hex string.")
+                    sampling_records.append(sample_hash)
+                scene = provider.make_scene(batch.scene_inputs)
+                predictions, auxiliary_state = provider.predict_native(
+                    model, scene, batch.receivers, arm, phase, epoch=epoch,
+                    temperature=self.config.temperature_for_epoch(epoch))
+                terms = provider.loss_terms(predictions, batch.targets, phase, auxiliary_state)
+                if not isinstance(terms, Mapping):
+                    raise TypeError("loss_terms must return a mapping of names to LossTerm values.")
+                objectives: dict[str, torch.Tensor | None] = {name: None for name in groups}
+                for name, term in terms.items():
+                    if name not in planned:
+                        raise ValueError(f"Loss term {name!r} has no target-only macro denominator.")
+                    if not torch.is_tensor(term.numerator) or term.numerator.numel() != 1:
+                        raise ValueError(f"Loss numerator {name!r} must be a scalar tensor.")
+                    denominator = _denominator(term.denominator)
+                    if not math.isfinite(float(term.weight)):
+                        raise ValueError(f"Loss weight {name!r} is not finite.")
+                    if term_weights[name] is not None and not math.isclose(
+                        float(term_weights[name]), float(term.weight), rel_tol=0.0, abs_tol=0.0
+                    ):
+                        raise ValueError(f"Loss weight for {name!r} changed across a macro-update.")
+                    term_weights[name] = float(term.weight)
+                    if denominator == 0:
+                        if float(term.numerator.detach()) != 0.0:
+                            raise ValueError(f"Loss numerator {name!r} is nonzero with an empty valid mask.")
+                        continue
+                    observed[name] += denominator
+                    term_numerators[name] += float(term.numerator.detach())
+                    weighted = term.numerator * (float(term.weight) / planned[name])
+                    group_name = term_group[name]
+                    objectives[group_name] = (
+                        weighted if objectives[group_name] is None else objectives[group_name] + weighted
+                    )
+                    loss_values[name] += float(term.numerator.detach()) / planned[name] * float(term.weight)
+                for name, value in provider.work_counts(batch, predictions, auxiliary_state).items():
+                    work[name] = work.get(name, 0.0) + float(value)
+
+                active_objectives = [(name, value) for name, value in objectives.items() if value is not None]
+                if not active_objectives:
+                    raise ValueError("A microbatch produced no differentiable loss groups.")
+                for position, (group_name, objective) in enumerate(active_objectives):
+                    if not bool(torch.isfinite(objective.detach())):
+                        raise FloatingPointError(f"Nonfinite diagnostic objective for {group_name!r}.")
+                    current = torch.autograd.grad(
+                        objective,
+                        parameter_values,
+                        retain_graph=position + 1 < len(active_objectives),
+                        allow_unused=True,
+                    )
+                    group_gradients = gradients[group_name]
+                    for (parameter_name, _), gradient in zip(parameters, current):
+                        if gradient is None:
+                            continue
+                        previous = group_gradients.get(parameter_name)
+                        group_gradients[parameter_name] = gradient.detach().clone() if previous is None else previous + gradient.detach()
+
+                main = getattr(predictions, "main_mps", None)
+                full = getattr(predictions, "full_mps", None)
+                batch_records.append({
+                    "case_keys": list(batch.case_keys),
+                    "query_sampling_sha256": sample_hash,
+                    "all_fine_main_full_same_tensor_values": bool(
+                        torch.is_tensor(main) and torch.is_tensor(full) and main.shape == full.shape
+                        and torch.equal(main.detach(), full.detach())
+                    ),
+                })
+            for name, expected in planned.items():
+                actual = observed.get(name, 0.0)
+                if not math.isclose(actual, expected, rel_tol=1.0e-6, abs_tol=1.0e-7):
+                    raise ValueError(f"Actual denominator for {name!r} ({actual}) differs from prepass ({expected}).")
+        finally:
+            if buffer_snapshot is not None:
+                with torch.no_grad():
+                    for name, value in model.named_buffers():
+                        value.copy_(buffer_snapshot[name])
+            model.train(original_training)
+            try:
+                if provider_state is not None and callable(provider_state_loader):
+                    provider_state_loader(provider_state)
+            finally:
+                restore_rng_state(rng_state)
+
+        def _norm(rows: Mapping[str, torch.Tensor], selected: Sequence[str]) -> float:
+            values = [rows[name] for name in selected if name in rows]
+            if not values:
+                return 0.0
+            tensor_norms = [torch.linalg.vector_norm(value.detach(), ord=2) for value in values]
+            return float(torch.linalg.vector_norm(torch.stack(tensor_norms), ord=2).item())
+
+        combined: dict[str, torch.Tensor] = {}
+        for group_gradients in gradients.values():
+            for name, value in group_gradients.items():
+                combined[name] = value.clone() if name not in combined else combined[name] + value
+        group_parameters = {
+            spec.name: tuple(spec.parameter_names)
+            for spec in specs
+        }
+        split_names = tuple(gradients)
+        total_norm = _norm(combined, tuple(group_by_parameter))
+        clip_factor = min(1.0, self.config.gradient_clip / (total_norm + 1.0e-6)) if total_norm > 0 else 1.0
+        clip_influence: dict[str, Any] = {}
+        for excluded_name in split_names:
+            without_excluded: dict[str, torch.Tensor] = {}
+            for other_name, other_gradients in gradients.items():
+                if other_name == excluded_name:
+                    continue
+                for parameter_name, value in other_gradients.items():
+                    without_excluded[parameter_name] = (
+                        value.clone() if parameter_name not in without_excluded
+                        else without_excluded[parameter_name] + value
+                    )
+            without_norm = _norm(without_excluded, tuple(group_by_parameter))
+            without_factor = (
+                min(1.0, self.config.gradient_clip / (without_norm + 1.0e-6))
+                if without_norm > 0 else 1.0
+            )
+            with_group_norm = _norm(gradients[excluded_name], tuple(group_by_parameter))
+            clip_influence[excluded_name] = {
+                "group_gradient_norm": with_group_norm,
+                "global_norm_without_group": without_norm,
+                "global_norm_with_group": total_norm,
+                "clip_factor_without_group": without_factor,
+                "actual_clip_factor_with_group": clip_factor,
+                "actual_clip_factor_change": clip_factor - without_factor,
+                "global_norm_change": total_norm - without_norm,
+            }
+        gradient_summary: dict[str, Any] = {}
+        for split_name, split_gradients in gradients.items():
+            per_optimizer_group = {
+                group_name: _norm(split_gradients, parameter_names)
+                for group_name, parameter_names in group_parameters.items()
+            }
+            reached = sorted(name for name in split_gradients)
+            gradient_summary[split_name] = {
+                "global_norm": _norm(split_gradients, tuple(group_by_parameter)),
+                "optimizer_group_norms": per_optimizer_group,
+                "reachable_parameter_count": len(reached),
+                "reachable_parameter_names": reached,
+                "nonzero_parameter_names": sorted(
+                    name for name, value in split_gradients.items() if bool(torch.count_nonzero(value).item())
+                ),
+                "parameter_norms": {
+                    name: math.sqrt(float(value.double().square().sum().item()))
+                    for name, value in split_gradients.items()
+                },
+            }
+        cosine: dict[str, dict[str, float | None]] = {}
+        for first in split_names:
+            cosine[first] = {}
+            for second in split_names:
+                first_norm = _norm(gradients[first], tuple(group_by_parameter))
+                second_norm = _norm(gradients[second], tuple(group_by_parameter))
+                dot = sum(
+                    float((gradients[first][name].double() * gradients[second][name].double()).sum().item())
+                    for name in gradients[first].keys() & gradients[second].keys()
+                )
+                cosine[first][second] = dot / (first_norm * second_norm) if first_norm > 0 and second_norm > 0 else None
+
+        result = {
+            "optimizer_updates": 0,
+            "phase": phase,
+            "arm": arm,
+            "epoch_for_schedule_and_sampler": int(epoch),
+            "case_keys": [key for batch in microbatches for key in batch.case_keys],
+            "query_sampling_sha256": hashlib.sha256(
+                json.dumps(sampling_records, separators=(",", ":")).encode("utf-8")
+            ).hexdigest() if sampling_records else None,
+            "term_groups": {name: list(names) for name, names in groups.items()},
+            "loss_terms": {
+                name: {
+                    "numerator_sum": term_numerators[name],
+                    "denominator": planned[name],
+                    "weight": term_weights[name],
+                    "weighted_objective": loss_values[name],
+                }
+                for name in planned
+            },
+            "denominators_observed": observed,
+            "gradient_splits": gradient_summary,
+            "gradient_cosines": cosine,
+            "combined_gradient": {
+                "global_norm_before_clip": total_norm,
+                "clip_limit": float(self.config.gradient_clip),
+                "clip_factor_formula": "min(1, clip_limit / (global_norm + 1e-6))",
+                "global_clip_factor": clip_factor,
+                "global_norm_after_clip": total_norm * clip_factor,
+                "optimizer_group_norms_before_clip": {
+                    group_name: _norm(combined, parameter_names)
+                    for group_name, parameter_names in group_parameters.items()
+                },
+                "loss_split_clip_influence": clip_influence,
+            },
+            "optimizer_groups": [
+                {
+                    "name": spec.name,
+                    "parameter_count": len(spec.parameter_names),
+                    "parameter_names": list(spec.parameter_names),
+                    "schedule": asdict(spec.schedule),
+                    "lr_at_epoch": spec.schedule.value(epoch),
+                    "weight_decay": float(spec.weight_decay),
+                    "betas": list(spec.betas),
+                    "eps": float(spec.eps),
+                }
+                for spec in specs
+            ],
+            "optimizer_state": optimizer_state_provenance(
+                optimizer_state_by_name, expected_groups=specs),
+            "work_counts": work,
+            "batches": batch_records,
+        }
+        if include_gradient_tensors:
+            result["gradient_tensors"] = {
+                split_name: {name: value.detach().clone() for name, value in rows.items()}
+                for split_name, rows in gradients.items()
+            }
+            result["combined_gradient_tensors"] = {
+                name: value.detach().clone() for name, value in combined.items()
+            }
+        return result
+
+    def measure_macro_loss(
+        self,
+        model: nn.Module,
+        provider: TaskProvider,
+        microbatches: Sequence[TaskBatch],
+        *,
+        phase: str,
+        arm: str,
+        epoch: int,
+        training_mode: bool = True,
+    ) -> dict[str, Any]:
+        """Measure exact provider LossTerms on fixed batches without autograd.
+
+        The default matches the training objective, including providers with
+        training-only auxiliary terms. Set ``training_mode=False`` only for an
+        explicitly eval-mode loss measurement; validation metrics use the
+        provider's separate native-metrics path.
+        """
+
+        if not microbatches:
+            raise ValueError("A fixed macro-loss measurement requires at least one microbatch.")
+        planned = {
+            name: _denominator(value)
+            for name, value in provider.loss_denominators(microbatches, phase, arm).items()
+        }
+        if not planned or any(value <= 0 for value in planned.values()):
+            raise ValueError("A fixed macro-loss measurement requires positive declared denominators.")
+        observed = {name: 0.0 for name in planned}
+        numerators = {name: 0.0 for name in planned}
+        weights: dict[str, float | None] = {name: None for name in planned}
+        weighted_losses = {name: 0.0 for name in planned}
+        sampling_records: list[str] = []
+        batch_records: list[dict[str, Any]] = []
+        rng_state = capture_rng_state()
+        original_training = model.training
+        buffer_snapshot = {
+            name: value.detach().clone() for name, value in model.named_buffers()
+        } if training_mode else None
+        provider_state_reader = getattr(provider, "training_state_dict", None)
+        provider_state_loader = getattr(provider, "load_training_state_dict", None)
+        provider_state = copy.deepcopy(provider_state_reader()) if callable(provider_state_reader) else None
+        model.train(bool(training_mode))
+        try:
+            with torch.no_grad():
+                for batch in microbatches:
+                    batch_auxiliary = batch.auxiliary if isinstance(batch.auxiliary, Mapping) else {}
+                    sample_hash = batch_auxiliary.get("query_sampling_sha256")
+                    if sample_hash is not None:
+                        if not isinstance(sample_hash, str) or len(sample_hash) != 64:
+                            raise ValueError("Provider query-sampling receipt must be a SHA256 hex string.")
+                        sampling_records.append(sample_hash)
+                    scene = provider.make_scene(batch.scene_inputs)
+                    predictions, auxiliary_state = provider.predict_native(
+                        model, scene, batch.receivers, arm, phase, epoch=epoch,
+                        temperature=self.config.temperature_for_epoch(epoch))
+                    terms = provider.loss_terms(predictions, batch.targets, phase, auxiliary_state)
+                    if not isinstance(terms, Mapping):
+                        raise TypeError("loss_terms must return a mapping of names to LossTerm values.")
+                    for name, term in terms.items():
+                        if name not in planned:
+                            raise ValueError(f"Loss term {name!r} has no target-only macro denominator.")
+                        if not torch.is_tensor(term.numerator) or term.numerator.numel() != 1:
+                            raise ValueError(f"Loss numerator {name!r} must be a scalar tensor.")
+                        denominator = _denominator(term.denominator)
+                        if denominator == 0:
+                            if float(term.numerator) != 0.0:
+                                raise ValueError(f"Loss numerator {name!r} is nonzero with an empty valid mask.")
+                            continue
+                        if weights[name] is not None and not math.isclose(
+                            float(weights[name]), float(term.weight), rel_tol=0.0, abs_tol=0.0
+                        ):
+                            raise ValueError(f"Loss weight for {name!r} changed across a macro-update.")
+                        weights[name] = float(term.weight)
+                        observed[name] += denominator
+                        numerators[name] += float(term.numerator)
+                        weighted_losses[name] += float(term.numerator) / planned[name] * float(term.weight)
+                    main = getattr(predictions, "main_mps", None)
+                    full = getattr(predictions, "full_mps", None)
+                    batch_records.append({
+                        "case_keys": list(batch.case_keys),
+                        "query_sampling_sha256": sample_hash,
+                        "all_fine_main_full_same_tensor_values": bool(
+                            torch.is_tensor(main) and torch.is_tensor(full) and main.shape == full.shape
+                            and torch.equal(main, full)
+                        ),
+                    })
+        finally:
+            if buffer_snapshot is not None:
+                with torch.no_grad():
+                    for name, value in model.named_buffers():
+                        value.copy_(buffer_snapshot[name])
+            model.train(original_training)
+            try:
+                if provider_state is not None and callable(provider_state_loader):
+                    provider_state_loader(provider_state)
+            finally:
+                restore_rng_state(rng_state)
+        for name, expected in planned.items():
+            if not math.isclose(observed[name], expected, rel_tol=1.0e-6, abs_tol=1.0e-7):
+                raise ValueError(f"Actual denominator for {name!r} ({observed[name]}) differs from prepass ({expected}).")
+        return {
+            "optimizer_updates": 0,
+            "training_mode": bool(training_mode),
+            "phase": phase,
+            "arm": arm,
+            "epoch_for_schedule_and_sampler": int(epoch),
+            "case_keys": [key for batch in microbatches for key in batch.case_keys],
+            "query_sampling_sha256": hashlib.sha256(
+                json.dumps(sampling_records, separators=(",", ":")).encode("utf-8")
+            ).hexdigest() if sampling_records else None,
+            "loss_terms": {
+                name: {
+                    "numerator_sum": numerators[name],
+                    "denominator": planned[name],
+                    "weight": weights[name],
+                    "weighted_objective": weighted_losses[name],
+                }
+                for name in planned
+            },
+            "batches": batch_records,
+        }
+
+    def compare_disposable_updates(
+        self,
+        model: nn.Module,
+        provider: TaskProvider,
+        update_batches: Sequence[TaskBatch],
+        probe_batches: Sequence[TaskBatch],
+        *,
+        phase: str,
+        arm: str,
+        epoch: int,
+        optimizer_state_by_name: Mapping[str, Any] | None,
+        interventions: Mapping[str, Mapping[str, float]],
+        declared_optimizer_updates: int,
+        dv_term: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one exact TrainingEngine update per intervention on isolated clones.
+
+        The required explicit count is the number of cloned optimizer steps this
+        call will perform. Every intervention starts from identical parameters,
+        optimizer moments, batches and schedules; only listed LossTerm weights
+        differ. No source model or checkpoint is mutated.
+        """
+
+        if not update_batches or not probe_batches:
+            raise ValueError("A disposable update comparison requires fixed update and disjoint probe batches.")
+        if not interventions or len(interventions) > 32:
+            raise ValueError("A comparison must declare between one and 32 one-step interventions.")
+        if type(declared_optimizer_updates) is not int or declared_optimizer_updates != len(interventions):
+            raise ValueError("The explicit optimizer-update count must equal the number of cloned one-step arms.")
+        if len(set(interventions)) != len(interventions):
+            raise ValueError("Counterfactual arm names must be unique.")
+        update_cases = {key for batch in update_batches for key in batch.case_keys}
+        probe_cases = {key for batch in probe_batches for key in batch.case_keys}
+        if not update_cases or not probe_cases or update_cases & probe_cases:
+            raise ValueError("Counterfactual probes must use nonempty case IDs disjoint from update cases.")
+        declared_terms = set(provider.loss_denominators(update_batches, phase, arm))
+        for arm_name, overrides in interventions.items():
+            if not arm_name or any(
+                    type(value) not in (int, float)
+                    or not math.isfinite(float(value))
+                    or float(value) < 0
+                    for value in overrides.values()):
+                raise ValueError(
+                    "Intervention names and LossTerm weight overrides must be finite nonnegative scalars."
+                )
+            if set(overrides) - declared_terms:
+                raise ValueError(f"Intervention {arm_name!r} overrides undeclared terms: {sorted(set(overrides) - declared_terms)}")
+
+        # Some existing predictors retain non-leaf tensors in transient
+        # attributes during native forward. Make the pristine clone template
+        # before any source-model probe can populate those caches.
+        clone_template = copy.deepcopy(model).to(self.device)
+        before_probe = self.measure_macro_loss(
+            model, provider, probe_batches, phase=phase, arm=arm, epoch=epoch,
+            training_mode=True)
+        dv_gradients: dict[str, torch.Tensor] = {}
+        if dv_term is not None:
+            probe_denominators = provider.loss_denominators(probe_batches, phase, arm)
+            if dv_term not in probe_denominators:
+                raise ValueError(f"Requested d_v term {dv_term!r} is absent from the fixed probe.")
+            rest = tuple(name for name in probe_denominators if name != dv_term)
+            partitions = {"selected_probe_term": (dv_term,)}
+            if rest:
+                partitions["other_probe_terms"] = rest
+            gradient_audit = self.diagnose_macro_update(
+                model,
+                provider,
+                probe_batches,
+                phase=phase,
+                arm=arm,
+                epoch=epoch,
+                term_groups=partitions,
+                training_mode=True,
+                include_gradient_tensors=True,
+                optimizer_state_by_name=optimizer_state_by_name,
+            )
+            dv_gradients = gradient_audit["gradient_tensors"]["selected_probe_term"]
+
+        source_provider_model = getattr(provider, "model", None)
+        provider_owns_source_model = source_provider_model is model
+        source_group_contract = None
+        if provider_owns_source_model:
+            source_specs = tuple(provider.optimizer_groups(
+                model, arm, self.config.stage_for_epoch(epoch)))
+            source_group_contract = tuple(
+                (spec.name, tuple(spec.parameter_names)) for spec in source_specs)
+
+        results: dict[str, Any] = {}
+        comparison_rng = capture_rng_state()
+        provider_state_reader = getattr(provider, "training_state_dict", None)
+        provider_state_loader = getattr(provider, "load_training_state_dict", None)
+        starting_provider_state = copy.deepcopy(provider_state_reader()) if callable(provider_state_reader) else None
+        try:
+            for arm_name, overrides in interventions.items():
+                restore_rng_state(comparison_rng)
+                clone = copy.deepcopy(clone_template).to(self.device)
+                clone.train(True)
+                initial = {
+                    name: value.detach().clone()
+                    for name, value in clone.named_parameters()
+                }
+                if provider_owns_source_model:
+                    # Some existing providers use their owned model throughout
+                    # prediction and loss construction, including identity
+                    # guards and native operator reads. Bind the disposable
+                    # provider context to this clone for the entire update and
+                    # probe, then restore the original binding in the outer
+                    # finally block even if any provider call fails.
+                    provider.model = clone
+                optimizer, specs = self._make_optimizer(
+                    clone, provider, arm, epoch, optimizer_state_by_name)
+                if source_group_contract is not None:
+                    clone_group_contract = tuple(
+                        (spec.name, tuple(spec.parameter_names)) for spec in specs)
+                    if clone_group_contract != source_group_contract:
+                        raise ValueError(
+                            "Disposable clone optimizer groups differ from the source model declaration.")
+                self._set_schedules(optimizer, specs, epoch)
+                update_losses, work, denominators, sampling_hash = self._run_update(
+                    clone,
+                    provider,
+                    optimizer,
+                    update_batches,
+                    phase=phase,
+                    arm=arm,
+                    epoch=epoch,
+                    update_index=0,
+                    loss_weight_overrides=overrides,
+                )
+                deltas = {
+                    name: parameter.detach() - initial[name]
+                    for name, parameter in clone.named_parameters()
+                }
+                delta_norms: dict[str, float] = {}
+                for spec in specs:
+                    delta_norms[spec.name] = math.sqrt(sum(
+                        float(deltas[name].double().square().sum().item())
+                        for name in spec.parameter_names
+                    ))
+                after_probe = self.measure_macro_loss(
+                    clone, provider, probe_batches, phase=phase, arm=arm, epoch=epoch,
+                    training_mode=True)
+                d_v = None
+                if dv_term is not None:
+                    d_v = sum(
+                        float((dv_gradients[name].double() * deltas[name].double()).sum().item())
+                        for name in dv_gradients.keys() & deltas.keys()
+                    )
+                results[arm_name] = {
+                    "loss_weight_overrides": {name: float(value) for name, value in overrides.items()},
+                    "optimizer_updates": 1,
+                    "training_loss_terms": update_losses,
+                    "training_denominators": denominators,
+                    "training_query_sampling_sha256": sampling_hash,
+                    "training_work_counts": work,
+                    "optimizer_groups": [
+                        {
+                            "name": str(group["group_name"]),
+                            "learning_rate": float(group["lr"]),
+                            "weight_decay": float(group["weight_decay"]),
+                            "betas": list(group["betas"]),
+                            "eps": float(group["eps"]),
+                            "parameter_count": len(group["params"]),
+                        }
+                        for group in optimizer.param_groups
+                    ],
+                    "parameter_delta_norms_by_group": delta_norms,
+                    "probe_before": before_probe,
+                    "probe_after": after_probe,
+                    "probe_loss_changes": {
+                        name: after_probe["loss_terms"][name]["weighted_objective"]
+                        - before_probe["loss_terms"][name]["weighted_objective"]
+                        for name in before_probe["loss_terms"]
+                    },
+                    "probe_selected_gradient_dot_update": d_v,
+                    "probe_selected_gradient_term": dv_term,
+                    "optimizer_state_after": optimizer_state_provenance(
+                        named_optimizer_state(clone, optimizer), expected_groups=specs),
+                }
+                del optimizer, clone
+                if starting_provider_state is not None and callable(provider_state_loader):
+                    provider_state_loader(starting_provider_state)
+        finally:
+            try:
+                if provider_owns_source_model:
+                    provider.model = source_provider_model
+            finally:
+                try:
+                    if starting_provider_state is not None and callable(provider_state_loader):
+                        provider_state_loader(starting_provider_state)
+                finally:
+                    restore_rng_state(comparison_rng)
+        return {
+            "optimizer_updates": declared_optimizer_updates,
+            "optimizer_state_start": "checkpoint_named_state" if optimizer_state_by_name is not None else "fresh_zero_moments",
+            "update_case_keys": sorted(update_cases, key=str),
+            "probe_case_keys": sorted(probe_cases, key=str),
+            "arms": results,
+        }
+
     def _run_update(
         self,
         model: nn.Module,
@@ -1304,6 +2090,7 @@ class TrainingEngine:
         arm: str,
         epoch: int,
         update_index: int,
+        loss_weight_overrides: Mapping[str, float] | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, float], str | None]:
         planned = {
             name: _denominator(value)
@@ -1346,9 +2133,14 @@ class TrainingEngine:
                         raise ValueError(f"Loss numerator {name!r} is nonzero with an empty valid mask.")
                     continue
                 observed[name] += denominator
-                piece = term.numerator * (float(term.weight) / planned[name])
+                effective_weight = float(term.weight)
+                if loss_weight_overrides is not None and name in loss_weight_overrides:
+                    effective_weight = float(loss_weight_overrides[name])
+                    if not math.isfinite(effective_weight):
+                        raise ValueError(f"Loss override for {name!r} is not finite.")
+                piece = term.numerator * (effective_weight / planned[name])
                 objective = piece if objective is None else objective + piece
-                losses[name] += float(term.numerator.detach()) / planned[name] * float(term.weight)
+                losses[name] += float(term.numerator.detach()) / planned[name] * effective_weight
             for name, value in provider.work_counts(batch, predictions, auxiliary_state).items():
                 work[name] = work.get(name, 0.0) + float(value)
             if objective is None:
@@ -1513,6 +2305,7 @@ class TrainingEngine:
         allow_microbatch_change: bool = False,
         mathematical_route_branch: Mapping[str, Any] | None = None,
         joint_core_revision: Mapping[str, Any] | None = None,
+        diagnostic_age_branch: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
@@ -1549,6 +2342,11 @@ class TrainingEngine:
             raise ValueError("A run cannot be both an exact resume and a new branch.")
         if allow_microbatch_change and resume_checkpoint is None:
             raise ValueError("A microbatch amendment requires an existing run's latest checkpoint.")
+        if diagnostic_age_branch is not None and (
+                branch_from_checkpoint is None or resume_checkpoint is not None
+                or allow_microbatch_change or mathematical_route_branch is not None
+                or joint_core_revision is not None):
+            raise ValueError("A diagnostic age branch requires a fresh child of one named checkpoint.")
         if joint_core_revision is not None and (
                 branch_from_checkpoint is None or resume_checkpoint is not None
                 or allow_microbatch_change or mathematical_route_branch is not None
@@ -1599,7 +2397,17 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if joint_core_revision is not None:
+            if diagnostic_age_branch is not None:
+                amendment = _diagnostic_age_branch_amendment(
+                    source_payload.get("experiment_identity", {}), sealed_identity,
+                    diagnostic_age_branch,
+                    source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    stop_after=int(stop_after))
+                if (source_payload.get("arm") != arm
+                        or int(source_payload.get("epoch", -1)) != diagnostic_age_branch["source_epoch"]):
+                    raise ValueError("Diagnostic arm or source age differs from its declared checkpoint.")
+            elif joint_core_revision is not None:
                 amendment = _branch_joint_locality_amendment(
                     source_payload.get('experiment_identity', {}), sealed_identity, joint_core_revision)
                 if (source_payload.get('arm') != arm
@@ -1615,7 +2423,7 @@ class TrainingEngine:
             if resume_checkpoint is not None:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
-            elif joint_core_revision is None:
+            elif joint_core_revision is None and diagnostic_age_branch is None:
                 if source_payload.get("arm") != "warmup":
                     raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
                 if int(source_payload.get("epoch", -1)) != self.config.warmup_epochs:
@@ -1630,7 +2438,8 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
-        if resume_checkpoint is not None or joint_core_revision is not None:
+        if (resume_checkpoint is not None or joint_core_revision is not None
+                or diagnostic_age_branch is not None):
             saved_group_names = source_payload.get("optimizer_group_names")
             current_group_names = [group["group_name"] for group in optimizer.param_groups]
             saved_groups = source_payload["optimizer_state_by_name"].get("groups", [])
@@ -1650,11 +2459,12 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
-            amendment_name = ('joint_core_revision' if joint_core_revision is not None else
+            amendment_name = ('diagnostic_age_branch' if diagnostic_age_branch is not None else
+                              'joint_core_revision' if joint_core_revision is not None else
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if joint_core_revision is not None else None), amendment)
+                category='logs' if joint_core_revision is not None or diagnostic_age_branch is not None else None), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = (copy.deepcopy(source_payload.get("branch_parent"))
@@ -1675,7 +2485,24 @@ class TrainingEngine:
                     joint_core_revision=copy.deepcopy(amendment),
                     inherited_history_scope='parent function through the common boundary',
                 )
+            if diagnostic_age_branch is not None:
+                branch_parent.update(
+                    diagnostic_age_branch=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row['case_visits']) for row in source_payload.get('history', [])),
+                    inherited_optimizer_updates=sum(int(row['optimizer_updates']) for row in source_payload.get('history', [])),
+                )
             best_field = best_guarded = float("inf")
+        diagnostic_contract = (
+            branch_parent.get("diagnostic_age_branch")
+            if isinstance(branch_parent, Mapping) else None
+        )
+        if diagnostic_contract is not None:
+            if (stop_after not in diagnostic_contract["review_epochs"]
+                    or stop_after > diagnostic_contract["review_stop"]):
+                raise ValueError("A diagnostic continuation cannot extend its declared reviews or update budget.")
+            evidence = Path(diagnostic_contract["evidence_path"]).read_bytes()
+            if hashlib.sha256(evidence).hexdigest() != diagnostic_contract["evidence_sha256"]:
+                raise ValueError("Diagnostic selection evidence changed before continuation.")
         active = {
             "status": "running", "arm": arm, "identity": sealed_identity, "device": str(self.device),
             "pid": os.getpid(),
@@ -1748,6 +2575,12 @@ class TrainingEngine:
                 ordered_cases = list(provider.epoch_cases(epoch, self.config.seed))
                 if not ordered_cases:
                     raise ValueError("Each development epoch must visit at least one selected TRAIN case.")
+                if diagnostic_contract is not None and (
+                        len(set(ordered_cases)) != len(ordered_cases)
+                        or set(ordered_cases) != set(diagnostic_contract["fit_case_keys"])
+                        or completed_updates + math.ceil(len(ordered_cases) / self.config.effective_cases)
+                        > diagnostic_contract["scientific_update_limit"]):
+                    raise ValueError("Diagnostic case membership or optimizer update budget changed during fitting.")
                 if self.config.deterministic_case_order:
                     rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, epoch, 0x484F4E46]))
                     order = rng.permutation(len(ordered_cases)).tolist()

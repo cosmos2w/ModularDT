@@ -412,6 +412,7 @@ class JointThermalTask(ThermalRefinementTask):
         operator_rows_per_case: int = OPERATOR_ROWS_PER_CASE,
         atlas_directory: Path = DEFAULT_ATLAS_DIRECTORY,
         auxiliary_calibration: Mapping[str, Any] | None = None,
+        saved_response_scales: Mapping[str, float] | None = None,
         validation_scope: str | None = None,
         optimizer_schedule: ScheduleSpec | None = None,
         weight_decay: float | None = None,
@@ -454,6 +455,13 @@ class JointThermalTask(ThermalRefinementTask):
         self.effective_batch_size = int(effective_batch_size)
         self.operator_rows_per_case = int(operator_rows_per_case)
         self.auxiliary_calibration = None if auxiliary_calibration is None else copy.deepcopy(dict(auxiliary_calibration))
+        self.saved_response_scales = None if saved_response_scales is None else {
+            str(name): float(value) for name, value in saved_response_scales.items()
+        }
+        if self.saved_response_scales is not None and (
+                set(self.saved_response_scales) != {"fluid", "surface", "material"}
+                or any(not math.isfinite(value) or value <= 0 for value in self.saved_response_scales.values())):
+            raise ValueError("Saved TRAIN response scales must be positive finite fluid/surface/material values.")
         self.flow_role_weights = {name: 0.5 / 4 for name in ("u", "v", "p", "omega")}
         self.thermal_role_weights = {name: 0.5 / 3 for name in ("fluid", "surface", "material")}
         self.response_weight = float(response_coefficient)
@@ -472,7 +480,11 @@ class JointThermalTask(ThermalRefinementTask):
         recipe = {
             "budget": dict(budget),
             "calibration": {
-                "response_scales": _load_recipe_helpers()[1](train_families),
+                "response_scales": (
+                    copy.deepcopy(self.saved_response_scales)
+                    if self.saved_response_scales is not None
+                    else _load_recipe_helpers()[1](train_families)
+                ),
                 "response_coefficient": self.response_weight,
                 "operator_coefficient": self.operator_weight,
             },
@@ -1041,13 +1053,24 @@ class JointThermalTask(ThermalRefinementTask):
             rows.append(row)
         return {"case_rows": rows}
 
-    def reduce_native_metrics(self, records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    def reduce_native_metrics(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        *,
+        expected_case_ids: Sequence[str] | None = None,
+    ) -> Mapping[str, Any]:
         rows = [row for record in records for row in record["case_rows"]]
         ids = [str(row["case_id"]) for row in rows]
-        if len(rows) != len(self._validation_ids) or len(set(ids)) != len(ids) or set(ids) != set(self._validation_ids):
-            raise ValueError("Joint Thermal validation must visit the exact exposed fixed cohort once per case.")
+        expected_ids = list(self._validation_ids if expected_case_ids is None else expected_case_ids)
+        if (len(set(expected_ids)) != len(expected_ids)
+                or (expected_case_ids is not None and not set(expected_ids) <= set(self._train_ids))):
+            raise ValueError("A fixed native metric panel must be unique and contained in TRAIN membership.")
+        if len(rows) != len(expected_ids) or len(set(ids)) != len(ids) or set(ids) != set(expected_ids):
+            raise ValueError("Joint Thermal metrics must visit the exact declared case cohort once per case.")
         result: dict[str, Any] = {
             "scope": (
+                "fixed selected TRAIN panel; equal-case native measurements"
+                if expected_case_ids is not None else
                 "formal canonical89 primary; exposed validation; equal-case native measurements"
                 if getattr(self, "formal_validation_scope", None) == "canonical89" else
                 "manual originalTRAIN600 preparation; fixed25_v1 exposed DEV22 sanity panel only"
@@ -1647,6 +1670,8 @@ def build_thermal_joint_task(
     depth: int = 2,
     validation_queries: int | None = None,
     auxiliary_calibration: Mapping[str, Any] | None = None,
+    saved_normalization_stats: Mapping[str, Any] | None = None,
+    saved_response_scales: Mapping[str, float] | None = None,
     validation_scope: str | None = None,
     optimizer_schedule: ScheduleSpec | None = None,
     weight_decay: float | None = None,
@@ -1763,7 +1788,18 @@ def build_thermal_joint_task(
         if len(train_ids) != 150 or len(validation_ids) != 22:
             raise ValueError("Joint Thermal development requires literal fixed25_v1 150/22 membership.")
 
-    normalizer = fit_global_normalizer(resolved_data_path, train_ids)
+    if saved_normalization_stats is None:
+        normalizer = fit_global_normalizer(resolved_data_path, train_ids)
+    else:
+        if not isinstance(saved_normalization_stats, Mapping) or not saved_normalization_stats:
+            raise TypeError("Saved Thermal normalization must be a nonempty checkpoint-owned mapping.")
+        restored_stats = {
+            str(name): np.asarray(value, dtype=np.float32).copy()
+            for name, value in saved_normalization_stats.items()
+        }
+        if any(not np.isfinite(value).all() for value in restored_stats.values()):
+            raise ValueError("Saved Thermal normalization contains non-finite values.")
+        normalizer = H5Normalizer(restored_stats)
     training_cases = _read_selected_cases(
         resolved_data_path,
         train_ids,
@@ -1883,6 +1919,7 @@ def build_thermal_joint_task(
         operator_rows_per_case=operator_rows_per_case,
         atlas_directory=Path(atlas_directory).expanduser().resolve(),
         auxiliary_calibration=auxiliary_calibration,
+        saved_response_scales=saved_response_scales,
         validation_scope=validation_scope,
         optimizer_schedule=optimizer_schedule,
         weight_decay=weight_decay,

@@ -634,6 +634,7 @@ def test_native_metrics_report_near_far_query_counts_and_sampled_module_peaks():
     provider.stats = _stats()
     provider.formal_full = False
     provider._validation_ids = ("synthetic-train-preflight",)
+    provider._train_ids = ("synthetic-train-preflight",)
     predictions = SimpleNamespace(native_prepared=prepared, native_main=output)
     targets = SimpleNamespace(
         case_ids=("synthetic-train-preflight",),
@@ -653,3 +654,10 @@ def test_native_metrics_report_near_far_query_counts_and_sampled_module_peaks():
     assert reduced["near_fluid_temperature_query_count"] == row["near_fluid_temperature_query_count"]
     assert reduced["far_fluid_temperature_query_count"] == row["far_fluid_temperature_query_count"]
     assert reduced["sampled_material_peak_rmse_mean"] == pytest.approx(row["sampled_material_peak_rmse"])
+    train_reduced = provider.reduce_native_metrics(
+        [record], expected_case_ids=["synthetic-train-preflight"],
+    )
+    assert train_reduced["scope"] == "fixed selected TRAIN panel; equal-case native measurements"
+    assert train_reduced["case_ids"] == ["synthetic-train-preflight"]
+    with pytest.raises(ValueError, match="contained in TRAIN"):
+        provider.reduce_native_metrics([record], expected_case_ids=["unbound-case"])

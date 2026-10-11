@@ -363,6 +363,7 @@ class WindFarmSharedInteractionModel(nn.Module):
         hidden: int = 64,
         message: int = 64,
         max_sources: int = 30,
+        factorized_affine_execution: bool = False,
     ) -> None:
         super().__init__()
         self.velocity_transform = velocity_transform
@@ -377,6 +378,7 @@ class WindFarmSharedInteractionModel(nn.Module):
             output_width=3,
             query_width=7,
             max_sources=int(max_sources),
+            factorized_affine_execution=factorized_affine_execution,
         )
 
     def prepare_case(

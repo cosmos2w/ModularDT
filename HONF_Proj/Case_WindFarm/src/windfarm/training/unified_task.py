@@ -75,6 +75,13 @@ WIND_COMPONENT_SCALE_MINIMUM_MPS = 1.0e-3
 WIND_COMPONENT_SCALE_FRACTION_OF_SCALAR = 0.10
 WIND_ALLOWED_QUERY_TILES = (512, 2048, 8192)
 WIND_ALLOWED_CONTEXT_SHAPES = ((2, 2, 2), (8, 4, 2))
+# Run2202's retained identity binds this raw-file digest, while the embedded
+# calibration mapping is a richer JSON representation with its own stable
+# object digest. Accepting the historical digest requires both exact values;
+# this prevents attaching an arbitrary file hash to changed calibration data
+# when the original raw file is unavailable.
+RUN2202_ROLE_SCALE_SOURCE_SHA256 = "d9d958a76ac47a96969233ade3a3aee8d6e359877a3e56fc709575f9dbf8259d"
+RUN2202_ROLE_SCALE_CALIBRATION_SHA256 = "0e9f5367c3ee979e1d922e78e8bf61609ab51e0967ada60239dc5c1eeb96edbf"
 _ROLE_INDEX = {name: index for index, name in enumerate(ROLE_NAMES)}
 _QUERY_STREAM = 0x57494E44
 _MESSAGE_CALIBRATION_STREAM = 0x4D534753
@@ -327,6 +334,66 @@ def _sha256(path: Path) -> str:
 def _stable_json_sha256(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_saved_role_scale_hash(calibration: Mapping[str, Any], saved_sha256: Any) -> str:
+    """Bind a reused role-scale receipt to its exact canonical or archived source digest."""
+
+    if not isinstance(saved_sha256, str) or len(saved_sha256) != 64:
+        raise ValueError("Saved Wind role-scale calibration requires its retained identity SHA256.")
+    try:
+        int(saved_sha256, 16)
+    except ValueError as exc:
+        raise ValueError("Saved Wind role-scale SHA256 must be hexadecimal.") from exc
+    canonical_sha256 = _stable_json_sha256(calibration)
+    if saved_sha256 == canonical_sha256:
+        return "stable_json_calibration_sha256"
+    if (saved_sha256 == RUN2202_ROLE_SCALE_SOURCE_SHA256
+            and canonical_sha256 == RUN2202_ROLE_SCALE_CALIBRATION_SHA256):
+        return "retained_Run2202_raw_file_sha256_bound_to_exact_embedded_calibration_sha256"
+    raise ValueError(
+        "Saved Wind role-scale hash matches neither the calibration's stable JSON digest nor "
+        "the exact retained Run2202 source-file/calibration digest pair."
+    )
+
+
+def _validate_saved_role_scale_data(
+    calibration: Mapping[str, Any], retained_scales: Any,
+) -> tuple[dict[str, float], dict[str, tuple[float, float, float]]]:
+    """Validate finite positive scalar/component scales against checkpoint identity values."""
+
+    scalar_scales = calibration.get("scalar_role_scales_mps")
+    component_scales = calibration.get("component_role_scales_mps")
+    if not isinstance(scalar_scales, Mapping) or not isinstance(component_scales, Mapping):
+        raise ValueError("Saved Wind role-scale receipt omitted scalar or component scales.")
+    if not isinstance(retained_scales, Mapping):
+        raise ValueError("Saved Wind role-scale receipt must include scales retained in checkpoint identity.")
+    embedded_scales = calibration.get("role_scales_mps")
+    if embedded_scales is not None and not isinstance(embedded_scales, Mapping):
+        raise ValueError("Saved Wind duplicated scalar scale receipt must be a mapping.")
+    scalar_result: dict[str, float] = {}
+    component_result: dict[str, tuple[float, float, float]] = {}
+    for role in ROLE_NAMES:
+        try:
+            scalar = float(scalar_scales[role])
+            retained_scalar = float(retained_scales[role])
+            components = np.asarray(component_scales[role], dtype=np.float64)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Saved Wind scales for {role!r} are missing or malformed.") from exc
+        if not math.isfinite(scalar) or scalar <= 0 or retained_scalar != scalar:
+            raise ValueError(f"Saved Wind scalar scale for {role!r} is invalid or differs from checkpoint identity.")
+        if embedded_scales is not None:
+            try:
+                embedded_scalar = float(embedded_scales[role])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"Saved Wind duplicated scalar scale for {role!r} is malformed.") from exc
+            if embedded_scalar != scalar:
+                raise ValueError(f"Saved Wind scalar scale for {role!r} disagrees with its duplicate receipt field.")
+        if components.shape != (3,) or not np.isfinite(components).all() or np.any(components <= 0):
+            raise ValueError(f"Saved Wind component scale for {role!r} is invalid or has the wrong dimension.")
+        scalar_result[role] = scalar
+        component_result[role] = tuple(float(value) for value in components)
+    return scalar_result, component_result
 
 
 def _indices_sha256(values: np.ndarray) -> str:
@@ -695,6 +762,8 @@ class WindRefinementTask:
         manifest: Mapping[str, Any],
         manifest_path: Path,
         normalization_path: Path,
+        normalization_identity_path: Path | None = None,
+        identity_device: str | None = None,
         role_scales: Mapping[str, float],
         role_scale_sha256: str,
         seed: int = 42,
@@ -718,6 +787,11 @@ class WindRefinementTask:
         self.manifest = dict(manifest)
         self.manifest_path = manifest_path.resolve()
         self.normalization_path = normalization_path.resolve()
+        self.normalization_identity_path = (
+            self.normalization_path if normalization_identity_path is None
+            else normalization_identity_path.expanduser().resolve()
+        )
+        self.identity_device = str(device) if identity_device is None else str(identity_device)
         self.role_scales = {name: float(role_scales[name]) for name in ROLE_NAMES}
         self.role_scale_sha256 = str(role_scale_sha256)
         self.seed = int(seed)
@@ -844,7 +918,7 @@ class WindRefinementTask:
             "role_query_counts": dict(self.role_query_counts),
             "role_scales_mps": dict(self.role_scales),
             "role_scale_source_sha256": self.role_scale_sha256,
-            "normalization_path": str(self.normalization_path),
+            "normalization_path": str(self.normalization_identity_path),
             "normalization_sha256": _sha256(self.normalization_path),
             "background_choice": "train_only_height_profile",
             "background_profile": self.background_profile.to_dict(),
@@ -870,7 +944,7 @@ class WindRefinementTask:
             },
             "catalogue_cache_capacity_bytes": self.catalogue_cache.max_cached_bytes,
             "horizon_updates_per_epoch": 3,
-            "device": str(self.device),
+            "device": self.identity_device,
             "physical_reference": "stored OpenFOAM native fields; no new solver calls",
         }
         if self.recipe is not None:
@@ -1522,10 +1596,70 @@ class WindRefinementTask:
             records.append(row)
         return {"rows": records}
 
-    def reduce_native_metrics(self, records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    def diagnostic_native_sample(
+        self,
+        predictions: WindPredictions,
+        batch: TaskBatch,
+        *,
+        maximum_queries_per_role: int = 8,
+    ) -> Mapping[str, Any]:
+        """Retain compact physical prediction/residual samples for a fixed batch."""
+
+        if type(maximum_queries_per_role) is not int or maximum_queries_per_role < 1:
+            raise ValueError("Diagnostic native samples require a positive integer per-role limit.")
+        predicted = predictions.main_mps.detach().cpu().numpy().astype(np.float64, copy=False)
+        full = None if predictions.full_mps is None else predictions.full_mps.detach().cpu().numpy().astype(np.float64, copy=False)
+        actual = np.asarray(batch.targets.velocity_mps, dtype=np.float64)
+        baseline = predictions.auxiliary["baseline_mps"].detach().cpu().numpy().astype(np.float64, copy=False)
+        role_ids = predictions.role_ids.detach().cpu().numpy()
+        coordinates = np.asarray(batch.receivers.coordinates_D, dtype=np.float64)
+        if predicted.shape != actual.shape or baseline.shape != actual.shape or coordinates.shape[:2] != actual.shape[:2]:
+            raise ValueError("Wind diagnostic sample inputs have incompatible native batch dimensions.")
+        rows: list[dict[str, Any]] = []
+        for batch_index, metadata in enumerate(batch.targets.case_metadata):
+            roles: dict[str, Any] = {}
+            for role in ROLE_NAMES:
+                selected = role_ids[batch_index] == _ROLE_INDEX[role]
+                ids = np.flatnonzero(selected)
+                if ids.size == 0:
+                    raise ValueError(f"Wind diagnostic sample role {role!r} is empty for {metadata['row_index']}.")
+                residual = predicted[batch_index, ids] - actual[batch_index, ids]
+                role_payload: dict[str, Any] = {
+                    "query_count": int(ids.size),
+                    "target_component_rms_mps": np.sqrt(np.mean(actual[batch_index, ids] ** 2, axis=0)).tolist(),
+                    "prediction_component_rms_mps": np.sqrt(np.mean(predicted[batch_index, ids] ** 2, axis=0)).tolist(),
+                    "baseline_component_rms_mps": np.sqrt(np.mean(baseline[batch_index, ids] ** 2, axis=0)).tolist(),
+                    "residual_component_rms_mps": np.sqrt(np.mean(residual ** 2, axis=0)).tolist(),
+                    "prediction_component_abs_p95_mps": np.quantile(
+                        np.abs(predicted[batch_index, ids]), 0.95, axis=0
+                    ).tolist(),
+                    "residual_component_abs_p95_mps": np.quantile(np.abs(residual), 0.95, axis=0).tolist(),
+                }
+                sample_ids = ids[:maximum_queries_per_role]
+                role_payload["sample"] = {
+                    "query_positions": sample_ids.astype(int).tolist(),
+                    "coordinates_D": coordinates[batch_index, sample_ids].tolist(),
+                    "target_velocity_mps": actual[batch_index, sample_ids].tolist(),
+                    "prediction_velocity_mps": predicted[batch_index, sample_ids].tolist(),
+                    "baseline_velocity_mps": baseline[batch_index, sample_ids].tolist(),
+                    "residual_mps": (predicted[batch_index, sample_ids] - actual[batch_index, sample_ids]).tolist(),
+                }
+                if full is not None:
+                    role_payload["sample"]["full_velocity_mps"] = full[batch_index, sample_ids].tolist()
+                roles[role] = role_payload
+            rows.append({**dict(metadata), "roles": roles})
+        return {"units": "m/s", "coordinate_units": "D", "rows": rows}
+
+    def reduce_native_metrics(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        *,
+        expected_row_count: int | None = None,
+    ) -> Mapping[str, Any]:
         rows = [row for record in records for row in record["rows"]]
-        if len(rows) != 24 or len({int(row["row_index"]) for row in rows}) != 24:
-            raise ValueError("Wind validation must reduce the exact 24-row fixed development panel.")
+        expected = 24 if expected_row_count is None else int(expected_row_count)
+        if expected < 1 or len(rows) != expected or len({int(row["row_index"]) for row in rows}) != expected:
+            raise ValueError(f"Wind native metrics must reduce the exact declared {expected}-row panel.")
         summary: dict[str, Any] = {
             "field_score": float(np.mean([row["field_score"] for row in rows])),
             "height_profile_score": float(np.mean([row["height_profile_score"] for row in rows])),
@@ -2038,30 +2172,58 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTas
     else:
         if config.get("role_query_counts") is not None and dict(config["role_query_counts"]) != recipe["role_query_counts"]:
             raise ValueError("Wind explicit role counts do not match the sealed query recipe.")
-        calibration_result = _fit_train_role_scales(
-            view,
-            train_rows,
-            manifest["train_layout_indices"],
-            profile,
-            normalizer,
-            training_fingerprint=manifest["manifest_sha256"],
-            calibration_layout_count=int(recipe["calibration_layout_count"]),
-            catalogue_cache=catalogue_cache,
-        )
-        profile_fields = {
-            "catalogue_build_or_lookup_seconds",
-            "native_target_sampling_seconds",
-            "catalogue_cache_after_calibration",
-        }
-        role_scale_profile = {key: calibration_result[key] for key in profile_fields}
-        calibration = {key: value for key, value in calibration_result.items() if key not in profile_fields}
-        role_scales = {name: float(calibration["scalar_role_scales_mps"][name]) for name in ROLE_NAMES}
-        role_component_scales = {
-            name: tuple(float(value) for value in calibration["component_role_scales_mps"][name])
-            for name in ROLE_NAMES
-        }
+        saved_calibration = config.get("saved_role_scale_calibration")
+        if saved_calibration is None:
+            calibration_result = _fit_train_role_scales(
+                view,
+                train_rows,
+                manifest["train_layout_indices"],
+                profile,
+                normalizer,
+                training_fingerprint=manifest["manifest_sha256"],
+                calibration_layout_count=int(recipe["calibration_layout_count"]),
+                catalogue_cache=catalogue_cache,
+            )
+            profile_fields = {
+                "catalogue_build_or_lookup_seconds",
+                "native_target_sampling_seconds",
+                "catalogue_cache_after_calibration",
+            }
+            role_scale_profile = {key: calibration_result[key] for key in profile_fields}
+            calibration = {key: value for key, value in calibration_result.items() if key not in profile_fields}
+        else:
+            if not isinstance(saved_calibration, Mapping):
+                raise TypeError("Saved Wind role-scale calibration must be a mapping.")
+            calibration = dict(saved_calibration)
+            expected = {
+                "training_fingerprint": manifest["manifest_sha256"],
+                "training_rows_sha256": _indices_sha256(train_rows),
+                "training_recipe_id": recipe["recipe_id"],
+                "training_recipe_sha256": recipe["recipe_sha256"],
+                "target_values_read": "TRAIN calibration panel only",
+            }
+            if any(calibration.get(name) != value for name, value in expected.items()):
+                raise ValueError("Saved Wind role-scale calibration differs from the fixed TRAIN and recipe binding.")
+            _validate_saved_role_scale_hash(calibration, config.get("saved_role_scale_sha256"))
+            checked_scalar_scales, checked_component_scales = _validate_saved_role_scale_data(
+                calibration, config.get("saved_role_scales_mps"),
+            )
+            role_scale_profile = config.get("saved_role_scale_profile")
+            if role_scale_profile is not None and not isinstance(role_scale_profile, Mapping):
+                raise TypeError("Saved Wind role-scale profile must be a mapping when supplied.")
+            role_scales = checked_scalar_scales
+            role_component_scales = checked_component_scales
+        if saved_calibration is None:
+            role_scales = {name: float(calibration["scalar_role_scales_mps"][name]) for name in ROLE_NAMES}
+            role_component_scales = {
+                name: tuple(float(value) for value in calibration["component_role_scales_mps"][name])
+                for name in ROLE_NAMES
+            }
         role_scale_calibration = calibration
-        role_scale_hash = _stable_json_sha256(calibration)
+        role_scale_hash = (
+            _stable_json_sha256(calibration)
+            if saved_calibration is None else str(config["saved_role_scale_sha256"])
+        )
         roles = dict(recipe["role_query_counts"])
         model_payload = {
             key: model_recipe[key]
@@ -2094,7 +2256,47 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTas
         catalogue_cache=catalogue_cache,
     )
     model.to(device)
-    provider.calibrate_train_message_scale(model)
+    saved_provider_state = config.get("provider_training_state")
+    if saved_provider_state is None:
+        provider.calibrate_train_message_scale(model)
+    else:
+        if not isinstance(saved_provider_state, Mapping):
+            raise TypeError("Saved Wind provider training state must be a mapping.")
+        message_scale = saved_provider_state.get("message_scale")
+        receipt = saved_provider_state.get("message_scale_calibration")
+        expected_receipt = {
+            "method": "pre-fit fine source-message RMS",
+            "layout_indices": list(provider.message_calibration_layouts),
+            "row_indices": list(provider.message_calibration_rows),
+            "query_count_per_row": 1024,
+            "target_values_read": False,
+        }
+        if not isinstance(receipt, Mapping) or any(receipt.get(key) != value for key, value in expected_receipt.items()):
+            raise ValueError("Saved Wind message calibration does not match the fixed TRAIN panel and query protocol.")
+        if (message_scale is None or not math.isfinite(float(message_scale)) or float(message_scale) <= 0
+                or receipt.get("message_rms_latent") != float(message_scale)):
+            raise ValueError("Saved Wind message calibration scale is missing or inconsistent.")
+        coordinate_hash = receipt.get("query_coordinates_sha256")
+        if not isinstance(coordinate_hash, str) or len(coordinate_hash) != 64:
+            raise ValueError("Saved Wind message calibration omitted its query-coordinate SHA256.")
+        try:
+            int(coordinate_hash, 16)
+        except ValueError as exc:
+            raise ValueError("Saved Wind message calibration query hash is not hexadecimal.") from exc
+        component_count = receipt.get("active_message_component_count")
+        message_width = int(model_payload["message"])
+        refinement = getattr(getattr(model, "core", None), "refinement", None)
+        base_output = getattr(refinement, "base_output", None)
+        if (type(component_count) is not int or component_count <= 0
+                or component_count % (1024 * message_width) != 0
+                or int(getattr(refinement, "output_width", -1)) != message_width
+                or int(getattr(base_output, "out_features", -1)) != message_width):
+            raise ValueError("Saved Wind calibration component count differs from the active message dimensions.")
+        provider.load_training_state_dict(saved_provider_state)
+        residual_scale = getattr(refinement, "residual_scale", None)
+        if not torch.is_tensor(residual_scale):
+            raise TypeError("Wind refined core omitted its residual-scale buffer.")
+        residual_scale.fill_(float(provider.training_state_dict()["message_scale"]))
     return model, provider, None
 
 

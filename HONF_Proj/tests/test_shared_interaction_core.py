@@ -122,3 +122,94 @@ def test_affine_prepared_response_rejects_post_prepare_readout_update():
         field.far_head[0].weight.add_(.1)
     with pytest.raises(ValueError, match='model weights changed'):
         field.apply_increment(response, torch.ones(1, 3, dtype=torch.float64))
+
+
+def test_factorized_affine_execution_matches_context_read_and_live_derivatives():
+    torch.manual_seed(713)
+    request = scene(3)
+    receivers = torch.rand(1, 7, 3, dtype=torch.float64)
+    reference = NonlinearFieldReadout(4, 2, 6, spatial_dim=3, hidden=8,
+        message=6, output_width=1, factorized_affine_execution=False).double()
+    factored = NonlinearFieldReadout(4, 2, 6, spatial_dim=3, hidden=8,
+        message=6, output_width=1, factorized_affine_execution=True).double()
+    factored.load_state_dict(reference.state_dict(), strict=True)
+    assert tuple(reference.state_dict()) == tuple(factored.state_dict())
+    assert sum(parameter.numel() for parameter in reference.parameters()) == sum(
+        parameter.numel() for parameter in factored.parameters())
+    assert 'factorized_affine_execution' not in reference.config
+    assert factored.config['factorized_affine_execution'] is True
+
+    def evaluate(model):
+        current = replace(request,
+            sources=request.sources.detach().clone().requires_grad_(True),
+            centers=request.centers.detach().clone().requires_grad_(True),
+            context=request.context.detach().clone().requires_grad_(True))
+        query = receivers.detach().clone().requires_grad_(True)
+        prepared = model.prepare(current)
+        values, messages = model.predict(prepared, query, return_messages=True)
+        loss = values.square().mean() + messages.square().mean()
+        gradients = torch.autograd.grad(loss,
+            tuple(model.parameters()) + (current.sources, current.centers, current.context, query))
+        return current, query, prepared, values, messages, gradients
+
+    old = evaluate(reference)
+    new = evaluate(factored)
+    for actual, expected in zip(new[3:5], old[3:5], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+    for actual, expected in zip(new[5], old[5], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=1e-11, atol=1e-12)
+
+    tangent = torch.full_like(receivers, 0.03)
+    old_jvp = torch.autograd.functional.jvp(
+        lambda query: reference.predict(old[2], query), receivers, tangent)[1]
+    new_jvp = torch.autograd.functional.jvp(
+        lambda query: factored.predict(new[2], query), receivers, tangent)[1]
+    torch.testing.assert_close(new_jvp, old_jvp, rtol=1e-11, atol=1e-12)
+    torch.testing.assert_close(factored.predict(new[2], receivers, chunk_size=2),
+                               new[3], rtol=1e-12, atol=1e-12)
+
+    stale = factored.prepare(request)
+    factored.set_factorized_affine_execution(False)
+    with pytest.raises(ValueError, match='execution mode changed'):
+        factored.predict(stale, receivers)
+
+
+def test_factorized_execution_toggleback_invalidates_prepared_context_without_state():
+    request = scene(3)
+    receivers = torch.rand(1, 3, 3, dtype=torch.float64)
+    model = NonlinearFieldReadout(4, 2, 6, spatial_dim=3, hidden=8,
+        message=6, output_width=1, factorized_affine_execution=True).double()
+    prepared = model.prepare(request)
+    state_keys = tuple(model.state_dict())
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    generation = model._factorized_affine_generation
+
+    model.set_factorized_affine_execution(True)
+    assert model._factorized_affine_generation == generation
+    model.set_factorized_affine_execution(False)
+    model.set_factorized_affine_execution(True)
+
+    assert tuple(model.state_dict()) == state_keys
+    assert sum(parameter.numel() for parameter in model.parameters()) == parameter_count
+    with pytest.raises(ValueError, match='execution mode changed'):
+        model.predict(prepared, receivers)
+
+
+def test_factorized_affine_execution_handles_empty_environment_and_zero_query_width():
+    torch.manual_seed(44)
+    request = scene(2)
+    request.environment_tokens = request.sources.new_empty(1, 0, 6)
+    request.environment_coords = request.centers.new_empty(1, 0, 2)
+    reference = NonlinearFieldReadout(4, 2, 6, spatial_dim=2, hidden=8,
+        message=6, output_width=1, query_width=0).double()
+    factored = NonlinearFieldReadout(4, 2, 6, spatial_dim=2, hidden=8,
+        message=6, output_width=1, query_width=0,
+        factorized_affine_execution=True).double()
+    factored.load_state_dict(reference.state_dict(), strict=True)
+    receivers = torch.rand(1, 5, 2, dtype=torch.float64)
+    old_context, new_context = reference.prepare(request), factored.prepare(request)
+    old = reference.predict(old_context, receivers)
+    new = factored.predict(new_context, receivers)
+    torch.testing.assert_close(new, old, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(factored.predict(new_context, receivers, chunk_size=1),
+                               new, rtol=1e-12, atol=1e-12)

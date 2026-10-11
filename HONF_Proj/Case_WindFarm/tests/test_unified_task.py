@@ -32,6 +32,8 @@ from windfarm.training.unified_task import (
     _role_ids,
     _scene_inputs,
     _stable_json_sha256,
+    _validate_saved_role_scale_data,
+    _validate_saved_role_scale_hash,
     resolve_wind_recipe,
 )
 
@@ -742,3 +744,52 @@ def test_formal_wind_task_assembles_eight_case_batch_with_separate_limit(monkeyp
     compact_identity = compact_provider.identity_payload()
     assert compact_identity["resolved_recipe"]["gate_version"] == WIND_GATE_COMPACT_C1_VERSION
     assert compact_identity["resolved_recipe"]["gate_transition"] == [0.35, 0.65]
+
+
+def test_saved_role_scale_hash_requires_canonical_or_exact_historical_pair(monkeypatch):
+    roles = tuple(DEFAULT_ROLE_QUERY_COUNTS)
+    calibration = {
+        "scalar_role_scales_mps": {role: 1.0 for role in roles},
+        "role_scales_mps": {role: 1.0 for role in roles},
+        "component_role_scales_mps": {role: [1.0, 2.0, 3.0] for role in roles},
+    }
+    canonical = _stable_json_sha256(calibration)
+    assert _validate_saved_role_scale_hash(calibration, canonical) == "stable_json_calibration_sha256"
+    historical_source_sha = "a" * 64
+    monkeypatch.setattr(unified_task_module, "RUN2202_ROLE_SCALE_SOURCE_SHA256", historical_source_sha)
+    monkeypatch.setattr(unified_task_module, "RUN2202_ROLE_SCALE_CALIBRATION_SHA256", canonical)
+    assert _validate_saved_role_scale_hash(calibration, historical_source_sha).startswith(
+        "retained_Run2202_raw_file_sha256"
+    )
+    changed = {**calibration, "scalar_role_scales_mps": {**calibration["scalar_role_scales_mps"], roles[0]: 2.0}}
+    with pytest.raises(ValueError, match="neither"):
+        _validate_saved_role_scale_hash(changed, historical_source_sha)
+    with pytest.raises(ValueError, match="hexadecimal"):
+        _validate_saved_role_scale_hash(calibration, "z" * 64)
+
+
+def test_saved_role_scale_values_must_be_finite_positive_and_identity_bound():
+    roles = tuple(DEFAULT_ROLE_QUERY_COUNTS)
+    calibration = {
+        "scalar_role_scales_mps": {role: 1.0 for role in roles},
+        "role_scales_mps": {role: 1.0 for role in roles},
+        "component_role_scales_mps": {role: [1.0, 2.0, 3.0] for role in roles},
+    }
+    scalars, components = _validate_saved_role_scale_data(
+        calibration, {role: 1.0 for role in roles}
+    )
+    assert scalars == {role: 1.0 for role in roles}
+    assert components[roles[0]] == (1.0, 2.0, 3.0)
+
+    bad_component = {
+        **calibration,
+        "component_role_scales_mps": {
+            **calibration["component_role_scales_mps"], roles[0]: [1.0, -2.0, 3.0]
+        },
+    }
+    with pytest.raises(ValueError, match="component scale"):
+        _validate_saved_role_scale_data(bad_component, {role: 1.0 for role in roles})
+
+    bad_identity = {**{role: 1.0 for role in roles}, roles[0]: 0.5}
+    with pytest.raises(ValueError, match="differs from checkpoint identity"):
+        _validate_saved_role_scale_data(calibration, bad_identity)

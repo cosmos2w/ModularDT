@@ -82,11 +82,12 @@ def test_native_curl_rejects_ambiguous_coordinates_and_mask_metadata(invalid):
         build_native_curl_read_stencil(points, lengths, mask, nx=8, ny=6)
 
 
-def _model(mode):
+def _model(mode, *, factorized_affine_execution=False):
     return InteractionPreservingThermalAdapter(
         mode=mode, normalization_stats=_thermal_stats(), flow_readout_law=NATIVE_CURL_READOUT_LAW,
         regional_anchors=0 if mode == "P" else 16,
         locality_prior_strength=None if mode == "P" else 1.,
+        factorized_affine_execution=factorized_affine_execution,
     )
 
 
@@ -141,6 +142,83 @@ def test_native_adapter_zero_collective_roundtrip_and_curl_gradient(mode):
         restored_output = restored.apply_native(restored.prepare_native(structure, receivers, **kwargs),
                                                 heat, accumulation_dtype=torch.float64)
         torch.testing.assert_close(restored_output["pred_field"], output["pred_field"], rtol=0, atol=0)
+
+
+def test_factorized_native_curl_preserves_physical_outputs_and_coordinate_vjp():
+    reference = _model("P").eval()
+    factored = _model("P", factorized_affine_execution=True).eval()
+    factored.load_state_dict(reference.state_dict(), strict=True)
+    structure, receivers, local, mask = _native_inputs()
+    heat = torch.tensor([[0.5, 0.9]], dtype=torch.float64)
+
+    def evaluate(model):
+        current_structure = dict(structure)
+        current_structure["module_centers"] = structure["module_centers"].detach().clone().requires_grad_(True)
+        current_receivers = receivers.detach().clone().requires_grad_(True)
+        prepared = model.prepare_native(current_structure, current_receivers,
+            local_query_points=local, ntheta=4, native_solid_mask=mask)
+        output = model.apply_native(prepared, heat, accumulation_dtype=torch.float64)
+        objective = (output["pred_field"][..., 3].square().mean()
+                     + output["pred_interface"].square().mean()
+                     + output["pred_internal_temperature"].square().mean())
+        gradients = torch.autograd.grad(objective,
+            tuple(model.parameters()) + (current_structure["module_centers"], current_receivers),
+            allow_unused=True)
+        return current_structure, current_receivers, output, gradients
+
+    old = evaluate(reference)
+    new = evaluate(factored)
+    for role in ("pred_field", "pred_interface", "pred_internal_temperature"):
+        torch.testing.assert_close(new[2][role], old[2][role], rtol=2.0e-5, atol=2.0e-6)
+    for actual, expected in zip(new[3], old[3], strict=True):
+        assert (actual is None) == (expected is None)
+        if actual is not None:
+            torch.testing.assert_close(actual, expected, rtol=3.0e-5, atol=3.0e-6)
+    assert new[3][-2] is not None and torch.isfinite(new[3][-2]).all()
+    assert new[3][-2].abs().sum() > 0
+    assert new[3][-1] is not None and torch.isfinite(new[3][-1]).all()
+
+    payload = factored.checkpoint_payload()
+    assert payload["model_config"]["factorized_affine_execution"] is True
+    restored = load_interaction_preserving_thermal_checkpoint(payload).eval()
+    restored_structure = dict(structure)
+    restored_receivers = receivers.detach().clone()
+    restored_output = restored.apply_native(
+        restored.prepare_native(restored_structure, restored_receivers,
+            local_query_points=local, ntheta=4, native_solid_mask=mask),
+        heat, accumulation_dtype=torch.float64)
+    torch.testing.assert_close(restored_output["pred_field"], new[2]["pred_field"],
+                               rtol=2.0e-5, atol=2.0e-6)
+
+
+def test_factorized_native_curl_padded_and_chunked_calls_match_reference():
+    reference = _model("P").eval()
+    factored = _model("P", factorized_affine_execution=True).eval()
+    factored.load_state_dict(reference.state_dict(), strict=True)
+    structure, receivers, local, mask = _native_inputs()
+    kwargs = {"local_query_points": local, "ntheta": 4, "native_solid_mask": mask}
+    heat = torch.tensor([[0.0, 0.9]], dtype=torch.float64)
+    old_prepared = reference.prepare_native(structure, receivers, **kwargs)
+    new_prepared = factored.prepare_native(structure, receivers, **kwargs)
+    old_output = reference.apply_native(old_prepared, heat, accumulation_dtype=torch.float64)
+    new_output = factored.apply_native(new_prepared, heat, accumulation_dtype=torch.float64)
+    torch.testing.assert_close(new_output["pred_field"], old_output["pred_field"],
+                               rtol=2.0e-5, atol=2.0e-6)
+    torch.testing.assert_close(new_output["pred_interface"], old_output["pred_interface"],
+                               rtol=2.0e-5, atol=2.0e-6)
+    torch.testing.assert_close(new_output["pred_internal_temperature"],
+                               old_output["pred_internal_temperature"],
+                               rtol=2.0e-5, atol=2.0e-6)
+    zero_heat = torch.zeros_like(heat)
+    zero_output = factored.apply_native(new_prepared, zero_heat,
+                                        accumulation_dtype=torch.float64)
+    assert torch.count_nonzero(zero_output["pred_field"][..., 4]) == 0
+
+    old_flow = reference.core.predict_fields(old_prepared.context,
+        old_prepared.flow_query_receivers, chunk_size=1)
+    new_flow = factored.core.predict_fields(new_prepared.context,
+        new_prepared.flow_query_receivers, chunk_size=1)
+    torch.testing.assert_close(new_flow, old_flow, rtol=2.0e-5, atol=2.0e-6)
 
 
 @pytest.mark.parametrize("mutation", ["missing_mask", "changed_mask", "changed_stencil", "changed_law"])

@@ -677,6 +677,7 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
         seed: int = 0,
         max_sources: int = 12,
         flow_readout_law: str | None = None,
+        factorized_affine_execution: bool = False,
     ) -> None:
         if flow_readout_law not in (None, NATIVE_CURL_READOUT_LAW):
             raise ValueError("Unknown interaction-preserving Thermal flow readout law.")
@@ -698,6 +699,8 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
             raise ValueError("Interaction-preserving Thermal forcing scale must be positive and finite.")
         if max_sources < 1:
             raise ValueError("Thermal source capacity must be positive.")
+        if type(factorized_affine_execution) is not bool:
+            raise TypeError("factorized_affine_execution must be a bool.")
 
         # Initialize only the base adapter state; do not construct or serialize
         # an intermediate J core. Pair and collective tensors are initialized
@@ -743,6 +746,7 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
             zero_offset=True,
             initialization_seed=int(seed),
             locality_prior_strength=(self.locality_prior_strength if mode != "P" else None),
+            factorized_affine_execution=factorized_affine_execution,
         )
         self.core_config = copy.deepcopy(dict(self.core.config))
         self._joint_model_config = {
@@ -775,6 +779,8 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
             self._joint_model_config["initialization_reference_field_outputs"] = 4
         if mode != "P":
             self._joint_model_config["locality_prior_strength"] = self.locality_prior_strength
+        if factorized_affine_execution:
+            self._joint_model_config["factorized_affine_execution"] = True
 
     def prepare_native(self, structure, fluid_xy, *, chunk_size=None, retained_access_mass=None,
                        receiver_edge_executor="dense", native_solid_mask=None, **kwargs):
@@ -867,7 +873,12 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
         return config
 
     def model_config(self) -> dict[str, Any]:
-        return copy.deepcopy(self._joint_model_config)
+        config = copy.deepcopy(self._joint_model_config)
+        if self.core.factorized_affine_execution:
+            config["factorized_affine_execution"] = True
+        else:
+            config.pop("factorized_affine_execution", None)
+        return config
 
     def checkpoint_payload(self, *, provider_identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = super().checkpoint_payload(provider_identity=provider_identity)
@@ -1069,6 +1080,11 @@ def load_interaction_preserving_thermal_checkpoint(
         expected_config["initialization_reference_field_outputs"] = 4
     if mode != "P":
         expected_config["locality_prior_strength"] = 1.0
+    factorized_affine_execution = config.get("factorized_affine_execution", False)
+    if type(factorized_affine_execution) is not bool:
+        raise TypeError("Thermal factorized execution mode must be a bool.")
+    if factorized_affine_execution:
+        expected_config["factorized_affine_execution"] = True
     if config != expected_config:
         raise ValueError("Thermal P-family model config differs from the sealed 8/14/8, H128, E192 native contract.")
     expected_adapter = {

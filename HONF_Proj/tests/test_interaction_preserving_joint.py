@@ -48,14 +48,18 @@ def _inputs(*, fractional: bool = True):
     }
 
 
-def _core(mode: str = 'P', *, affine_outputs: int = 1, seed: int = 703):
-    return InteractionPreservingJointCore(
+def _core(mode: str = 'P', *, affine_outputs: int = 1, seed: int = 703,
+          factorized_affine_execution: bool = False,
+          dtype: torch.dtype = torch.float64):
+    model = InteractionPreservingJointCore(
         4, 3, 5, spatial_dim=2, hidden=12, message=8, mode=mode,
         collective_width=6, regional_anchors=0 if mode == 'P' else 3,
         field_outputs=3, affine_outputs=affine_outputs, query_width=2,
         initialization_seed=seed,
         locality_prior_strength=None if mode == 'P' else 1.0,
-    ).double()
+        factorized_affine_execution=factorized_affine_execution,
+    )
+    return model.to(dtype=dtype)
 
 
 def _prepare(model, values, **kwargs):
@@ -372,6 +376,143 @@ def test_learned_collective_recipe_requires_explicit_prior_and_widths_are_bound(
     assert model.config['mode'] == 'P-H'
     assert model.config['collective_width'] == 6
     assert model.config['locality_prior_strength'] == 1.0
+
+
+def test_factorized_p_h_preserves_fields_affine_response_derivatives_and_adamw_step():
+    torch.set_num_threads(2)
+    values = _inputs(fractional=True)
+    reference = _core('P-H')
+    factored = _core('P-H', factorized_affine_execution=True)
+    factored.load_state_dict(reference.state_dict(), strict=True)
+    assert tuple(reference.state_dict()) == tuple(factored.state_dict())
+    assert sum(parameter.numel() for parameter in reference.parameters()) == sum(
+        parameter.numel() for parameter in factored.parameters())
+    assert 'factorized_affine_execution' not in reference.config
+    assert factored.config['factorized_affine_execution'] is True
+
+    def evaluate(model):
+        current = dict(values)
+        for name in ('sources', 'context', 'centers', 'receivers', 'receiver_features'):
+            current[name] = values[name].detach().clone().requires_grad_(True)
+        prepared = _prepare(model, current)
+        fields = model.predict_fields(prepared, current['receivers'],
+                                      current['receiver_features'])
+        response = model.prepare_receivers(prepared, current['receivers'],
+                                           current['receiver_features'])
+        kernel = response.dense_kernel()
+        heat = torch.tensor([[0.0, 0.4, -0.2, 0.0]], dtype=current['sources'].dtype)
+        delta = torch.tensor([[0.2, -0.1, 0.3, 0.0]], dtype=current['sources'].dtype)
+        applied = model.apply_forcing(response, heat, accumulation_dtype=torch.float64)
+        zero_heat = model.apply_forcing(response, torch.zeros_like(heat),
+                                        accumulation_dtype=torch.float64)
+        increment = model.apply_increment(response, delta, accumulation_dtype=torch.float64)
+        loss = fields.square().mean() + kernel.square().mean() * 0.1 + applied.square().mean()
+        return current, prepared, fields, kernel, applied, zero_heat, increment, loss
+
+    old = evaluate(reference)
+    new = evaluate(factored)
+    for actual, expected in zip(new[2:7], old[2:7], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+    expected_increment = torch.einsum('bqma,bm->bqa', old[3].double(),
+                                      torch.tensor([[0.2, -0.1, 0.3, 0.0]], dtype=torch.float64))
+    torch.testing.assert_close(old[6], expected_increment[..., 0], rtol=1e-12, atol=1e-12)
+    assert torch.count_nonzero(old[5]) == 0
+
+    tangent = torch.full_like(old[0]['receivers'], 0.02)
+    old_jvp = torch.autograd.functional.jvp(
+        lambda query: reference.predict_fields(old[1], query, old[0]['receiver_features']),
+        old[0]['receivers'], tangent)[1]
+    new_jvp = torch.autograd.functional.jvp(
+        lambda query: factored.predict_fields(new[1], query, new[0]['receiver_features']),
+        new[0]['receivers'], tangent)[1]
+    torch.testing.assert_close(new_jvp, old_jvp, rtol=1e-11, atol=1e-12)
+
+    torch.testing.assert_close(
+        factored.predict_fields(new[1], new[0]['receivers'], new[0]['receiver_features'],
+                                chunk_size=2), new[2], rtol=1e-12, atol=1e-12)
+    order = torch.tensor([2, 0, 3, 1])
+    permuted = dict(values)
+    for name in ('sources', 'centers', 'present', 'source_lengths', 'source_measures', 'source_ids'):
+        permuted[name] = values[name].index_select(1, order)
+    permuted_context = _prepare(factored, permuted)
+    permuted_output = factored.predict_fields(permuted_context, values['receivers'],
+                                               values['receiver_features'])
+    torch.testing.assert_close(permuted_output, new[2], rtol=1e-12, atol=1e-12)
+
+    old[7].backward(retain_graph=True)
+    new[7].backward(retain_graph=True)
+    for (old_name, old_parameter), (new_name, new_parameter) in zip(
+            reference.named_parameters(), factored.named_parameters(), strict=True):
+        assert old_name == new_name
+        assert (old_parameter.grad is None) == (new_parameter.grad is None)
+        if old_parameter.grad is not None:
+            torch.testing.assert_close(new_parameter.grad, old_parameter.grad,
+                                       rtol=1e-10, atol=1e-12)
+    for name in ('sources', 'context', 'centers', 'receivers', 'receiver_features'):
+        torch.testing.assert_close(new[0][name].grad, old[0][name].grad,
+                                   rtol=1e-10, atol=1e-12)
+
+    old_optimizer = torch.optim.AdamW(reference.parameters(), lr=1e-4, weight_decay=0.01)
+    new_optimizer = torch.optim.AdamW(factored.parameters(), lr=1e-4, weight_decay=0.01)
+    old_optimizer.step()
+    new_optimizer.step()
+    for old_parameter, new_parameter in zip(reference.parameters(), factored.parameters(), strict=True):
+        torch.testing.assert_close(new_parameter, old_parameter, rtol=1e-10, atol=1e-12)
+
+    reloaded = _core('P-H', factorized_affine_execution=True)
+    reloaded.load_state_dict(factored.state_dict(), strict=True)
+    reloaded_context = _prepare(reloaded, values)
+    torch.testing.assert_close(reloaded.predict_fields(reloaded_context, values['receivers'],
+        values['receiver_features']), factored.predict_fields(_prepare(factored, values),
+        values['receivers'], values['receiver_features']), rtol=0, atol=0)
+
+    stale = _prepare(reloaded, values)
+    reloaded.set_factorized_affine_execution(False)
+    with pytest.raises(ValueError, match='semantics changed'):
+        reloaded.predict_fields(stale, values['receivers'], values['receiver_features'])
+
+
+def test_factorized_mode_toggleback_invalidates_prepared_joint_context():
+    values = _inputs()
+    model = _core('P-H', factorized_affine_execution=True)
+    prepared = _prepare(model, values)
+    state_keys = tuple(model.state_dict())
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    generation = model._factorized_affine_generation
+
+    model.set_factorized_affine_execution(True)
+    assert model._factorized_affine_generation == generation
+    model.set_factorized_affine_execution(False)
+    model.set_factorized_affine_execution(True)
+
+    assert tuple(model.state_dict()) == state_keys
+    assert sum(parameter.numel() for parameter in model.parameters()) == parameter_count
+    with pytest.raises(ValueError, match='execution mode changed'):
+        model.predict_fields(prepared, values['receivers'], values['receiver_features'])
+
+
+def test_factorized_p_h_fp32_uses_existing_output_and_gradient_thresholds():
+    values = _inputs(fractional=True)
+    values = {name: value.float() if value.is_floating_point() else value
+              for name, value in values.items()}
+    reference = _core('P-H', dtype=torch.float32)
+    factored = _core('P-H', factorized_affine_execution=True, dtype=torch.float32)
+    factored.load_state_dict(reference.state_dict(), strict=True)
+    old_context, new_context = _prepare(reference, values), _prepare(factored, values)
+    old_fields = reference.predict_fields(old_context, values['receivers'], values['receiver_features'])
+    new_fields = factored.predict_fields(new_context, values['receivers'], values['receiver_features'])
+    torch.testing.assert_close(new_fields, old_fields, rtol=2.0e-5, atol=2.0e-6)
+    old_response = reference.prepare_receivers(old_context, values['receivers'], values['receiver_features'])
+    new_response = factored.prepare_receivers(new_context, values['receivers'], values['receiver_features'])
+    torch.testing.assert_close(new_response.dense_kernel(), old_response.dense_kernel(),
+                               rtol=2.0e-5, atol=2.0e-6)
+
+    old_loss = old_fields.square().mean() + old_response.dense_kernel().square().mean()
+    new_loss = new_fields.square().mean() + new_response.dense_kernel().square().mean()
+    old_grad = torch.autograd.grad(old_loss, tuple(reference.parameters()))
+    new_grad = torch.autograd.grad(new_loss, tuple(factored.parameters()))
+    for actual, expected in zip(new_grad, old_grad, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=3.0e-5, atol=3.0e-6)
 
 
 @pytest.mark.parametrize('mode', ['P', 'P-G', 'P-H'])

@@ -42,6 +42,7 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
         seed: int = 42,
         max_sources: int = 30,
         locality_prior_strength: float | None = None,
+        factorized_affine_execution: bool = False,
     ) -> None:
         if mode not in INTERACTION_PRESERVING_WIND_MODES:
             raise ValueError(f"Interaction-preserving Wind mode must be one of {INTERACTION_PRESERVING_WIND_MODES}.")
@@ -61,6 +62,8 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
             raise ValueError("Wind P has no collective locality prior.")
         if mode in ("P-G", "P-H") and locality != 1.0:
             raise ValueError("The recovery Wind P-G/P-H locality prior is sealed to 1.0.")
+        if type(factorized_affine_execution) is not bool:
+            raise TypeError("factorized_affine_execution must be a bool.")
 
         nn.Module.__init__(self)
         self.velocity_transform = velocity_transform
@@ -89,6 +92,8 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
         }
         if mode != "P":
             self.core_config["locality_prior_strength"] = locality
+        if factorized_affine_execution:
+            self.core_config["factorized_affine_execution"] = True
         self.core = InteractionPreservingJointCore(
             2,
             11,
@@ -105,6 +110,7 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
             max_sources=self.max_sources,
             initialization_seed=self.seed,
             locality_prior_strength=(locality if mode != "P" else None),
+            factorized_affine_execution=factorized_affine_execution,
         )
 
     @classmethod
@@ -129,8 +135,17 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
             "mode", "collective_width", "regional_anchors", "depth", "field_outputs", "affine_outputs",
             "query_width", "max_sources", "initialization_seed",
         }
-        if set(core) not in (required_core, required_core | {"locality_prior_strength"}):
+        allowed_core = {
+            frozenset(required_core),
+            frozenset(required_core | {"locality_prior_strength"}),
+            frozenset(required_core | {"factorized_affine_execution"}),
+            frozenset(required_core | {"locality_prior_strength", "factorized_affine_execution"}),
+        }
+        if frozenset(core) not in allowed_core:
             raise ValueError("Saved Wind P-family core dimensions are incomplete or unsupported.")
+        if ("factorized_affine_execution" in core and
+                type(core["factorized_affine_execution"]) is not bool):
+            raise TypeError("Saved Wind factorized execution mode must be a bool.")
         if type(payload["seed"]) is not int or type(core["initialization_seed"]) is not int:
             raise TypeError("Saved Wind P-family initialization seeds must be integers.")
         if core["initialization_seed"] != payload["seed"]:
@@ -201,18 +216,24 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
             seed=payload["seed"],
             max_sources=core["max_sources"],
             locality_prior_strength=(None if mode == "P" else float(core["locality_prior_strength"])),
+            factorized_affine_execution=core.get("factorized_affine_execution", False),
         )
         if model.export_config() != payload:
             raise ValueError("Saved Wind P-family model config is not a canonical exact round trip.")
         return model
 
     def export_config(self) -> dict[str, Any]:
+        core_config = dict(self.core_config)
+        if self.core.factorized_affine_execution:
+            core_config["factorized_affine_execution"] = True
+        else:
+            core_config.pop("factorized_affine_execution", None)
         return {
             "family": self.FAMILY,
             "dataset": "WindFarm",
             "seed": self.seed,
             "receiver_tile": self.receiver_tile,
-            "core": dict(self.core_config),
+            "core": core_config,
             "velocity_transform": self.velocity_transform.to_dict(),
             "background_profile": self.background_profile.to_dict(),
             "native_coordinate_frame": "rotor_diameters",

@@ -12,10 +12,27 @@ from dataclasses import dataclass, replace
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 def _mlp(inputs, outputs, hidden):
     return nn.Sequential(nn.Linear(inputs, hidden), nn.SiLU(), nn.Linear(hidden, outputs))
+
+
+def _project_linear_slice(linear, value, start, stop):
+    """Apply a column slice of an existing Linear without copying parameters."""
+    return F.linear(value, linear.weight[:, start:stop], None)
+
+
+def _finish_projected_mlp(module, projected_terms):
+    """Finish an MLP after its first affine map has been algebraically split."""
+    first = module[0]
+    preactivation = projected_terms[0]
+    for term in projected_terms[1:]:
+        preactivation = preactivation + term
+    if first.bias is not None:
+        preactivation = preactivation + first.bias
+    return module[2](module[1](preactivation))
 
 
 def _score_mlp(inputs, hidden):
@@ -74,6 +91,9 @@ class PreparedResponseContext:
     # Optional payload produced by an explicitly inserted shared-core block.
     # Legacy operators leave this unset and retain their original behavior.
     intermediate_context: object | None = None
+    # Runtime-only generation for execution-mode changes. It is not a model
+    # parameter or buffer and therefore does not enter checkpoint weights.
+    factorized_affine_generation: int = 0
 
     def assert_fresh(self):
         _check_versions(self.input_versions)
@@ -81,6 +101,9 @@ class PreparedResponseContext:
             owner = self.model_reference()
             if owner is None or _parameter_signature(owner) != self.parameter_signature:
                 raise ValueError('Prepared interaction model weights changed; rebuild this request.')
+            if (hasattr(owner, '_factorized_affine_generation')
+                    and self.factorized_affine_generation != owner._factorized_affine_generation):
+                raise ValueError('Prepared interaction execution mode changed; model semantics changed; rebuild this request.')
 
 
 @dataclass(frozen=True)
@@ -164,7 +187,8 @@ class InteractionContextCore(nn.Module):
     """Two context rounds over physical sources and environment donors."""
 
     def __init__(self, source_width, context_width, environment_width, *,
-                 spatial_dim=2, hidden=64, message=64, query_width=0, max_sources=None):
+                 spatial_dim=2, hidden=64, message=64, query_width=0, max_sources=None,
+                 factorized_affine_execution=False):
         super().__init__()
         if spatial_dim not in (2, 3) or min(source_width, context_width, environment_width, hidden, message) < 1 or query_width < 0:
             raise ValueError('Interaction widths must be positive with 2-D or 3-D geometry.')
@@ -173,6 +197,9 @@ class InteractionContextCore(nn.Module):
         self.config = {'source_width': source_width, 'context_width': context_width,
             'environment_width': environment_width, 'spatial_dim': spatial_dim, 'hidden': hidden,
             'message': message, 'query_width': query_width, 'max_sources': max_sources}
+        self.factorized_affine_execution = False
+        self._factorized_affine_generation = 0
+        self.set_factorized_affine_execution(factorized_affine_execution)
         relative_width = spatial_dim * 9
         self.source_encoder = _mlp(source_width + context_width, hidden, hidden)
         self.environment_encoder = _mlp(environment_width + context_width, hidden, hidden)
@@ -181,6 +208,25 @@ class InteractionContextCore(nn.Module):
         self.source_updates = nn.ModuleList([_mlp(hidden + 2 * message + context_width, hidden, hidden) for _ in range(2)])
         self.environment_updates = nn.ModuleList([_mlp(2 * hidden + message + context_width, hidden, hidden) for _ in range(2)])
         self.global_encoder = _mlp(2 * hidden + context_width, hidden, hidden)
+
+    def set_factorized_affine_execution(self, enabled):
+        """Select the opt-in same-function affine executor.
+
+        This execution-only setting adds no learned state. It is recorded in
+        model configuration only when enabled, preserving legacy config
+        round-trips, and changing it invalidates already prepared contexts.
+        Dataset adapters should construct with this option so their exported
+        model configuration records the selected execution mode.
+        """
+        if type(enabled) is not bool:
+            raise TypeError('factorized_affine_execution must be a bool.')
+        if enabled != self.factorized_affine_execution:
+            self._factorized_affine_generation += 1
+        self.factorized_affine_execution = enabled
+        if enabled:
+            self.config['factorized_affine_execution'] = True
+        else:
+            self.config.pop('factorized_affine_execution', None)
 
     @staticmethod
     def _validate_shape(value, shape, name):
@@ -255,13 +301,44 @@ class InteractionContextCore(nn.Module):
         intermediate_context = None
         for round_index, (module_message, environment_message, source_update, environment_update) in enumerate(zip(
                 self.module_messages, self.environment_messages, self.source_updates, self.environment_updates)):
-            left = state[:, :, None].expand(-1, -1, modules, -1)
-            right = state[:, None].expand(-1, modules, -1, -1)
-            module_aggregate = (module_message(torch.cat((left, right, relative_mm), -1)) * donor_mass[..., None]).sum(2)
-            env_aggregate = (environment_message(torch.cat((state[:, :, None].expand(-1, -1, environments, -1),
-                environment[:, None].expand(-1, modules, -1, -1), relative_me), -1)) * environment_mass[:, None, :, None]).sum(2)
-            source_aggregate = (environment_message(torch.cat((environment[:, :, None].expand(-1, -1, modules, -1),
-                state[:, None].expand(-1, environments, -1, -1), relative_em), -1)) * source_mass[:, None, :, None]).sum(2)
+            if self.factorized_affine_execution:
+                mm_first = module_message[0]
+                mm_relative_start = 2 * self.hidden
+                mm_left = _project_linear_slice(mm_first, state, 0, self.hidden)
+                mm_right = _project_linear_slice(mm_first, state, self.hidden, mm_relative_start)
+                mm_relative = _project_linear_slice(mm_first, relative_mm,
+                    mm_relative_start, mm_first.in_features)
+                module_values = _finish_projected_mlp(module_message,
+                    (mm_left[:, :, None], mm_right[:, None], mm_relative))
+                module_aggregate = (module_values * donor_mass[..., None]).sum(2)
+
+                env_first = environment_message[0]
+                env_relative_start = 2 * self.hidden
+                state_first = _project_linear_slice(env_first, state, 0, self.hidden)
+                state_second = _project_linear_slice(env_first, state,
+                    self.hidden, env_relative_start)
+                environment_first = _project_linear_slice(env_first, environment,
+                    0, self.hidden)
+                environment_second = _project_linear_slice(env_first, environment,
+                    self.hidden, env_relative_start)
+                me_relative = _project_linear_slice(env_first, relative_me,
+                    env_relative_start, env_first.in_features)
+                me_values = _finish_projected_mlp(environment_message,
+                    (state_first[:, :, None], environment_second[:, None], me_relative))
+                env_aggregate = (me_values * environment_mass[:, None, :, None]).sum(2)
+                em_relative = _project_linear_slice(env_first, relative_em,
+                    env_relative_start, env_first.in_features)
+                em_values = _finish_projected_mlp(environment_message,
+                    (environment_first[:, :, None], state_second[:, None], em_relative))
+                source_aggregate = (em_values * source_mass[:, None, :, None]).sum(2)
+            else:
+                left = state[:, :, None].expand(-1, -1, modules, -1)
+                right = state[:, None].expand(-1, modules, -1, -1)
+                module_aggregate = (module_message(torch.cat((left, right, relative_mm), -1)) * donor_mass[..., None]).sum(2)
+                env_aggregate = (environment_message(torch.cat((state[:, :, None].expand(-1, -1, environments, -1),
+                    environment[:, None].expand(-1, modules, -1, -1), relative_me), -1)) * environment_mass[:, None, :, None]).sum(2)
+                source_aggregate = (environment_message(torch.cat((environment[:, :, None].expand(-1, -1, modules, -1),
+                    state[:, None].expand(-1, environments, -1, -1), relative_em), -1)) * source_mass[:, None, :, None]).sum(2)
             env_pool = (environment * environment_mass[..., None]).sum(1)[:, None].expand(-1, environments, -1)
             state = (state + source_update(torch.cat((state, module_aggregate, env_aggregate, source_context), -1))) * present[..., None]
             environment = (environment + environment_update(torch.cat((environment, source_aggregate, env_pool, environment_context), -1))) * environment_present[..., None]
@@ -288,6 +365,8 @@ class InteractionContextCore(nn.Module):
         prepared.owner = id(self)
         prepared.model_reference = weakref.ref(self)
         prepared.parameter_signature = _parameter_signature(self)
+        prepared.factorized_affine_execution = self.factorized_affine_execution
+        prepared.factorized_affine_generation = self._factorized_affine_generation
         return prepared
 
     @staticmethod
@@ -331,6 +410,8 @@ class InteractionContextCore(nn.Module):
         prepared.assert_fresh()
         if getattr(prepared, 'owner', id(self)) != id(self):
             raise ValueError('Prepared interaction state belongs to another operator.')
+        if getattr(prepared, 'factorized_affine_execution', False) != self.factorized_affine_execution:
+            raise ValueError('Prepared interaction execution mode changed; rebuild this request.')
 
 
 class NonlinearFieldReadout(InteractionContextCore):
@@ -344,16 +425,55 @@ class NonlinearFieldReadout(InteractionContextCore):
 
     def __init__(self, source_width, context_width, environment_width, *,
                  spatial_dim=3, hidden=64, message=64, output_width=3,
-                 query_width=0, max_sources=None):
+                 query_width=0, max_sources=None, factorized_affine_execution=False):
         super().__init__(source_width, context_width, environment_width,
             spatial_dim=spatial_dim, hidden=hidden, message=message,
-            query_width=query_width, max_sources=max_sources)
+            query_width=query_width, max_sources=max_sources,
+            factorized_affine_execution=factorized_affine_execution)
         if output_width < 1:
             raise ValueError('Nonlinear output width must be positive.')
         self.output_width = output_width
         self.source_read = _mlp(2 * hidden + 3 * spatial_dim * 9 + query_width, message, hidden)
         self.field_head = _mlp(hidden + message + spatial_dim * 9 + query_width, output_width, hidden)
         self.config.update(output_width=output_width)
+
+    def _prepare_factorized_source_read(self, prepared, receivers, features, module):
+        """Project receiver-independent and query-only terms once per call."""
+        first = module[0]
+        geometry_width = self.spatial_dim * 9
+        start = 0
+        source_stop = self.hidden
+        global_stop = source_stop + self.hidden
+        query_stop = global_stop + geometry_width
+        relative1_stop = query_stop + geometry_width
+        relative2_stop = relative1_stop + geometry_width
+        source = _project_linear_slice(first, prepared.source_states, start, source_stop)
+        global_state = _project_linear_slice(first, prepared.global_state, source_stop, global_stop)
+        query_geometry = _project_linear_slice(first,
+            _geometry(receivers / prepared.lengths[:, None]), global_stop, query_stop)
+        receiver_features = _project_linear_slice(first, features, relative2_stop, first.in_features)
+        return (source, global_state, query_geometry, receiver_features,
+                query_stop, relative1_stop, relative2_stop)
+
+    def _factorized_source_read(self, prepared, query, module, projections, start,
+                                extra_receiver_projection=None):
+        """Read a query chunk without building its concatenated Q-by-M inputs."""
+        source, global_state, query_geometry, receiver_features, query_stop, relative1_stop, relative2_stop = projections
+        delta = query[:, :, None] - prepared.centers[:, None]
+        domain_relative = _geometry(delta / prepared.lengths[:, None, None])
+        source_relative = _geometry(delta / prepared.source_lengths[:, None, :, None].clamp_min(1e-12))
+        first = module[0]
+        terms = (
+            source[:, None],
+            global_state[:, None, None],
+            query_geometry[:, start:start + query.shape[1], None],
+            _project_linear_slice(first, domain_relative, query_stop, relative1_stop),
+            _project_linear_slice(first, source_relative, relative1_stop, relative2_stop),
+            receiver_features[:, start:start + query.shape[1], None],
+        )
+        if extra_receiver_projection is not None:
+            terms += (extra_receiver_projection[:, :, None],)
+        return _finish_projected_mlp(module, terms)
 
     def predict(self, prepared, receivers, receiver_features=None, *, chunk_size=512,
                 return_messages=False):
@@ -365,10 +485,17 @@ class NonlinearFieldReadout(InteractionContextCore):
         features = receivers.new_empty(batch, queries, 0) if receiver_features is None else receiver_features
         self._validate_shape(features, (batch, queries, self.query_width), 'receiver_features')
         values, messages = [], []
+        read_projections = (self._prepare_factorized_source_read(
+            prepared, receivers, features, self.source_read)
+            if self.factorized_affine_execution else None)
         for start in range(0, queries, chunk_size):
             query, feature = receivers[:, start:start + chunk_size], features[:, start:start + chunk_size]
-            fine = self.source_read(self._read_features(prepared, query,
-                prepared.source_states, prepared.centers, prepared.source_lengths, feature))
+            if read_projections is None:
+                fine = self.source_read(self._read_features(prepared, query,
+                    prepared.source_states, prepared.centers, prepared.source_lengths, feature))
+            else:
+                fine = self._factorized_source_read(prepared, query, self.source_read,
+                    read_projections, start)
             reduced = (fine * prepared.source_measure[:, None, :, None]).sum(2)
             values.append(self.field_head(torch.cat((reduced,
                 prepared.global_state[:, None].expand(-1, query.shape[1], -1),

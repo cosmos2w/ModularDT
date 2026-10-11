@@ -103,6 +103,55 @@ class _GuardedToyProvider(_ToyProvider):
         return {**super().reduce_native_metrics(records), "response_guard_max_ratio": 0.9}
 
 
+class _DiagnosticToyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.shared = nn.Parameter(torch.tensor(0.5))
+        self.physical_head = nn.Parameter(torch.tensor(0.25))
+        self.auxiliary_head = nn.Parameter(torch.tensor(-0.1))
+
+    def forward(self, x):
+        return self.shared * x + self.physical_head
+
+    def base(self, x):
+        return self.shared * x + self.auxiliary_head
+
+
+class _DiagnosticToyProvider(_ToyProvider):
+    def predict_native(self, model, scene, receivers, execution_mode, phase, epoch, temperature):
+        del receivers, execution_mode, phase, epoch, temperature
+        return {"main": model(scene), "base": model.base(scene)}, None
+
+    def loss_denominators(self, batches, phase, arm):
+        del phase, arm
+        count = sum(batch.targets.numel() for batch in batches)
+        return {"native_role/u": float(count), "base_loss": float(count)}
+
+    def loss_terms(self, predictions, targets, phase, auxiliary_state):
+        del phase, auxiliary_state
+        return {
+            "native_role/u": LossTerm((predictions["main"] - targets).square().sum(), targets.numel(), 0.25),
+            "base_loss": LossTerm(predictions["base"].square().sum(), targets.numel(), 0.1),
+        }
+
+    def optimizer_groups(self, model, arm, stage):
+        del arm, stage
+        return (
+            OptimizerGroupSpec(
+                name="shared_and_physical",
+                parameter_names=("shared", "physical_head"),
+                schedule=ScheduleSpec(peak_lr=0.01, hold_through_epoch=4, total_epochs=10),
+                weight_decay=0.0,
+            ),
+            OptimizerGroupSpec(
+                name="auxiliary",
+                parameter_names=("auxiliary_head",),
+                schedule=ScheduleSpec(peak_lr=0.01, hold_through_epoch=4, total_epochs=10),
+                weight_decay=0.0,
+            ),
+        )
+
+
 def _config():
     return EngineConfig(seed=17, microbatch_cases=2, effective_cases=4, total_epochs=10,
                         warmup_epochs=2, open_through_epoch=4, soft_through_epoch=6,
@@ -153,6 +202,135 @@ def test_sparse_outputs_keep_only_milestones_and_update_real_curves(tmp_path):
     summary = json.loads(_artifact(output, "fit_summary.json").read_text())
     assert summary["cumulative_microbatches"] == 30
     assert summary["cumulative_partial_update_cases"] == 10
+
+
+def test_macro_update_diagnosis_matches_engine_objective_without_mutating_state():
+    provider = _DiagnosticToyProvider()
+    model = _DiagnosticToyModel()
+    before = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    batch = provider.make_batch((0, 1), SamplingKey(17, 1, 0, 0, "joint", "P"))
+    engine = TrainingEngine(_config(), device="cpu")
+
+    result = engine.diagnose_macro_update(
+        model,
+        provider,
+        (batch,),
+        phase="joint",
+        arm="P",
+        epoch=1,
+        term_groups={
+            "physical": ("native_role/u",),
+            "base_auxiliary": ("base_loss",),
+        },
+    )
+
+    assert result["optimizer_updates"] == 0
+    assert result["denominators_observed"] == {"native_role/u": 2.0, "base_loss": 2.0}
+    assert result["loss_terms"]["native_role/u"]["weight"] == 0.25
+    assert result["loss_terms"]["base_loss"]["weight"] == 0.1
+    assert result["gradient_splits"]["physical"]["reachable_parameter_names"] == [
+        "physical_head", "shared"
+    ]
+    assert result["gradient_splits"]["base_auxiliary"]["reachable_parameter_names"] == [
+        "auxiliary_head", "shared"
+    ]
+    assert result["gradient_splits"]["base_auxiliary"]["optimizer_group_norms"]["auxiliary"] > 0
+    assert result["combined_gradient"]["global_norm_before_clip"] > 0
+    assert result["combined_gradient"]["global_clip_factor"] == 1.0
+    assert all(torch.equal(value, before[name]) for name, value in model.state_dict().items())
+    assert all(parameter.grad is None for parameter in model.parameters())
+
+
+def test_disposable_clone_provider_binding_restores_after_failure_without_step(monkeypatch):
+    class FailingCloneProvider(_ToyProvider):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+            self.source_model = model
+            self.group_contracts = []
+
+        def optimizer_groups(self, model, arm, stage):
+            assert model is self.model
+            specs = super().optimizer_groups(model, arm, stage)
+            self.group_contracts.append(tuple(
+                (spec.name, tuple(spec.parameter_names)) for spec in specs))
+            return specs
+
+        def predict_native(self, model, scene, receivers, execution_mode, phase, epoch, temperature):
+            assert model is self.model
+            if model is not self.source_model and model.training:
+                raise RuntimeError("injected failure after clone optimizer construction")
+            return super().predict_native(model, scene, receivers, execution_mode, phase, epoch, temperature)
+
+    model = nn.Linear(1, 1)
+    provider = FailingCloneProvider(model)
+    update = provider.make_batch((0,), SamplingKey(17, 1, 0, 0, "joint", "joint"))
+    probe = provider.make_batch((1,), SamplingKey(17, 2, 0, 0, "joint", "joint"))
+    engine = TrainingEngine(_config(), device="cpu")
+    optimizer_steps = []
+    original_step = torch.optim.AdamW.step
+
+    def counted_step(optimizer, *args, **kwargs):
+        optimizer_steps.append(True)
+        return original_step(optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", counted_step)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        engine.compare_disposable_updates(
+            model,
+            provider,
+            (update,),
+            (probe,),
+            phase="joint",
+            arm="joint",
+            epoch=1,
+            optimizer_state_by_name=None,
+            interventions={"control": {}},
+            declared_optimizer_updates=1,
+        )
+
+    assert provider.model is model
+    assert provider.group_contracts == [
+        (("predictor", ("weight", "bias")),),
+        (("predictor", ("weight", "bias")),),
+    ]
+    assert optimizer_steps == []
+
+
+def test_disposable_update_rejects_negative_loss_weight_before_clone_or_step(monkeypatch):
+    class NoCloneLinear(nn.Linear):
+        def __deepcopy__(self, memo):
+            del memo
+            raise AssertionError("invalid intervention must be rejected before model cloning")
+
+    model = NoCloneLinear(1, 1)
+    provider = _ToyProvider()
+    update = provider.make_batch((0,), SamplingKey(17, 1, 0, 0, "joint", "joint"))
+    probe = provider.make_batch((1,), SamplingKey(17, 2, 0, 0, "joint", "joint"))
+    engine = TrainingEngine(_config(), device="cpu")
+    optimizer_steps = []
+    original_step = torch.optim.AdamW.step
+
+    def counted_step(optimizer, *args, **kwargs):
+        optimizer_steps.append(True)
+        return original_step(optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", counted_step)
+    with pytest.raises(ValueError, match="finite nonnegative scalars"):
+        engine.compare_disposable_updates(
+            model,
+            provider,
+            (update,),
+            (probe,),
+            phase="joint",
+            arm="joint",
+            epoch=1,
+            optimizer_state_by_name=None,
+            interventions={"negative": {"native": -0.1}},
+            declared_optimizer_updates=1,
+        )
+
+    assert optimizer_steps == []
 
 
 def test_curve_rng_is_preserved_and_sparse_resume_is_exact(tmp_path, monkeypatch):

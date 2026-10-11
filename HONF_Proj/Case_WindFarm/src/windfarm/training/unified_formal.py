@@ -723,9 +723,16 @@ class WindFormalRefinementTask(WindRefinementTask):
         })
         return summary
 
-    def reduce_native_metrics(self, records: Any) -> Mapping[str, Any]:
+    def reduce_native_metrics(
+        self,
+        records: Any,
+        *,
+        expected_row_count: int | None = None,
+    ) -> Mapping[str, Any]:
         rows = [row for record in records for row in record["rows"]]
-        expected_rows = 24 if self.startup_benchmark else 90
+        expected_rows = (24 if self.startup_benchmark else 90) if expected_row_count is None else int(expected_row_count)
+        if expected_rows < 1:
+            raise ValueError("Formal Wind diagnostic metric panel must contain at least one row.")
         if len(rows) != expected_rows or len({int(row["row_index"]) for row in rows}) != expected_rows:
             raise ValueError(f"Formal Wind validation must reduce exactly {expected_rows} declared rows.")
         summary: dict[str, Any] = {
@@ -871,10 +878,239 @@ def create_task(
     return model, provider, None
 
 
+def build_run2202_diagnostic_context(
+    factory_config: Mapping[str, Any],
+    checkpoint_payload: Mapping[str, Any],
+) -> tuple[nn.Module, WindFormalRefinementTask, Any, dict[str, Any]]:
+    """Rebuild the existing Run2202 full-data provider for fixed-panel diagnosis.
+
+    This replay path consumes the exact historical checkpoint identity and
+    provider calibration state. It never fits normalization, role scales, or
+    message calibration, and it does not create an optimizer or perform an
+    update. The raw normalization file may be an explicitly supplied,
+    hash-matching filesystem copy; the original identity path remains sealed.
+    """
+
+    from honf_runtime.unified_training import (
+        EngineConfig,
+        SelectionPolicy,
+        TrainingEngine,
+    )
+    from windfarm.migration import (
+        RUN2202_BACKGROUND_PROFILE_SHA256,
+        RUN2202_EPOCH_CHECKPOINT_SHA256,
+        RUN2202_FORMAL_RECIPE_SHA256,
+        RUN2202_NORMALIZATION_BINDING_SHA256,
+        RUN2202_NORMALIZATION_SHA256,
+        RUN2202_RESOLVED_RECIPE_SHA256,
+        RUN2202_SOURCE_METADATA_SHA256,
+        RUN2202_TRAIN_ROWS_SHA256,
+        RUN2202_VALIDATION_ROWS_SHA256,
+    )
+    from .unified_task import _validate_saved_role_scale_data, _validate_saved_role_scale_hash
+
+    if not isinstance(factory_config, Mapping) or not isinstance(checkpoint_payload, Mapping):
+        raise TypeError("Run2202 replay requires mapping factory configuration and checkpoint payloads.")
+    checkpoint_path = Path(str(factory_config.get("checkpoint_path", ""))).expanduser().resolve()
+    checkpoint_sha256 = factory_config.get("checkpoint_sha256")
+    if not checkpoint_path.is_file() or not isinstance(checkpoint_sha256, str):
+        raise ValueError("Diagnostic factory must provide the actual checkpoint path and SHA256.")
+    source_epoch = checkpoint_payload.get("epoch")
+    if type(source_epoch) is not int or source_epoch not in RUN2202_EPOCH_CHECKPOINT_SHA256:
+        raise ValueError("Run2202 replay accepts only its retained e1000/e2000/e5000 checkpoints.")
+    if checkpoint_sha256 != RUN2202_EPOCH_CHECKPOINT_SHA256[source_epoch] or _sha256(checkpoint_path) != checkpoint_sha256:
+        raise ValueError("Run2202 source checkpoint path/hash differs from the pinned retained checkpoint.")
+
+    experiment_identity = checkpoint_payload.get("experiment_identity")
+    if not isinstance(experiment_identity, Mapping):
+        raise TypeError("Run2202 checkpoint has no sealed experiment identity.")
+    source_identity = dict(experiment_identity)
+    expected = source_identity.get("provider_identity")
+    if not isinstance(expected, Mapping):
+        raise TypeError("Run2202 checkpoint identity has no provider identity.")
+    expected = dict(expected)
+    if (
+        source_identity.get("run_identity") != "Run_2202_20261008_194400_w3_h128_full_train420_q4096_e5000"
+        or source_identity.get("workflow") != "unified_interaction_refinement_formal_v1"
+        or expected.get("formal_recipe_sha256") != RUN2202_FORMAL_RECIPE_SHA256
+        or expected.get("normalization_sha256") != RUN2202_NORMALIZATION_SHA256
+        or expected.get("normalization_binding_sha256") != RUN2202_NORMALIZATION_BINDING_SHA256
+        or expected.get("source_metadata_sha256") != RUN2202_SOURCE_METADATA_SHA256
+        or expected.get("train_rows_sha256") != RUN2202_TRAIN_ROWS_SHA256
+        or expected.get("validation_rows_sha256") != RUN2202_VALIDATION_ROWS_SHA256
+    ):
+        raise ValueError("Run2202 provider identity does not match the retained full-data source contract.")
+
+    normalization_path = Path(str(factory_config.get("normalization_path", ""))).expanduser().resolve()
+    if not normalization_path.is_file() or _sha256(normalization_path) != RUN2202_NORMALIZATION_SHA256:
+        raise ValueError("Replay normalization must be the exact Run2202 SHA256-matching document.")
+    normalizer, profile = read_normalization_json(normalization_path)
+    if profile is None or _stable_json_sha256(profile.to_dict()) != RUN2202_BACKGROUND_PROFILE_SHA256:
+        raise ValueError("Replay normalization omitted or changed the exact retained TRAIN background profile.")
+    if normalizer.source_rows != 420 or normalizer.seed != 42:
+        raise ValueError("Replay normalizer does not retain its 420-row seed-42 TRAIN fit binding.")
+
+    resolved_recipe = resolve_wind_recipe(recipe=dict(expected.get("resolved_recipe", {})))
+    if resolved_recipe is None or resolved_recipe["recipe_sha256"] != RUN2202_RESOLVED_RECIPE_SHA256:
+        raise ValueError("Run2202 resolved recipe does not match its retained sealed recipe hash.")
+    role_scale_calibration = expected.get("role_scale_calibration")
+    if not isinstance(role_scale_calibration, Mapping):
+        raise TypeError("Run2202 identity omitted its saved component role-scale calibration.")
+    scale_hash_rule = _validate_saved_role_scale_hash(
+        role_scale_calibration, expected.get("role_scale_source_sha256")
+    )
+    role_scales, component_scales = _validate_saved_role_scale_data(
+        role_scale_calibration, expected.get("role_scales_mps")
+    )
+    if dict(expected.get("role_component_scales_mps", {})) != {
+        role: list(values) for role, values in component_scales.items()
+    }:
+        raise ValueError("Run2202 component role scales differ from the exact embedded calibration.")
+
+    data_root = Path(factory_config.get("data_root", DEFAULT_DATA_ROOT)).expanduser().resolve()
+    derived_root = Path(factory_config.get("derived_root", DEFAULT_DERIVED_ROOT)).expanduser().resolve()
+    token_shape = tuple(int(value) for value in expected["environment_representation"]["token_shape"])
+    view = WindFarmNativeView(data_root, allow_npz_metadata_fallback=True, token_shape=token_shape)
+    split = _load_original_split(view, derived_root)
+    membership = _validate_original_membership(view, split)
+    if membership != expected.get("partition_identity"):
+        raise ValueError("Current Wind metadata split differs from the Run2202 checkpoint's full TRAIN binding.")
+    if _metadata_fingerprint(view) != RUN2202_SOURCE_METADATA_SHA256:
+        raise ValueError("Current Wind geometry metadata differs from the retained Run2202 fingerprint.")
+    if _source_file_inventory(view) != expected.get("source_file_inventory"):
+        raise ValueError("Current Wind source files differ from the Run2202 path/size/mtime inventory.")
+
+    groups = np.asarray(view.metadata["layout_index"], dtype=np.int64)
+    counts = np.asarray(view.metadata["n_turbines"], dtype=np.int64)
+    train_layouts = np.unique(groups[split.train]).astype(int).tolist()
+    validation_layouts = np.unique(groups[split.validation]).astype(int).tolist()
+    train_counts = sorted(set(map(int, counts[split.train].tolist())))
+    all_counts = sorted(set(map(int, counts.tolist())))
+    manifest_body = {
+        "subset_id": FORMAL_RECIPE_ID,
+        "train_layout_indices": train_layouts,
+        "validation_layout_indices": validation_layouts,
+        "train_layout_selection": {
+            "selected_turbine_counts": train_counts,
+            "uncovered_turbine_counts": sorted(set(all_counts) - set(train_counts)),
+        },
+    }
+    manifest = {**manifest_body, "manifest_sha256": _stable_digest(manifest_body)}
+    if (
+        expected.get("subset_manifest_sha256") != expected.get("train_rows_sha256")
+        or train_layouts != expected.get("train_layout_indices")
+        or validation_layouts != expected.get("validation_layout_indices")
+    ):
+        raise ValueError("Rebuilt formal manifest differs from the Run2202 provider identity.")
+
+    model_recipe = dict(resolved_recipe["model"])
+    model_payload = {
+        key: model_recipe[key]
+        for key in (
+            "forward_architecture", "hidden", "message", "max_sources", "base_width", "router_hidden",
+        )
+    }
+    model = build_windfarm_model(
+        model_payload,
+        velocity_transform=normalizer,
+        background_profile=profile,
+    )
+    device = torch.device(str(factory_config.get("device", "cpu")))
+    model.to(device)
+    catalogue_cache = NativeRoleCatalogueCache(
+        persistent_dir=Path(factory_config.get("catalogue_cache_dir", training_catalogue_cache_directory())),
+        max_cached_bytes=int(expected["catalogue_cache_capacity_bytes"]),
+    )
+    formal_recipe = {
+        "recipe_sha256": RUN2202_FORMAL_RECIPE_SHA256,
+        "source_metadata_sha256": expected["source_metadata_sha256"],
+        "source_file_inventory": expected["source_file_inventory"],
+        "partition_identity": expected["partition_identity"],
+        "normalization_sha256": expected["normalization_sha256"],
+        "normalization_binding_sha256": expected["normalization_binding_sha256"],
+        "role_scale_sha256": expected["role_scale_sha256"],
+    }
+    provider = WindFormalRefinementTask(
+        view,
+        train_rows=split.train.astype(np.int64),
+        validation_rows=split.validation.astype(np.int64),
+        normalizer=normalizer,
+        background_profile=profile,
+        manifest=manifest,
+        manifest_path=Path(factory_config.get("manifest_path", normalization_path.parent / "run2202_replay_manifest.json")),
+        normalization_path=normalization_path,
+        normalization_identity_path=Path(expected["normalization_path"]),
+        role_scales=role_scales,
+        role_scale_sha256=str(expected["role_scale_source_sha256"]),
+        seed=42,
+        device=device,
+        identity_device=str(expected["device"]),
+        role_query_counts=dict(expected["role_query_counts"]),
+        catalogue_cache_bytes=int(expected["catalogue_cache_capacity_bytes"]),
+        message_width=int(model_recipe["message"]),
+        role_component_scales=component_scales,
+        role_scale_calibration=dict(role_scale_calibration),
+        recipe=resolved_recipe,
+        sampling_dataset_fingerprint=str(expected["train_rows_sha256"]),
+        catalogue_cache=catalogue_cache,
+        formal_recipe=formal_recipe,
+        startup_benchmark=bool(expected["startup_benchmark"]),
+    )
+    provider_state = checkpoint_payload.get("provider_training_state")
+    if not isinstance(provider_state, Mapping):
+        raise TypeError("Run2202 source checkpoint omitted its saved provider calibration state.")
+    provider.load_training_state_dict(provider_state)
+    actual_provider_identity = dict(provider.identity_payload())
+    if actual_provider_identity != expected:
+        differing = sorted(
+            key for key in set(actual_provider_identity) | set(expected)
+            if actual_provider_identity.get(key) != expected.get(key)
+        )
+        raise ValueError(f"Run2202 provider replay identity differs in fields: {differing}.")
+
+    engine_payload = dict(source_identity.get("engine_config", {}))
+    if not engine_payload:
+        raise TypeError("Run2202 experiment identity omitted its engine configuration.")
+    for name in ("monitor_epochs", "checkpoint_epochs"):
+        if isinstance(engine_payload.get(name), list):
+            engine_payload[name] = tuple(engine_payload[name])
+    engine = TrainingEngine(
+        EngineConfig(**engine_payload),
+        device=device,
+        selection=SelectionPolicy(**dict(source_identity.get("selection_policy", {}))),
+    )
+    source_normalization_path = Path(expected["normalization_path"])
+    provenance = {
+        "adapter": "windfarm.training.unified_formal.build_run2202_diagnostic_context",
+        "source_run_identity": source_identity["run_identity"],
+        "source_epoch": source_epoch,
+        "source_checkpoint_sha256": checkpoint_sha256,
+        "provider_identity_verified": True,
+        "actual_normalization_path": str(normalization_path),
+        "identity_normalization_path": str(source_normalization_path),
+        "normalization_sha256": RUN2202_NORMALIZATION_SHA256,
+        "normalization_path_override": str(normalization_path) != str(source_normalization_path),
+        "role_scale_hash_binding": scale_hash_rule,
+        "actual_execution_device": str(device),
+        "identity_device": str(expected["device"]),
+        "constructor_data_access": {
+            "native_fields_materialized": False,
+            "metadata_and_normalizer_loaded": True,
+            "target_rows_materialized": [],
+            "training_and_validation_membership": "metadata-only identity verification",
+        },
+        "optimizer_updates_during_construction": 0,
+        "calibration_refit": False,
+        "optimizer_created_during_construction": False,
+    }
+    return model, provider, engine, provenance
+
+
 __all__ = [
     "FORMAL_HORIZON",
     "FORMAL_RECIPE_ID",
     "WindFormalRefinementTask",
+    "build_run2202_diagnostic_context",
     "create_task",
     "prepare_recipe",
     "validate_recipe",

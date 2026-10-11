@@ -179,7 +179,8 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                  max_sources: int | None = None, forcing_scale: float = 1.0,
                  zero_offset: bool = True, initialization_seed: int = 0,
                  locality_prior_strength: float | None = None,
-                 initialization_reference_field_outputs: int | None = None):
+                 initialization_reference_field_outputs: int | None = None,
+                 factorized_affine_execution: bool = False):
         if mode not in ('P', 'P-G', 'P-H'):
             raise ValueError("mode must be 'P', 'P-G' or 'P-H'.")
         if field_outputs is None:
@@ -219,7 +220,8 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             super().__init__(source_width, context_width, environment_width,
                              spatial_dim=spatial_dim, hidden=hidden,
                              message=message, output_width=reference_field_outputs,
-                             query_width=query_width, max_sources=max_sources)
+                             query_width=query_width, max_sources=max_sources,
+                             factorized_affine_execution=factorized_affine_execution)
             self.mode = mode
             self.collective_width = collective_width
             self.regional_anchors = regional_anchors
@@ -707,8 +709,22 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
 
     def _read_source_features(self, prepared: InteractionPreservingPreparedContext,
                               receivers: torch.Tensor, features: torch.Tensor,
-                              start: int) -> tuple[torch.Tensor, torch.Tensor | None,
+                              start: int, factorized_projections=None) -> tuple[torch.Tensor, torch.Tensor | None,
                                                    torch.Tensor | None]:
+        if self.factorized_affine_execution:
+            projections = (factorized_projections if factorized_projections is not None else
+                self._prepare_factorized_source_read(prepared, receivers, features, self.source_read))
+            query_start = start if factorized_projections is not None else 0
+            if self.mode == 'P' or not prepared._collective_enabled:
+                source_features = self._factorized_source_read(prepared, receivers,
+                    self.source_read, projections, query_start)
+                return source_features, None, None
+            access, receiver_collective = self._receiver_access(
+                prepared, receivers, features, prepared._access_mode)
+            source_features = self._factorized_source_read(prepared, receivers,
+                self.source_read, projections, query_start,
+                extra_receiver_projection=self.collective_to_receiver(receiver_collective))
+            return source_features, access, receiver_collective
         if self.mode == 'P' or not prepared._collective_enabled:
             source_features = self.source_read(self._read_features(
                 prepared, receivers, prepared.source_states, prepared.centers,
@@ -725,10 +741,25 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
 
     def _read_affine_source_features(self, prepared: InteractionPreservingPreparedContext,
                                     receivers: torch.Tensor, features: torch.Tensor,
-                                    start: int) -> tuple[torch.Tensor, torch.Tensor | None,
+                                    start: int, factorized_projections=None) -> tuple[torch.Tensor, torch.Tensor | None,
                                                          torch.Tensor | None]:
         if self.affine_source_read is None:
             raise ValueError('This model has no affine source-specific read head.')
+        if self.factorized_affine_execution:
+            projections = (factorized_projections if factorized_projections is not None else
+                self._prepare_factorized_source_read(prepared, receivers, features,
+                                                     self.affine_source_read))
+            query_start = start if factorized_projections is not None else 0
+            if self.mode == 'P' or not prepared._collective_enabled:
+                source_features = self._factorized_source_read(prepared, receivers,
+                    self.affine_source_read, projections, query_start)
+                return source_features, None, None
+            access, receiver_collective = self._receiver_access(
+                prepared, receivers, features, prepared._access_mode)
+            source_features = self._factorized_source_read(prepared, receivers,
+                self.affine_source_read, projections, query_start,
+                extra_receiver_projection=self.collective_to_receiver(receiver_collective))
+            return source_features, access, receiver_collective
         if self.mode == 'P' or not prepared._collective_enabled:
             source_features = self.affine_source_read(self._read_features(
                 prepared, receivers, prepared.source_states, prepared.centers,
@@ -760,11 +791,14 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                     else receiver_features)
         self._validate_shape(features, (batch, queries, self.query_width), 'receiver_features')
         outputs, messages, accesses, collective_reads = [], [], [], []
+        read_projections = (self._prepare_factorized_source_read(
+            prepared, receivers, features, self.source_read)
+            if self.factorized_affine_execution else None)
         for start in range(0, queries, chunk_size):
             query = receivers[:, start:start + chunk_size]
             current_features = features[:, start:start + chunk_size]
             source_features, access, collective = self._read_source_features(
-                prepared, query, current_features, start)
+                prepared, query, current_features, start, read_projections)
             source_pool = (source_features * prepared.source_measure[:, None, :, None]).sum(2)
             field_input = torch.cat((source_pool,
                                      prepared.global_state[:, None].expand(-1, query.shape[1], -1),
@@ -837,11 +871,14 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                if receiver_ids is None else receiver_ids)
         self._validate_shape(ids, (batch, queries), 'receiver_ids')
         kernels, offsets, accesses, collective_reads = [], [], [], []
+        affine_projections = (self._prepare_factorized_source_read(
+            prepared, receivers, features, self.affine_source_read)
+            if self.factorized_affine_execution else None)
         for start in range(0, queries, chunk_size):
             query = receivers[:, start:start + chunk_size]
             current_features = features[:, start:start + chunk_size]
             source_features, access, collective = self._read_affine_source_features(
-                prepared, query, current_features, start)
+                prepared, query, current_features, start, affine_projections)
             kernels.append(self.affine_head(source_features) * prepared.present[:, None, :, None])
             if self.zero_offset:
                 offsets.append(query.new_zeros(batch, query.shape[1], self.affine_outputs))
