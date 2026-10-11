@@ -34,8 +34,8 @@ from honf_runtime.unified_training import (
 from torch import nn
 
 from ..data import WindFarmNativeView
-from ..joint_regional import WindFarmJointRegionalModel
 from ..interaction_preserving import INTERACTION_PRESERVING_WIND_MODES, InteractionPreservingWindModel
+from ..joint_regional import WindFarmJointRegionalModel
 from ..normalization import (
     VelocityNormalizer,
     VerticalProfileBaseline,
@@ -66,6 +66,12 @@ JOINT_WIND_ENVIRONMENT_SHAPE = (4, 4, 4)
 JOINT_WIND_ENVIRONMENT_COUNT = 64
 JOINT_WIND_PROFILE_ID = "wind_shared_fixed24_v1"
 JOINT_WIND_FORMAL_PROFILE_ID = "wind_formal_fulltrain_v1"
+JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID = "wind_original420_train_fullVALID90_followup1000_v1"
+FULL_TRAIN_FOLLOWUP_PROTOCOL = "interaction_preserving_full_train_followup1000_v1"
+FULL_TRAIN_FOLLOWUP_DATASET = "wind_original420_train_fullVALID90_followup_v1"
+FULL_TRAIN_FOLLOWUP_TRAIN_SHA256 = "a2170bb15349462160679632fc074d7f685d7e5d17d09aeeab1797a824c8a282"
+FULL_TRAIN_FOLLOWUP_VALIDATION_SHA256 = "ed7295dd2650687c599c13e29a6bae3492508ec8346517e39f4cacf60d0eff72"
+FULL_TRAIN_FOLLOWUP_TEST_SHA256 = "e11734b05e51691680fcae088ef07be8608951660eab9761d05dc29fe2fef998"
 JOINT_WIND_ROLE_CALIBRATION_QUERY_COUNT = 1024
 JOINT_WIND_ROLE_SCALE_RULE = (
     "TRAIN-only per-role component RMS of the residual from the fitted height profile, "
@@ -106,6 +112,40 @@ WIND_JOINT_DEPENDENCY = DependencySpec(
 )
 
 _ROLE_INDEX = {name: index for index, name in enumerate(ROLE_NAMES)}
+
+
+def validate_full_train_followup_membership(
+    train_rows: Sequence[int], validation_rows: Sequence[int], test_rows: Sequence[int], *,
+    train_layout_count: int, validation_layout_count: int, test_layout_count: int,
+) -> dict[str, Any]:
+    """Validate the original 420/90/90 split from row/layout metadata only."""
+    partitions = [np.asarray(rows, dtype=np.int64) for rows in (train_rows, validation_rows, test_rows)]
+    expected = ((420, 140, FULL_TRAIN_FOLLOWUP_TRAIN_SHA256),
+                (90, 30, FULL_TRAIN_FOLLOWUP_VALIDATION_SHA256),
+                (90, 30, FULL_TRAIN_FOLLOWUP_TEST_SHA256))
+    for name, rows, (row_count, layout_count, expected_sha), actual_layout_count in zip(
+            ("TRAIN", "validation", "TEST"), partitions, expected,
+            (train_layout_count, validation_layout_count, test_layout_count)):
+        if rows.ndim != 1 or rows.size != row_count or not np.array_equal(rows, np.sort(rows)):
+            raise ValueError(f"Wind full follow-up {name} rows must be sorted and contain exactly {row_count} rows.")
+        if int(actual_layout_count) != layout_count:
+            raise ValueError(f"Wind full follow-up {name} must preserve exactly {layout_count} layouts.")
+        if _indices_sha256(rows) != expected_sha:
+            raise ValueError(f"Wind full follow-up {name} membership differs from the sealed seed-42 split.")
+    combined = np.concatenate(partitions)
+    if combined.size != 600 or np.unique(combined).size != 600:
+        raise ValueError("Wind full follow-up TRAIN/VALID/TEST row memberships must be disjoint and exhaustive.")
+    if not np.array_equal(np.sort(combined), np.arange(600, dtype=np.int64)):
+        raise ValueError("Wind full follow-up partitions must cover the original 600 canonical rows exactly.")
+    return {
+        "train_row_count": int(partitions[0].size),
+        "train_row_indices_sha256": _indices_sha256(partitions[0]),
+        "validation_row_count": int(partitions[1].size),
+        "validation_row_indices_sha256": _indices_sha256(partitions[1]),
+        "test_row_count": int(partitions[2].size),
+        "test_row_indices_sha256": _indices_sha256(partitions[2]),
+        "test_target_values_read": False,
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -364,7 +404,7 @@ def _read_transform_cache(
     if payload["cache_key"] != dict(cache_key):
         return None
     if (
-        cache_key.get("dataset_profile") != JOINT_WIND_FORMAL_PROFILE_ID
+        cache_key.get("dataset_profile") not in (JOINT_WIND_FORMAL_PROFILE_ID, JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID)
         or cache_key.get("wind_test_target_values_read") is not False
         or cache_key.get("target_partition_access") != "all selected original TRAIN rows only"
         or int(cache_key.get("solver_attempts", -1)) != 0
@@ -394,12 +434,15 @@ def _fit_or_load_formal_transforms(
     training_fingerprint: str,
     seed: int,
     cache_dir: Path,
+    profile_id: str = JOINT_WIND_FORMAL_PROFILE_ID,
 ) -> tuple[VelocityNormalizer, VerticalProfileBaseline, Mapping[str, Any]]:
     rows = np.asarray(train_rows, dtype=np.int64)
     key = {
         "schema_version": JOINT_WIND_ROLE_SCALE_CACHE_SCHEMA,
-        "transform_fit_id": "wind_full_original_train_equal_count_volume_fit_v1",
-        "dataset_profile": JOINT_WIND_FORMAL_PROFILE_ID,
+        "transform_fit_id": ("wind_full_followup1000_original_train_equal_count_volume_fit_v1"
+                             if profile_id == JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID else
+                             "wind_full_original_train_equal_count_volume_fit_v1"),
+        "dataset_profile": str(profile_id),
         "dataset_fingerprint": _wind_dataset_fingerprint(view),
         "subset_manifest_sha256": str(manifest["manifest_sha256"]),
         "training_fingerprint": str(training_fingerprint),
@@ -421,7 +464,7 @@ def _fit_or_load_formal_transforms(
         "solver_attempts": 0,
     }
     key_sha = _stable_json_sha256(key)
-    cache_file = cache_dir / f"{JOINT_WIND_FORMAL_PROFILE_ID}-transforms-{key_sha[:20]}.json"
+    cache_file = cache_dir / f"{profile_id}-transforms-{key_sha[:20]}.json"
     with _role_scale_cache_lock(cache_file):
         cached = _read_transform_cache(cache_file, key)
         if cached is None:
@@ -809,6 +852,7 @@ class WindJointRegionalTask:
         validation_scope: str | None = None,
         native_sampling_protocol: str | None = None,
         environment_token_shape: Sequence[int] = JOINT_WIND_ENVIRONMENT_SHAPE,
+        full_train_followup1000: bool = False,
     ) -> None:
         self.view = view
         self.model = model
@@ -843,7 +887,25 @@ class WindJointRegionalTask:
         self.catalogue_cache = catalogue_cache
         self.sampling_version = SamplingKey.CASE_EPOCH_VERSION
         manifest_fingerprint = str(self.manifest.get("manifest_sha256", self.training_fingerprint))
-        formal_full = self.profile_id == JOINT_WIND_FORMAL_PROFILE_ID and self.total_epochs == 5000
+        self.full_train_followup1000 = bool(full_train_followup1000)
+        profile_is_followup = self.profile_id == JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID
+        if profile_is_followup != self.full_train_followup1000:
+            raise ValueError("Wind full-followup profile and explicit protocol flag must agree.")
+        if self.full_train_followup1000 and (self.total_epochs != 5000
+                                             or model.mode not in INTERACTION_PRESERVING_WIND_MODES):
+            raise ValueError("Wind full-TRAIN follow-up is a fresh P-family 5000-horizon identity.")
+        if self.full_train_followup1000:
+            layout_index = np.asarray(self.view.metadata["layout_index"], dtype=np.int64)
+            validate_full_train_followup_membership(
+                self.train_rows, self.validation_rows,
+                self.manifest.get("test_row_indices", ()),
+                train_layout_count=len(np.unique(layout_index[self.train_rows])),
+                validation_layout_count=len(np.unique(layout_index[self.validation_rows])),
+                test_layout_count=len(self.manifest.get("test_layout_indices", ())),
+            )
+        formal_full = (self.profile_id in (JOINT_WIND_FORMAL_PROFILE_ID,
+                                           JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID)
+                       and self.total_epochs == 5000)
         _validate_formal_controls(
             formal_full=formal_full,
             total_epochs=self.total_epochs,
@@ -882,7 +944,7 @@ class WindJointRegionalTask:
         if self.seed != 42:
             raise ValueError("Wind joint fixed-profile identity is sealed to initialization/sampling seed 42.")
         if self.total_epochs not in (2500, 5000):
-            raise ValueError("Wind joint horizon must be 2500 development or manual-only 5000 formal epochs.")
+            raise ValueError("Wind joint horizon must be 2500 development or 5000 formal/follow-up schedule epochs.")
         if self.validation_scope == "fullVALID90":
             layout_indices = np.asarray(self.view.metadata["layout_index"], dtype=np.int64)
             validation_layouts = np.unique(layout_indices[self.validation_rows])
@@ -954,6 +1016,19 @@ class WindJointRegionalTask:
             "physical_reference": "stored native OpenFOAM velocity fields; no solver calls",
             "wind_test_target_values_read": False,
         }
+        if self.full_train_followup1000:
+            payload.update({
+                "execution_protocol": FULL_TRAIN_FOLLOWUP_PROTOCOL,
+                "dataset_protocol": FULL_TRAIN_FOLLOWUP_DATASET,
+                "full_train_followup1000": True,
+                "approved_stop_after": 1000,
+                "test_row_indices_sha256": self.manifest.get("test_row_indices_sha256"),
+                "test_row_count": self.manifest.get("test_row_count"),
+                "test_layout_indices": self.manifest.get("test_layout_indices"),
+                "wind_test_target_values_read": False,
+                "normalization_training_membership_sha256": _indices_sha256(self.train_rows),
+                "role_scale_training_membership_sha256": _indices_sha256(self.train_rows),
+            })
         if self.native_sampling_protocol is not None:
             payload["native_sampling_identity"] = {
                 "protocol": self.native_sampling_protocol,
@@ -1002,7 +1077,8 @@ class WindJointRegionalTask:
             self.validation_scope is not None,
             self.native_sampling_protocol is not None,
         ))
-        if self.profile_id == JOINT_WIND_FORMAL_PROFILE_ID and formal_controls_enabled:
+        if self.profile_id in (JOINT_WIND_FORMAL_PROFILE_ID, JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID) \
+                and formal_controls_enabled:
             payload["training"]["case_visits_per_epoch"] = int(self.train_rows.size)
             payload["training"]["horizon_updates_per_epoch"] = math.ceil(
                 self.train_rows.size / self.effective_batch_size
@@ -1473,6 +1549,29 @@ def _formal_split_manifest(split: GroupSplit, view: WindFarmNativeView) -> tuple
     return identity, train_rows, validation_rows
 
 
+def _full_train_followup_split_manifest(
+    split: GroupSplit, view: WindFarmNativeView,
+) -> tuple[dict[str, Any], np.ndarray, np.ndarray, np.ndarray]:
+    """Bind all three original seed-42 memberships without reading TEST targets."""
+    manifest, train_rows, validation_rows = _formal_split_manifest(split, view)
+    test_rows = np.asarray(split.test, dtype=np.int64)
+    manifest = dict(manifest)
+    manifest.update({
+        "subset_id": JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID,
+        "test_row_indices_sha256": _indices_sha256(test_rows),
+        "test_row_indices": test_rows.astype(int).tolist(),
+        "test_row_count": int(test_rows.size),
+        "test_layout_indices": sorted({int(view.metadata["layout_index"][row]) for row in test_rows}),
+        "wind_test_target_values_read": False,
+        "full_train_followup1000": True,
+        "dataset_protocol": FULL_TRAIN_FOLLOWUP_DATASET,
+    })
+    manifest["manifest_sha256"] = _stable_json_sha256(
+        {name: value for name, value in manifest.items() if name != "manifest_sha256"}
+    )
+    return manifest, train_rows, validation_rows, test_rows
+
+
 def build_wind_joint_task(
     mode: str,
     *,
@@ -1504,6 +1603,7 @@ def build_wind_joint_task(
     environment_token_shape: Sequence[int] | None = None,
     collective_width: int = 64,
     max_sources: int = 30,
+    full_train_followup1000: bool = False,
 ) -> tuple[WindFarmJointRegionalModel, WindJointRegionalTask]:
     """Build a fresh Wind model and provider from the sealed development or formal split.
 
@@ -1524,12 +1624,17 @@ def build_wind_joint_task(
         raise ValueError("Wind joint microbatch size must lie in [1,24].")
     if int(primary_queries) < len(ROLE_NAMES):
         raise ValueError("Wind joint primary query count must include every native role.")
+    if type(full_train_followup1000) is not bool:
+        raise TypeError("Wind full_train_followup1000 must be boolean.")
     if int(total_epochs) not in (2500, 5000):
-        raise ValueError("Wind joint supports the 2500-epoch development or 5000-epoch manual formal horizon.")
-    if bool(formal_full) != (int(total_epochs) == 5000):
+        raise ValueError("Wind joint supports the 2500 development or 5000 formal/follow-up schedule horizon.")
+    if full_train_followup1000:
+        if formal_full or int(total_epochs) != 5000 or mode not in INTERACTION_PRESERVING_WIND_MODES:
+            raise ValueError("Wind full follow-up requires non-formal P-family identity and 5000-epoch horizon.")
+    elif bool(formal_full) != (int(total_epochs) == 5000):
         raise ValueError("The 5000-epoch horizon is reserved for the separate formal_full identity.")
     _validate_formal_controls(
-        formal_full=bool(formal_full),
+        formal_full=bool(formal_full or full_train_followup1000),
         total_epochs=int(total_epochs),
         optimizer_schedule=optimizer_schedule,
         weight_decay=weight_decay,
@@ -1546,7 +1651,7 @@ def build_wind_joint_task(
         raise ValueError("Wind P has no collective locality prior.")
     if mode in ("P-G", "P-H") and locality_prior_strength != 1.0:
         raise ValueError("The recovery Wind P-G/P-H geometric locality prior is sealed to 1.0.")
-    if mode in INTERACTION_PRESERVING_WIND_MODES and bool(formal_full):
+    if mode in INTERACTION_PRESERVING_WIND_MODES and bool(formal_full) and not full_train_followup1000:
         raise ValueError("P-family full-TRAIN recipes remain unavailable until separately justified and authorized.")
     resolved_environment_shape = tuple(int(value) for value in (
         environment_token_shape if environment_token_shape is not None else
@@ -1575,8 +1680,19 @@ def build_wind_joint_task(
         token_shape=resolved_environment_shape,
     )
     split = _load_original_split(view, derived_root)
-    if formal_full:
-        manifest, train_rows, validation_rows = _formal_split_manifest(split, view)
+    if formal_full or full_train_followup1000:
+        if full_train_followup1000:
+            manifest, train_rows, validation_rows, test_rows = _full_train_followup_split_manifest(split, view)
+            validate_full_train_followup_membership(
+                train_rows, validation_rows, test_rows,
+                train_layout_count=len(manifest["train_layout_indices"]),
+                validation_layout_count=len(manifest["validation_layout_indices"]),
+                test_layout_count=len(manifest["test_layout_indices"]),
+            )
+            selected_profile_id = JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID
+        else:
+            manifest, train_rows, validation_rows = _formal_split_manifest(split, view)
+            selected_profile_id = JOINT_WIND_FORMAL_PROFILE_ID
         if validation_scope == "fullVALID90":
             validation_layout_count = len({int(view.metadata["layout_index"][row]) for row in validation_rows})
             if validation_rows.size != 90 or validation_layout_count != 30:
@@ -1590,9 +1706,11 @@ def build_wind_joint_task(
             training_fingerprint=str(manifest["manifest_sha256"]),
             seed=seed,
             cache_dir=Path(role_scale_cache_dir).expanduser().resolve(),
+            profile_id=selected_profile_id,
         )
         normalizer_source = {
-            "kind": "fresh_full_original_train_fit",
+            "kind": ("fresh_full_followup1000_original_train_fit" if full_train_followup1000
+                     else "fresh_full_original_train_fit"),
             "training_rows_sha256": _indices_sha256(train_rows),
             "source_rows": int(train_rows.size),
             "samples_per_row": int(normalizer.sample_count_per_row),
@@ -1601,7 +1719,14 @@ def build_wind_joint_task(
             "background_profile": profile.to_dict(),
             "source_bound_cache": transform_cache_binding,
         }
-        profile_id = JOINT_WIND_FORMAL_PROFILE_ID
+        if full_train_followup1000:
+            normalizer_source.update({
+                "dataset_protocol": FULL_TRAIN_FOLLOWUP_DATASET,
+                "normalization_fit_scope": "exact original420 TRAIN rows only",
+                "unexposed_original_test_targets_read": False,
+                "test_membership_sha256": manifest["test_row_indices_sha256"],
+            })
+        profile_id = selected_profile_id
     else:
         manifest, train_rows, validation_rows = _read_fixed_rows(view, split, manifest_path)
         normalizer, profile = read_normalization_json(normalization_path)
@@ -1732,6 +1857,7 @@ def build_wind_joint_task(
         validation_scope=validation_scope,
         native_sampling_protocol=native_sampling_protocol,
         environment_token_shape=resolved_environment_shape,
+        full_train_followup1000=full_train_followup1000,
     )
     return model, provider
 

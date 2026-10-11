@@ -20,6 +20,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from full_train_followup_contract import (
+    PROTOCOL as FULL_TRAIN_FOLLOWUP_PROTOCOL,
+)
+from full_train_followup_contract import (
+    validate_recipe as validate_full_train_followup_recipe,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 for directory in (ROOT / "src", ROOT / "Case_ThermalChannel/src", ROOT / "Case_WindFarm/src"):
     if str(directory) not in sys.path:
@@ -38,6 +45,10 @@ RECIPE_KEYS = {
     "optimizer_betas", "optimizer_eps", "gradient_clip_norm",
     "validation_scope", "optimizer_schedule", "weight_decay", "native_sampling_protocol",
     "checkpoint_epochs", "write_initial_artifacts", "flow_readout_law",
+    "execution_protocol", "full_train_followup1000", "approved_stop_after",
+    "root_protocol_go", "manual_full_followup", "parent_checkpoint",
+    "auxiliary_calibration_fallback", "population_binding", "mechanism_reference",
+    "wind_test_target_values_read",
 }
 
 RECOVERY_OPTIMIZER_SCHEDULE = {
@@ -96,12 +107,16 @@ NATIVE_CURL_FLOW_SOURCE = (
 )
 
 
-def _recovery_source_files(flow_readout_law: str | None = None) -> tuple[str, ...]:
-    if flow_readout_law is None:
-        return RECOVERY_SOURCE_FILES
-    if flow_readout_law != NATIVE_CURL_THERMAL_LAW:
-        raise ValueError("Unsupported optional Thermal flow readout law.")
-    return RECOVERY_SOURCE_FILES + (NATIVE_CURL_FLOW_SOURCE,)
+def _recovery_source_files(flow_readout_law: str | None = None, *,
+                           full_train_followup: bool = False) -> tuple[str, ...]:
+    files = RECOVERY_SOURCE_FILES
+    if flow_readout_law is not None:
+        if flow_readout_law != NATIVE_CURL_THERMAL_LAW:
+            raise ValueError("Unsupported optional Thermal flow readout law.")
+        files += (NATIVE_CURL_FLOW_SOURCE,)
+    if full_train_followup:
+        files += ("HONF_Proj/tools/full_train_followup_contract.py",)
+    return files
 
 
 def _recovery_model_contract(task: str, mode: str,
@@ -264,12 +279,16 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
     effective = 48 if recipe["task"] == "thermal" else 24
     if recipe["effective_cases"] != effective or recipe["microbatch_cases"] > effective:
         raise ValueError("Joint recipes preserve the dataset's effective batch.")
-    if recipe["total_epochs"] != (5000 if recipe.get("formal_full") else 2500):
+    full_followup = recipe.get("execution_protocol") == FULL_TRAIN_FOLLOWUP_PROTOCOL
+    if recipe["total_epochs"] != (5000 if recipe.get("formal_full") or full_followup else 2500):
         raise ValueError("Joint recipe horizon must match the development/formal identity.")
     if type(recipe.get("seed")) is not int or type(recipe.get("formal_full")) is not bool:
         raise ValueError("Joint seed/formal identity has invalid types.")
-    expected = ("original600_train" if recipe["task"] == "thermal" else "original420_train") if recipe["formal_full"] else (
-        "fixed25_v1" if recipe["task"] == "thermal" else "wind_shared_fixed24_v1")
+    expected = recipe["dataset_protocol"] if full_followup else (
+        ("original600_train" if recipe["task"] == "thermal" else "original420_train")
+        if recipe["formal_full"] else
+        ("fixed25_v1" if recipe["task"] == "thermal" else "wind_shared_fixed24_v1")
+    )
     if recipe.get("dataset_protocol") != expected:
         raise ValueError("Joint recipe dataset protocol differs from its population identity.")
     for name in ("response_coefficient", "operator_coefficient"):
@@ -287,7 +306,7 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("P-G and P-H are sealed to the shared geometric locality prior lambda=1.")
     formal_options = {"validation_scope", "optimizer_schedule", "weight_decay",
                       "native_sampling_protocol", "checkpoint_epochs", "write_initial_artifacts"}
-    if (not recipe["formal_full"] and formal_options.intersection(recipe)
+    if (not recipe["formal_full"] and not full_followup and formal_options.intersection(recipe)
             and not (recovery and not (formal_options - {"optimizer_schedule", "weight_decay", "checkpoint_epochs"}).intersection(recipe))):
         raise ValueError("Formal comparison controls require the separate fullTRAIN identity.")
     if "validation_scope" in recipe and recipe["validation_scope"] != (
@@ -313,13 +332,21 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Formal weight decay must be finite and nonnegative.")
     if "checkpoint_epochs" in recipe:
         epochs = recipe["checkpoint_epochs"]
+        required_final_checkpoint = recipe.get("approved_stop_after") if full_followup else recipe["total_epochs"]
         if (not isinstance(epochs, list)
                 or any(type(epoch) is not int or not 1 <= epoch <= recipe["total_epochs"] for epoch in epochs)
-                or sorted(set(epochs)) != epochs or recipe["total_epochs"] not in epochs):
+                or sorted(set(epochs)) != epochs or required_final_checkpoint not in epochs):
             raise ValueError("Formal checkpoint epochs must be sorted unique and include the horizon.")
     if "write_initial_artifacts" in recipe and type(recipe["write_initial_artifacts"]) is not bool:
         raise ValueError("Initial artifact control must be boolean.")
-    if recovery:
+    if full_followup:
+        if recipe.get("full_train_followup1000") is not True:
+            raise ValueError("Full-data follow-up must declare its distinct bounded protocol flag.")
+        if recipe.get("formal_full") is not False:
+            raise ValueError("Full-data follow-up cannot reuse the legacy formal_full identity.")
+        _validate_full_followup_mechanism(recipe)
+        validate_full_train_followup_recipe(recipe, command="prepare")
+    elif recovery:
         _validate_recovery_recipe(recipe)
     return recipe
 
@@ -422,11 +449,59 @@ def _validate_recovery_recipe(recipe: dict[str, Any]) -> None:
                 raise ValueError("Resolved Thermal recipe is not sealed to its external calibration receipt.")
 
 
+def _validate_full_followup_mechanism(recipe: dict[str, Any]) -> None:
+    """Validate the unchanged model/objective by mapping population labels back to the sealed quarter recipe."""
+    segmented = copy.deepcopy(recipe)
+    task = recipe["task"]
+    expected_objective = _recovery_objective_contract(task)
+    objective = segmented.get("objective_contract")
+    if not isinstance(objective, dict):
+        raise TypeError("Full follow-up recipe must retain the sealed native objective contract.")
+    for label in ("primary_cohort", "calibration_scope"):
+        if label in expected_objective:
+            objective[label] = expected_objective[label]
+    if "response_addendum" in expected_objective:
+        addendum = objective.get("response_addendum")
+        if not isinstance(addendum, dict):
+            raise ValueError("Thermal full follow-up must retain its four-family response addendum.")
+        addendum["primary_cohort_overlap"] = expected_objective["response_addendum"]["primary_cohort_overlap"]
+    segmented["objective_contract"] = objective
+    segmented["dataset_protocol"] = "fixed25_v1" if task == "thermal" else "wind_shared_fixed24_v1"
+    segmented["total_epochs"] = 2500
+    segmented["launch_policy"] = "bounded_development"
+    segmented["optimizer_schedule"] = RECOVERY_OPTIMIZER_SCHEDULE
+    segmented["checkpoint_epochs"] = RECOVERY_CHECKPOINT_EPOCHS
+    segmented["run_id"] = (
+        {"P": "T4111", "P-G": "T4112", "P-H": "T4113"}[recipe["mode"]]
+        if task == "thermal" and recipe.get("flow_readout_law") == NATIVE_CURL_THERMAL_LAW else
+        {"P": "W2401", "P-G": "W2402", "P-H": "W2403"}[recipe["mode"]]
+    )
+    if task == "thermal":
+        segmented["calibration_receipt"] = {
+            "receipt_path": "diagnostics/generated/interaction_recovery_20261010/thermal_native_curl_fresh_P_calibration.json",
+            "required_payload_sha256": "sealed_after_fresh_P_native_curl_calibration",
+        }
+        segmented.pop("auxiliary_calibration", None)
+        segmented.pop("response_coefficient", None)
+        segmented.pop("operator_coefficient", None)
+    segmented.pop("execution_protocol", None)
+    segmented.pop("full_train_followup1000", None)
+    segmented.pop("approved_stop_after", None)
+    segmented.pop("root_protocol_go", None)
+    segmented.pop("manual_full_followup", None)
+    segmented.pop("parent_checkpoint", None)
+    segmented.pop("auxiliary_calibration_fallback", None)
+    segmented.pop("population_binding", None)
+    segmented.pop("mechanism_reference", None)
+    segmented.pop("wind_test_target_values_read", None)
+    _validate_recovery_recipe(segmented)
+
+
 def resolved_recipe(args: argparse.Namespace) -> dict[str, Any]:
     if args.recipe_json:
         recipe = read_recipe(args.recipe_json)
         if recipe["mode"] in ("P", "P-G", "P-H") and recipe["task"] == "thermal" \
-                and args.command != "calibrate-thermal":
+                and args.command not in ("calibrate-thermal", "validate-followup"):
             recipe = _bind_calibration_receipt(recipe)
         return recipe
     task = args.task
@@ -469,10 +544,12 @@ def _bind_calibration_receipt(recipe: dict[str, Any]) -> dict[str, Any]:
     if receipt.get("payload_sha256") != actual_digest:
         raise ValueError("Thermal calibration receipt payload digest is missing or invalid.")
     flow_readout_law = recipe.get("flow_readout_law")
-    active_source_identity = (
-        training_source_identity(require_clean=True) if flow_readout_law is None else
-        training_source_identity(require_clean=True, flow_readout_law=flow_readout_law)
-    )
+    source_options = {"require_clean": True}
+    if flow_readout_law is not None:
+        source_options["flow_readout_law"] = flow_readout_law
+    if recipe.get("execution_protocol") == FULL_TRAIN_FOLLOWUP_PROTOCOL:
+        source_options["full_train_followup"] = True
+    active_source_identity = training_source_identity(**source_options)
     if receipt.get("training_source_identity") != active_source_identity:
         raise ValueError("Thermal calibration receipt was produced by a different committed training source revision.")
     if (recipe.get("flow_readout_law") is not None
@@ -487,11 +564,14 @@ def _bind_calibration_receipt(recipe: dict[str, Any]) -> dict[str, Any]:
             and descriptor["required_payload_sha256"] != actual_digest):
         raise ValueError("Thermal recipe calibration digest differs from the external TRAIN receipt.")
     resolved = copy.deepcopy(recipe)
-    resolved["calibration_receipt"] = {
+    bound_descriptor = {
         "receipt_path": descriptor["receipt_path"],
         "required_payload_sha256": actual_digest,
         "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }
+    if recipe.get("execution_protocol") == FULL_TRAIN_FOLLOWUP_PROTOCOL:
+        bound_descriptor["dataset_protocol"] = descriptor["dataset_protocol"]
+    resolved["calibration_receipt"] = bound_descriptor
     resolved["auxiliary_calibration"] = receipt
     resolved["response_coefficient"] = float(receipt["response_coefficient"])
     resolved["operator_coefficient"] = float(receipt["operator_coefficient"])
@@ -512,9 +592,10 @@ def _check_fresh_calibration_destinations(recipe: dict[str, Any], output_dir: st
 
 
 def training_source_identity(*, require_clean: bool,
-                             flow_readout_law: str | None = None) -> dict[str, Any]:
+                             flow_readout_law: str | None = None,
+                             full_train_followup: bool = False) -> dict[str, Any]:
     repo_root = ROOT.parent
-    source_files = _recovery_source_files(flow_readout_law)
+    source_files = _recovery_source_files(flow_readout_law, full_train_followup=full_train_followup)
     dirty = subprocess.run(
         ["git", "status", "--porcelain", "--", *source_files],
         cwd=repo_root, check=True, text=True, capture_output=True,
@@ -573,7 +654,8 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
         from windfarm.training.joint_task import build_wind_joint_task as factory
     task_options = {name: recipe[name] for name in ("response_coefficient", "operator_coefficient", "auxiliary_calibration",
                                                  "locality_prior_strength", "validation_scope", "weight_decay",
-                                                 "native_sampling_protocol", "flow_readout_law")
+                                                 "native_sampling_protocol", "flow_readout_law",
+                                                 "full_train_followup1000")
                     if name in recipe}
     if "optimizer_schedule" in recipe:
         task_options["optimizer_schedule"] = ScheduleSpec(total_epochs=recipe["total_epochs"],
@@ -612,11 +694,12 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
     )
     engine = TrainingEngine(config, device=device, selection=SelectionPolicy(field_metric="field_score"))
     flow_readout_law = recipe.get("flow_readout_law")
-    source_identity = (
-        training_source_identity(require_clean=require_clean_source)
-        if flow_readout_law is None else
-        training_source_identity(require_clean=require_clean_source, flow_readout_law=flow_readout_law)
-    )
+    source_options = {"require_clean": require_clean_source}
+    if flow_readout_law is not None:
+        source_options["flow_readout_law"] = flow_readout_law
+    if recipe.get("execution_protocol") == FULL_TRAIN_FOLLOWUP_PROTOCOL:
+        source_options["full_train_followup"] = True
+    source_identity = training_source_identity(**source_options)
     identity = {
         "workflow": "joint_regional_fields_v1", "recipe": recipe,
         "training_source_identity": source_identity,
@@ -698,7 +781,7 @@ def validate_manual_recipe(model: Any, provider: Any, engine: Any, identity: dic
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "dry-run", "calibrate-thermal", "start", "resume", "branch"))
+    parser.add_argument("command", choices=("prepare", "dry-run", "validate-followup", "calibrate-thermal", "start", "resume", "branch"))
     parser.add_argument("--task", choices=("thermal", "wind"))
     parser.add_argument("--mode", choices=MODES, default="J-H")
     parser.add_argument("--recipe-json")
@@ -720,6 +803,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threads", type=int, default=1)
     args = parser.parse_args(argv)
     recipe = resolved_recipe(args)
+    full_followup = recipe.get("execution_protocol") == FULL_TRAIN_FOLLOWUP_PROTOCOL
+    if args.command == "validate-followup":
+        if not full_followup:
+            parser.error("validate-followup accepts only the explicit full-population follow-up protocol.")
+        validate_full_train_followup_recipe(recipe, command="prepare")
+        print(json.dumps({
+            "status": "metadata_only_followup_recipe_valid",
+            "run_id": recipe["run_id"],
+            "execution_protocol": recipe["execution_protocol"],
+            "dataset_protocol": recipe["dataset_protocol"],
+            "optimizer_horizon": recipe["total_epochs"],
+            "approved_stop_after": recipe["approved_stop_after"],
+            "root_protocol_go": recipe["root_protocol_go"],
+            "dataset_access": "none",
+            "optimizer_updates": 0,
+        }, indent=2, sort_keys=True), flush=True)
+        return 0
+    if full_followup:
+        resume_payload = None
+        if args.command == "resume":
+            if not args.output_dir:
+                parser.error("Full-population exact resume requires the original --output-dir.")
+            from honf_runtime.compat import load_trusted_checkpoint
+            from honf_runtime.run_layout import resolve_checkpoint
+            latest = resolve_checkpoint(Path(args.output_dir).expanduser().resolve(), "latest")
+            resume_payload = load_trusted_checkpoint(latest, map_location="cpu")
+        validate_full_train_followup_recipe(
+            recipe, command=args.command, stop_after=args.stop_after,
+            resume_checkpoint_payload=resume_payload,
+        )
     if args.command == "calibrate-thermal":
         if (recipe["task"] != "thermal" or recipe["mode"] != "P" or recipe["formal_full"]
                 or recipe.get("auxiliary_calibration") is not None):
@@ -734,7 +847,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("start", "resume", "branch"):
         if not args.output_dir or args.stop_after is None:
             parser.error("Optimization requires --output-dir and --stop-after.")
-        if recipe["formal_full"] and not args.manual_formal_launch:
+        if recipe["formal_full"] and not full_followup and not args.manual_formal_launch:
             parser.error("Formal optimization requires explicit --manual-formal-launch; preparation is inert.")
         if not 1 <= args.stop_after <= recipe["total_epochs"]:
             parser.error("Requested stop exceeds the declared horizon.")
@@ -792,7 +905,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.output_dir:
             write_json(Path(args.output_dir) / "preparation.json", payload)
     elif args.command == "dry-run":
-        if recipe["formal_full"]:
+        if full_followup:
+            # Full-population follow-up validation never advances an optimizer.
+            payload = {
+                "status": "full_train_followup_inert_validation",
+                "cold_setup_seconds": setup_seconds,
+                "optimizer_updates": 0,
+                "preflight_update_executed": False,
+                "formal_training_started": False,
+                "checkpoint_written": False,
+            }
+        elif recipe["formal_full"]:
             # FullTRAIN preparation is deliberately inert. No formal optimizer
             # is instantiated, even for a disposable update.
             payload = {"status": "manual_formal_recipe_validated_inert",

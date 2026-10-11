@@ -58,6 +58,10 @@ JOINT_MANIFEST_DEFAULT = Path("/data/wanglz/ModularDT/thermal_development/fixed2
 JOINT_SOURCE_ROOT = Path(__file__).resolve().parents[4]
 JOINT_TOOLS = JOINT_SOURCE_ROOT / "tools"
 JOINT_NEAR_RADIUS_MULTIPLE = 2.0
+FULL_TRAIN_FOLLOWUP_PROTOCOL = "interaction_preserving_full_train_followup1000_v1"
+FULL_TRAIN_FOLLOWUP_DATASET = "thermal_original600_train_canonical89_validation_followup_v1"
+FULL_TRAIN_FOLLOWUP_TRAIN_SHA256 = "c991acbcdced62e887385bc2763d4da7f4686256f72e44f797b69185522f3e3e"
+FULL_TRAIN_FOLLOWUP_VALIDATION_SHA256 = "51f0bea2278c26b24a994a29a52ad6b8af1e3e85941dc75d9b20bbebce5d8728"
 
 
 def _json_hash(value: Any) -> str:
@@ -69,6 +73,32 @@ def _case_ids_hash(values: Sequence[str]) -> str:
     for value in values:
         digest.update(str(value).encode("utf-8") + b"\0")
     return digest.hexdigest()
+
+
+def validate_full_train_followup_membership(
+    training_ids: Sequence[str], validation_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Validate the full-follow-up split using IDs only, before target loading or norm fitting."""
+    train = tuple(map(str, training_ids))
+    validation = tuple(map(str, validation_ids))
+    if len(train) != 600 or len(set(train)) != 600:
+        raise ValueError("Thermal full follow-up requires exactly 600 unique original TRAIN IDs.")
+    if len(validation) != 89 or len(set(validation)) != 89 or "0273" in validation:
+        raise ValueError("Thermal full follow-up requires the canonical89 validation IDs without 0273.")
+    if set(train).intersection(validation):
+        raise ValueError("Thermal full follow-up TRAIN and exposed validation IDs must be disjoint.")
+    train_hash, validation_hash = _case_ids_hash(train), _case_ids_hash(validation)
+    if (train_hash != FULL_TRAIN_FOLLOWUP_TRAIN_SHA256
+            or validation_hash != FULL_TRAIN_FOLLOWUP_VALIDATION_SHA256):
+        raise ValueError("Thermal follow-up TRAIN/validation IDs differ from the sealed full-population contract.")
+    return {
+        "training_case_count": len(train),
+        "training_membership_sha256": train_hash,
+        "validation_case_count": len(validation),
+        "validation_membership_sha256": validation_hash,
+        "validation_targets_are_original_h5_test_split_exposed": True,
+        "unexposed_original_test_targets_read": False,
+    }
 
 
 def _shared_direct_state_sha256(model: torch.nn.Module) -> str:
@@ -114,11 +144,13 @@ def _stored_binary_mask(value: Any, *, expected_shape: tuple[int, int], source: 
 
 def _read_fixed_native_mask_catalog(
     data_path: Path, training_ids: Sequence[str], validation_ids: Sequence[str], *,
-    expected_shape: tuple[int, int] = (64, 128),
+    expected_shape: tuple[int, int] = (64, 128), full_train_followup1000: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """Read only input-only H5 `module_mask` datasets for the sealed 150/22 panel."""
-    if len(training_ids) != 150 or len(validation_ids) != 22:
-        raise ValueError("The native-curl recovery mask catalog requires exactly fixed25 TRAIN150/DEV22 IDs.")
+    """Read only stored geometry masks for the selected sealed population."""
+    expected_counts = (600, 89) if full_train_followup1000 else (150, 22)
+    if (len(training_ids), len(validation_ids)) != expected_counts:
+        scope = "full TRAIN600/canonical89" if full_train_followup1000 else "fixed25 TRAIN150/DEV22"
+        raise ValueError(f"The native-curl mask catalog requires exactly the sealed {scope} IDs.")
     ordered_ids = tuple(map(str, training_ids)) + tuple(map(str, validation_ids))
     if len(set(ordered_ids)) != len(ordered_ids):
         raise ValueError("Fixed25 native mask IDs must be unique across TRAIN and DEV.")
@@ -150,6 +182,10 @@ def _read_fixed_native_mask_catalog(
         **split_records,
         "catalog_sha256": _json_hash(split_records),
     }
+    if full_train_followup1000:
+        binding["dataset_protocol"] = FULL_TRAIN_FOLLOWUP_DATASET
+        binding["training_membership_sha256"] = _case_ids_hash(training_ids)
+        binding["validation_membership_sha256"] = _case_ids_hash(validation_ids)
     return masks, binding
 
 
@@ -381,6 +417,7 @@ class JointThermalTask(ThermalRefinementTask):
         weight_decay: float | None = None,
         native_sampling_protocol: str | None = None,
         flow_readout_law: str | None = None,
+        full_train_followup1000: bool = False,
     ) -> None:
         if mode not in THERMAL_RECOVERY_MODES or model.mode != mode:
             raise ValueError("Joint Thermal task mode must match its freshly initialized adapter.")
@@ -403,12 +440,18 @@ class JointThermalTask(ThermalRefinementTask):
         self.data_path = Path(data_path).resolve()
         self.source_binding = copy.deepcopy(dict(source_binding))
         self.formal_full = bool(formal_full)
+        self.full_train_followup1000 = bool(full_train_followup1000)
+        self.total_epochs = int(total_epochs)
+        if self.formal_full and self.full_train_followup1000:
+            raise ValueError("Thermal legacy formal_full and bounded full-TRAIN follow-up identities are exclusive.")
+        if self.full_train_followup1000 and (
+                mode not in INTERACTION_PRESERVING_THERMAL_MODES or self.total_epochs != 5000):
+            raise ValueError("Thermal full-TRAIN follow-up is a fresh P-family 5000-horizon identity.")
         self.formal_validation_scope = validation_scope
         self.formal_optimizer_schedule = optimizer_schedule
         self.formal_weight_decay = weight_decay
         self.native_sampling_protocol = native_sampling_protocol
         self.effective_batch_size = int(effective_batch_size)
-        self.total_epochs = int(total_epochs)
         self.operator_rows_per_case = int(operator_rows_per_case)
         self.auxiliary_calibration = None if auxiliary_calibration is None else copy.deepcopy(dict(auxiliary_calibration))
         self.flow_role_weights = {name: 0.5 / 4 for name in ("u", "v", "p", "omega")}
@@ -471,7 +514,7 @@ class JointThermalTask(ThermalRefinementTask):
         validation_ids = list(self._validation_ids)
         training_hash = _case_ids_hash(train_ids)
         fixed25_train_hash = _case_ids_hash(development_case_ids(self.manifest, "train"))
-        if self.formal_full and training_hash == fixed25_train_hash:
+        if (self.formal_full or self.full_train_followup1000) and training_hash == fixed25_train_hash:
             raise ValueError("Manual fullTRAIN identity cannot reuse fixed25_v1 quarter TRAIN membership.")
         normalization_stats = {
             str(name): np.asarray(value).tolist() for name, value in self.stats.items()
@@ -481,10 +524,13 @@ class JointThermalTask(ThermalRefinementTask):
             "task_provider": "thermal_joint_regional_v1",
             "training_mode": JOINT_TRAINING_MODE,
             "arm": self.joint_mode,
-            "dataset_split": "original_train_full_manual_only" if self.formal_full else "fixed25_v1",
+            "dataset_split": ("original_train_full_followup1000" if self.full_train_followup1000 else
+                              "original_train_full_manual_only" if self.formal_full else "fixed25_v1"),
             "manifest_fingerprint": self.manifest["manifest_sha256"],
-            "manifest_binding_scope": "fixed25_v1_validation_sanity_panel_only" if self.formal_full else "fixed25_v1_training_and_validation",
-            "training_membership_scope": "all_original_train_600_manual_only" if self.formal_full else "fixed25_v1_selected_train_150",
+            "manifest_binding_scope": ("full_followup1000_full_split_and_exposed_validation" if self.full_train_followup1000 else
+                                        "fixed25_v1_validation_sanity_panel_only" if self.formal_full else "fixed25_v1_training_and_validation"),
+            "training_membership_scope": ("all_original_train_600_followup1000" if self.full_train_followup1000 else
+                                          "all_original_train_600_manual_only" if self.formal_full else "fixed25_v1_selected_train_150"),
             "training_membership_sha256": training_hash,
             "fixed25_v1_train_membership_sha256": fixed25_train_hash,
             "training_case_ids": train_ids,
@@ -493,12 +539,14 @@ class JointThermalTask(ThermalRefinementTask):
             "validation_case_ids": validation_ids,
             "validation_case_ids_sha256": _case_ids_hash(validation_ids),
             "validation_case_count": len(validation_ids),
-            "validation_scope": "fixed25_v1_exposed_DEV22_sanity_only" if self.formal_full else "fixed25_v1_exposed_DEV22",
+            "validation_scope": ("canonical89_exposed_validation_followup1000" if self.full_train_followup1000 else
+                                 "fixed25_v1_exposed_DEV22_sanity_only" if self.formal_full else "fixed25_v1_exposed_DEV22"),
             "source_binding": copy.deepcopy(self.source_binding),
             "model_family": getattr(self.model, "family_id", getattr(self.model, "FAMILY", JOINT_THERMAL_ID)),
             "model_config": self.model.model_config(),
             "adapter_config": self.model.adapter_config(),
-            "normalization_scope": "all_original_train_only" if self.formal_full else "selected_fixed25_train_only",
+            "normalization_scope": ("exact_original600_TRAIN_only_followup1000" if self.full_train_followup1000 else
+                                    "all_original_train_only" if self.formal_full else "selected_fixed25_train_only"),
             "normalization_stats_sha256": _tensor_digest(self.stats),
             "normalization_stats": normalization_stats,
             "native_query_budget": dict(self.budget),
@@ -533,9 +581,21 @@ class JointThermalTask(ThermalRefinementTask):
             "formal_full_run_policy": "manual_only_not_launched" if self.formal_full else None,
             "solver_attempts": 0,
         }
+        if self.full_train_followup1000:
+            payload.update({
+                "execution_protocol": FULL_TRAIN_FOLLOWUP_PROTOCOL,
+                "dataset_protocol": FULL_TRAIN_FOLLOWUP_DATASET,
+                "full_train_followup1000": True,
+                "approved_stop_after": 1000,
+                "normalization_training_membership_sha256": training_hash,
+                "validation_targets_are_original_h5_test_split_exposed": True,
+                "unexposed_test_targets_read": False,
+            })
         if getattr(self, "formal_validation_scope", None) == "canonical89":
-            payload["manifest_binding_scope"] = "fixed25_v1_source_metadata_only"
-            payload["validation_scope"] = "formal_canonical89_exposed_validation"
+            payload["manifest_binding_scope"] = ("full_followup1000_full_split_and_source_metadata" if self.full_train_followup1000
+                                                  else "fixed25_v1_source_metadata_only")
+            payload["validation_scope"] = ("canonical89_exposed_validation_followup1000" if self.full_train_followup1000
+                                           else "formal_canonical89_exposed_validation")
         schedule = getattr(self, "formal_optimizer_schedule", None)
         weight_decay = getattr(self, "formal_weight_decay", None)
         if schedule is not None:
@@ -1252,7 +1312,8 @@ class JointThermalTask(ThermalRefinementTask):
         for update_index, index in enumerate(selected_indices):
             key = SamplingKey(
                 0, 1, update_index, 0, "joint_auxiliary_calibration", self.joint_mode,
-                sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="thermal_fixed25_v1",
+                sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+                dataset_id=("thermal_full_followup1000_v1" if self.full_train_followup1000 else "thermal_fixed25_v1"),
             )
             batch = self._batch_from_indices([int(index)], 1, key=key, training=True,
                                              include_response=False, budget=self.budget)
@@ -1273,7 +1334,8 @@ class JointThermalTask(ThermalRefinementTask):
         for update_index, family in enumerate(self.train_families):
             key = SamplingKey(
                 0, 1, update_index, 0, "joint_response_calibration", self.joint_mode,
-                sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id="thermal_fixed25_v1",
+                sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+                dataset_id=("thermal_full_followup1000_v1" if self.full_train_followup1000 else "thermal_fixed25_v1"),
             )
             response_target = self._prepare_response_sample(family, training=True, key=key, budget=self.budget)
             structure = {name: value.to(self.device) for name, value in response_target["structure"].items()}
@@ -1340,8 +1402,9 @@ class JointThermalTask(ThermalRefinementTask):
             raise ValueError("Fresh-P calibration must use calibration_only provider construction with no DEV cases loaded.")
         if self.auxiliary_calibration is not None:
             raise RuntimeError("Joint Thermal auxiliary coefficients are already calibrated and sealed.")
-        if len(self._train_ids) != 150:
-            raise ValueError("Fresh-P auxiliary calibration is bound to the fixed25_v1 150-case TRAIN cohort.")
+        expected_training_count = 600 if getattr(self, "full_train_followup1000", False) else 150
+        if len(self._train_ids) != expected_training_count:
+            raise ValueError("Fresh-P auxiliary calibration is bound to the active sealed TRAIN population.")
         initialization_sha256 = _state_sha256(self.model)
         direct_path_sha256 = _shared_direct_state_sha256(self.model)
         module_counts = [int(np.asarray(case["structure"]["module_present"]).sum()) for case in self.training_cases]
@@ -1363,7 +1426,7 @@ class JointThermalTask(ThermalRefinementTask):
                 "joint_auxiliary_calibration",
                 self.joint_mode,
                 sampling_version=SamplingKey.CASE_EPOCH_VERSION,
-                dataset_id="thermal_fixed25_v1",
+                dataset_id=("thermal_full_followup1000_v1" if getattr(self, "full_train_followup1000", False) else "thermal_fixed25_v1"),
             )
             batch = self._batch_from_indices([int(index)], 1, key=key, training=True,
                                              include_response=False, budget=self.budget)
@@ -1392,7 +1455,7 @@ class JointThermalTask(ThermalRefinementTask):
                 "joint_response_calibration",
                 self.joint_mode,
                 sampling_version=SamplingKey.CASE_EPOCH_VERSION,
-                dataset_id="thermal_fixed25_v1",
+                dataset_id=("thermal_full_followup1000_v1" if getattr(self, "full_train_followup1000", False) else "thermal_fixed25_v1"),
             )
             response_target = self._prepare_response_sample(family, training=True, key=key, budget=self.budget)
             structure = {key: value.to(self.device) for key, value in response_target["structure"].items()}
@@ -1440,7 +1503,7 @@ class JointThermalTask(ThermalRefinementTask):
             "initial_model_state_sha256": initialization_sha256,
             "shared_direct_path_sha256": direct_path_sha256,
             "initialization_seed": int(getattr(self.model, "seed", -1)),
-            "dataset_protocol": "fixed25_v1",
+            "dataset_protocol": (FULL_TRAIN_FOLLOWUP_DATASET if getattr(self, "full_train_followup1000", False) else "fixed25_v1"),
             "manifest_sha256": str(self.manifest["manifest_sha256"]),
             "training_membership_sha256": _case_ids_hash(self._train_ids),
             "training_case_ids": list(self._train_ids),
@@ -1455,7 +1518,7 @@ class JointThermalTask(ThermalRefinementTask):
             "response_family_ids": [str(item["family_id"]) for item in self.train_families],
             "response_family_source_sha256": family_hashes,
             "response_family_partition": "original TRAIN response addendum; all four fixed families",
-            "primary_partition": "fixed25_v1 TRAIN only",
+            "primary_partition": ("original600 TRAIN only" if getattr(self, "full_train_followup1000", False) else "fixed25_v1 TRAIN only"),
             "flow_group_gradient_norms": flow_gradient_norms,
             "thermal_group_gradient_norms": thermal_gradient_norms,
             "balanced_field_gradient_norms": field_gradient_norms,
@@ -1503,7 +1566,8 @@ class JointThermalTask(ThermalRefinementTask):
             or receipt.get("method") != "fresh_joint_init_fixed_train_gradient_ratio_v1"
             or receipt.get("calibration_mode") != "P"
             or receipt.get("compatible_modes") != list(INTERACTION_PRESERVING_THERMAL_MODES)
-            or receipt.get("dataset_protocol") != "fixed25_v1"
+            or receipt.get("dataset_protocol") != (
+                FULL_TRAIN_FOLLOWUP_DATASET if getattr(self, "full_train_followup1000", False) else "fixed25_v1")
             or receipt.get("training_membership_sha256") != _case_ids_hash(self._train_ids)
             or receipt.get("training_case_ids") != list(self._train_ids)
             or receipt.get("manifest_sha256") != str(self.manifest["manifest_sha256"])
@@ -1515,7 +1579,8 @@ class JointThermalTask(ThermalRefinementTask):
             or receipt.get("response_material_queries_per_module") != int(self.budget["material_queries_per_module"])
             or receipt.get("response_family_ids") != list(TRAIN_RESPONSE_IDS)
             or receipt.get("response_family_partition") != "original TRAIN response addendum; all four fixed families"
-            or receipt.get("primary_partition") != "fixed25_v1 TRAIN only"
+            or receipt.get("primary_partition") != (
+                "original600 TRAIN only" if getattr(self, "full_train_followup1000", False) else "fixed25_v1 TRAIN only")
             or receipt.get("validation_values_read") is not False
             or receipt.get("validation_cases_materialized") != 0
             or receipt.get("development_response_families_loaded") is not False
@@ -1590,6 +1655,7 @@ def build_thermal_joint_task(
     max_sources: int = 12,
     calibration_only: bool = False,
     flow_readout_law: str | None = None,
+    full_train_followup1000: bool = False,
 ) -> tuple[JointThermalRegionalAdapter, JointThermalTask]:
     """Construct a fresh joint candidate and its fixed25_v1 provider.
 
@@ -1603,8 +1669,13 @@ def build_thermal_joint_task(
         raise ValueError("Unsupported opt-in Thermal flow readout law.")
     if flow_readout_law is not None and mode not in INTERACTION_PRESERVING_THERMAL_MODES:
         raise ValueError("The native-curl readout is a P-family-only model identity.")
-    if flow_readout_law is not None and formal_full:
+    if flow_readout_law is not None and formal_full and not full_train_followup1000:
         raise ValueError("Native-curl full-TRAIN recipes require a separately authorized campaign.")
+    if type(full_train_followup1000) is not bool:
+        raise TypeError("Thermal full_train_followup1000 must be boolean.")
+    if full_train_followup1000 and (formal_full or mode not in INTERACTION_PRESERVING_THERMAL_MODES
+                                    or total_epochs != 5000):
+        raise ValueError("Thermal full follow-up requires non-formal P-family identity and 5000-epoch horizon.")
     if isinstance(locality_prior_strength, (bool, np.bool_)):
         raise TypeError("Joint Thermal locality prior strength must be numeric, not boolean.")
     try:
@@ -1619,9 +1690,10 @@ def build_thermal_joint_task(
         raise ValueError("Thermal P has no collective locality prior.")
     if mode in ("P-G", "P-H") and locality_prior_strength != 1.0:
         raise ValueError("The recovery Thermal P-G/P-H geometric locality prior is sealed to 1.0.")
-    if mode in INTERACTION_PRESERVING_THERMAL_MODES and formal_full:
+    if mode in INTERACTION_PRESERVING_THERMAL_MODES and formal_full and not full_train_followup1000:
         raise ValueError("P-family full-TRAIN recipes remain unavailable until separately justified and authorized.")
-    if calibration_only and (mode != "P" or formal_full or auxiliary_calibration is not None):
+    if calibration_only and (mode != "P" or (formal_full and not full_train_followup1000)
+                             or auxiliary_calibration is not None):
         raise ValueError("Calibration-only construction is reserved for a fresh P model with no supplied receipt.")
     if mode in INTERACTION_PRESERVING_THERMAL_MODES and not calibration_only and auxiliary_calibration is None:
         raise ValueError("Every P-family Thermal comparison requires the sealed fresh-P TRAIN calibration receipt.")
@@ -1631,9 +1703,10 @@ def build_thermal_joint_task(
         raise ValueError("Joint Thermal primary query count and receiver tile must be positive.")
     if operator_rows_per_case != OPERATOR_ROWS_PER_CASE:
         raise ValueError("The declared joint Thermal objective requires exactly128 operator rows per case.")
-    if formal_full and total_epochs != 5000:
+    if (formal_full or full_train_followup1000) and total_epochs != 5000:
         raise ValueError("The manual fullTRAIN joint recipe is bound to a5000-epoch horizon.")
-    if any(option is not None for option in (validation_scope, native_sampling_protocol)) and not formal_full:
+    if any(option is not None for option in (validation_scope, native_sampling_protocol)) \
+            and not (formal_full or full_train_followup1000):
         raise ValueError("Formal validation and sampling controls require the separate fullTRAIN identity.")
     if (optimizer_schedule is not None or weight_decay is not None) and not formal_full \
             and mode not in INTERACTION_PRESERVING_THERMAL_MODES:
@@ -1652,12 +1725,13 @@ def build_thermal_joint_task(
         raise ValueError("Baseline formal sampling requires the canonical89 primary panel.")
 
     resolved_manifest, resolved_data_path, manifest_path = _load_data_binding(manifest, data_path)
-    if formal_full:
+    base_development_manifest_sha256 = str(resolved_manifest["manifest_sha256"])
+    if formal_full or full_train_followup1000:
         _source, catalog = read_case_catalog(resolved_data_path)
         train_ids = tuple(record["case_id"] for record in catalog if record["split"] == "train")
         validation_ids = development_case_ids(resolved_manifest, "test")
         if len(train_ids) != 600:
-            raise ValueError("Manual joint Thermal fullTRAIN preparation requires the original600 TRAIN cases.")
+            raise ValueError("Full-population Thermal preparation requires the original600 TRAIN cases.")
         if validation_scope == "canonical89":
             original90 = tuple(record["case_id"] for record in catalog if record["split"] == "test")
             validation_ids = tuple(case_id for case_id in original90 if case_id != "0273")
@@ -1665,6 +1739,24 @@ def build_thermal_joint_task(
                     or len(validation_ids) != 89 or len(set(validation_ids)) != 89
                     or set(train_ids).intersection(validation_ids)):
                 raise ValueError("Formal validation requires original90 with duplicate0273 excluded from canonical89.")
+        if full_train_followup1000:
+            followup_membership = validate_full_train_followup_membership(train_ids, validation_ids)
+            followup_manifest = {
+                "execution_protocol": FULL_TRAIN_FOLLOWUP_PROTOCOL,
+                "dataset_protocol": FULL_TRAIN_FOLLOWUP_DATASET,
+                "base_manifest_sha256": resolved_manifest["manifest_sha256"],
+                "training_case_ids": list(train_ids),
+                "training_membership_sha256": followup_membership["training_membership_sha256"],
+                "validation_case_ids": list(validation_ids),
+                "validation_membership_sha256": followup_membership["validation_membership_sha256"],
+                "excluded_validation_id": "0273",
+                "excluded_validation_reason": "historical duplicate in original90 validation; preserve canonical89",
+            }
+            resolved_manifest = {
+                **resolved_manifest,
+                "full_train_followup1000": followup_manifest,
+                "manifest_sha256": _json_hash(followup_manifest),
+            }
     else:
         train_ids = development_case_ids(resolved_manifest, "train")
         validation_ids = development_case_ids(resolved_manifest, "test")
@@ -1694,6 +1786,7 @@ def build_thermal_joint_task(
     if flow_readout_law == NATIVE_CURL_READOUT_LAW:
         native_masks, native_mask_binding = _read_fixed_native_mask_catalog(
             resolved_data_path, train_ids, validation_ids,
+            full_train_followup1000=full_train_followup1000,
         )
         for case in (*training_cases, *validation_cases):
             case["native_solid_mask"] = native_masks[str(case["case_id"])]
@@ -1750,9 +1843,19 @@ def build_thermal_joint_task(
         "dataset_file_mtime_ns": int(stat.st_mtime_ns),
         "dataset_catalog_metadata_sha256": resolved_manifest["source"]["metadata_sha256"],
         "development_manifest_path": None if manifest_path is None else str(manifest_path),
-        "development_manifest_sha256": resolved_manifest["manifest_sha256"],
-        "formal_scope": "original_train_600" if formal_full else "fixed25_v1_train_150",
+        "development_manifest_sha256": base_development_manifest_sha256,
+        "formal_scope": ("original600_train_full_followup1000" if full_train_followup1000 else
+                         "original_train_600" if formal_full else "fixed25_v1_train_150"),
     }
+    if full_train_followup1000:
+        source_binding.update({
+            "execution_protocol": FULL_TRAIN_FOLLOWUP_PROTOCOL,
+            "dataset_protocol": FULL_TRAIN_FOLLOWUP_DATASET,
+            "normalization_fit_scope": "exact original600 TRAIN cases only",
+            "validation_scope": "canonical89 exposed original-H5 split=test; 0273 excluded by historical duplicate rule",
+            "unexposed_original_test_targets_read": False,
+            "full_followup_manifest_sha256": resolved_manifest["manifest_sha256"],
+        })
     if flow_readout_law is not None:
         source_binding.update({
             "flow_readout_law": flow_readout_law,
@@ -1785,6 +1888,7 @@ def build_thermal_joint_task(
         weight_decay=weight_decay,
         native_sampling_protocol=native_sampling_protocol,
         flow_readout_law=flow_readout_law,
+        full_train_followup1000=full_train_followup1000,
     )
     if validation_budget is not None:
         provider.validation_budget = validation_budget
