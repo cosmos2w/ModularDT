@@ -36,4 +36,10 @@ The P-R `native_route_intervention` accepts `density_reset` or `equal_measure_re
 
 Ordinary P-R executes every eligible nonlinear value message. Positive normalized weights and concentrated support do not establish eliminated work. Compare complete calls at identical queries, native outputs, CPU staging/return and checkpoint scope; report cold setup, memory, training time and numerical failures separately. Development evidence uses exposed fixed cohorts, and neither a routed graph nor a successful short qualification authorizes a formal run.
 
+## Storage and round closeout
+
+Follow the repository's [storage budget and mandatory round cleanup rule](../../../AGENTS.md#storage-budget-and-mandatory-round-cleanup). Wind geometry catalogues already have exact recipe/geometry identities; reuse the verified shared store across P/R/C, source replays and cost checks instead of allocating another catalogue tree per arm or code version. Check the provider's actual resolved cache directory: an explicit `catalogue_cache_dir` overrides the default/environment choice. The host-memory LRU does not impose a persistent disk quota, and a small optimizer/query budget does not bound a full native-grid catalogue.
+
+Record a disk-growth budget and free-space reserve before materialization, and use memory-only or disposable temporary storage for short diagnostics when persistence has no budget. Remove validated round-local duplicate cache payloads and unnecessary temporary data at closeout, retaining manifests/checksums, scientific checkpoints, selected numerical/figure evidence and a deletion/capacity receipt. Cache cleanup must not change sampling measures, draws, model weights or the reported physical/cost result. A round is complete only after this cleanup and verification, together with the existing durable upload checks.
+
 The [native-routing development report](../reports/HONF_Native_Interaction_Routing_Development_Report.md) records the measured warm children, physical misses, complete costs and evidence limitations; the [evidence index](../reports/HONF_Native_Interaction_Routing_Evidence_Index.md) points to the ignored numerical artifacts.
