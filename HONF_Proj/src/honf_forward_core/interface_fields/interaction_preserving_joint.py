@@ -8,6 +8,7 @@ an exact submodel at initialization.
 """
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +26,10 @@ from .interaction_core import (
     _versions,
 )
 from .source_response_operator import PreparedSourceResponse, ResponseApplication
+
+DIRECT_INTERACTION_MODES = ('P', 'P-R', 'P-C')
+COLLECTIVE_INTERACTION_MODES = ('P-G', 'P-H')
+INTERACTION_PRESERVING_MODES = DIRECT_INTERACTION_MODES + COLLECTIVE_INTERACTION_MODES
 
 
 def _masked_measure_softmax(scores: torch.Tensor, measure: torch.Tensor,
@@ -145,13 +150,16 @@ class InteractionPreservingPreparedContext(PreparedResponseContext):
         owner = self.model_reference() if self.model_reference is not None else None
         if owner is None or self._owner_id != id(owner):
             raise ValueError('Prepared interaction-preserving context belongs to another model.')
-        snapshot = tuple(sorted(owner.config.items()))
+        snapshot = copy.deepcopy(owner.config)
         semantics = (owner.mode, owner.locality_prior_strength, owner.regional_anchors,
                      owner.collective_width, owner.field_outputs, owner.affine_outputs,
                      owner.forcing_scale, owner.zero_offset, owner.query_width,
-                     owner.spatial_dim)
+                     owner.spatial_dim, owner.native_aggregation_policy,
+                     owner.native_control_hidden, owner.native_routing_enabled,
+                     owner._native_routing_generation)
         prepared_semantics = (self._incidence_mode, self._access_mode,
-                              self._collective_enabled, self._matched_mass_shuffle)
+                              self._collective_enabled, self._matched_mass_shuffle,
+                              self.native_route_intervention)
         if (snapshot != self._model_config_snapshot or
                 semantics != self._model_semantic_snapshot or
                 prepared_semantics != self._prepared_semantic_snapshot):
@@ -159,7 +167,7 @@ class InteractionPreservingPreparedContext(PreparedResponseContext):
 
 
 class InteractionPreservingJointCore(NonlinearFieldReadout):
-    """Opt-in P, P-G and P-H shared joint core.
+    """Opt-in P, P-G/P-H and native P-R/P-C shared joint core.
 
     ``P`` executes only the maintained two-round source-conditioned path.
     ``P-G`` adds one fixed smooth geometric collective block. ``P-H`` uses the
@@ -180,9 +188,10 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                  zero_offset: bool = True, initialization_seed: int = 0,
                  locality_prior_strength: float | None = None,
                  initialization_reference_field_outputs: int | None = None,
-                 factorized_affine_execution: bool = False):
-        if mode not in ('P', 'P-G', 'P-H'):
-            raise ValueError("mode must be 'P', 'P-G' or 'P-H'.")
+                 factorized_affine_execution: bool = False,
+                 native_control_hidden: int | None = None):
+        if mode not in INTERACTION_PRESERVING_MODES:
+            raise ValueError("mode must be P, P-G, P-H, P-R or P-C.")
         if field_outputs is None:
             field_outputs = 3 if output_width is None else output_width
         elif output_width is not None and output_width != field_outputs:
@@ -198,16 +207,22 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             reference_field_outputs = initialization_reference_field_outputs
         if collective_width < 1 or regional_anchors < 0:
             raise ValueError('Collective width must be positive and anchor count nonnegative.')
-        if mode == 'P' and regional_anchors != 0:
-            raise ValueError('P has no collective anchor bank; set regional_anchors=0.')
-        if mode != 'P' and regional_anchors < 1:
+        direct_mode = mode in DIRECT_INTERACTION_MODES
+        collective_mode = mode in COLLECTIVE_INTERACTION_MODES
+        if direct_mode and regional_anchors != 0:
+            raise ValueError('P/P-R/P-C have no collective anchor bank; set regional_anchors=0.')
+        if collective_mode and regional_anchors < 1:
             raise ValueError('P-G and P-H require at least one regional anchor.')
-        if mode == 'P' and locality_prior_strength not in (None, 0, 0.0):
-            raise ValueError('P has no collective locality prior.')
-        if mode != 'P' and (locality_prior_strength is None or
+        if direct_mode and locality_prior_strength not in (None, 0, 0.0):
+            raise ValueError('P/P-R/P-C have no collective locality prior.')
+        if collective_mode and (locality_prior_strength is None or
                              not math.isfinite(locality_prior_strength) or
                              locality_prior_strength < 0):
             raise ValueError('P-G and P-H require an explicit finite nonnegative locality prior.')
+        if mode == 'P-C' and (type(native_control_hidden) is not int or native_control_hidden < 1):
+            raise ValueError('P-C requires an explicit parameter-matched native_control_hidden width.')
+        if mode != 'P-C' and native_control_hidden is not None:
+            raise ValueError('native_control_hidden is defined only for P-C.')
         if isinstance(initialization_seed, bool) or not isinstance(initialization_seed, int):
             raise TypeError('initialization_seed must be an integer.')
         if not math.isfinite(forcing_scale) or forcing_scale <= 0:
@@ -221,8 +236,16 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                              spatial_dim=spatial_dim, hidden=hidden,
                              message=message, output_width=reference_field_outputs,
                              query_width=query_width, max_sources=max_sources,
-                             factorized_affine_execution=factorized_affine_execution)
+                             factorized_affine_execution=factorized_affine_execution,
+                             native_aggregation_policy={
+                                 'P-R': 'learned_density',
+                                 'P-C': 'destination_gain',
+                             }.get(mode, 'measure'),
+                             native_control_hidden=native_control_hidden,
+                             native_routing_seed=initialization_seed)
             self.mode = mode
+            if mode in ('P-R', 'P-C'):
+                self.config['native_routing']['mode'] = mode
             self.collective_width = collective_width
             self.regional_anchors = regional_anchors
             self.field_outputs = field_outputs
@@ -253,7 +276,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                                               nn.Linear(hidden, affine_outputs))
                                 if affine_outputs and not zero_offset else None)
 
-            if mode != 'P':
+            if collective_mode:
                 geometry_width = spatial_dim * 9
                 access_width = min(collective_width, 64)
                 self.collective_anchor = nn.Sequential(
@@ -318,7 +341,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                 'forcing_scale': float(forcing_scale), 'zero_offset': bool(zero_offset),
                 'initialization_seed': initialization_seed,
             })
-            if mode != 'P':
+            if collective_mode:
                 self.config['locality_prior_strength'] = self.locality_prior_strength
             if initialization_reference_field_outputs is not None:
                 self.config['initialization_reference_field_outputs'] = reference_field_outputs
@@ -503,7 +526,9 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                         incidence_mode: str | None = None,
                         receiver_access: str | None = None,
                         matched_mass_shuffle: bool = False,
-                        collective_enabled: bool = True) -> InteractionPreservingPreparedContext:
+                        collective_enabled: bool = True,
+                        routing_trace: bool = False,
+                        native_route_intervention: dict | None = None) -> InteractionPreservingPreparedContext:
         batch, modules, dimension = centers.shape
         if source_ids is None:
             raise ValueError('The interaction-preserving family requires explicit physical source_ids.')
@@ -525,14 +550,17 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                            .expand(batch, -1) if environment_ids is None else environment_ids)
         self._validate_ids(environment_ids, environment_present, (batch, environments),
                            'environment_ids')
+        if native_route_intervention is not None and self.mode != 'P-R':
+            raise ValueError('Native route interventions require the direct P-R density policy.')
         domain_origin = centers.new_zeros(batch, dimension) if domain_origin is None else domain_origin
         self._validate_shape(domain_origin, (batch, dimension), 'domain_origin')
 
-        if self.mode == 'P':
+        direct_mode = self.mode in DIRECT_INTERACTION_MODES
+        if direct_mode:
             if incidence_mode not in (None, 'none') or receiver_access not in (None, 'none'):
-                raise ValueError('P has no collective incidence or receiver access to intervene on.')
+                raise ValueError('P/P-R/P-C have no collective incidence or receiver access to intervene on.')
             if matched_mass_shuffle or not collective_enabled:
-                raise ValueError('P has no collective block to shuffle or disable.')
+                raise ValueError('P/P-R/P-C have no collective block to shuffle or disable.')
             chosen_incidence, chosen_access = 'none', 'none'
         else:
             default_incidence = 'geometry' if self.mode == 'P-G' else 'learned'
@@ -555,12 +583,15 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             'environment_embedding': environment_embedding, 'domain_origin': domain_origin,
             'environment_ids': environment_ids,
         }
-        if self.mode == 'P':
+        if direct_mode:
             prepared = super().prepare_context(
                 sources, context, centers, present, lengths, source_lengths,
                 source_measures, environment_tokens, environment_coords,
                 environment_present, environment_measures, source_ids,
-                environment_embedding, _extra_version_tensors=(domain_origin, environment_ids))
+                environment_embedding, environment_ids=environment_ids,
+                routing_trace=routing_trace,
+                native_route_intervention=native_route_intervention,
+                _extra_version_tensors=(domain_origin,))
             collective = None
         else:
             holder: dict[str, Any] = {}
@@ -584,8 +615,11 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                 sources, context, centers, present, lengths, source_lengths,
                 source_measures, environment_tokens, environment_coords,
                 environment_present, environment_measures, source_ids,
-                environment_embedding, _between_rounds=between_rounds,
-                _extra_version_tensors=(domain_origin, environment_ids))
+                environment_embedding, environment_ids=environment_ids,
+                routing_trace=routing_trace,
+                native_route_intervention=native_route_intervention,
+                _between_rounds=between_rounds,
+                _extra_version_tensors=(domain_origin,))
             collective = holder['collective']
 
         prepared.source_measures_raw = source_measures
@@ -596,23 +630,30 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
         prepared._input_args = input_args
         prepared._incidence_mode = chosen_incidence
         prepared._access_mode = chosen_access
-        prepared._collective_enabled = bool(collective_enabled and self.mode != 'P')
+        prepared._collective_enabled = bool(collective_enabled and not direct_mode)
         prepared._matched_mass_shuffle = bool(matched_mass_shuffle)
         prepared._owner_id = id(self)
-        prepared._model_config_snapshot = tuple(sorted(self.config.items()))
+        prepared._model_config_snapshot = copy.deepcopy(self.config)
         prepared._model_semantic_snapshot = (
             self.mode, self.locality_prior_strength, self.regional_anchors,
             self.collective_width, self.field_outputs, self.affine_outputs,
-            self.forcing_scale, self.zero_offset, self.query_width, self.spatial_dim)
+            self.forcing_scale, self.zero_offset, self.query_width, self.spatial_dim,
+            self.native_aggregation_policy, self.native_control_hidden,
+            self.native_routing_enabled, self._native_routing_generation)
         prepared._prepared_semantic_snapshot = (
             prepared._incidence_mode, prepared._access_mode,
-            prepared._collective_enabled, prepared._matched_mass_shuffle)
+            prepared._collective_enabled, prepared._matched_mass_shuffle,
+            prepared.native_route_intervention)
         prepared._intervention_receipt = {
             'incidence': chosen_incidence,
             'receiver_access': chosen_access,
             'collective_enabled': prepared._collective_enabled,
             'matched_mass_shuffle': bool(matched_mass_shuffle),
             'return_rule': 'normalized transpose context sharing' if collective is not None else 'none',
+            'native_route_intervention': {
+                'kind': prepared.native_route_intervention[0],
+                'route_types': prepared.native_route_intervention[1],
+            },
         }
         if collective is not None:
             for name, value in collective.items():
@@ -644,16 +685,32 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                           incidence_mode: str | None = None,
                           receiver_access: str | None = None,
                           matched_mass_shuffle: bool = False,
-                          collective_enabled: bool = True) -> InteractionPreservingPreparedContext:
-        """Rebuild a same-weight context under declared graph interventions."""
+                          collective_enabled: bool = True,
+                          native_route_intervention: dict | None = None,
+                          routing_trace: bool | None = None) -> InteractionPreservingPreparedContext:
+        """Rebuild all context rounds under a declared same-weight intervention."""
         self.assert_owned(prepared)
-        if self.mode == 'P':
-            raise ValueError('P has no collective graph to intervene on.')
         assert prepared._input_args is not None
+        if self.mode in DIRECT_INTERACTION_MODES:
+            if (incidence_mode is not None or receiver_access is not None
+                    or matched_mass_shuffle or not collective_enabled):
+                raise ValueError('P/P-R/P-C have no collective graph to intervene on.')
+            if self.mode != 'P-R' and native_route_intervention is not None:
+                raise ValueError('Native route interventions require the direct P-R density policy.')
+            if native_route_intervention is None:
+                if self.mode == 'P-R':
+                    raise ValueError('P-R intervention rebuilds require an explicit native route intervention.')
+                raise ValueError('P/P-C do not support a native route intervention.')
+            trace = True if routing_trace is None else routing_trace
+        else:
+            if native_route_intervention is not None:
+                raise ValueError('P-G/P-H do not have native P-R routes to intervene on.')
+            trace = False if routing_trace is None else routing_trace
         rebuilt = self.prepare_context(
             **prepared._input_args, incidence_mode=incidence_mode,
             receiver_access=receiver_access, matched_mass_shuffle=matched_mass_shuffle,
-            collective_enabled=collective_enabled)
+            collective_enabled=collective_enabled, routing_trace=trace,
+            native_route_intervention=native_route_intervention)
         return self._preserve_context_metadata(prepared, rebuilt)
 
     def restore(self, prepared: InteractionPreservingPreparedContext) -> InteractionPreservingPreparedContext:
@@ -715,7 +772,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             projections = (factorized_projections if factorized_projections is not None else
                 self._prepare_factorized_source_read(prepared, receivers, features, self.source_read))
             query_start = start if factorized_projections is not None else 0
-            if self.mode == 'P' or not prepared._collective_enabled:
+            if self.mode in DIRECT_INTERACTION_MODES or not prepared._collective_enabled:
                 source_features = self._factorized_source_read(prepared, receivers,
                     self.source_read, projections, query_start)
                 return source_features, None, None
@@ -725,7 +782,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                 self.source_read, projections, query_start,
                 extra_receiver_projection=self.collective_to_receiver(receiver_collective))
             return source_features, access, receiver_collective
-        if self.mode == 'P' or not prepared._collective_enabled:
+        if self.mode in DIRECT_INTERACTION_MODES or not prepared._collective_enabled:
             source_features = self.source_read(self._read_features(
                 prepared, receivers, prepared.source_states, prepared.centers,
                 prepared.source_lengths, features))
@@ -750,7 +807,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                 self._prepare_factorized_source_read(prepared, receivers, features,
                                                      self.affine_source_read))
             query_start = start if factorized_projections is not None else 0
-            if self.mode == 'P' or not prepared._collective_enabled:
+            if self.mode in DIRECT_INTERACTION_MODES or not prepared._collective_enabled:
                 source_features = self._factorized_source_read(prepared, receivers,
                     self.affine_source_read, projections, query_start)
                 return source_features, None, None
@@ -760,7 +817,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                 self.affine_source_read, projections, query_start,
                 extra_receiver_projection=self.collective_to_receiver(receiver_collective))
             return source_features, access, receiver_collective
-        if self.mode == 'P' or not prepared._collective_enabled:
+        if self.mode in DIRECT_INTERACTION_MODES or not prepared._collective_enabled:
             source_features = self.affine_source_read(self._read_features(
                 prepared, receivers, prepared.source_states, prepared.centers,
                 prepared.source_lengths, features))
@@ -779,7 +836,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                        chunk_size: int = 512, return_messages: bool = False,
                        return_organization: bool = False):
         self.assert_owned(prepared)
-        if self.mode == 'P' and not return_organization:
+        if self.mode in DIRECT_INTERACTION_MODES and not return_organization:
             return super().predict(prepared, receivers, receiver_features,
                                    chunk_size=chunk_size, return_messages=return_messages)
         batch, queries, _ = receivers.shape
@@ -830,7 +887,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                 'incidence_mode': prepared._incidence_mode,
                 'receiver_access_mode': prepared._access_mode,
                 'collective_enabled': prepared._collective_enabled,
-                'typed_pair_slots_per_batch': (None if self.mode == 'P' else {
+                'typed_pair_slots_per_batch': (None if self.mode in DIRECT_INTERACTION_MODES else {
                     'MM': int(prepared.centers.shape[1] ** 2),
                     'ME': int(prepared.centers.shape[1] * prepared.environment_coords.shape[1]),
                     'EM': int(prepared.environment_coords.shape[1] * prepared.centers.shape[1]),

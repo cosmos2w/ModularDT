@@ -1026,6 +1026,8 @@ class ThermalRefinementTask:
         self, case_indices: Sequence[int], epoch: int, *, key: SamplingKey | None,
         training: bool, include_response: bool, budget: Mapping[str, Any] | None = None,
     ) -> TaskBatch:
+        if not training and getattr(self, "_validation_ids", ()) and not self.validation_cases:
+            raise RuntimeError("Thermal DEV targets were intentionally not materialized for this TRAIN-only context.")
         indices = tuple(int(index) for index in case_indices)
         sample_budget = (self.budget if training else self.validation_budget) if budget is None else budget
         sample, primary_sampling_hash = _sample_primary(

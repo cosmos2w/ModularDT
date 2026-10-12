@@ -51,13 +51,15 @@ def _inputs(*, fractional: bool = True):
 def _core(mode: str = 'P', *, affine_outputs: int = 1, seed: int = 703,
           factorized_affine_execution: bool = False,
           dtype: torch.dtype = torch.float64):
+    direct_mode = mode in ('P', 'P-R', 'P-C')
     model = InteractionPreservingJointCore(
         4, 3, 5, spatial_dim=2, hidden=12, message=8, mode=mode,
-        collective_width=6, regional_anchors=0 if mode == 'P' else 3,
+        collective_width=6, regional_anchors=0 if direct_mode else 3,
         field_outputs=3, affine_outputs=affine_outputs, query_width=2,
         initialization_seed=seed,
-        locality_prior_strength=None if mode == 'P' else 1.0,
+        locality_prior_strength=None if direct_mode else 1.0,
         factorized_affine_execution=factorized_affine_execution,
+        native_control_hidden=32 if mode == 'P-C' else None,
     )
     return model.to(dtype=dtype)
 
@@ -231,9 +233,10 @@ def test_graph_interventions_recompute_pair_context_restore_and_keep_adapter_sid
     torch.testing.assert_close(disabled_fields, direct_fields, rtol=0, atol=0)
 
 
-def test_native_affine_response_is_source_resolved_and_uses_fp64_application():
+@pytest.mark.parametrize('mode', ['P-H', 'P-R', 'P-C'])
+def test_native_affine_response_is_source_resolved_and_uses_fp64_application(mode):
     values = _inputs()
-    model = _core('P-H')
+    model = _core(mode)
     prepared = _prepare(model, values)
     response = model.prepare_receivers(prepared, values['receivers'],
                                        values['receiver_features'])
@@ -265,7 +268,7 @@ def test_response_applications_reject_a_context_owned_by_another_core():
         other.apply_increment(response, forcing)
 
 
-def test_absent_or_ambiguous_source_ids_and_wind_affine_increment_are_rejected():
+def test_absent_or_ambiguous_source_ids_are_rejected():
     values = _inputs()
     model = _core('P')
     arguments = {name: values[name] for name in (
@@ -279,7 +282,9 @@ def test_absent_or_ambiguous_source_ids_and_wind_affine_increment_are_rejected()
     with pytest.raises(ValueError, match='uniquely identify'):
         _prepare(model, duplicate)
 
-    wind = _core('P', affine_outputs=0)
+@pytest.mark.parametrize('mode', ['P', 'P-R', 'P-C'])
+def test_wind_p_and_native_routing_reject_exact_affine_increments(mode):
+    wind = _core(mode, affine_outputs=0)
     with pytest.raises(ValueError, match='no exact affine finite-increment'):
         wind.apply_increment(None, torch.ones(1, 4, dtype=torch.float64))
 

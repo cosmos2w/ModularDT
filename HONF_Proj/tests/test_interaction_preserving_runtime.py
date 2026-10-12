@@ -51,7 +51,7 @@ def _thermal_stats() -> dict[str, np.ndarray]:
 
 def _thermal_model(mode: str = "P") -> InteractionPreservingThermalAdapter:
     torch.manual_seed(17)
-    graph = mode != "P"
+    graph = mode in ("P-G", "P-H")
     return InteractionPreservingThermalAdapter(
         mode=mode,
         normalization_stats=_thermal_stats(),
@@ -132,8 +132,9 @@ def _joint_recipe_module():
     return module
 
 
-def test_thermal_native_heads_keep_flow_separate_and_reach_both_read_paths():
-    model = _thermal_model().eval()
+@pytest.mark.parametrize("mode", ["P", "P-R", "P-C"])
+def test_thermal_native_heads_keep_flow_separate_and_reach_both_read_paths(mode):
+    model = _thermal_model(mode).eval()
     structure, receivers, local = _thermal_inputs()
     prepared = model.prepare_native(structure, receivers, local_query_points=local, ntheta=4)
     heat_a = torch.tensor([[0.5, 0.9]], dtype=torch.float64)
@@ -160,6 +161,26 @@ def test_thermal_native_heads_keep_flow_separate_and_reach_both_read_paths():
     assert torch.equal(output_a["pred_field"][..., :4], expected_flow.to(output_a["pred_field"].dtype))
     assert not torch.allclose(output_a["fluid_temperature"], output_b["fluid_temperature"])
 
+    source_order = torch.tensor([1, 0])
+    permuted_structure = dict(structure)
+    for name in ("module_centers", "module_present", "module_source_ids"):
+        permuted_structure[name] = structure[name].index_select(1, source_order)
+    permuted_local = local.index_select(1, source_order)
+    permuted = model.prepare_native(
+        permuted_structure, receivers, local_query_points=permuted_local, ntheta=4
+    )
+    reordered_output = model.apply_native(
+        permuted, heat_a.index_select(1, source_order), accumulation_dtype=torch.float64
+    )
+    torch.testing.assert_close(reordered_output["pred_field"], output_a["pred_field"],
+                               rtol=2.0e-5, atol=2.0e-6)
+    torch.testing.assert_close(reordered_output["pred_interface"],
+                               output_a["pred_interface"].index_select(1, source_order),
+                               rtol=2.0e-5, atol=2.0e-6)
+    torch.testing.assert_close(reordered_output["pred_internal_temperature"],
+                               output_a["pred_internal_temperature"].index_select(1, source_order),
+                               rtol=2.0e-5, atol=2.0e-6)
+
     flow_loss = output_a["pred_field"][..., :4].square().mean()
     affine_loss = output_a["fluid_temperature"].square().mean()
     parameters = dict(model.named_parameters())
@@ -182,6 +203,47 @@ def test_thermal_native_heads_keep_flow_separate_and_reach_both_read_paths():
             )
             assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in gradients)
             assert sum(float(gradient.abs().sum()) for gradient in gradients) > 0.0
+
+
+@pytest.mark.parametrize("mode", ["P-R", "P-C"])
+def test_thermal_native_routing_zero_start_matches_p_outputs_and_physical_input_vjps(mode):
+    baseline, routed = _thermal_model("P").eval(), _thermal_model(mode).eval()
+
+    def evaluate(model):
+        structure, receivers, local = _thermal_inputs()
+        differentiable = {}
+        for name, value in structure.items():
+            value = value.detach().clone()
+            if value.is_floating_point():
+                value.requires_grad_(True)
+            differentiable[name] = value
+        receivers = receivers.detach().clone().requires_grad_(True)
+        local = local.detach().clone().requires_grad_(True)
+        heat = torch.tensor([[0.5, 0.9]], dtype=torch.float64, requires_grad=True)
+        prepared = model.prepare_native(
+            differentiable, receivers, local_query_points=local, ntheta=4
+        )
+        output = model.apply_native(prepared, heat, accumulation_dtype=torch.float64)
+        loss = (output["pred_field"].square().sum()
+                + output["pred_interface"].square().sum()
+                + output["pred_internal_temperature"].square().sum())
+        physical_inputs = tuple(value for value in differentiable.values()
+                                if value.is_floating_point()) + (receivers, local, heat)
+        gradients = torch.autograd.grad(loss, physical_inputs, allow_unused=True)
+        return output, gradients
+
+    baseline_output, baseline_gradients = evaluate(baseline)
+    routed_output, routed_gradients = evaluate(routed)
+    assert set(routed_output) == set(baseline_output)
+    for name in routed_output:
+        if torch.is_tensor(routed_output[name]):
+            torch.testing.assert_close(routed_output[name], baseline_output[name],
+                                       rtol=2.0e-5, atol=2.0e-6)
+    for actual, expected in zip(routed_gradients, baseline_gradients, strict=True):
+        assert (actual is None) == (expected is None)
+        if actual is not None:
+            assert torch.isfinite(actual).all()
+            torch.testing.assert_close(actual, expected, rtol=3.0e-5, atol=3.0e-6)
 
 
 def test_thermal_p_checkpoint_roundtrips_standalone_and_engine_envelopes():
@@ -259,22 +321,23 @@ def _wind_transforms():
     return normalizer, profile
 
 
-def _wind_model(*, factorized_affine_execution=False):
+def _wind_model(*, mode="P-G", factorized_affine_execution=False):
     normalizer, profile = _wind_transforms()
     torch.manual_seed(42)
+    direct = mode in ("P", "P-R", "P-C")
     return InteractionPreservingWindModel(
         velocity_transform=normalizer,
         background_profile=profile,
-        mode="P-G",
+        mode=mode,
         hidden=128,
         message=128,
-        regional_anchors=32,
+        regional_anchors=0 if direct else 32,
         depth=2,
         collective_width=64,
         receiver_tile=512,
         seed=42,
         max_sources=30,
-        locality_prior_strength=1.0,
+        locality_prior_strength=None if direct else 1.0,
         factorized_affine_execution=factorized_affine_execution,
     )
 
@@ -319,6 +382,79 @@ def _wind_scene() -> InteractionScene:
         environment_measures=environment_measure,
         source_ids=source_ids,
     )
+
+
+@pytest.mark.parametrize("mode", ["P-R", "P-C"])
+def test_wind_native_routing_zero_start_matches_p_outputs_and_physical_input_vjps(mode):
+    baseline, routed = _wind_model(mode="P").eval(), _wind_model(mode=mode).eval()
+    receivers = torch.tensor([[[-2.5, -1.0, 1.0], [0.0, 1.0, 2.5],
+                               [3.0, 3.0, 4.5]]], dtype=torch.float32)
+
+    def evaluate(model):
+        source_scene = _wind_scene()
+        scene_inputs = []
+        scene_kwargs = {}
+        for name in source_scene.__dataclass_fields__:
+            value = getattr(source_scene, name)
+            if torch.is_tensor(value):
+                value = value.detach().clone()
+                if value.is_floating_point():
+                    value.requires_grad_(True)
+                    scene_inputs.append(value)
+            scene_kwargs[name] = value
+        scene = InteractionScene(**scene_kwargs)
+        query = receivers.detach().clone().requires_grad_(True)
+        prepared = model.prepare_scene(scene)
+        output = model.predict_physical(prepared, query)
+        gradients = torch.autograd.grad(output.square().sum(), (*scene_inputs, query),
+                                        allow_unused=True)
+        return output, gradients
+
+    baseline_output, baseline_gradients = evaluate(baseline)
+    routed_output, routed_gradients = evaluate(routed)
+    torch.testing.assert_close(routed_output, baseline_output, rtol=2.0e-5, atol=2.0e-6)
+    for actual, expected in zip(routed_gradients, baseline_gradients, strict=True):
+        assert (actual is None) == (expected is None)
+        if actual is not None:
+            assert torch.isfinite(actual).all()
+            torch.testing.assert_close(actual, expected, rtol=3.0e-5, atol=3.0e-6)
+
+
+@pytest.mark.parametrize("mode", ["P-R", "P-C"])
+@pytest.mark.parametrize("dataset", ["thermal", "wind"])
+def test_native_prepared_scene_roundtrips_source_and_environment_ids(mode, dataset):
+    if dataset == "thermal":
+        model = _thermal_model(mode).eval()
+        structure, receivers, local = _thermal_inputs()
+        structure["module_source_ids"] = ["module-west", "module-east"]
+        prepared = model.prepare_native(structure, receivers, local_query_points=local, ntheta=4)
+        assert prepared.source_id_catalogue == ("module-west", "module-east")
+        assert prepared.context.source_id_catalogue == prepared.source_id_catalogue
+        assert torch.equal(prepared.context.source_ids, torch.tensor([[0, 1]], dtype=torch.int64))
+        tensors = model.context_tensors(structure)
+    else:
+        model = _wind_model(mode=mode).eval()
+        scene = _wind_scene()
+        prepared = model.prepare_scene(scene)
+        assert torch.equal(prepared.scene.source_ids, torch.tensor([[4, 11]], dtype=torch.int64))
+        assert torch.equal(prepared.core_context.source_ids, prepared.scene.source_ids)
+        tensors = scene.tensors()
+        tensors["domain_origin"] = scene.context[:, 5:8] * scene.centers.new_tensor(POSITIONAL_SCALE_D)
+
+    traced = model.core.prepare_context(**tensors, routing_trace=True)
+    expected_sources = (prepared.context.source_ids if dataset == "thermal"
+                        else prepared.core_context.source_ids)
+    expected_environments = torch.arange(
+        tensors["environment_tokens"].shape[1], dtype=torch.int64,
+        device=tensors["environment_tokens"].device,
+    )[None]
+    for item in traced.native_routing_trace:
+        assert torch.equal(item["destination_ids"],
+                           expected_sources if item["destination_type"] == "physical_source"
+                           else expected_environments)
+        assert torch.equal(item["donor_ids"],
+                           expected_sources if item["donor_type"] == "physical_source"
+                           else expected_environments)
 
 
 def test_wind_config_roundtrip_preserves_physical_frame_and_scaling():
@@ -369,6 +505,13 @@ def test_wind_prepared_state_rejects_transform_mutation():
     model.velocity_transform.safe_std[0] += 0.01
     with pytest.raises(ValueError, match="velocity transform changed"):
         model.predict_physical(prepared, receivers)
+
+
+@pytest.mark.parametrize("mode", ["P-R", "P-C"])
+def test_wind_native_routing_still_rejects_exact_affine_increments(mode):
+    model = _wind_model(mode=mode)
+    with pytest.raises(ValueError, match="nonlinear|exact affine"):
+        model.apply_increment(torch.ones(1, 2))
 
 
 def test_six_recovery_recipes_validate_and_seal_graph_interventions():

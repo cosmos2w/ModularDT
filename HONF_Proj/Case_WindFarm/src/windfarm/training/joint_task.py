@@ -58,12 +58,15 @@ from .unified_task import (
     _indices_sha256,
     _load_original_split,
     _physical_case_direction_id,
+    _query_sampling_sha256,
     _read_fixed_rows,
     _stable_json_sha256,
 )
 
 JOINT_WIND_ENVIRONMENT_SHAPE = (4, 4, 4)
 JOINT_WIND_ENVIRONMENT_COUNT = 64
+NATIVE_ROUTING_WIND_MODES = ("P-R", "P-C")
+WIND_P_FAMILY_MODES = frozenset((*INTERACTION_PRESERVING_WIND_MODES, *NATIVE_ROUTING_WIND_MODES))
 JOINT_WIND_PROFILE_ID = "wind_shared_fixed24_v1"
 JOINT_WIND_FORMAL_PROFILE_ID = "wind_formal_fulltrain_v1"
 JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID = "wind_original420_train_fullVALID90_followup1000_v1"
@@ -863,7 +866,7 @@ class WindJointRegionalTask:
         view_token_shape = getattr(view, "token_shape", None)
         if view_token_shape is not None and tuple(view_token_shape) != self.environment_token_shape:
             raise ValueError("Wind native view tokenization differs from the provider identity.")
-        if model.mode in INTERACTION_PRESERVING_WIND_MODES and view_token_shape is None:
+        if model.mode in WIND_P_FAMILY_MODES and view_token_shape is None:
             raise ValueError("Wind P-family providers require the native view's explicit token_shape.")
         self.train_rows = np.asarray(train_rows, dtype=np.int64)
         self.validation_rows = np.asarray(validation_rows, dtype=np.int64)
@@ -892,7 +895,7 @@ class WindJointRegionalTask:
         if profile_is_followup != self.full_train_followup1000:
             raise ValueError("Wind full-followup profile and explicit protocol flag must agree.")
         if self.full_train_followup1000 and (self.total_epochs != 5000
-                                             or model.mode not in INTERACTION_PRESERVING_WIND_MODES):
+                                             or model.mode not in WIND_P_FAMILY_MODES):
             raise ValueError("Wind full-TRAIN follow-up is a fresh P-family 5000-horizon identity.")
         if self.full_train_followup1000:
             layout_index = np.asarray(self.view.metadata["layout_index"], dtype=np.int64)
@@ -913,7 +916,7 @@ class WindJointRegionalTask:
             weight_decay=weight_decay,
             validation_scope=validation_scope,
             native_sampling_protocol=native_sampling_protocol,
-            allow_development_optimizer_controls=model.mode in INTERACTION_PRESERVING_WIND_MODES,
+            allow_development_optimizer_controls=model.mode in WIND_P_FAMILY_MODES,
         )
         self.optimizer_schedule = optimizer_schedule
         self.optimizer_weight_decay = None if weight_decay is None else float(weight_decay)
@@ -959,7 +962,8 @@ class WindJointRegionalTask:
     def identity_payload(self) -> Mapping[str, Any]:
         payload = {
             "dataset": "WindFarm",
-            "family": getattr(self.model, "FAMILY", WindFarmJointRegionalModel.FAMILY),
+            "family": getattr(self.model, "family_id",
+                               getattr(self.model, "FAMILY", WindFarmJointRegionalModel.FAMILY)),
             "mode": self.model.mode,
             "dataset_profile": self.profile_id,
             "profile_is_formal_fulltrain": self.profile_id == JOINT_WIND_FORMAL_PROFILE_ID,
@@ -1209,6 +1213,7 @@ class WindJointRegionalTask:
         receivers: list[np.ndarray] = []
         role_rows: list[np.ndarray] = []
         targets: list[np.ndarray] = []
+        sampled_rows: list[Any] = []
         metadata: list[Mapping[str, Any]] = []
         for row in row_ids:
             scene_inputs, sample = self._sample_row(row, key, validation=not training)
@@ -1219,6 +1224,7 @@ class WindJointRegionalTask:
                 raise RuntimeError("Wind role assignments do not align with every native receiver.")
             role_rows.append(role_ids)
             targets.append(np.asarray(sample.target_mps, dtype=np.float32))
+            sampled_rows.append(sample)
             metadata.append(
                 {
                     "row_index": int(row),
@@ -1238,7 +1244,10 @@ class WindJointRegionalTask:
             scene_inputs=tuple(scene_rows),
             receivers=receiver_inputs,
             targets=target_inputs,
-            auxiliary={"role_names": ROLE_NAMES},
+            auxiliary={
+                "role_names": ROLE_NAMES,
+                "query_sampling_sha256": _query_sampling_sha256(row_ids, sampled_rows, key),
+            },
             case_keys=row_ids,
         )
 
@@ -1294,7 +1303,7 @@ class WindJointRegionalTask:
         del epoch, temperature
         self.phase_metadata(phase)
         if execution_mode not in {"joint", "full", "all", "all_fine", "J-H", "J-geometry", "J-direct",
-                                  *INTERACTION_PRESERVING_WIND_MODES}:
+                                  *INTERACTION_PRESERVING_WIND_MODES, *NATIVE_ROUTING_WIND_MODES}:
             raise ValueError("Wind joint regional prediction does not support legacy gate/detail execution modes.")
         if not isinstance(model, WindFarmJointRegionalModel):
             raise TypeError("Wind joint provider requires a standalone WindFarmJointRegionalModel.")
@@ -1461,7 +1470,7 @@ class WindJointRegionalTask:
             "environment_records": int(batch_size * self.environment_count),
             "complete_native_prediction": 1,
         }
-        if self.model.mode not in INTERACTION_PRESERVING_WIND_MODES:
+        if self.model.mode not in WIND_P_FAMILY_MODES:
             return counts
         if prepared is None:
             raise ValueError("Wind P-family work accounting requires its prepared pair context.")
@@ -1595,6 +1604,7 @@ def build_wind_joint_task(
     normalization_path: str | Path | None = None,
     normalization_binding_path: str | Path | None = None,
     role_scale_cache_dir: str | Path = DEFAULT_JOINT_WIND_ROLE_SCALE_CACHE_DIR,
+    catalogue_cache_dir: str | Path | None = None,
     catalogue_cache_bytes: int = DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
     optimizer_schedule: ScheduleSpec | None = None,
     weight_decay: float | None = None,
@@ -1604,6 +1614,10 @@ def build_wind_joint_task(
     collective_width: int = 64,
     max_sources: int = 30,
     full_train_followup1000: bool = False,
+    saved_role_scale_calibration: Mapping[str, Any] | None = None,
+    saved_role_scale_cache_binding: Mapping[str, Any] | None = None,
+    saved_role_scale_source_sha256: str | None = None,
+    model_override: nn.Module | None = None,
 ) -> tuple[WindFarmJointRegionalModel, WindJointRegionalTask]:
     """Build a fresh Wind model and provider from the sealed development or formal split.
 
@@ -1613,7 +1627,7 @@ def build_wind_joint_task(
     """
 
     mode = str(mode)
-    all_modes = {"J-H", "J-geometry", "J-direct", *INTERACTION_PRESERVING_WIND_MODES}
+    all_modes = {"J-H", "J-geometry", "J-direct", *INTERACTION_PRESERVING_WIND_MODES, *NATIVE_ROUTING_WIND_MODES}
     if mode not in all_modes:
         raise ValueError(f"Wind joint mode must be one of {sorted(all_modes)}.")
     if int(seed) != 42:
@@ -1626,10 +1640,17 @@ def build_wind_joint_task(
         raise ValueError("Wind joint primary query count must include every native role.")
     if type(full_train_followup1000) is not bool:
         raise TypeError("Wind full_train_followup1000 must be boolean.")
+    saved_role_values = (saved_role_scale_calibration, saved_role_scale_cache_binding, saved_role_scale_source_sha256)
+    if any(value is not None for value in saved_role_values) and not all(value is not None for value in saved_role_values):
+        raise ValueError("Saved Wind role scales require their exact calibration, cache binding and source hash together.")
+    if mode in NATIVE_ROUTING_WIND_MODES and saved_role_scale_calibration is None:
+        raise ValueError("Wind P-R/P-C require the exact checkpoint-owned W2401 TRAIN role calibration; refitting is disabled.")
+    if mode in NATIVE_ROUTING_WIND_MODES and (formal_full or full_train_followup1000):
+        raise ValueError("Native-routing Wind contexts are sealed to the existing fixed24 development profile.")
     if int(total_epochs) not in (2500, 5000):
         raise ValueError("Wind joint supports the 2500 development or 5000 formal/follow-up schedule horizon.")
     if full_train_followup1000:
-        if formal_full or int(total_epochs) != 5000 or mode not in INTERACTION_PRESERVING_WIND_MODES:
+        if formal_full or int(total_epochs) != 5000 or mode not in WIND_P_FAMILY_MODES:
             raise ValueError("Wind full follow-up requires non-formal P-family identity and 5000-epoch horizon.")
     elif bool(formal_full) != (int(total_epochs) == 5000):
         raise ValueError("The 5000-epoch horizon is reserved for the separate formal_full identity.")
@@ -1640,7 +1661,7 @@ def build_wind_joint_task(
         weight_decay=weight_decay,
         validation_scope=validation_scope,
         native_sampling_protocol=native_sampling_protocol,
-        allow_development_optimizer_controls=mode in INTERACTION_PRESERVING_WIND_MODES,
+        allow_development_optimizer_controls=mode in WIND_P_FAMILY_MODES,
     )
     locality_prior_strength = float(locality_prior_strength)
     if not np.isfinite(locality_prior_strength) or locality_prior_strength < 0.0:
@@ -1651,15 +1672,15 @@ def build_wind_joint_task(
         raise ValueError("Wind P has no collective locality prior.")
     if mode in ("P-G", "P-H") and locality_prior_strength != 1.0:
         raise ValueError("The recovery Wind P-G/P-H geometric locality prior is sealed to 1.0.")
-    if mode in INTERACTION_PRESERVING_WIND_MODES and bool(formal_full) and not full_train_followup1000:
+    if mode in WIND_P_FAMILY_MODES and bool(formal_full) and not full_train_followup1000:
         raise ValueError("P-family full-TRAIN recipes remain unavailable until separately justified and authorized.")
     resolved_environment_shape = tuple(int(value) for value in (
         environment_token_shape if environment_token_shape is not None else
-        ((2, 2, 2) if mode in INTERACTION_PRESERVING_WIND_MODES else JOINT_WIND_ENVIRONMENT_SHAPE)
+        ((2, 2, 2) if mode in WIND_P_FAMILY_MODES else JOINT_WIND_ENVIRONMENT_SHAPE)
     ))
     if len(resolved_environment_shape) != 3 or any(value < 1 for value in resolved_environment_shape):
         raise ValueError("Wind environment_token_shape must contain three positive dimensions.")
-    if mode in INTERACTION_PRESERVING_WIND_MODES and resolved_environment_shape != (2, 2, 2):
+    if mode in WIND_P_FAMILY_MODES and resolved_environment_shape != (2, 2, 2):
         raise ValueError("The Wind P-family recipe is bound to the deployed E8 token shape (2,2,2).")
     device = torch.device(device)
     data_root = Path(data_root).expanduser().resolve()
@@ -1764,7 +1785,8 @@ def build_wind_joint_task(
         train_rows=train_rows,
     )
     catalogue_cache = NativeRoleCatalogueCache(
-        persistent_dir=training_catalogue_cache_directory(),
+        persistent_dir=(training_catalogue_cache_directory() if catalogue_cache_dir is None
+                        else Path(catalogue_cache_dir).expanduser().resolve()),
         max_cached_bytes=int(catalogue_cache_bytes),
     )
     # The corrected role/component scales are an environment-independent
@@ -1773,24 +1795,51 @@ def build_wind_joint_task(
     # remain exactly comparable with the mature J controls; only the model
     # scene itself uses the deployed E8 representation.
     scale_view = view
-    if mode in INTERACTION_PRESERVING_WIND_MODES:
+    if mode in WIND_P_FAMILY_MODES:
         scale_view = WindFarmNativeView(
             data_root,
             allow_npz_metadata_fallback=True,
             token_shape=JOINT_WIND_ENVIRONMENT_SHAPE,
         )
-    calibration, cache_identity = _fit_or_load_role_scales(
-        view=scale_view,
-        train_rows=train_rows,
-        train_layouts=train_layouts,
-        profile=profile,
-        normalizer=normalizer,
-        manifest=manifest,
-        training_fingerprint=role_scale_fingerprint,
-        catalogue_cache=catalogue_cache,
-        cache_dir=Path(role_scale_cache_dir).expanduser().resolve(),
-        native_sampling_protocol=native_sampling_protocol,
-    )
+    if saved_role_scale_calibration is None:
+        calibration, cache_identity = _fit_or_load_role_scales(
+            view=scale_view,
+            train_rows=train_rows,
+            train_layouts=train_layouts,
+            profile=profile,
+            normalizer=normalizer,
+            manifest=manifest,
+            training_fingerprint=role_scale_fingerprint,
+            catalogue_cache=catalogue_cache,
+            cache_dir=Path(role_scale_cache_dir).expanduser().resolve(),
+            native_sampling_protocol=native_sampling_protocol,
+        )
+    else:
+        calibration = dict(saved_role_scale_calibration)
+        cache_identity = dict(saved_role_scale_cache_binding or {})
+        if (
+            calibration.get("target_values_read") != "TRAIN calibration panel only"
+            or calibration.get("wind_test_target_values_read", False) is not False
+            or int(calibration.get("solver_attempts", -1)) != 0
+            or calibration.get("training_rows_sha256") != _indices_sha256(train_rows)
+            or calibration.get("training_fingerprint") != role_scale_fingerprint
+            or calibration.get("background_profile_sha256") != _stable_json_sha256(profile.to_dict())
+            or calibration.get("calibration_query_count_per_row") != JOINT_WIND_ROLE_CALIBRATION_QUERY_COUNT
+            or cache_identity.get("calibration_id") != JOINT_WIND_ROLE_SCALE_CALIBRATION_ID
+            or cache_identity.get("schema_version") != JOINT_WIND_ROLE_SCALE_CACHE_SCHEMA
+            or not isinstance(saved_role_scale_source_sha256, str)
+            or _stable_json_sha256({"calibration": calibration, "cache_binding": cache_identity})
+            != saved_role_scale_source_sha256
+        ):
+            raise ValueError("Saved Wind role calibration is not the exact TRAIN-only W2401-bound receipt.")
+        expected_scale_roles = set(ROLE_NAMES)
+        component_scales = calibration.get("component_role_scales_mps")
+        if not isinstance(component_scales, Mapping) or set(component_scales) != expected_scale_roles:
+            raise ValueError("Saved Wind role calibration omits the exact five component-balanced roles.")
+        if set(cache_identity) != {
+            "schema_version", "cache_key_sha256", "dataset_fingerprint", "calibration_id", "cache_file_sha256"
+        }:
+            raise ValueError("Saved Wind role-scale cache binding has an unexpected field inventory.")
     role_scales = {
         role: tuple(float(value) for value in calibration["component_role_scales_mps"][role])
         for role in ROLE_NAMES
@@ -1809,7 +1858,7 @@ def build_wind_joint_task(
             torch.cuda.manual_seed_all(seed)
         model_factory = (
             InteractionPreservingWindModel
-            if mode in INTERACTION_PRESERVING_WIND_MODES
+            if mode in WIND_P_FAMILY_MODES
             else WindFarmJointRegionalModel
         )
         model_options = {
@@ -1823,7 +1872,7 @@ def build_wind_joint_task(
             "receiver_tile": receiver_tile,
             "seed": seed,
         }
-        if mode in INTERACTION_PRESERVING_WIND_MODES:
+        if mode in WIND_P_FAMILY_MODES:
             model_options.update({
                 "collective_width": collective_width,
                 "max_sources": max_sources,
@@ -1831,7 +1880,24 @@ def build_wind_joint_task(
             })
         else:
             model_options["locality_prior_strength"] = locality_prior_strength
-        model = model_factory(**model_options).to(device)
+        if model_override is None:
+            model = model_factory(**model_options).to(device)
+        else:
+            if not isinstance(model_override, nn.Module):
+                raise TypeError("Wind model_override must be an initialized native adapter module.")
+            if getattr(model_override, "mode", None) != mode:
+                raise ValueError("Wind model_override mode differs from the sealed provider request.")
+            override_normalizer = getattr(model_override, "velocity_transform", None)
+            override_profile = getattr(model_override, "background_profile", None)
+            if (not hasattr(override_normalizer, "to_dict") or not hasattr(override_profile, "to_dict")
+                    or override_normalizer.to_dict() != normalizer.to_dict()
+                    or override_profile.to_dict() != profile.to_dict()):
+                raise ValueError("Wind model_override transforms differ from the bound TRAIN-only transforms.")
+            names = tuple(name for name, _ in model_override.named_parameters())
+            if (not names or any(not name.startswith("core.") for name in names)
+                    or any(not parameter.requires_grad for _, parameter in model_override.named_parameters())):
+                raise ValueError("Wind model_override must expose only trainable parameters in its active native core.")
+            model = model_override.to(device)
     provider = WindJointRegionalTask(
         view,
         model=model,

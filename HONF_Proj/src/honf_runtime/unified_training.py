@@ -2306,6 +2306,7 @@ class TrainingEngine:
         mathematical_route_branch: Mapping[str, Any] | None = None,
         joint_core_revision: Mapping[str, Any] | None = None,
         diagnostic_age_branch: Mapping[str, Any] | None = None,
+        architecture_child_initialization: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
@@ -2342,6 +2343,13 @@ class TrainingEngine:
             raise ValueError("A run cannot be both an exact resume and a new branch.")
         if allow_microbatch_change and resume_checkpoint is None:
             raise ValueError("A microbatch amendment requires an existing run's latest checkpoint.")
+        if architecture_child_initialization is not None and (
+                branch_from_checkpoint is None or resume_checkpoint is not None
+                or optimizer_seed is not None or allow_microbatch_change
+                or mathematical_route_branch is not None or joint_core_revision is not None
+                or diagnostic_age_branch is not None or self.config.training_mode != "joint"
+                or arm != architecture_child_initialization.get("target_mode")):
+            raise ValueError("Native routing attachment requires one fresh joint architecture child of its named P parent.")
         if diagnostic_age_branch is not None and (
                 branch_from_checkpoint is None or resume_checkpoint is not None
                 or allow_microbatch_change or mathematical_route_branch is not None
@@ -2397,7 +2405,15 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if diagnostic_age_branch is not None:
+            if architecture_child_initialization is not None:
+                from .architecture_child import prepare_native_routing_child
+
+                amendment = prepare_native_routing_child(
+                    model, source_payload, sealed_identity, architecture_child_initialization,
+                    source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    stop_after=int(stop_after))
+            elif diagnostic_age_branch is not None:
                 amendment = _diagnostic_age_branch_amendment(
                     source_payload.get("experiment_identity", {}), sealed_identity,
                     diagnostic_age_branch,
@@ -2423,21 +2439,37 @@ class TrainingEngine:
             if resume_checkpoint is not None:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
-            elif joint_core_revision is None and diagnostic_age_branch is None:
+            elif (joint_core_revision is None and diagnostic_age_branch is None
+                  and architecture_child_initialization is None):
                 if source_payload.get("arm") != "warmup":
                     raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
                 if int(source_payload.get("epoch", -1)) != self.config.warmup_epochs:
                     raise ValueError("Matched arms must branch at the declared common warmup boundary.")
-            model.load_state_dict(source_payload["model_state_dict"], strict=True)
+            if architecture_child_initialization is None:
+                model.load_state_dict(source_payload["model_state_dict"], strict=True)
             optimizer_seed = source_payload["optimizer_state_by_name"]
             restored_rng = source_payload["rng_state"]
             restore_provider_state = getattr(provider, "load_training_state_dict", None)
+            provider_state = source_payload.get("provider_training_state", {})
+            if architecture_child_initialization is not None:
+                from .architecture_child import architecture_child_provider_state
+
+                provider_state = architecture_child_provider_state(provider, provider_state, arm)
+                amendment["exact_non_arm_provider_state_verified"] = True
             if callable(restore_provider_state):
-                restore_provider_state(source_payload.get("provider_training_state", {}))
+                restore_provider_state(provider_state)
         if resume_checkpoint is not None:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
+        if architecture_child_initialization is not None:
+            from .architecture_child import verify_architecture_child_optimizer
+
+            verify_architecture_child_optimizer(
+                model, optimizer, source_payload["optimizer_state_by_name"],
+                architecture_child_initialization["added_parameter_names"])
+            amendment["exact_inherited_moments_verified"] = True
+            amendment["new_optimizer_states_at_attachment"] = 0
         if (resume_checkpoint is not None or joint_core_revision is not None
                 or diagnostic_age_branch is not None):
             saved_group_names = source_payload.get("optimizer_group_names")
@@ -2459,12 +2491,14 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
-            amendment_name = ('diagnostic_age_branch' if diagnostic_age_branch is not None else
+            amendment_name = ('architecture_child_initialization' if architecture_child_initialization is not None else
+                              'diagnostic_age_branch' if diagnostic_age_branch is not None else
                               'joint_core_revision' if joint_core_revision is not None else
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if joint_core_revision is not None or diagnostic_age_branch is not None else None), amendment)
+                category='logs' if (joint_core_revision is not None or diagnostic_age_branch is not None
+                                    or architecture_child_initialization is not None) else None), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = (copy.deepcopy(source_payload.get("branch_parent"))
@@ -2491,6 +2525,13 @@ class TrainingEngine:
                     inherited_case_visits=sum(int(row['case_visits']) for row in source_payload.get('history', [])),
                     inherited_optimizer_updates=sum(int(row['optimizer_updates']) for row in source_payload.get('history', [])),
                 )
+            if architecture_child_initialization is not None:
+                branch_parent.update(
+                    architecture_child_initialization=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row['case_visits']) for row in source_payload.get('history', [])),
+                    inherited_optimizer_updates=sum(int(row['optimizer_updates']) for row in source_payload.get('history', [])),
+                    inherited_history_scope='parent P function; child history counts only new visits and updates',
+                )
             best_field = best_guarded = float("inf")
         diagnostic_contract = (
             branch_parent.get("diagnostic_age_branch")
@@ -2503,6 +2544,14 @@ class TrainingEngine:
             evidence = Path(diagnostic_contract["evidence_path"]).read_bytes()
             if hashlib.sha256(evidence).hexdigest() != diagnostic_contract["evidence_sha256"]:
                 raise ValueError("Diagnostic selection evidence changed before continuation.")
+        architecture_contract = (
+            branch_parent.get("architecture_child_initialization")
+            if isinstance(branch_parent, Mapping) else None
+        )
+        if architecture_contract is not None and (
+                stop_after not in architecture_contract["review_epochs"]
+                or stop_after > architecture_contract["final_epoch"]):
+            raise ValueError("Architecture child continuation must stay within its sealed reviews and update horizon.")
         active = {
             "status": "running", "arm": arm, "identity": sealed_identity, "device": str(self.device),
             "pid": os.getpid(),
@@ -2581,6 +2630,12 @@ class TrainingEngine:
                         or completed_updates + math.ceil(len(ordered_cases) / self.config.effective_cases)
                         > diagnostic_contract["scientific_update_limit"]):
                     raise ValueError("Diagnostic case membership or optimizer update budget changed during fitting.")
+                if architecture_contract is not None and (
+                        len(ordered_cases) != len(architecture_contract["fit_case_keys"])
+                        or set(ordered_cases) != set(architecture_contract["fit_case_keys"])
+                        or completed_updates + math.ceil(len(ordered_cases) / self.config.effective_cases)
+                        > architecture_contract["scientific_update_limit"]):
+                    raise ValueError("Architecture child case membership or optimizer update cap changed during fitting.")
                 if self.config.deterministic_case_order:
                     rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, epoch, 0x484F4E46]))
                     order = rng.permutation(len(ordered_cases)).tolist()

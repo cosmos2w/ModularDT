@@ -50,7 +50,9 @@ from .unified_task import (
 )
 
 JOINT_TRAINING_MODE = "joint"
-THERMAL_RECOVERY_MODES = tuple(JOINT_THERMAL_MODES) + tuple(INTERACTION_PRESERVING_THERMAL_MODES)
+NATIVE_ROUTING_THERMAL_MODES = ("P-R", "P-C")
+THERMAL_P_FAMILY_MODES = frozenset((*INTERACTION_PRESERVING_THERMAL_MODES, *NATIVE_ROUTING_THERMAL_MODES))
+THERMAL_RECOVERY_MODES = tuple(JOINT_THERMAL_MODES) + tuple(INTERACTION_PRESERVING_THERMAL_MODES) + NATIVE_ROUTING_THERMAL_MODES
 JOINT_MICROBATCH_DEFAULT = 4
 JOINT_EFFECTIVE_BATCH_DEFAULT = 48
 JOINT_PRIMARY_QUERY_DEFAULT = 1024
@@ -105,7 +107,7 @@ def _shared_direct_state_sha256(model: torch.nn.Module) -> str:
     """Hash only the common pair/source-read path shared by P, P-G and P-H."""
     mode_specific = (
         "collective_", "source_membership_score", "environment_membership_score",
-        "receiver_query", "edge_key", "access_geometry",
+        "receiver_query", "edge_key", "access_geometry", "native_routing",
     )
     digest = hashlib.sha256()
     names = [name for name in model.state_dict() if not any(part in name for part in mode_specific)]
@@ -419,6 +421,7 @@ class JointThermalTask(ThermalRefinementTask):
         native_sampling_protocol: str | None = None,
         flow_readout_law: str | None = None,
         full_train_followup1000: bool = False,
+        validation_case_ids: Sequence[str] | None = None,
     ) -> None:
         if mode not in THERMAL_RECOVERY_MODES or model.mode != mode:
             raise ValueError("Joint Thermal task mode must match its freshly initialized adapter.")
@@ -434,7 +437,7 @@ class JointThermalTask(ThermalRefinementTask):
         self.flow_readout_law = flow_readout_law
         if self.flow_readout_law not in (None, NATIVE_CURL_READOUT_LAW):
             raise ValueError("Joint Thermal provider received an unsupported flow readout law.")
-        if self.flow_readout_law and mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+        if self.flow_readout_law and mode not in THERMAL_P_FAMILY_MODES:
             raise ValueError("The native-curl readout belongs only to fresh P-family providers.")
         if getattr(model, "flow_readout_law", None) != self.flow_readout_law:
             raise ValueError("Joint Thermal provider and adapter flow readout laws must match exactly.")
@@ -443,10 +446,13 @@ class JointThermalTask(ThermalRefinementTask):
         self.formal_full = bool(formal_full)
         self.full_train_followup1000 = bool(full_train_followup1000)
         self.total_epochs = int(total_epochs)
+        if mode in NATIVE_ROUTING_THERMAL_MODES and (
+                self.formal_full or self.full_train_followup1000 or self.total_epochs != 2500):
+            raise ValueError("Thermal P-R/P-C children require the fixed25_v1 2500-epoch development identity.")
         if self.formal_full and self.full_train_followup1000:
             raise ValueError("Thermal legacy formal_full and bounded full-TRAIN follow-up identities are exclusive.")
         if self.full_train_followup1000 and (
-                mode not in INTERACTION_PRESERVING_THERMAL_MODES or self.total_epochs != 5000):
+                mode not in THERMAL_P_FAMILY_MODES or self.total_epochs != 5000):
             raise ValueError("Thermal full-TRAIN follow-up is a fresh P-family 5000-horizon identity.")
         self.formal_validation_scope = validation_scope
         self.formal_optimizer_schedule = optimizer_schedule
@@ -513,12 +519,22 @@ class JointThermalTask(ThermalRefinementTask):
             stats=stats,
             recipe=recipe,
         )
+        if validation_case_ids is not None:
+            expected_validation_ids = tuple(development_case_ids(manifest, "test"))
+            declared_validation_ids = tuple(map(str, validation_case_ids))
+            if (declared_validation_ids != expected_validation_ids
+                    or len(set(declared_validation_ids)) != len(declared_validation_ids)):
+                raise ValueError("Unmaterialized Thermal DEV identity must retain the exact selected manifest IDs.")
+            if self.validation_cases:
+                raise ValueError("Explicit unmaterialized DEV IDs cannot accompany materialized validation cases.")
+            self._validation_ids = declared_validation_ids
+        self.dev_targets_materialized = bool(self.validation_cases)
         self.response_scales = recipe["calibration"]["response_scales"]
         self.response_coefficient = self.response_weight
         self.operator_coefficient = self.operator_weight
         self._geometry_helper = model
         self._joint_loss_metadata = self._build_loss_metadata()
-        if self.joint_mode in INTERACTION_PRESERVING_THERMAL_MODES and self.auxiliary_calibration is not None:
+        if self.joint_mode in THERMAL_P_FAMILY_MODES and self.auxiliary_calibration is not None:
             self._validate_auxiliary_calibration(self.auxiliary_calibration)
 
     def identity_payload(self) -> Mapping[str, Any]:
@@ -947,6 +963,11 @@ class JointThermalTask(ThermalRefinementTask):
         terms["q_proxy"] = LossTerm(values["q_proxy"].sum(), len(targets.case_ids), self.q_proxy_weight)
         return terms
 
+    def validation_batches(self):
+        if self._validation_ids and not self.validation_cases:
+            raise RuntimeError("Thermal DEV targets were intentionally not materialized for this TRAIN-only context.")
+        yield from super().validation_batches()
+
     def validation_metrics(self, predictions, targets, auxiliary_state):
         del auxiliary_state
         values = self._native_role_losses(predictions.native_main, predictions.native_prepared, targets)
@@ -1141,7 +1162,7 @@ class JointThermalTask(ThermalRefinementTask):
         result: dict[str, int | float] = {
             name: float(value) for name, value in auxiliary_state.get("work", predictions.work).items()
         }
-        if self.joint_mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+        if self.joint_mode not in THERMAL_P_FAMILY_MODES:
             return result
         contexts = []
         main_native = predictions.native_prepared
@@ -1305,9 +1326,9 @@ class JointThermalTask(ThermalRefinementTask):
                 raise ValueError(f"Saved joint Thermal {name} differs from the active recipe.")
         saved = state.get("auxiliary_calibration")
         saved_receipt = None if saved is None else copy.deepcopy(dict(saved))
-        if self.joint_mode in INTERACTION_PRESERVING_THERMAL_MODES:
-            if self.auxiliary_calibration is None or saved_receipt != self.auxiliary_calibration:
-                raise ValueError("Saved P-family task state has no sealed fresh-P calibration receipt.")
+        if (self.joint_mode in THERMAL_P_FAMILY_MODES
+                and (self.auxiliary_calibration is None or saved_receipt != self.auxiliary_calibration)):
+            raise ValueError("Saved P-family task state has no sealed fresh-P calibration receipt.")
         self.auxiliary_calibration = saved_receipt
 
     def calibrate_auxiliary_coefficients(self) -> Mapping[str, Any]:
@@ -1316,6 +1337,8 @@ class JointThermalTask(ThermalRefinementTask):
             return self._calibrate_legacy_auxiliary_coefficients()
         if self.joint_mode in INTERACTION_PRESERVING_THERMAL_MODES:
             return self._calibrate_interaction_preserving_auxiliary_coefficients()
+        if self.joint_mode in NATIVE_ROUTING_THERMAL_MODES:
+            raise RuntimeError("P-R/P-C reuse the exact saved P calibration; routed calibration refitting is disabled.")
         raise ValueError("Unsupported Thermal auxiliary-calibration family.")
 
     def _calibrate_legacy_auxiliary_coefficients(self) -> Mapping[str, Any]:
@@ -1570,7 +1593,7 @@ class JointThermalTask(ThermalRefinementTask):
 
     def _validate_auxiliary_calibration(self, receipt: Mapping[str, Any]) -> None:
         """Reject calibration from J/H, another cohort, or another direct initialization."""
-        if self.joint_mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+        if self.joint_mode not in THERMAL_P_FAMILY_MODES:
             raise ValueError("Only P-family Thermal tasks accept a fresh-P auxiliary calibration receipt.")
         active_flow_readout_law = getattr(self, "flow_readout_law", None)
         receipt_flow_readout_law = receipt.get("flow_readout_law")
@@ -1681,6 +1704,8 @@ def build_thermal_joint_task(
     calibration_only: bool = False,
     flow_readout_law: str | None = None,
     full_train_followup1000: bool = False,
+    include_dev_targets: bool = True,
+    model_override: torch.nn.Module | None = None,
 ) -> tuple[JointThermalRegionalAdapter, JointThermalTask]:
     """Construct a fresh joint candidate and its fixed25_v1 provider.
 
@@ -1690,15 +1715,23 @@ def build_thermal_joint_task(
     """
     if mode not in THERMAL_RECOVERY_MODES:
         raise ValueError(f"Joint Thermal mode must be one of {THERMAL_RECOVERY_MODES}.")
+    if type(include_dev_targets) is not bool:
+        raise TypeError("Thermal include_dev_targets must be boolean.")
+    if mode in NATIVE_ROUTING_THERMAL_MODES and (
+            formal_full or full_train_followup1000 or total_epochs != 2500):
+        raise ValueError("Thermal P-R/P-C children require the fixed25_v1 2500-epoch development identity.")
+    if mode in NATIVE_ROUTING_THERMAL_MODES and (
+            saved_normalization_stats is None or saved_response_scales is None or auxiliary_calibration is None):
+        raise ValueError("P-R/P-C require the exact saved P normalization, response scales and TRAIN calibration receipt.")
     if flow_readout_law not in (None, NATIVE_CURL_READOUT_LAW):
         raise ValueError("Unsupported opt-in Thermal flow readout law.")
-    if flow_readout_law is not None and mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+    if flow_readout_law is not None and mode not in THERMAL_P_FAMILY_MODES:
         raise ValueError("The native-curl readout is a P-family-only model identity.")
     if flow_readout_law is not None and formal_full and not full_train_followup1000:
         raise ValueError("Native-curl full-TRAIN recipes require a separately authorized campaign.")
     if type(full_train_followup1000) is not bool:
         raise TypeError("Thermal full_train_followup1000 must be boolean.")
-    if full_train_followup1000 and (formal_full or mode not in INTERACTION_PRESERVING_THERMAL_MODES
+    if full_train_followup1000 and (formal_full or mode not in THERMAL_P_FAMILY_MODES
                                     or total_epochs != 5000):
         raise ValueError("Thermal full follow-up requires non-formal P-family identity and 5000-epoch horizon.")
     if isinstance(locality_prior_strength, (bool, np.bool_)):
@@ -1715,12 +1748,12 @@ def build_thermal_joint_task(
         raise ValueError("Thermal P has no collective locality prior.")
     if mode in ("P-G", "P-H") and locality_prior_strength != 1.0:
         raise ValueError("The recovery Thermal P-G/P-H geometric locality prior is sealed to 1.0.")
-    if mode in INTERACTION_PRESERVING_THERMAL_MODES and formal_full and not full_train_followup1000:
+    if mode in THERMAL_P_FAMILY_MODES and formal_full and not full_train_followup1000:
         raise ValueError("P-family full-TRAIN recipes remain unavailable until separately justified and authorized.")
     if calibration_only and (mode != "P" or (formal_full and not full_train_followup1000)
                              or auxiliary_calibration is not None):
         raise ValueError("Calibration-only construction is reserved for a fresh P model with no supplied receipt.")
-    if mode in INTERACTION_PRESERVING_THERMAL_MODES and not calibration_only and auxiliary_calibration is None:
+    if mode in THERMAL_P_FAMILY_MODES and not calibration_only and auxiliary_calibration is None:
         raise ValueError("Every P-family Thermal comparison requires the sealed fresh-P TRAIN calibration receipt.")
     if microbatch_size < 1 or effective_batch_size < 1 or microbatch_size > effective_batch_size:
         raise ValueError("Joint Thermal microbatch must be positive and no larger than its effective batch.")
@@ -1734,7 +1767,7 @@ def build_thermal_joint_task(
             and not (formal_full or full_train_followup1000):
         raise ValueError("Formal validation and sampling controls require the separate fullTRAIN identity.")
     if (optimizer_schedule is not None or weight_decay is not None) and not formal_full \
-            and mode not in INTERACTION_PRESERVING_THERMAL_MODES:
+            and mode not in THERMAL_P_FAMILY_MODES:
         raise ValueError("Explicit development optimizer controls are reserved for the P-family recovery recipes.")
     if validation_scope not in (None, "canonical89"):
         raise ValueError("Joint Thermal formal validation scope must be canonical89.")
@@ -1807,7 +1840,7 @@ def build_thermal_joint_task(
         normalizer=normalizer,
         include_grid=True,
     )
-    validation_cases = [] if calibration_only else _read_selected_cases(
+    validation_cases = [] if calibration_only or not include_dev_targets else _read_selected_cases(
         resolved_data_path,
         validation_ids,
         split="test",
@@ -1837,7 +1870,7 @@ def build_thermal_joint_task(
     set_seed(int(seed))
     model_factory = (
         InteractionPreservingThermalAdapter
-        if mode in INTERACTION_PRESERVING_THERMAL_MODES
+        if mode in THERMAL_P_FAMILY_MODES
         else JointThermalRegionalAdapter
     )
     model_options = {
@@ -1851,11 +1884,28 @@ def build_thermal_joint_task(
         "locality_prior_strength": locality_prior_strength,
         "seed": seed,
     }
-    if mode in INTERACTION_PRESERVING_THERMAL_MODES:
+    if mode in THERMAL_P_FAMILY_MODES:
         model_options.update({"collective_width": collective_width, "max_sources": max_sources})
     if flow_readout_law is not None:
         model_options["flow_readout_law"] = flow_readout_law
-    model = model_factory(**model_options).to(device)
+    if model_override is None:
+        model = model_factory(**model_options).to(device)
+    else:
+        if not isinstance(model_override, torch.nn.Module):
+            raise TypeError("Thermal model_override must be an initialized native adapter module.")
+        if (getattr(model_override, "mode", None) != mode
+                or getattr(model_override, "flow_readout_law", None) != flow_readout_law):
+            raise ValueError("Thermal model_override mode/readout law differs from the sealed provider request.")
+        override_stats = getattr(model_override, "normalization_stats", None)
+        if not isinstance(override_stats, Mapping) or set(override_stats) != set(normalizer.stats):
+            raise ValueError("Thermal model_override must retain the exact saved normalization inventory.")
+        if any(not np.array_equal(np.asarray(override_stats[name]), np.asarray(normalizer.stats[name]))
+               for name in normalizer.stats):
+            raise ValueError("Thermal model_override normalization differs from the checkpoint-owned statistics.")
+        names = tuple(name for name, _ in model_override.named_parameters())
+        if not names or any(not name.startswith("core.") for name in names):
+            raise ValueError("Thermal model_override must register only the one active native core.")
+        model = model_override.to(device)
     budget = {
         "fluid_queries": int(primary_queries),
         "material_queries_per_module": 32,
@@ -1926,6 +1976,7 @@ def build_thermal_joint_task(
         native_sampling_protocol=native_sampling_protocol,
         flow_readout_law=flow_readout_law,
         full_train_followup1000=full_train_followup1000,
+        validation_case_ids=(validation_ids if not calibration_only and not include_dev_targets else None),
     )
     if validation_budget is not None:
         provider.validation_budget = validation_budget

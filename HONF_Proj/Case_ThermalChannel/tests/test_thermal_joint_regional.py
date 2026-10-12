@@ -63,6 +63,54 @@ def _adapter(mode="J-H", locality_prior_strength=0.0):
     )
 
 
+@pytest.mark.parametrize("mode", ("P-R", "P-C"))
+@pytest.mark.parametrize(
+    ("formal_full", "full_train_followup1000", "total_epochs"),
+    ((True, False, 5000), (False, True, 5000), (False, False, 5000)),
+)
+def test_native_routing_builder_rejects_full_identities_before_data_access(
+    monkeypatch, mode, formal_full, full_train_followup1000, total_epochs,
+):
+    def forbidden_data_access(*_args, **_kwargs):
+        pytest.fail("native-routing identity guard ran after dataset access")
+
+    monkeypatch.setattr(joint_task_module, "_load_data_binding", forbidden_data_access)
+    with pytest.raises(ValueError, match="P-R/P-C children require the fixed25_v1 2500-epoch development identity"):
+        joint_task_module.build_thermal_joint_task(
+            mode=mode,
+            formal_full=formal_full,
+            full_train_followup1000=full_train_followup1000,
+            total_epochs=total_epochs,
+        )
+
+
+@pytest.mark.parametrize("mode", ("P-R", "P-C"))
+@pytest.mark.parametrize("full_flag", ("formal_full", "full_train_followup1000"))
+def test_native_routing_task_rejects_full_flags(mode, full_flag):
+    kwargs = {
+        "model": SimpleNamespace(mode=mode, flow_readout_law=None),
+        "training_cases": (),
+        "validation_cases": (),
+        "manifest": {},
+        "data_path": ".",
+        "source_binding": {},
+        "train_families": (),
+        "balances": (),
+        "normalization_stats": {},
+        "mode": mode,
+        "device": "cpu",
+        "budget": {},
+        "effective_batch_size": 48,
+        "total_epochs": 5000,
+        "formal_full": full_flag == "formal_full",
+        "response_coefficient": 0.1,
+        "operator_coefficient": 0.1,
+        "full_train_followup1000": full_flag == "full_train_followup1000",
+    }
+    with pytest.raises(ValueError, match="P-R/P-C children require the fixed25_v1 2500-epoch development identity"):
+        JointThermalTask(**kwargs)
+
+
 def _prepare(model, module_count):
     structure = _structure(module_count)
     xy = torch.tensor([[[0.75, 0.75], [3.75, 2.25], [8.25, 3.75]]], dtype=torch.float32)
@@ -599,6 +647,7 @@ def test_joint_provider_identity_is_strict_json_serializable():
         "partitions": {"train": {"case_ids": ["train-a", "train-b"]}},
     }
     provider.formal_full = False
+    provider.full_train_followup1000 = False
     provider.source_binding = {"dataset_id": "synthetic_identity_test", "metadata_sha256": "b" * 64}
     provider.model = _adapter("J-H")
     provider.stats = _stats()
