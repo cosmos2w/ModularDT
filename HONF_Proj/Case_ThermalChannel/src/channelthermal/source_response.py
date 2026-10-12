@@ -263,11 +263,17 @@ class ThermalSourceResponse(nn.Module):
             "source_ids": source_ids,
         }
 
-    def prepare_context(self, structure, *, environment_flow_features=None):
+    def prepare_context(self, structure, *, environment_flow_features=None,
+                        routing_trace=False, native_route_intervention=None):
         tensors = self.context_tensors(structure)
-        return self._prepare_context_tensors(tensors, environment_flow_features)
+        return self._prepare_context_tensors(
+            tensors, environment_flow_features,
+            routing_trace=routing_trace,
+            native_route_intervention=native_route_intervention,
+        )
 
-    def _prepare_context_tensors(self, tensors, environment_flow_features):
+    def _prepare_context_tensors(self, tensors, environment_flow_features, *,
+                                 routing_trace=False, native_route_intervention=None):
         dependency = _thermal_interaction_dependency(
             environment_flow_context=self.environment_flow_context,
         )
@@ -276,7 +282,11 @@ class ThermalSourceResponse(nn.Module):
         if self.environment_flow_projection is None:
             if environment_flow_features is not None:
                 raise ValueError("Geometry-only Thermal response does not accept environment flow features.")
-            prepared = self.core.prepare_context(**tensors)
+            prepared = self.core.prepare_context(
+                **tensors,
+                routing_trace=routing_trace,
+                native_route_intervention=native_route_intervention,
+            )
             prepared.dependency = dependency
             return prepared
         if environment_flow_features is None:
@@ -289,7 +299,12 @@ class ThermalSourceResponse(nn.Module):
         # Keep the original environment records and quadrature measures. Solid
         # donors carry a zeroed standardized u/v pair and an explicit invalid bit.
         environment_embedding = self.environment_flow_projection(features)
-        prepared = self.core.prepare_context(**tensors, environment_embedding=environment_embedding)
+        prepared = self.core.prepare_context(
+            **tensors,
+            environment_embedding=environment_embedding,
+            routing_trace=routing_trace,
+            native_route_intervention=native_route_intervention,
+        )
         prepared.dependency = dependency
         return prepared
 
@@ -318,9 +333,14 @@ class ThermalSourceResponse(nn.Module):
         return NativeStencil(indices, weights, valid)
 
     def prepare_native(self, structure, fluid_xy, *, local_query_points=None, ntheta=64, chunk_size=512,
-                       environment_flow_features=None, receiver_read_options=None):
+                       environment_flow_features=None, receiver_read_options=None,
+                       routing_trace=False, native_route_intervention=None):
         tensors = self.context_tensors(structure)
-        context = self._prepare_context_tensors(tensors, environment_flow_features)
+        context = self._prepare_context_tensors(
+            tensors, environment_flow_features,
+            routing_trace=routing_trace,
+            native_route_intervention=native_route_intervention,
+        )
         centers, present, lengths = tensors["centers"], tensors["present"], tensors["lengths"]
         radius = tensors["source_lengths"][:, :1]
         delta = torch.minimum((lengths / lengths.new_tensor([self.nx, self.ny])).amin(-1, keepdim=True), 0.15 * radius)

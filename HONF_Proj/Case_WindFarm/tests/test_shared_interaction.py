@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,6 +13,10 @@ from honf_forward_core.interface_fields.interaction_core import NonlinearFieldRe
 from honf_forward_core.interface_fields.interaction_refinement import RefinedNonlinearFieldReadout
 
 from windfarm.geometry import environment_representation, global_geometry_features, support_geometry
+from windfarm.interaction_preserving import (
+    InteractionPreservingWindModel,
+    load_interaction_preserving_wind_checkpoint,
+)
 from windfarm.model import (
     REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
     SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
@@ -188,6 +194,211 @@ def test_refined_context_rejects_mutated_train_profile_and_jvp_restores_fixed_ro
     profile.values_mps[0, 0] += 0.5
     with pytest.raises(ValueError, match="background profile changed; rebuild"):
         model.predict_physical_case(case, prepared, receivers)
+
+
+def test_pr2_wind_nonlinear_config_and_strict_state_roundtrip() -> None:
+    torch.manual_seed(42)
+    model = InteractionPreservingWindModel(
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+        mode="P-R2",
+        seed=42,
+    ).eval()
+    config = model.export_config()
+    assert config["core"]["native_routing"] == {
+        "schema": "native_interaction_routing_v2",
+        "mode": "P-R2",
+        "policy": "learned_density",
+        "initialization_seed": 42,
+        "score_hidden": 32,
+        "score_bound": 2.0,
+        "views": 2,
+        "feature_blocks": [64, 64],
+    }
+    restored = InteractionPreservingWindModel.from_config(copy.deepcopy(config)).eval()
+    restored.load_state_dict(model.state_dict(), strict=True)
+    assert restored.export_config() == config
+    for name, tensor in model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], tensor, rtol=0.0, atol=0.0)
+
+    case = _case()
+    receivers = torch.tensor([[[0.5, 0.2, 0.875], [4.0, 1.0, 1.1]]])
+    scene = wind_scene_from_case(case)
+    prepared = model.prepare_scene(scene)
+    restored_prepared = restored.prepare_scene(scene)
+    prediction = model.predict_standardized(prepared, receivers)
+    restored_prediction = restored.predict_standardized(restored_prepared, receivers)
+    assert prediction.shape == (1, 2, 3)
+    assert torch.isfinite(prediction).all()
+    torch.testing.assert_close(restored_prediction, prediction, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize(
+    ("name", "bad_value"),
+    (("score_hidden", 32.0), ("score_bound", 2), ("views", 2.0),
+     ("feature_blocks", [64.0, 64]), ("feature_blocks", [64, True])),
+)
+def test_pr2_wind_loader_rejects_numeric_equivalent_v2_metadata_types(name, bad_value) -> None:
+    model = InteractionPreservingWindModel(
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+        mode="P-R2",
+        seed=42,
+    )
+    config = model.export_config()
+    config["core"]["native_routing"][name] = bad_value
+    with pytest.raises(TypeError):
+        InteractionPreservingWindModel.from_config(config)
+
+
+def _fresh_wind_engine_checkpoint(mode="P"):
+    from honf_runtime.unified_training import fresh_matched_initialization_receipt
+
+    honf_root = Path(__file__).resolve().parents[2]
+    tools_path = str(honf_root / "tools")
+    if tools_path not in sys.path:
+        sys.path.insert(0, tools_path)
+    import joint_regional_train as fresh_runner
+
+    normalizer = VelocityNormalizer(
+        mean=np.asarray([1.0, 0.0, 0.0]),
+        std=np.asarray([0.2, 0.1, 0.1]),
+        safe_std=np.asarray([0.2, 0.1, 0.1]),
+        source_rows=72,
+        seed=42,
+    )
+    model = InteractionPreservingWindModel(
+        velocity_transform=normalizer,
+        background_profile=_profile(),
+        mode=mode,
+        seed=42,
+    )
+    model.core.set_consolidated_native_validation(True)
+    provider_identity = {
+        "dataset": "WindFarm",
+        "family": model.family_id,
+        "mode": mode,
+        "subset_manifest_sha256": "a" * 64,
+        "normalizer_and_background_source": {"source_sha256": "b" * 64},
+        "standalone_model_config": model.export_config(),
+        "fresh_matched_comparison": True,
+        "objective": {
+            "component_scales_mps": {role: [1.0, 1.0, 1.0] for role in (
+                "background", "downstream_envelope", "hub_slab", "near_turbine", "volume"
+            )},
+            "scale_rule": "synthetic fresh-loader fixture",
+            "scale_source_sha256": "c" * 64,
+            "scale_calibration": {"schema": "synthetic"},
+            "scale_cache_binding": {"sha256": "d" * 64},
+        },
+    }
+    recipe = {
+        "schema_version": 1,
+        "comparison_protocol": "fresh_segmented_multiview_2500_v1",
+        "task": "wind",
+        "mode": mode,
+        "fresh_matched_comparison": True,
+        "dataset_protocol": "wind_shared_fixed24_v1",
+        "seed": 42,
+        "total_epochs": 2500,
+        "native_validation_policy": "consolidated_route_flags_v1",
+        "engine_schedule": {"sampling_version": "case_epoch_v1"},
+        "model_contract": fresh_runner._fresh_matched_model_contract("wind", mode),
+    }
+    engine_config = {
+        "seed": 42,
+        "total_epochs": 2500,
+        "sampling_version": "case_epoch_v1",
+        "deterministic_case_order": True,
+        "training_mode": "joint",
+    }
+    marker = fresh_matched_initialization_receipt(
+        model,
+        provider_identity,
+        active_mode=mode,
+        seed=42,
+        sampling_version="case_epoch_v1",
+        deterministic_case_order=True,
+    )
+    identity = {
+        "workflow": "fresh_segmented_multiview_2500_v1",
+        "recipe": recipe,
+        "engine_config": engine_config,
+        "provider_identity": provider_identity,
+        "native_validation_policy": "consolidated_route_flags_v1",
+        "initialization": "fresh_common_trunk_private_router_rng",
+        "inherited_parameter_names": [],
+        "optimizer_state_start": "fresh_zero_moments",
+        "external_learned_field_files": [],
+        "fresh_initialization": marker,
+        "initial_model_state_sha256": marker["initial_model_state_sha256"],
+    }
+    return model, {
+        "checkpoint_schema_version": 1,
+        "workflow": "fresh_segmented_multiview_2500_v1",
+        "experiment_identity": identity,
+        "arm": mode,
+        "epoch": 1,
+        "model_state_dict": model.state_dict(),
+        "branch_parent": None,
+    }
+
+
+@pytest.mark.parametrize("mode", ("P", "P-R", "P-R2"))
+def test_fresh_wind_engine_checkpoint_roundtrip_reactivates_validation_policy(mode) -> None:
+    source_model, payload = _fresh_wind_engine_checkpoint(mode)
+    loaded = load_interaction_preserving_wind_checkpoint(payload)
+    assert loaded.export_config() == source_model.export_config()
+    assert loaded.core.consolidated_native_validation is True
+    for name, tensor in source_model.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[name], tensor, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (("receipt_hash", "Fresh initialization receipt differs"),
+     ("receipt_schema", "Fresh matched initialization schema"),
+     ("receipt_digest_format", "malformed SHA-256"),
+     ("common_digest_format", "malformed SHA-256"),
+     ("receipt_exclusion", "common digest must exclude"),
+     ("receipt_sampler", "sampler namespace is not bound"),
+     ("recipe_route_type", "recipe route metadata has noncanonical numeric types"),
+     ("provider_route_type", "provider P-R2 metadata must use exact integer types"),
+     ("recipe_mode", "Fresh Wind engine arm, provider and recipe"),
+     ("workflow", "not from the fresh segmented multiview workflow")),
+)
+def test_fresh_wind_engine_checkpoint_rejects_malformed_identity_markers(mutation, message) -> None:
+    _, payload = _fresh_wind_engine_checkpoint("P-R2")
+    identity = payload["experiment_identity"]
+    if mutation == "receipt_hash":
+        identity["fresh_initialization"]["common_initialization_sha256"] = "0" * 64
+    elif mutation == "receipt_schema":
+        identity["fresh_initialization"]["schema"] = "matched_fresh_multiview_initialization_v0"
+    elif mutation == "receipt_digest_format":
+        identity["fresh_initialization"]["initial_model_state_sha256"] = "not-a-digest"
+    elif mutation == "common_digest_format":
+        identity["fresh_initialization"]["common_initialization_sha256"] = "not-a-digest"
+    elif mutation == "receipt_exclusion":
+        identity["fresh_initialization"]["common_parameter_exclusion_prefixes"] = ["core."]
+    elif mutation == "receipt_sampler":
+        identity["fresh_initialization"]["sampler_namespace"]["dataset_id"] = "other:dataset"
+    elif mutation == "recipe_route_type":
+        identity["recipe"]["model_contract"]["native_routing"]["views"] = 2.0
+    elif mutation == "provider_route_type":
+        identity["provider_identity"]["standalone_model_config"]["core"]["native_routing"]["views"] = 2.0
+    elif mutation == "recipe_mode":
+        identity["recipe"]["mode"] = "P-R"
+    else:
+        payload["workflow"] = "forward"
+    with pytest.raises((TypeError, ValueError), match=message):
+        load_interaction_preserving_wind_checkpoint(payload)
+
+
+def test_fresh_wind_direct_p_engine_loader_rejects_bad_initialization_schema() -> None:
+    _, payload = _fresh_wind_engine_checkpoint("P")
+    payload["experiment_identity"]["fresh_initialization"]["schema"] = "unknown"
+    with pytest.raises(ValueError, match="Fresh matched initialization schema"):
+        load_interaction_preserving_wind_checkpoint(payload)
 
 
 def _compact_c1_adapter_fixture():

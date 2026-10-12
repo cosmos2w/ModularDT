@@ -17,6 +17,7 @@ import random
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ for directory in (ROOT / "src", ROOT / "Case_ThermalChannel/src", ROOT / "Case_W
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-MODES = ("J-direct", "J-geometry", "J-H", "P", "P-G", "P-H")
+MODES = ("J-direct", "J-geometry", "J-H", "P", "P-G", "P-H", "P-R", "P-R2")
 RECIPE_KEYS = {
     "schema_version", "task", "mode", "run_id", "seed", "hidden", "message", "regional_anchors",
     "depth", "receiver_tile", "primary_queries", "microbatch_cases", "effective_cases",
@@ -49,7 +50,14 @@ RECIPE_KEYS = {
     "root_protocol_go", "manual_full_followup", "parent_checkpoint",
     "auxiliary_calibration_fallback", "population_binding", "mechanism_reference",
     "wind_test_target_values_read",
+    "fresh_matched_comparison", "comparison_protocol", "field_selection", "native_validation_policy",
+    "conditional_confirmation",
 }
+FRESH_MATCHED_COMPARISON_PROTOCOL = "fresh_segmented_multiview_2500_v1"
+FRESH_MATCHED_NATIVE_VALIDATION_POLICY = "consolidated_route_flags_v1"
+FRESH_MATCHED_MODES = ("P", "P-R", "P-R2")
+FRESH_MATCHED_REVIEW_EPOCHS = (100, 500, 1000, 1500, 2500)
+FRESH_MATCHED_SELECTION_EPOCHS = tuple(range(100, 2501, 100))
 
 RECOVERY_OPTIMIZER_SCHEDULE = {
     "peak_lr": 3.0e-4,
@@ -98,6 +106,11 @@ RECOVERY_SOURCE_FILES = (
     "HONF_Proj/Case_WindFarm/src/windfarm/data.py",
     "HONF_Proj/Case_WindFarm/src/windfarm/splits.py",
     "HONF_Proj/Case_WindFarm/src/windfarm/workflows/joint_forward.py",
+)
+FRESH_MATCHED_SOURCE_FILES = (
+    "HONF_Proj/src/honf_forward_core/interface_fields/native_interaction_routing.py",
+    "HONF_Proj/src/config_core/forward/joint_regional/fresh_multiview_thermal_v1.json",
+    "HONF_Proj/src/config_core/forward/joint_regional/fresh_multiview_wind_v1.json",
 )
 
 
@@ -262,7 +275,13 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Joint recipes require a declared mode and fresh trainable weights.")
     flow_readout_law = recipe.get("flow_readout_law")
     if flow_readout_law is not None:
-        if (recipe["task"] != "thermal" or recipe["mode"] not in ("P", "P-G", "P-H")
+        legacy_curl_mode = recipe["mode"] in ("P", "P-G", "P-H")
+        fresh_matched_curl_mode = (
+            recipe.get("fresh_matched_comparison") is True
+            and recipe["mode"] in FRESH_MATCHED_MODES
+        )
+        if (recipe["task"] != "thermal"
+                or not (legacy_curl_mode or fresh_matched_curl_mode)
                 or recipe["formal_full"]):
             raise ValueError("The native curl law is limited to bounded fresh Thermal P-family recipes.")
         if flow_readout_law != NATIVE_CURL_THERMAL_LAW:
@@ -274,7 +293,7 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         if type(recipe.get(name)) is not int or recipe[name] < 1:
             raise ValueError(f"Recipe {name} must be a positive integer.")
     anchors = recipe.get("regional_anchors")
-    if type(anchors) is not int or anchors < (0 if recipe.get("mode") == "P" else 1):
+    if type(anchors) is not int or anchors < (0 if recipe.get("mode") in ("P", "P-R", "P-R2") else 1):
         raise ValueError("Recipe regional_anchors must be zero only for P and positive for graph modes.")
     effective = 48 if recipe["task"] == "thermal" else 24
     if recipe["effective_cases"] != effective or recipe["microbatch_cases"] > effective:
@@ -295,7 +314,14 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         if name in recipe and (not isinstance(recipe[name], (float, int)) or
                                not math.isfinite(recipe[name]) or recipe[name] < 0):
             raise ValueError(f"Recipe {name} must be finite and nonnegative.")
-    recovery = recipe["mode"] in ("P", "P-G", "P-H")
+    fresh_matched = recipe.get("fresh_matched_comparison", False)
+    if type(fresh_matched) is not bool:
+        raise ValueError("Fresh matched comparison flag must be a boolean.")
+    if "conditional_confirmation" in recipe and not fresh_matched:
+        raise ValueError("Conditional confirmation belongs only to the separate fresh matched protocol.")
+    if recipe["mode"] in ("P-R", "P-R2") and not fresh_matched:
+        raise ValueError("Fresh P-R/P-R2 recipes require the explicit matched-initialization protocol.")
+    recovery = recipe["mode"] in ("P", "P-G", "P-H") and not fresh_matched
     prior = recipe.get("locality_prior_strength", 0.0)
     if (type(prior) not in (float, int) or not math.isfinite(prior) or prior < 0
             or (prior and recipe["mode"] not in ("J-H", "P-G", "P-H"))):
@@ -307,6 +333,7 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
     formal_options = {"validation_scope", "optimizer_schedule", "weight_decay",
                       "native_sampling_protocol", "checkpoint_epochs", "write_initial_artifacts"}
     if (not recipe["formal_full"] and not full_followup and formal_options.intersection(recipe)
+            and not fresh_matched
             and not (recovery and not (formal_options - {"optimizer_schedule", "weight_decay", "checkpoint_epochs"}).intersection(recipe))):
         raise ValueError("Formal comparison controls require the separate fullTRAIN identity.")
     if "validation_scope" in recipe and recipe["validation_scope"] != (
@@ -346,9 +373,680 @@ def validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Full-data follow-up cannot reuse the legacy formal_full identity.")
         _validate_full_followup_mechanism(recipe)
         validate_full_train_followup_recipe(recipe, command="prepare")
+    elif fresh_matched:
+        _validate_fresh_matched_recipe(recipe)
     elif recovery:
         _validate_recovery_recipe(recipe)
     return recipe
+
+
+def _fresh_matched_model_contract(task: str, mode: str) -> dict[str, Any]:
+    flow_readout_law = NATIVE_CURL_THERMAL_LAW if task == "thermal" else None
+    contract = _recovery_model_contract(task, "P", flow_readout_law)
+    if mode == "P":
+        contract["native_routing"] = {"enabled": False, "mode": "P"}
+    elif mode == "P-R":
+        contract["native_routing"] = {
+            "schema": "native_interaction_routing_v1", "mode": "P-R",
+            "policy": "learned_density", "views": 1,
+            "score_hidden": 32, "score_bound": 2.0,
+        }
+    elif mode == "P-R2":
+        contract["native_routing"] = {
+            "schema": "native_interaction_routing_v2", "mode": "P-R2",
+            "policy": "learned_density", "views": 2, "feature_blocks": [64, 64],
+            "score_hidden": 32, "score_bound": 2.0,
+        }
+    else:
+        raise ValueError("Fresh matched model contract requires P, P-R or P-R2.")
+    return contract
+
+
+def _validate_fresh_matched_recipe(recipe: dict[str, Any]) -> None:
+    from honf_runtime.unified_training import fresh_matched_recipe_seed
+
+    task, mode = recipe["task"], recipe["mode"]
+    if (recipe.get("comparison_protocol") != FRESH_MATCHED_COMPARISON_PROTOCOL
+            or mode not in FRESH_MATCHED_MODES or recipe.get("formal_full") is not False
+            or recipe.get("full_train_followup1000") is True):
+        raise ValueError("Fresh matched recipes must use the segmented 2500-epoch P/R1/R2 protocol.")
+    run_id = recipe.get("run_id")
+    prefix = "TMV1-" if task == "thermal" else "WMV1-"
+    if (not isinstance(run_id, str) or not run_id.startswith(prefix)
+            or len(run_id) != len(prefix) + 32
+            or any(character not in "0123456789abcdef" for character in run_id[len(prefix):])):
+        raise ValueError("Fresh matched recipe run_id must come from the new UUID allocator.")
+    expected = {
+        "seed": fresh_matched_recipe_seed(recipe, verify_decision=True),
+        "hidden": 128,
+        "message": 128,
+        "regional_anchors": 0,
+        "collective_width": 64,
+        "depth": 2,
+        "receiver_tile": 512,
+        "primary_queries": 1024 if task == "thermal" else 4096,
+        "microbatch_cases": 8,
+        "effective_cases": 48 if task == "thermal" else 24,
+        "total_epochs": 2500,
+        "initialization": "fresh_all_trainable",
+        "launch_policy": "bounded_development",
+        "dataset_protocol": "fixed25_v1" if task == "thermal" else "wind_shared_fixed24_v1",
+        "formal_full": False,
+        "environment_token_shape": [24, 8] if task == "thermal" else [2, 2, 2],
+        "max_sources": 12 if task == "thermal" else 30,
+        "model_contract": _fresh_matched_model_contract(task, mode),
+        "objective_contract": _recovery_objective_contract(task),
+        "engine_schedule": RECOVERY_ENGINE_SCHEDULE,
+        "optimizer_name": "AdamW",
+        "optimizer_betas": [0.9, 0.999],
+        "optimizer_eps": 1.0e-8,
+        "optimizer_schedule": RECOVERY_OPTIMIZER_SCHEDULE,
+        "weight_decay": 1.0e-4 if task == "thermal" else 1.0e-5,
+        "gradient_clip_norm": 1.0,
+        "checkpoint_epochs": RECOVERY_CHECKPOINT_EPOCHS,
+        "write_initial_artifacts": False,
+        "field_selection": {
+            "metric": "field_score", "direction": "minimize",
+            "eligible_epochs": list(FRESH_MATCHED_SELECTION_EPOCHS),
+            "same_selector_for_all_arms": True,
+        },
+        "native_validation_policy": FRESH_MATCHED_NATIVE_VALIDATION_POLICY,
+    }
+    if task == "thermal":
+        expected["flow_readout_law"] = NATIVE_CURL_THERMAL_LAW
+    required = set(expected)
+    if task == "thermal":
+        required.add("calibration_receipt")
+    missing = required - set(recipe)
+    if missing:
+        raise ValueError(f"Fresh matched recipe is missing sealed fields: {sorted(missing)}.")
+    for name, value in expected.items():
+        if recipe.get(name) != value:
+            raise ValueError(f"Fresh matched recipe {name} differs from its fixed segmented protocol.")
+    routing = recipe["model_contract"].get("native_routing")
+    if mode == "P-R":
+        if (not isinstance(routing, dict)
+                or set(routing) != {"schema", "mode", "policy", "views", "score_hidden", "score_bound"}
+                or type(routing.get("views")) is not int
+                or type(routing.get("score_hidden")) is not int
+                or type(routing.get("score_bound")) is not float):
+            raise ValueError("Fresh R1 routing metadata must use the strict v1 scalar schema types.")
+    elif mode == "P-R2" and (
+            not isinstance(routing, dict)
+            or set(routing) != {"schema", "mode", "policy", "views", "feature_blocks",
+                                "score_hidden", "score_bound"}
+            or type(routing.get("views")) is not int
+            or type(routing.get("score_hidden")) is not int
+            or type(routing.get("score_bound")) is not float
+            or type(routing.get("feature_blocks")) is not list
+            or any(type(value) is not int for value in routing["feature_blocks"])):
+        raise ValueError("Fresh R2 routing metadata must use the strict v2 two-view schema types.")
+    if "locality_prior_strength" in recipe and recipe["locality_prior_strength"] != 0:
+        raise ValueError("Fresh P/R1/R2 recipes retain the zero-locality-prior source-preserving core.")
+    if task == "thermal":
+        descriptor = recipe["calibration_receipt"]
+        if (not isinstance(descriptor, dict)
+                or set(descriptor) not in ({"receipt_path", "required_payload_sha256"},
+                                           {"receipt_path", "required_payload_sha256", "file_sha256"})
+                or not isinstance(descriptor["receipt_path"], str)
+                or not descriptor["receipt_path"]):
+            raise ValueError("Fresh matched Thermal recipes require one shared TRAIN-only calibration receipt.")
+        digest = descriptor["required_payload_sha256"]
+        valid_digest = (isinstance(digest, str) and len(digest) == 64
+                        and all(character in "0123456789abcdef" for character in digest))
+        if digest not in ("sealed_after_fresh_P_native_curl_calibration",) and not valid_digest:
+            raise ValueError("Thermal fresh comparison receipt needs the allocator sentinel or a sealed digest.")
+        if "file_sha256" in descriptor and (
+                not isinstance(descriptor["file_sha256"], str)
+                or len(descriptor["file_sha256"]) != 64
+                or any(character not in "0123456789abcdef" for character in descriptor["file_sha256"])):
+            raise ValueError("Thermal fresh comparison calibration file hash is malformed.")
+        calibration = recipe.get("auxiliary_calibration")
+        if digest == "sealed_after_fresh_P_native_curl_calibration" and calibration is not None:
+            raise ValueError("Unresolved Thermal fresh P receipt cannot carry pre-calibrated objective weights.")
+
+
+def fresh_matched_config(task: str) -> tuple[dict[str, Any], Path, str]:
+    if task not in ("thermal", "wind"):
+        raise ValueError("Fresh matched comparison task must be thermal or wind.")
+    config_path = ROOT / "src/config_core/forward/joint_regional" / f"fresh_multiview_{task}_v1.json"
+    config_bytes = config_path.read_bytes()
+    config = json.loads(config_bytes)
+    if (config.get("schema") != "fresh_segmented_multiview_comparison_config_v1"
+            or config.get("task") != task or config.get("arms") != list(FRESH_MATCHED_MODES)
+            or config.get("total_epochs") != 2500
+            or config.get("review_epochs") != list(FRESH_MATCHED_REVIEW_EPOCHS)
+            or config.get("checkpoint_epochs") != list(RECOVERY_CHECKPOINT_EPOCHS)
+            or config.get("field_selection", {}).get("eligible_epochs")
+            != list(FRESH_MATCHED_SELECTION_EPOCHS)
+            or config.get("native_validation_policy") != FRESH_MATCHED_NATIVE_VALIDATION_POLICY
+            or (task == "thermal" and config.get("flow_readout_law") != NATIVE_CURL_THERMAL_LAW)
+            or (task == "wind" and "flow_readout_law" in config)):
+        raise ValueError("Maintained fresh matched comparison config differs from its sealed protocol.")
+    return config, config_path, hashlib.sha256(config_bytes).hexdigest()
+
+
+def _fresh_matched_recipe(config: dict[str, Any], task: str, mode: str,
+                          run_id: str, calibration_path: Path | None) -> dict[str, Any]:
+    optimizer = config["optimizer"]
+    recipe = {
+        "schema_version": 1,
+        "task": task,
+        "mode": mode,
+        "run_id": run_id,
+        "seed": config["seed"],
+        "hidden": config["hidden"],
+        "message": config["message"],
+        "regional_anchors": config["regional_anchors"],
+        "depth": config["depth"],
+        "receiver_tile": config["receiver_tile"],
+        "primary_queries": config["primary_queries"],
+        "microbatch_cases": config["microbatch_cases"],
+        "effective_cases": config["effective_cases"],
+        "formal_full": False,
+        "total_epochs": config["total_epochs"],
+        "initialization": "fresh_all_trainable",
+        "launch_policy": "bounded_development",
+        "dataset_protocol": config["dataset_protocol"],
+        "collective_width": config["collective_width"],
+        "max_sources": config["max_sources"],
+        "environment_token_shape": config["environment_token_shape"],
+        "model_contract": _fresh_matched_model_contract(task, mode),
+        "objective_contract": _recovery_objective_contract(task),
+        "engine_schedule": config["engine_schedule"],
+        "optimizer_name": optimizer["name"],
+        "optimizer_betas": optimizer["betas"],
+        "optimizer_eps": optimizer["eps"],
+        "gradient_clip_norm": optimizer["gradient_clip_norm"],
+        "optimizer_schedule": optimizer["schedule"],
+        "weight_decay": optimizer["weight_decay"],
+        "checkpoint_epochs": config["checkpoint_epochs"],
+        "write_initial_artifacts": config["write_initial_artifacts"],
+        "fresh_matched_comparison": True,
+        "comparison_protocol": FRESH_MATCHED_COMPARISON_PROTOCOL,
+        "field_selection": config["field_selection"],
+        "native_validation_policy": config["native_validation_policy"],
+    }
+    if task == "thermal":
+        if calibration_path is None:
+            raise ValueError("Thermal fresh comparison allocation needs its campaign-owned calibration path.")
+        try:
+            receipt_path = calibration_path.resolve().relative_to(ROOT.resolve()).as_posix()
+        except ValueError:
+            receipt_path = str(calibration_path.resolve())
+        recipe["calibration_receipt"] = {
+            "receipt_path": receipt_path,
+            "required_payload_sha256": "sealed_after_fresh_P_native_curl_calibration",
+        }
+        recipe["flow_readout_law"] = config["flow_readout_law"]
+    return validate_recipe(recipe)
+
+
+def allocate_fresh_matched_comparison(task: str, output_dir: str | Path) -> dict[str, Any]:
+    """Create immutable recipes with new collision-checked IDs; create no model/run state."""
+    config, config_path, config_sha256 = fresh_matched_config(task)
+    campaign_root = Path(output_dir).expanduser().resolve()
+    campaign_root.mkdir(parents=True, exist_ok=False)
+    calibration_path = (campaign_root / "thermal_train_calibration.json") if task == "thermal" else None
+    arms: dict[str, Any] = {}
+    allocated_ids: set[str] = set()
+    for mode in FRESH_MATCHED_MODES:
+        prefix = "TMV1-" if task == "thermal" else "WMV1-"
+        while True:
+            run_id = prefix + uuid.uuid4().hex
+            run_dir = campaign_root / "runs" / run_id
+            if run_id not in allocated_ids and not run_dir.exists():
+                break
+        allocated_ids.add(run_id)
+        recipe = _fresh_matched_recipe(config, task, mode, run_id, calibration_path)
+        recipe_path = campaign_root / "recipes" / f"{mode.replace('-', '_').lower()}.json"
+        recipe_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_once(recipe_path, recipe)
+        arms[mode] = {
+            "run_id": run_id,
+            "recipe_path": str(recipe_path),
+            "recipe_sha256": hashlib.sha256(recipe_path.read_bytes()).hexdigest(),
+            "output_dir": str(run_dir),
+        }
+    manifest = {
+        "schema": FRESH_MATCHED_COMPARISON_PROTOCOL,
+        "task": task,
+        "dataset_protocol": config["dataset_protocol"],
+        "seed": config["seed"],
+        "source_config_path": str(config_path),
+        "source_config_sha256": config_sha256,
+        "campaign_root": str(campaign_root),
+        "review_epochs": config["review_epochs"],
+        "checkpoint_epochs": config["checkpoint_epochs"],
+        "field_selection": config["field_selection"],
+        "thermal_calibration_path": None if calibration_path is None else str(calibration_path),
+        "calibration_output_dir": (None if task != "thermal"
+                                   else str(campaign_root / "calibration-preparation")),
+        "arms": arms,
+        "optimizer_updates": 0,
+        "optimizer_state_created": False,
+    }
+    write_json_once(campaign_root / "comparison_manifest.json", manifest)
+    return manifest
+
+
+def _read_fresh_comparison_manifest(
+    path: str | Path, *, require_fresh_run_dirs: bool = False,
+) -> tuple[dict[str, Any], Path]:
+    manifest_path = Path(path).expanduser().resolve()
+    manifest = json.loads(manifest_path.read_text())
+    if (manifest.get("schema") != FRESH_MATCHED_COMPARISON_PROTOCOL
+            or manifest.get("task") not in ("thermal", "wind")
+            or set(manifest.get("arms", {})) != set(FRESH_MATCHED_MODES)):
+        raise ValueError("Fresh matched comparison manifest has an unsupported schema or arm inventory.")
+    config, config_path, config_sha256 = fresh_matched_config(manifest["task"])
+    if (manifest.get("source_config_path") != str(config_path)
+            or manifest.get("source_config_sha256") != config_sha256
+            or manifest.get("dataset_protocol") != config["dataset_protocol"]
+            or manifest.get("review_epochs") != config["review_epochs"]
+            or manifest.get("checkpoint_epochs") != config["checkpoint_epochs"]
+            or manifest.get("field_selection") != config["field_selection"]):
+        raise ValueError("Fresh matched campaign manifest differs from its maintained config.")
+    campaign_root = Path(manifest["campaign_root"]).resolve()
+    if campaign_root != manifest_path.parent:
+        raise ValueError("Fresh matched manifest path differs from its campaign root.")
+    ids = []
+    for mode in FRESH_MATCHED_MODES:
+        arm = manifest["arms"][mode]
+        recipe_path = Path(arm["recipe_path"]).resolve()
+        if (recipe_path.parent != campaign_root / "recipes"
+                or not recipe_path.is_file()
+                or hashlib.sha256(recipe_path.read_bytes()).hexdigest() != arm["recipe_sha256"]):
+            raise ValueError(f"Fresh matched {mode} recipe is missing or changed after allocation.")
+        recipe = read_recipe(recipe_path)
+        if recipe["mode"] != mode or recipe["run_id"] != arm["run_id"]:
+            raise ValueError(f"Fresh matched {mode} recipe differs from its allocated run identity.")
+        output_dir = Path(arm["output_dir"]).resolve()
+        if output_dir != campaign_root / "runs" / arm["run_id"]:
+            raise ValueError(f"Fresh matched {mode} output path is not owned by its allocated run ID.")
+        if require_fresh_run_dirs and output_dir.exists() and any(output_dir.iterdir()):
+            raise FileExistsError(f"Fresh matched allocated output is already nonempty: {output_dir}")
+        ids.append(arm["run_id"])
+    if len(ids) != len(set(ids)):
+        raise ValueError("Fresh matched arm run IDs must be unique.")
+    return manifest, manifest_path
+
+
+def _native_score_trunk_digest(model: Any) -> str:
+    digest = hashlib.sha256()
+    tensors = [
+        (name, value) for name, value in model.state_dict().items()
+        if name.startswith("core.native_routing.score_mlps.") and not name.endswith(".2.weight")
+    ]
+    if not tensors:
+        raise ValueError("Native learned-density model is missing its score trunk inventory.")
+    for name, tensor in sorted(tensors):
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(str((tuple(tensor.shape), str(tensor.dtype))).encode("ascii"))
+        digest.update(tensor.detach().to(device="cpu").contiguous().reshape(-1).view(__import__("torch").uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _provider_shared_comparison_binding(provider_identity: dict[str, Any]) -> dict[str, Any]:
+    if provider_identity.get("task") == "ThermalChannel":
+        names = ("manifest_fingerprint", "training_case_ids_sha256", "validation_case_ids_sha256",
+                 "normalization_stats_sha256", "response_scales", "native_query_budget",
+                 "loss_weights", "auxiliary_calibration")
+        return {name: provider_identity.get(name) for name in names}
+    if provider_identity.get("dataset") == "WindFarm":
+        objective = provider_identity.get("objective", {})
+        training = provider_identity.get("training", {})
+        return {
+            "subset_manifest_sha256": provider_identity.get("subset_manifest_sha256"),
+            "train_row_indices_sha256": provider_identity.get("train_row_indices_sha256"),
+            "validation_row_indices_sha256": provider_identity.get("validation_row_indices_sha256"),
+            "normalizer_and_background_source": provider_identity.get("normalizer_and_background_source"),
+            "component_scales_mps": objective.get("component_scales_mps"),
+            "scale_rule": objective.get("scale_rule"),
+            "scale_source_sha256": objective.get("scale_source_sha256"),
+            "scale_calibration": objective.get("scale_calibration"),
+            "scale_cache_binding": objective.get("scale_cache_binding"),
+            "role_query_counts": objective.get("role_query_counts"),
+            "primary_queries_per_case": training.get("primary_queries_per_case"),
+        }
+    raise ValueError("Fresh comparison provider identity has an unsupported dataset.")
+
+
+def prepare_fresh_matched_comparison(manifest_path: str | Path) -> dict[str, Any]:
+    """Build all arms on CPU, verify common starts/scales, and seal preparation only."""
+    manifest, manifest_path = _read_fresh_comparison_manifest(manifest_path, require_fresh_run_dirs=True)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    import torch
+
+    torch.set_num_threads(1)
+    prepared: dict[str, Any] = {}
+    identities: dict[str, dict[str, Any]] = {}
+    providers: dict[str, dict[str, Any]] = {}
+    initializations: dict[str, dict[str, Any]] = {}
+    models: dict[str, Any] = {}
+    for mode in FRESH_MATCHED_MODES:
+        arm = manifest["arms"][mode]
+        recipe_path = Path(arm["recipe_path"])
+        recipe = read_recipe(recipe_path)
+        if recipe["task"] == "thermal":
+            recipe = _bind_calibration_receipt(recipe)
+        model, provider, engine, identity = build(
+            recipe, device="cpu", require_clean_source=True, include_dev_targets=False)
+        if recipe["task"] == "thermal":
+            if (getattr(provider, "dev_targets_materialized", None) is not False
+                    or tuple(getattr(provider, "validation_cases", ()))):
+                raise RuntimeError("Fresh Thermal preparation must keep all DEV targets unmaterialized.")
+        elif getattr(provider, "_validation_cache", None) is not None:
+            raise RuntimeError("Fresh Wind preparation must leave its lazy DEV validation cache empty.")
+        model_summary = summary(model, provider, engine, identity)
+        providers[mode] = dict(provider.identity_payload())
+        identities[mode] = identity
+        initializations[mode] = identity["fresh_initialization"]
+        models[mode] = model
+        prepared[mode] = {
+            "run_id": arm["run_id"],
+            "recipe_sha256": arm["recipe_sha256"],
+            "initial_model_state_sha256": identity["initial_model_state_sha256"],
+            "common_initialization_sha256": initializations[mode]["common_initialization_sha256"],
+            "provider_scale_binding_sha256": initializations[mode]["provider_scale_binding_sha256"],
+            "sampler_namespace": initializations[mode]["sampler_namespace"],
+            "optimizer_updates": 0,
+            "optimizer_started": False,
+            "active_parameter_count": model_summary["active_parameter_count"],
+            "optimizer_schedule_contract": model_summary["optimizer_schedule_contract"],
+        }
+    common_digests = {item["common_initialization_sha256"] for item in prepared.values()}
+    scale_digests = {item["provider_scale_binding_sha256"] for item in prepared.values()}
+    provider_bindings = {_canonical_json(_provider_shared_comparison_binding(identity))
+                         for identity in providers.values()}
+    sampler_namespaces = {_canonical_json(item["sampler_namespace"]) for item in prepared.values()}
+    if len(common_digests) != 1:
+        raise ValueError("P, R1 and R2 common initialized value tensors differ.")
+    if len(scale_digests) != 1 or len(provider_bindings) != 1:
+        raise ValueError("P, R1 and R2 do not share exact TRAIN normalization/calibration/objective bindings.")
+    if len(sampler_namespaces) != 1:
+        raise ValueError("P, R1 and R2 do not share the exact dataset/seed/query sampler namespace.")
+    r1_trunk = _native_score_trunk_digest(models["P-R"])
+    r2_trunk = _native_score_trunk_digest(models["P-R2"])
+    if r1_trunk != r2_trunk:
+        raise ValueError("Fresh R1/R2 typed score trunks do not share their private initialization seed.")
+    for mode in ("P-R", "P-R2"):
+        projection_names = [name for name, tensor in models[mode].state_dict().items()
+                            if name.startswith("core.native_routing.score_mlps.") and name.endswith(".2.weight")]
+        if not projection_names or any(bool(torch.count_nonzero(models[mode].state_dict()[name]))
+                                       for name in projection_names):
+            raise ValueError(f"Fresh {mode} score projections must initialize to exact zero.")
+    preparation_root = manifest_path.parent / "preparation"
+    preparation_root.mkdir(parents=True, exist_ok=True)
+    for mode in FRESH_MATCHED_MODES:
+        write_json_once(preparation_root / f"{mode.replace('-', '_').lower()}.json", {
+            "status": "prepared_only",
+            "identity": identities[mode],
+            "provider_identity": providers[mode],
+            "optimizer_updates": 0,
+            "optimizer_started": False,
+            "formal_training_started": False,
+        })
+    seal = {
+        "schema": "fresh_matched_initialization_seal_v1",
+        "comparison_manifest": str(manifest_path),
+        "comparison_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "task": manifest["task"],
+        "dataset_protocol": manifest["dataset_protocol"],
+        "source_config_sha256": manifest["source_config_sha256"],
+        "arms": prepared,
+        "common_initialization_sha256": next(iter(common_digests)),
+        "provider_scale_binding_sha256": next(iter(scale_digests)),
+        "shared_provider_binding_sha256": hashlib.sha256(next(iter(provider_bindings)).encode()).hexdigest(),
+        "sampler_namespace_sha256": hashlib.sha256(next(iter(sampler_namespaces)).encode()).hexdigest(),
+        "r1_r2_score_trunk_sha256": r1_trunk,
+        "optimizer_updates": 0,
+        "optimizer_started": False,
+        "formal_training_started": False,
+        "training_launch_authorized": False,
+    }
+    write_json_once(manifest_path.parent / "comparison_seal.json", seal)
+    return seal
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str, separators=(",", ":"), allow_nan=False)
+
+
+def _fresh_audit_sha256(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value))
+
+
+def validate_fresh_matched_streams(manifest_path: str | Path) -> dict[str, Any]:
+    manifest, manifest_path = _read_fresh_comparison_manifest(manifest_path)
+    seal_path = manifest_path.parent / "comparison_seal.json"
+    if not seal_path.is_file():
+        raise FileNotFoundError("Run prepare-matched before reviewing training stream audits.")
+    seal = json.loads(seal_path.read_text())
+    if seal.get("schema") != "fresh_matched_initialization_seal_v1":
+        raise ValueError("Fresh matched preparation seal is missing or malformed.")
+    if (seal.get("comparison_manifest_sha256") != hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            or seal.get("task") != manifest["task"]
+            or seal.get("dataset_protocol") != manifest["dataset_protocol"]
+            or set(seal.get("arms", {})) != set(FRESH_MATCHED_MODES)):
+        raise ValueError("Fresh matched preparation seal does not bind the current campaign manifest.")
+    receipts: dict[str, Any] = {}
+    history_hashes: dict[str, str] = {}
+    identity_bindings: dict[str, Any] = {}
+    fields = (
+        "case_order_sha256", "case_visits", "optimizer_updates", "microbatches",
+        "query_sampling_sha256", "query_sampling_by_update_sha256", "observed_mask_sha256",
+        "mask_sha256_by_update", "observed_denominators_sha256",
+        "observed_denominators_by_update", "observed_denominator_totals",
+        "effective_cases", "microbatch_cases", "sampling_dataset_id", "sampler_namespace_sha256",
+    )
+    for mode in FRESH_MATCHED_MODES:
+        arm = manifest["arms"][mode]
+        output = Path(arm["output_dir"])
+        identity_path = output / "experiment_identity.json"
+        history_path = output / "history.json"
+        if not identity_path.is_file() or not history_path.is_file():
+            raise FileNotFoundError(f"Fresh matched {mode} lacks its saved identity or history.")
+        identity = json.loads(identity_path.read_text())
+        rows = json.loads(history_path.read_text())
+        row = next((item for item in rows if int(item.get("epoch", -1)) == 1), None)
+        audit = row.get("observed_stream_audit") if isinstance(row, dict) else None
+        marker = identity.get("fresh_initialization")
+        if (not isinstance(marker, dict) or not isinstance(audit, dict)
+                or audit.get("schema") != "observed_fresh_training_stream_v1"
+                or identity.get("recipe", {}).get("mode") != mode
+                or identity.get("recipe", {}).get("fresh_matched_comparison") is not True
+                or marker.get("active_mode") != mode):
+            raise ValueError(f"Fresh matched {mode} epoch-1 observed stream receipt is absent.")
+        preparation_arm = seal["arms"][mode]
+        if (marker.get("common_initialization_sha256") != seal.get("common_initialization_sha256")
+                or marker.get("provider_scale_binding_sha256") != seal.get("provider_scale_binding_sha256")
+                or marker.get("sampler_namespace") != preparation_arm.get("sampler_namespace")
+                or preparation_arm.get("run_id") != arm["run_id"]):
+            raise ValueError(f"Fresh matched {mode} training identity differs from its prepared seal.")
+        if not isinstance(row, dict):
+            raise TypeError(f"Fresh matched {mode} history has no epoch-1 row.")
+        update_count = row.get("optimizer_updates")
+        case_visits = row.get("case_visits")
+        microbatches = row.get("microbatches")
+        if (type(update_count) is not int or update_count < 1
+                or type(case_visits) is not int or case_visits < 1
+                or type(microbatches) is not int or microbatches < update_count
+                or type(audit.get("optimizer_updates")) is not int
+                or type(audit.get("case_visits")) is not int
+                or type(audit.get("microbatches")) is not int
+                or type(audit.get("effective_cases")) is not int
+                or type(audit.get("microbatch_cases")) is not int
+                or not isinstance(audit.get("sampling_dataset_id"), str)
+                or audit.get("optimizer_updates") != update_count
+                or audit.get("case_visits") != case_visits
+                or audit.get("microbatches") != microbatches
+                or audit.get("effective_cases") != identity.get("engine_config", {}).get("effective_cases")
+                or audit.get("microbatch_cases") != identity.get("engine_config", {}).get("microbatch_cases")
+                or audit.get("sampling_dataset_id") != identity.get("sampling_dataset_id")
+                or audit.get("sampler_namespace_sha256") != _fresh_audit_sha256(marker.get("sampler_namespace"))):
+            raise ValueError(f"Fresh matched {mode} observed stream counters differ from the saved engine identity.")
+        for name in ("case_order_sha256", "query_sampling_sha256", "observed_mask_sha256",
+                     "observed_denominators_sha256", "sampler_namespace_sha256"):
+            if not _is_sha256(audit.get(name)):
+                raise ValueError(f"Fresh matched {mode} observed stream digest {name} is malformed.")
+        if (row.get("case_order_sha256") != audit["case_order_sha256"]
+                or row.get("query_sampling_sha256") != audit["query_sampling_sha256"]):
+            raise ValueError(f"Fresh matched {mode} history summary differs from its observed streams.")
+        query_updates = audit.get("query_sampling_by_update_sha256")
+        mask_updates = audit.get("mask_sha256_by_update")
+        denominator_updates = audit.get("observed_denominators_by_update")
+        if not all(isinstance(value, list) and len(value) == update_count for value in (
+                query_updates, mask_updates, denominator_updates)):
+            raise ValueError(f"Fresh matched {mode} per-update stream evidence has the wrong length.")
+        expected_indices = list(range(update_count))
+        if (not all(isinstance(item, dict) and type(item.get("update_index")) is int
+                    for item in query_updates + mask_updates + denominator_updates)
+                or [item.get("update_index") for item in query_updates if isinstance(item, dict)] != expected_indices
+                or [item.get("update_index") for item in mask_updates if isinstance(item, dict)] != expected_indices
+                or [item.get("update_index") for item in denominator_updates if isinstance(item, dict)]
+                != expected_indices
+                or not all(_is_sha256(item.get("sha256")) for item in query_updates if isinstance(item, dict))
+                or not all(_is_sha256(item.get("sha256")) for item in mask_updates if isinstance(item, dict))):
+            raise ValueError(f"Fresh matched {mode} per-update stream digests are malformed or reordered.")
+        digest_sequence = hashlib.sha256(json.dumps([item["sha256"] for item in query_updates], separators=(",", ":"),
+                                             allow_nan=False).encode("utf-8")).hexdigest()
+        if digest_sequence != audit["query_sampling_sha256"]:
+            raise ValueError(f"Fresh matched {mode} query stream aggregate differs from its update hashes.")
+        if _fresh_audit_sha256(mask_updates) != audit["observed_mask_sha256"]:
+            raise ValueError(f"Fresh matched {mode} mask stream aggregate differs from its update hashes.")
+        if _fresh_audit_sha256(denominator_updates) != audit["observed_denominators_sha256"]:
+            raise ValueError(f"Fresh matched {mode} denominator aggregate differs from its update records.")
+        totals: dict[str, float] = {}
+        for item in denominator_updates:
+            if not isinstance(item, dict) or not isinstance(item.get("denominators"), dict):
+                raise TypeError(f"Fresh matched {mode} denominator update record is malformed.")
+            for name, value in item["denominators"].items():
+                if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                    raise ValueError(f"Fresh matched {mode} denominator {name} is not finite and nonnegative.")
+                totals[name] = totals.get(name, 0.0) + float(value)
+        if audit.get("observed_denominator_totals") != totals:
+            raise ValueError(f"Fresh matched {mode} denominator totals differ from the observed update records.")
+        receipts[mode] = {name: audit[name] for name in fields}
+        history_hashes[mode] = hashlib.sha256(history_path.read_bytes()).hexdigest()
+        identity_bindings[mode] = {
+            "common_initialization_sha256": marker["common_initialization_sha256"],
+            "provider_scale_binding_sha256": marker["provider_scale_binding_sha256"],
+            "sampler_namespace": marker["sampler_namespace"],
+        }
+    reference = receipts["P"]
+    differences = {
+        mode: [name for name in fields if receipts[mode][name] != reference[name]]
+        for mode in ("P-R", "P-R2")
+    }
+    if any(differences.values()):
+        raise ValueError(f"Observed epoch-1 case/query/mask/denominator streams differ across arms: {differences}.")
+    receipt = {
+        "schema": "fresh_matched_observed_stream_comparison_v1",
+        "comparison_manifest": str(manifest_path),
+        "comparison_seal_sha256": hashlib.sha256(seal_path.read_bytes()).hexdigest(),
+        "task": manifest["task"],
+        "dataset_protocol": manifest["dataset_protocol"],
+        "arms": {
+            mode: {
+                "run_id": manifest["arms"][mode]["run_id"],
+                "history_sha256": history_hashes[mode],
+                "observed_stream_audit": receipts[mode],
+                "identity_binding": identity_bindings[mode],
+            }
+            for mode in FRESH_MATCHED_MODES
+        },
+        "matched": True,
+        "optimizer_updates_observed": reference["optimizer_updates"],
+        "case_visits_observed": reference["case_visits"],
+    }
+    write_json_once(manifest_path.parent / "observed_stream_comparison.json", receipt)
+    return receipt
+
+
+def forecast_fresh_matched_run(output_dir: str | Path, *, horizon: int = 2500) -> dict[str, Any]:
+    """Forecast full epochs from observed train and full-DEV validation durations."""
+    import numpy as np
+
+    output = Path(output_dir).expanduser().resolve()
+    identity_path, history_path = output / "experiment_identity.json", output / "history.json"
+    if not identity_path.is_file() or not history_path.is_file():
+        raise FileNotFoundError("A fresh-run forecast requires a saved identity and completed epoch history.")
+    identity = json.loads(identity_path.read_text())
+    marker = identity.get("fresh_initialization")
+    if not isinstance(marker, dict):
+        raise TypeError("Forecast target is not an explicitly fresh matched run.")
+    recipe = identity.get("recipe", {})
+    if (recipe.get("fresh_matched_comparison") is not True or recipe.get("total_epochs") != horizon
+            or recipe.get("comparison_protocol") != FRESH_MATCHED_COMPARISON_PROTOCOL):
+        raise ValueError("Forecast horizon or recipe differs from the fresh segmented comparison.")
+    rows = json.loads(history_path.read_text())
+    if not rows:
+        raise ValueError("Fresh matched run has no completed epoch rows to forecast from.")
+    training_rows = [float(row["train_seconds"]) for row in rows if row.get("train_seconds") is not None]
+    validation_rows = [float(row["validation_seconds"]) for row in rows
+                       if row.get("validation_seconds") is not None]
+    if not training_rows or not validation_rows:
+        return {
+            "status": "incomplete_forecast_inputs",
+            "reason": "Need measured TRAIN and full-DEV validation durations from at least one review epoch.",
+            "completed_epoch": max(int(row["epoch"]) for row in rows),
+            "optimizer_updates": sum(int(row["optimizer_updates"]) for row in rows),
+            "case_visits": sum(int(row["case_visits"]) for row in rows),
+            "forecast_seconds": None,
+        }
+    recent_training = training_rows[-min(len(training_rows), 20):]
+    recent_validation = validation_rows[-min(len(validation_rows), 5):]
+    training_epoch_seconds = float(np.median(recent_training))
+    validation_review_seconds = float(np.median(recent_validation))
+    completed_epoch = max(int(row["epoch"]) for row in rows)
+    remaining_epochs = max(0, horizon - completed_epoch)
+    review_count = sum(1 for epoch in FRESH_MATCHED_SELECTION_EPOCHS
+                       if completed_epoch < epoch <= horizon)
+    last = rows[-1]
+    best_row = min((row for row in rows if row.get("validation", {}).get("field_score") is not None),
+                   key=lambda row: float(row["validation"]["field_score"]), default=None)
+    provider = identity.get("provider_identity", {})
+    if provider.get("task") == "ThermalChannel":
+        query_budget = provider.get("native_query_budget")
+    else:
+        objective = provider.get("objective", {})
+        query_budget = {
+            "primary_queries_per_case": provider.get("training", {}).get("primary_queries_per_case"),
+            "role_query_counts": objective.get("role_query_counts"),
+        }
+    return {
+        "status": "measured_epoch_and_validation_forecast",
+        "run_id": recipe["run_id"],
+        "active_mode": marker["active_mode"],
+        "completed_epoch": completed_epoch,
+        "remaining_epochs": remaining_epochs,
+        "review_epochs_remaining": review_count,
+        "median_training_seconds_per_epoch_recent": training_epoch_seconds,
+        "median_full_dev_validation_seconds_recent": validation_review_seconds,
+        "forecast_full_review_epoch_seconds": training_epoch_seconds + validation_review_seconds,
+        "forecast_remaining_train_seconds": remaining_epochs * training_epoch_seconds,
+        "forecast_remaining_validation_seconds": review_count * validation_review_seconds,
+        "forecast_remaining_seconds_including_validation": (
+            remaining_epochs * training_epoch_seconds + review_count * validation_review_seconds),
+        "observed_case_visits_per_epoch": int(last["case_visits"]),
+        "observed_optimizer_updates_per_epoch": int(last["optimizer_updates"]),
+        "observed_case_visits_total": sum(int(row["case_visits"]) for row in rows),
+        "observed_optimizer_updates_total": sum(int(row["optimizer_updates"]) for row in rows),
+        "observed_work_counts_last_epoch": last.get("work_counts", {}),
+        "observed_train_objective_last_epoch": last.get("train_losses", {}),
+        "observed_validation_field_score_last_review": (
+            None if not last.get("validation") else last["validation"].get("field_score")),
+        "current_best_field_selected_age": None if best_row is None else int(best_row["epoch"]),
+        "primary_and_auxiliary_query_budget": query_budget,
+        "forecast_is_extrapolation_from_measured_epochs": True,
+        "optimizer_updates_in_this_command": 0,
+    }
 
 
 def _validate_recovery_recipe(recipe: dict[str, Any]) -> None:
@@ -500,8 +1198,10 @@ def _validate_full_followup_mechanism(recipe: dict[str, Any]) -> None:
 def resolved_recipe(args: argparse.Namespace) -> dict[str, Any]:
     if args.recipe_json:
         recipe = read_recipe(args.recipe_json)
-        if recipe["mode"] in ("P", "P-G", "P-H") and recipe["task"] == "thermal" \
-                and args.command not in ("calibrate-thermal", "validate-followup"):
+        if (recipe["task"] == "thermal"
+                and (recipe.get("fresh_matched_comparison") is True
+                     or recipe["mode"] in ("P", "P-G", "P-H"))
+                and args.command not in ("calibrate-thermal", "validate-followup")):
             recipe = _bind_calibration_receipt(recipe)
         return recipe
     task = args.task
@@ -549,6 +1249,8 @@ def _bind_calibration_receipt(recipe: dict[str, Any]) -> dict[str, Any]:
         source_options["flow_readout_law"] = flow_readout_law
     if recipe.get("execution_protocol") == FULL_TRAIN_FOLLOWUP_PROTOCOL:
         source_options["full_train_followup"] = True
+    if recipe.get("fresh_matched_comparison") is True:
+        source_options["fresh_matched"] = True
     active_source_identity = training_source_identity(**source_options)
     if receipt.get("training_source_identity") != active_source_identity:
         raise ValueError("Thermal calibration receipt was produced by a different committed training source revision.")
@@ -593,9 +1295,12 @@ def _check_fresh_calibration_destinations(recipe: dict[str, Any], output_dir: st
 
 def training_source_identity(*, require_clean: bool,
                              flow_readout_law: str | None = None,
-                             full_train_followup: bool = False) -> dict[str, Any]:
+                             full_train_followup: bool = False,
+                             fresh_matched: bool = False) -> dict[str, Any]:
     repo_root = ROOT.parent
     source_files = _recovery_source_files(flow_readout_law, full_train_followup=full_train_followup)
+    if fresh_matched:
+        source_files = tuple(dict.fromkeys((*source_files, *FRESH_MATCHED_SOURCE_FILES)))
     dirty = subprocess.run(
         ["git", "status", "--porcelain", "--", *source_files],
         cwd=repo_root, check=True, text=True, capture_output=True,
@@ -645,8 +1350,10 @@ def model_digest(model: Any) -> str:
 
 
 def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False,
-          require_clean_source: bool = False):
+          require_clean_source: bool = False, include_dev_targets: bool = True):
     from honf_runtime.unified_training import EngineConfig, ScheduleSpec, SelectionPolicy, TrainingEngine
+    if type(include_dev_targets) is not bool:
+        raise TypeError("Fresh runner include_dev_targets must be boolean.")
     seed_all(recipe["seed"])
     if recipe["task"] == "thermal":
         from channelthermal.training.joint_task import build_thermal_joint_task as factory
@@ -655,8 +1362,11 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
     task_options = {name: recipe[name] for name in ("response_coefficient", "operator_coefficient", "auxiliary_calibration",
                                                  "locality_prior_strength", "validation_scope", "weight_decay",
                                                  "native_sampling_protocol", "flow_readout_law",
-                                                 "full_train_followup1000")
+                                                 "full_train_followup1000", "fresh_matched_comparison",
+                                                 "conditional_confirmation")
                     if name in recipe}
+    if recipe["task"] == "thermal":
+        task_options["include_dev_targets"] = include_dev_targets
     if "optimizer_schedule" in recipe:
         task_options["optimizer_schedule"] = ScheduleSpec(total_epochs=recipe["total_epochs"],
                                                           **recipe["optimizer_schedule"])
@@ -676,6 +1386,17 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
         formal_full=recipe["formal_full"], total_epochs=recipe["total_epochs"],
         **task_options,
     )
+    fresh_matched = recipe.get("fresh_matched_comparison") is True
+    if fresh_matched:
+        if recipe.get("native_validation_policy") != FRESH_MATCHED_NATIVE_VALIDATION_POLICY:
+            raise ValueError("Fresh matched recipe lacks its explicit consolidated native-validation policy.")
+        core = getattr(model, "core", None)
+        setter = getattr(core, "set_consolidated_native_validation", None)
+        if not callable(setter):
+            raise TypeError("Fresh matched native model does not expose consolidated validation controls.")
+        setter(True)
+        if getattr(core, "consolidated_native_validation", None) is not True:
+            raise RuntimeError("Fresh matched consolidated native-validation policy was not enabled.")
     declared_engine = recipe.get("engine_schedule", {})
     config = EngineConfig(
         seed=recipe["seed"], microbatch_cases=recipe["microbatch_cases"],
@@ -699,6 +1420,8 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
         source_options["flow_readout_law"] = flow_readout_law
     if recipe.get("execution_protocol") == FULL_TRAIN_FOLLOWUP_PROTOCOL:
         source_options["full_train_followup"] = True
+    if recipe.get("fresh_matched_comparison") is True:
+        source_options["fresh_matched"] = True
     source_identity = training_source_identity(**source_options)
     identity = {
         "workflow": "joint_regional_fields_v1", "recipe": recipe,
@@ -707,6 +1430,20 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
         "initialization": "fresh_all_trainable", "external_learned_field_files": [],
         "solver_attempts": 0, "WindTEST_targets": "locked",
     }
+    if fresh_matched:
+        identity["native_validation_policy"] = FRESH_MATCHED_NATIVE_VALIDATION_POLICY
+    if fresh_matched and not calibration_only:
+        from honf_runtime.unified_training import fresh_matched_initialization_receipt
+
+        identity["workflow"] = FRESH_MATCHED_COMPARISON_PROTOCOL
+        identity["fresh_initialization"] = fresh_matched_initialization_receipt(
+            model, provider.identity_payload(), active_mode=recipe["mode"],
+            seed=recipe["seed"], sampling_version=config.sampling_version,
+            deterministic_case_order=config.deterministic_case_order)
+        identity["initial_model_state_sha256"] = identity["fresh_initialization"]["initial_model_state_sha256"]
+        identity["initialization"] = "fresh_common_trunk_private_router_rng"
+        identity["inherited_parameter_names"] = []
+        identity["optimizer_state_start"] = "fresh_zero_moments"
     return model, provider, engine, identity
 
 
@@ -781,10 +1518,14 @@ def validate_manual_recipe(model: Any, provider: Any, engine: Any, identity: dic
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "dry-run", "validate-followup", "calibrate-thermal", "start", "resume", "branch"))
+    parser.add_argument("command", choices=(
+        "prepare", "dry-run", "validate-followup", "calibrate-thermal", "start", "resume", "branch",
+        "allocate-matched", "prepare-matched", "validate-matched-streams", "forecast",
+    ))
     parser.add_argument("--task", choices=("thermal", "wind"))
     parser.add_argument("--mode", choices=MODES, default="J-H")
     parser.add_argument("--recipe-json")
+    parser.add_argument("--comparison-manifest")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--hidden", type=int, default=128)
     parser.add_argument("--message", type=int, default=128)
@@ -799,9 +1540,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir")
     parser.add_argument("--stop-after", type=int)
+    parser.add_argument("--forecast-horizon", type=int, default=2500)
     parser.add_argument("--manual-formal-launch", action="store_true")
     parser.add_argument("--threads", type=int, default=1)
     args = parser.parse_args(argv)
+    if args.command == "allocate-matched":
+        if args.task is None or args.output_dir is None:
+            parser.error("allocate-matched requires --task and a new --output-dir.")
+        try:
+            result = allocate_fresh_matched_comparison(args.task, args.output_dir)
+        except FileExistsError as error:
+            parser.error(str(error))
+        print(json.dumps(result, indent=2, sort_keys=True), flush=True)
+        return 0
+    if args.command == "prepare-matched":
+        if args.comparison_manifest is None:
+            parser.error("prepare-matched requires --comparison-manifest.")
+        print(json.dumps(prepare_fresh_matched_comparison(args.comparison_manifest),
+                         indent=2, sort_keys=True), flush=True)
+        return 0
+    if args.command == "validate-matched-streams":
+        if args.comparison_manifest is None:
+            parser.error("validate-matched-streams requires --comparison-manifest.")
+        print(json.dumps(validate_fresh_matched_streams(args.comparison_manifest),
+                         indent=2, sort_keys=True), flush=True)
+        return 0
+    if args.command == "forecast":
+        if args.output_dir is None:
+            parser.error("forecast requires --output-dir for a prepared/running fresh history.")
+        print(json.dumps(forecast_fresh_matched_run(args.output_dir, horizon=args.forecast_horizon),
+                         indent=2, sort_keys=True), flush=True)
+        return 0
     recipe = resolved_recipe(args)
     full_followup = recipe.get("execution_protocol") == FULL_TRAIN_FOLLOWUP_PROTOCOL
     if args.command == "validate-followup":
@@ -842,7 +1611,8 @@ def main(argv: list[str] | None = None) -> int:
         calibration_receipt_path, calibration_invocation_path = _check_fresh_calibration_destinations(
             recipe, args.output_dir
         )
-    recovery_execution = recipe["mode"] in ("P", "P-G", "P-H") and args.command in (
+    recovery_execution = (recipe["mode"] in ("P", "P-G", "P-H")
+                          or recipe.get("fresh_matched_comparison") is True) and args.command in (
         "calibrate-thermal", "start", "resume", "branch")
     if args.command in ("start", "resume", "branch"):
         if not args.output_dir or args.stop_after is None:
@@ -851,6 +1621,11 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("Formal optimization requires explicit --manual-formal-launch; preparation is inert.")
         if not 1 <= args.stop_after <= recipe["total_epochs"]:
             parser.error("Requested stop exceeds the declared horizon.")
+        if recipe.get("fresh_matched_comparison") is True:
+            if args.command == "branch":
+                parser.error("Fresh matched P/R1/R2 histories cannot branch from a checkpoint.")
+            if args.stop_after not in FRESH_MATCHED_SELECTION_EPOCHS:
+                parser.error("Fresh matched runs stop only at identical 100-epoch review/selection ages.")
     if args.command == 'branch':
         if (recipe['formal_full'] or recipe['mode'] != 'J-H'
                 or not args.branch_from_checkpoint or not args.revision_declaration):
@@ -928,6 +1703,11 @@ def main(argv: list[str] | None = None) -> int:
         from honf_runtime.run_layout import resolve_checkpoint
         output = Path(args.output_dir).resolve()
         if args.command in ('start', 'branch'):
+            if recipe.get("fresh_matched_comparison") is True:
+                if output.name != recipe["run_id"]:
+                    parser.error("Fresh matched output directory basename must equal its allocated UUID run_id.")
+                if output.exists() and any(output.iterdir()):
+                    parser.error("Fresh matched start refuses to overwrite a nonempty allocated run directory.")
             write_json(output / "resolved_recipe.json", {
                 "recipe": recipe,
                 "training_source_identity": identity["training_source_identity"],

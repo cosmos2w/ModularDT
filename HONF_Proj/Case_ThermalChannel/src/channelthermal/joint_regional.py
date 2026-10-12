@@ -44,7 +44,8 @@ JOINT_THERMAL_CHECKPOINT_SCHEMA = "thermal_joint_regional_checkpoint_v1"
 JOINT_THERMAL_CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
 JOINT_THERMAL_MODES = ("J-direct", "J-geometry", "J-H")
 INTERACTION_PRESERVING_THERMAL_MODES = ("P", "P-G", "P-H")
-NATIVE_ROUTING_THERMAL_MODES = ("P-R", "P-C")
+NATIVE_ROUTING_THERMAL_MODES = ("P-R", "P-C", "P-R2")
+NATIVE_ROUTING_CHILD_THERMAL_MODES = ("P-R", "P-C")
 ALL_INTERACTION_PRESERVING_THERMAL_MODES = (
     INTERACTION_PRESERVING_THERMAL_MODES + NATIVE_ROUTING_THERMAL_MODES
 )
@@ -52,9 +53,12 @@ NATIVE_CURL_THERMAL_FAMILY = "thermal_interaction_preserving_native_curl_v1"
 NATIVE_CURL_THERMAL_CHECKPOINT_SCHEMA = "thermal_interaction_preserving_native_curl_checkpoint_v1"
 NATIVE_ROUTING_THERMAL_FAMILY = "thermal_native_interaction_routing_v1"
 NATIVE_ROUTING_THERMAL_CHECKPOINT_SCHEMA = "thermal_native_interaction_routing_checkpoint_v1"
+NATIVE_ROUTING_R2_THERMAL_CHECKPOINT_SCHEMA = "thermal_native_interaction_routing_checkpoint_v2"
 NATIVE_CURL_ROUTING_THERMAL_FAMILY = "thermal_native_curl_interaction_routing_v1"
 NATIVE_CURL_ROUTING_THERMAL_CHECKPOINT_SCHEMA = "thermal_native_curl_interaction_routing_checkpoint_v1"
+NATIVE_CURL_ROUTING_R2_THERMAL_CHECKPOINT_SCHEMA = "thermal_native_curl_interaction_routing_checkpoint_v2"
 NATIVE_ROUTING_CONFIG_SCHEMA = "native_interaction_routing_v1"
+NATIVE_ROUTING_R2_CONFIG_SCHEMA = "native_interaction_routing_v2"
 NATIVE_ROUTING_CHILD_SCHEMA = "native_interaction_routing_child_v1"
 
 
@@ -66,6 +70,17 @@ def _thermal_interaction_family(mode: str, native_curl: bool) -> str:
 
 
 def _thermal_native_routing_config(mode: str, seed: int) -> dict[str, Any]:
+    if mode == "P-R2":
+        return {
+            "schema": NATIVE_ROUTING_R2_CONFIG_SCHEMA,
+            "mode": mode,
+            "policy": "learned_density",
+            "initialization_seed": seed,
+            "score_hidden": 32,
+            "score_bound": 2.0,
+            "views": 2,
+            "feature_blocks": [64, 64],
+        }
     config = {
         "schema": NATIVE_ROUTING_CONFIG_SCHEMA,
         "mode": mode,
@@ -82,8 +97,196 @@ def _thermal_native_routing_config(mode: str, seed: int) -> dict[str, Any]:
 
 
 def _is_sha256_hex(value: Any) -> bool:
-    return (isinstance(value, str) and len(value) == 64
+    return (type(value) is str and len(value) == 64
             and all(character in "0123456789abcdef" for character in value))
+
+
+FRESH_SEGMENTED_MULTIVIEW_WORKFLOW = "fresh_segmented_multiview_2500_v1"
+FRESH_MATCHED_INITIALIZATION_SCHEMA = "matched_fresh_multiview_initialization_v1"
+FRESH_MATCHED_ROUTING_PREFIXES = ["core.native_routing."]
+
+
+def _validate_thermal_fresh_receipt_shape(
+    marker: Mapping[str, Any], provider_identity: Mapping[str, Any], *,
+    mode: str, seed: int, sampling_version: str, deterministic_case_order: bool,
+) -> None:
+    """Reject malformed or detached fresh-start metadata before model loading."""
+    from honf_runtime.unified_training import _sampling_dataset_id
+
+    expected_keys = {
+        "schema", "active_mode", "native_validation_policy", "source_checkpoint",
+        "inherited_parameter_names", "optimizer_state_start",
+        "common_parameter_exclusion_prefixes", "common_initialization_sha256",
+        "initial_model_state_sha256", "active_model_config_sha256",
+        "provider_identity_sha256", "provider_scale_binding_sha256", "sampler_namespace",
+    }
+    if set(marker) != expected_keys:
+        raise ValueError("Fresh Thermal initialization receipt has an incomplete or extended schema.")
+    if marker.get("schema") != FRESH_MATCHED_INITIALIZATION_SCHEMA:
+        raise ValueError("Fresh matched initialization schema is unsupported.")
+    digest_names = (
+        "common_initialization_sha256", "initial_model_state_sha256",
+        "active_model_config_sha256", "provider_identity_sha256",
+        "provider_scale_binding_sha256",
+    )
+    if any(not _is_sha256_hex(marker.get(name)) for name in digest_names):
+        raise ValueError("Fresh Thermal initialization receipt contains a malformed SHA-256 digest.")
+    if marker.get("common_parameter_exclusion_prefixes") != FRESH_MATCHED_ROUTING_PREFIXES:
+        raise ValueError("Fresh Thermal common digest must exclude only private routing tensors.")
+    if (marker.get("active_mode") != mode
+            or marker.get("native_validation_policy") != "consolidated_route_flags_v1"
+            or marker.get("source_checkpoint") is not None
+            or marker.get("inherited_parameter_names") != []
+            or marker.get("optimizer_state_start") != "fresh_zero_moments"):
+        raise ValueError("Fresh Thermal receipt does not describe a no-parent, zero-moment start.")
+    if (type(seed) is not int or type(sampling_version) is not str
+            or type(deterministic_case_order) is not bool or deterministic_case_order is not True):
+        raise ValueError("Fresh Thermal receipt sampler controls have noncanonical types.")
+    expected_sampler = {
+        "sampling_version": sampling_version,
+        "seed": seed,
+        "dataset_id": _sampling_dataset_id(provider_identity),
+        "case_order": "seed_epoch_v1_deterministic_permutation",
+        "case_order_arm_independent": True,
+        "query_stream_keying": "dataset_seed_epoch_named_case_role_stream",
+        "query_stream_arm_independent": True,
+        "query_stream_update_independent": True,
+        "query_stream_microbatch_independent": True,
+    }
+    sampler = marker.get("sampler_namespace")
+    if (not isinstance(sampler, Mapping) or set(sampler) != set(expected_sampler)
+            or dict(sampler) != expected_sampler
+            or type(sampler.get("seed")) is not int
+            or any(type(sampler.get(name)) is not bool for name in (
+                "case_order_arm_independent", "query_stream_arm_independent",
+                "query_stream_update_independent", "query_stream_microbatch_independent",
+            ))):
+        raise ValueError("Fresh Thermal receipt sampler namespace is not bound to this TRAIN provider.")
+
+
+def _thermal_fresh_engine_mode(
+    payload: Mapping[str, Any], engine_identity: Mapping[str, Any],
+    provider_identity: Mapping[str, Any], recipe: Mapping[str, Any],
+) -> str:
+    """Validate the separate no-parent fresh P/R1/R2 engine-checkpoint contract."""
+    from honf_runtime.unified_training import fresh_matched_recipe_seed
+
+    declared_seed = fresh_matched_recipe_seed(recipe)
+    if (payload.get("workflow") != FRESH_SEGMENTED_MULTIVIEW_WORKFLOW
+            or engine_identity.get("workflow") != FRESH_SEGMENTED_MULTIVIEW_WORKFLOW):
+        raise ValueError("Fresh Thermal engine checkpoint workflow marker is inconsistent.")
+    if not JointThermalRegionalAdapter._native_input_equal(
+            engine_identity.get("provider_identity"), provider_identity):
+        raise ValueError("Fresh Thermal engine identity and provider binding disagree.")
+    mode = recipe.get("mode")
+    if (type(recipe.get("schema_version")) is not int or recipe.get("schema_version") != 1
+            or recipe.get("comparison_protocol") != FRESH_SEGMENTED_MULTIVIEW_WORKFLOW
+            or recipe.get("task") != "thermal"
+            or recipe.get("fresh_matched_comparison") is not True
+            or recipe.get("dataset_protocol") != "fixed25_v1"
+            or type(recipe.get("seed")) is not int or recipe.get("seed") != declared_seed
+            or type(recipe.get("total_epochs")) is not int or recipe.get("total_epochs") != 2500
+            or mode not in ("P", "P-R", "P-R2")
+            or recipe.get("flow_readout_law") != NATIVE_CURL_READOUT_LAW
+            or recipe.get("native_validation_policy") != "consolidated_route_flags_v1"):
+        raise ValueError("Fresh Thermal engine recipe is not the sealed fixed25 native-curl P/R1/R2 protocol.")
+    engine_config = engine_identity.get("engine_config")
+    schedule = recipe.get("engine_schedule")
+    if (not isinstance(engine_config, Mapping) or not isinstance(schedule, Mapping)
+            or engine_config.get("seed") != recipe.get("seed")
+            or engine_config.get("total_epochs") != recipe.get("total_epochs")
+            or engine_config.get("sampling_version") != schedule.get("sampling_version")
+            or engine_config.get("sampling_version") != "case_epoch_v1"
+            or engine_config.get("deterministic_case_order") is not True
+            or engine_config.get("training_mode") != "joint"):
+        raise ValueError("Fresh Thermal engine sampler/schedule differs from its resolved recipe.")
+    model_config = provider_identity.get("model_config")
+    if (not isinstance(model_config, Mapping)
+            or provider_identity.get("task") != "ThermalChannel"
+            or provider_identity.get("fresh_matched_comparison") is not True
+            or provider_identity.get("dataset_split") != "fixed25_v1"
+            or provider_identity.get("training_membership_scope") != "fixed25_v1_selected_train_150"
+            or provider_identity.get("arm") != mode or model_config.get("mode") != mode
+            or payload.get("arm") != mode):
+        raise ValueError("Fresh Thermal engine arm, provider and recipe do not match.")
+    contract = recipe.get("model_contract")
+    route_contract = contract.get("native_routing") if isinstance(contract, Mapping) else None
+    route_config = model_config.get("native_routing")
+    expected_route_contract = {
+        "P": {"enabled": False, "mode": "P"},
+        "P-R": {
+            "schema": NATIVE_ROUTING_CONFIG_SCHEMA, "mode": "P-R",
+            "policy": "learned_density", "views": 1, "score_hidden": 32, "score_bound": 2.0,
+        },
+        "P-R2": {
+            "schema": NATIVE_ROUTING_R2_CONFIG_SCHEMA, "mode": "P-R2",
+            "policy": "learned_density", "views": 2, "feature_blocks": [64, 64],
+            "score_hidden": 32, "score_bound": 2.0,
+        },
+    }[mode]
+    if mode in NATIVE_ROUTING_THERMAL_MODES:
+        if (type(route_contract) is not dict
+                or type(route_contract.get("score_hidden")) is not int
+                or type(route_contract.get("score_bound")) is not float
+                or type(route_contract.get("views")) is not int):
+            raise TypeError("Fresh Thermal recipe route widths and bounds must use their canonical numeric types.")
+        if mode == "P-R2" and (
+                type(route_contract.get("feature_blocks")) is not list
+                or any(type(value) is not int for value in route_contract["feature_blocks"])):
+            raise TypeError("Fresh Thermal P-R2 recipe view metadata must use exact integer types.")
+    elif (type(route_contract) is not dict
+          or type(route_contract.get("enabled")) is not bool
+          or type(route_contract.get("mode")) is not str):
+        raise TypeError("Fresh Thermal direct-P route contract must use its canonical boolean and string types.")
+    if route_contract != expected_route_contract:
+        raise ValueError("Fresh Thermal recipe route contract is not canonical for its arm.")
+    if mode == "P":
+        if route_config is not None:
+            raise ValueError("Fresh Thermal direct P cannot declare provider native-routing metadata.")
+    else:
+        if (not isinstance(route_config, Mapping)
+                or type(route_config.get("initialization_seed")) is not int
+                or type(route_config.get("score_hidden")) is not int
+                or type(route_config.get("score_bound")) is not float):
+            raise TypeError("Fresh Thermal provider route metadata has noncanonical numeric types.")
+        if mode == "P-R2" and (
+                type(route_config.get("views")) is not int
+                or type(route_config.get("feature_blocks")) is not list
+                or any(type(value) is not int for value in route_config["feature_blocks"])):
+            raise TypeError("Fresh Thermal provider P-R2 metadata must use exact integer types.")
+        if (route_config.get("schema") != expected_route_contract["schema"]
+                or route_config.get("mode") != mode
+                or route_config.get("policy") != "learned_density"
+                or route_config.get("initialization_seed") != recipe.get("seed")
+                or route_config.get("score_hidden") != 32
+                or route_config.get("score_bound") != 2.0
+                or (mode == "P-R2" and (route_config.get("views") != 2
+                                        or route_config.get("feature_blocks") != [64, 64]))):
+            raise ValueError("Fresh Thermal recipe and provider route metadata differ.")
+    if (engine_identity.get("native_validation_policy") != "consolidated_route_flags_v1"
+            or engine_identity.get("initialization") != "fresh_common_trunk_private_router_rng"
+            or engine_identity.get("inherited_parameter_names") != []
+            or engine_identity.get("optimizer_state_start") != "fresh_zero_moments"
+            or engine_identity.get("external_learned_field_files") != []
+            or payload.get("branch_parent") is not None):
+        raise ValueError("Fresh Thermal engine checkpoint contains inherited state or a mismatched policy.")
+    marker = engine_identity.get("fresh_initialization")
+    if not isinstance(marker, Mapping):
+        raise TypeError("Fresh Thermal engine checkpoint has no matched-initialization receipt.")
+    _validate_thermal_fresh_receipt_shape(
+        marker, provider_identity, mode=mode, seed=recipe["seed"],
+        sampling_version=engine_config["sampling_version"],
+        deterministic_case_order=engine_config["deterministic_case_order"],
+    )
+    if (marker.get("active_mode") != mode
+            or marker.get("native_validation_policy") != "consolidated_route_flags_v1"
+            or marker.get("source_checkpoint") is not None
+            or marker.get("inherited_parameter_names") != []
+            or marker.get("optimizer_state_start") != "fresh_zero_moments"
+            or engine_identity.get("initial_model_state_sha256")
+            != marker.get("initial_model_state_sha256")):
+        raise ValueError("Fresh Thermal engine receipt does not match its no-parent arm identity.")
+    return str(mode)
 
 
 def _thermal_engine_child_mode(
@@ -113,7 +316,8 @@ def _thermal_engine_child_mode(
     routed_modes = set(NATIVE_ROUTING_THERMAL_MODES)
 
     if receipt is None:
-        if routed_modes.intersection((recipe_mode, arm, provider_mode, provider_arm)):
+        active_routed_modes = routed_modes.intersection((recipe_mode, arm, provider_mode, provider_arm))
+        if active_routed_modes:
             raise ValueError("Thermal native-routing engine checkpoints require a verified architecture-child receipt.")
         if (arm != recipe_mode or provider_mode != recipe_mode
                 or (provider_arm is not None and provider_arm != recipe_mode)):
@@ -123,7 +327,7 @@ def _thermal_engine_child_mode(
         raise TypeError("Thermal architecture-child checkpoint lineage must be mappings.")
 
     target_mode = arm
-    if target_mode not in NATIVE_ROUTING_THERMAL_MODES:
+    if target_mode not in NATIVE_ROUTING_CHILD_THERMAL_MODES:
         raise ValueError("Thermal architecture-child arm must be P-R or P-C.")
     if not (recipe_mode == "P" and provider_mode == target_mode
             and provider_arm == target_mode and receipt.get("target_mode") == target_mode):
@@ -461,7 +665,8 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             "joint_output_laws": self.interaction_output_laws,
         }
 
-    def _prepare_context_tensors(self, tensors, environment_flow_features):
+    def _prepare_context_tensors(self, tensors, environment_flow_features, *,
+                                 routing_trace=False, native_route_intervention=None):
         """Prepare joint state while declaring only the affine T block as a control response.
 
         The shared ``ThermalSourceResponse`` helper compares model-level
@@ -475,7 +680,16 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             raise ValueError("Joint Thermal affine response block disagrees with its heat dependency.")
         if environment_flow_features is not None:
             raise ValueError("Joint Thermal configuration does not accept predicted-flow environment features.")
-        prepared = self.core.prepare_context(**tensors)
+        if isinstance(self.core, InteractionPreservingJointCore):
+            prepared = self.core.prepare_context(
+                **tensors,
+                routing_trace=routing_trace,
+                native_route_intervention=native_route_intervention,
+            )
+        else:
+            if routing_trace or native_route_intervention is not None:
+                raise ValueError("Native routing traces and interventions require the P-family Thermal core.")
+            prepared = self.core.prepare_context(**tensors)
         prepared.dependency = dependency
         prepared.model_output_laws = self.interaction_output_laws
         return prepared
@@ -489,7 +703,8 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         return prepared
 
     def prepare_native(self, structure, fluid_xy, *, chunk_size=None,
-                       retained_access_mass=None, receiver_edge_executor='dense', **kwargs):
+                       retained_access_mass=None, receiver_edge_executor='dense',
+                       routing_trace=False, native_route_intervention=None, **kwargs):
         tile = self.receiver_tile if chunk_size is None else int(chunk_size)
         if tile < 1:
             raise ValueError("Joint Thermal receiver chunk size must be positive.")
@@ -500,7 +715,11 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             'receiver_edge_executor': receiver_edge_executor,
         }
         prepared = super().prepare_native(
-            structure, fluid_xy, chunk_size=tile, receiver_read_options=read_options, **kwargs)
+            structure, fluid_xy, chunk_size=tile, receiver_read_options=read_options,
+            routing_trace=routing_trace,
+            native_route_intervention=native_route_intervention,
+            **kwargs,
+        )
         _, catalogue = self._source_identity(structure, prepared.context.centers, prepared.context.present)
         self._bind_source_id_catalogue(prepared, catalogue)
         prepared.normalization_stats_snapshot = {
@@ -646,7 +865,9 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
         device=None,
         *,
         ntheta: int = 64,
-    ) -> dict[str, np.ndarray]:
+        routing_trace: bool = False,
+        native_route_intervention: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if isinstance(ntheta, (bool, np.bool_)) or not isinstance(ntheta, (int, np.integer)):
             raise TypeError("Native interface receiver count ntheta must be a positive integer.")
         if ntheta < 1:
@@ -668,22 +889,30 @@ class JointThermalRegionalAdapter(ThermalSourceResponse):
             local = local[None]
         heat = torch.as_tensor(sample["structure"]["heat_powers"], device=device, dtype=torch.float32)[None]
         with torch.no_grad():
-            output = self.apply_native(
-                self.prepare_native(
-                    structure, fluid, local_query_points=local, ntheta=ntheta,
-                    **({"native_solid_mask": torch.as_tensor(sample["module_mask"], device=device, dtype=torch.bool)[None]}
-                       if getattr(self, "flow_readout_law", None) == NATIVE_CURL_READOUT_LAW else {}),
-                ),
-                heat,
+            prepared = self.prepare_native(
+                structure, fluid, local_query_points=local, ntheta=ntheta,
+                routing_trace=routing_trace,
+                native_route_intervention=native_route_intervention,
+                **({"native_solid_mask": torch.as_tensor(
+                    sample["module_mask"], device=device, dtype=torch.bool
+                )[None]} if getattr(self, "flow_readout_law", None) == NATIVE_CURL_READOUT_LAW else {}),
             )
+            output = self.apply_native(prepared, heat)
         ny, nx = np.asarray(sample["x_grid"]).shape
-        return {
+        result = {
             "pred_field_grid": output["pred_field"][0].cpu().numpy().reshape(ny, nx, 5),
             "pred_interface": output["pred_interface"][0].cpu().numpy(),
             "pred_internal_temperature": output["pred_internal_temperature"][0, ..., 0].cpu().numpy(),
             "pred_port_condition": output["pred_port_condition"][0].cpu().numpy(),
             "initial_port_status": output["initial_port_status"],
         }
+        if routing_trace:
+            result["native_routing_trace"] = prepared.context.native_routing_trace
+            result["native_routing_trace_metadata"] = prepared.context.native_routing_trace_metadata
+            result["fluid_stencil_valid"] = (
+                prepared.stencils["fluid"].valid[0].cpu().numpy().reshape(ny, nx)
+            )
+        return result
 
     def prepare_record(self, record, device=None, *, chunk_size=None, native_solid_mask=None):
         """Prepare native physical receivers from source IDs and input metadata."""
@@ -957,7 +1186,8 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
             self._joint_model_config["factorized_affine_execution"] = True
 
     def prepare_native(self, structure, fluid_xy, *, chunk_size=None, retained_access_mass=None,
-                       receiver_edge_executor="dense", native_solid_mask=None, **kwargs):
+                       receiver_edge_executor="dense", native_solid_mask=None,
+                       routing_trace=False, native_route_intervention=None, **kwargs):
         """Use the inherited physical receiver builder without J-only read knobs."""
         if retained_access_mass is not None or receiver_edge_executor != "dense":
             raise ValueError("The interaction-preserving Thermal core uses its declared dense direct read.")
@@ -967,7 +1197,10 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
         if "receiver_read_options" in kwargs:
             raise ValueError("P-family receiver preparation does not accept legacy retained-access options.")
         prepared = ThermalSourceResponse.prepare_native(
-            self, structure, fluid_xy, chunk_size=tile, **kwargs
+            self, structure, fluid_xy, chunk_size=tile,
+            routing_trace=routing_trace,
+            native_route_intervention=native_route_intervention,
+            **kwargs,
         )
         _, catalogue = self._source_identity(
             structure, prepared.context.centers, prepared.context.present
@@ -1056,9 +1289,14 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
 
     def checkpoint_payload(self, *, provider_identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if self.mode in NATIVE_ROUTING_THERMAL_MODES:
-            checkpoint_schema = (NATIVE_CURL_ROUTING_THERMAL_CHECKPOINT_SCHEMA
-                                 if self.flow_readout_law else
-                                 NATIVE_ROUTING_THERMAL_CHECKPOINT_SCHEMA)
+            if self.mode == "P-R2":
+                checkpoint_schema = (NATIVE_CURL_ROUTING_R2_THERMAL_CHECKPOINT_SCHEMA
+                                     if self.flow_readout_law else
+                                     NATIVE_ROUTING_R2_THERMAL_CHECKPOINT_SCHEMA)
+            else:
+                checkpoint_schema = (NATIVE_CURL_ROUTING_THERMAL_CHECKPOINT_SCHEMA
+                                     if self.flow_readout_law else
+                                     NATIVE_ROUTING_THERMAL_CHECKPOINT_SCHEMA)
         else:
             checkpoint_schema = (NATIVE_CURL_THERMAL_CHECKPOINT_SCHEMA
                                  if self.flow_readout_law else
@@ -1120,11 +1358,14 @@ def load_interaction_preserving_thermal_checkpoint(
         raise ValueError("Interaction-preserving Thermal checkpoints cannot bind an external learned parent.")
 
     engine_identity = None
+    fresh_engine_checkpoint = False
     standalone_schemas = {
         "thermal_interaction_preserving_joint_checkpoint_v1": (False, False),
         NATIVE_CURL_THERMAL_CHECKPOINT_SCHEMA: (True, False),
         NATIVE_ROUTING_THERMAL_CHECKPOINT_SCHEMA: (False, True),
+        NATIVE_ROUTING_R2_THERMAL_CHECKPOINT_SCHEMA: (False, True),
         NATIVE_CURL_ROUTING_THERMAL_CHECKPOINT_SCHEMA: (True, True),
+        NATIVE_CURL_ROUTING_R2_THERMAL_CHECKPOINT_SCHEMA: (True, True),
     }
     if payload.get("checkpoint_schema") in standalone_schemas:
         native_curl, native_routing = standalone_schemas[payload["checkpoint_schema"]]
@@ -1142,7 +1383,8 @@ def load_interaction_preserving_thermal_checkpoint(
         stats = payload.get("global_normalization_stats")
         state = payload.get("model_state_dict")
     elif payload.get("checkpoint_schema_version") == 1:
-        if payload.get("workflow") != "joint_regional_fields_v1":
+        fresh_engine_checkpoint = payload.get("workflow") == FRESH_SEGMENTED_MULTIVIEW_WORKFLOW
+        if not fresh_engine_checkpoint and payload.get("workflow") != "joint_regional_fields_v1":
             raise ValueError("Engine checkpoint workflow is not the maintained joint regional trainer.")
         engine_identity = payload.get("experiment_identity")
         if not isinstance(engine_identity, Mapping):
@@ -1151,14 +1393,22 @@ def load_interaction_preserving_thermal_checkpoint(
         recipe = engine_identity.get("recipe")
         if not isinstance(provider_identity, Mapping) or not isinstance(recipe, Mapping):
             raise TypeError("Engine checkpoint must bind both provider identity and the resolved recipe.")
+        if fresh_engine_checkpoint:
+            child_mode = _thermal_fresh_engine_mode(payload, engine_identity, provider_identity, recipe)
+        else:
+            if (engine_identity.get("workflow") != payload.get("workflow")
+                    or recipe.get("fresh_matched_comparison") is True):
+                raise ValueError("Fresh Thermal engine checkpoints require their separate workflow and receipt.")
+            child_mode = None
         if (recipe.get("task") != "thermal" or recipe.get("mode") not in ALL_INTERACTION_PRESERVING_THERMAL_MODES
                 or engine_identity.get("external_learned_field_files") != []):
             raise ValueError("Engine checkpoint is not a fresh, self-contained Thermal P-family run.")
         if provider_identity.get("task") != "ThermalChannel":
             raise ValueError("Engine checkpoint provider is not the maintained Thermal task.")
-        child_mode = _thermal_engine_child_mode(
-            payload, engine_identity, provider_identity, recipe,
-        )
+        if child_mode is None:
+            child_mode = _thermal_engine_child_mode(
+                payload, engine_identity, provider_identity, recipe,
+            )
         native_curl = recipe.get("flow_readout_law") == NATIVE_CURL_READOUT_LAW
         native_routing = child_mode in NATIVE_ROUTING_THERMAL_MODES
         if recipe.get("flow_readout_law") not in (None, NATIVE_CURL_READOUT_LAW):
@@ -1249,11 +1499,13 @@ def load_interaction_preserving_thermal_checkpoint(
         if engine_identity is not None else
         payload.get("checkpoint_schema") in (
             NATIVE_ROUTING_THERMAL_CHECKPOINT_SCHEMA,
+            NATIVE_ROUTING_R2_THERMAL_CHECKPOINT_SCHEMA,
             NATIVE_CURL_ROUTING_THERMAL_CHECKPOINT_SCHEMA,
+            NATIVE_CURL_ROUTING_R2_THERMAL_CHECKPOINT_SCHEMA,
         )
     )
     if native_routing != checkpoint_has_native_routing:
-        raise ValueError("Thermal route checkpoint schema does not match its configured P-R/P-C mode.")
+        raise ValueError("Thermal route checkpoint schema does not match its configured routed mode.")
     anchors = 0 if mode in ("P",) + NATIVE_ROUTING_THERMAL_MODES else 16
     expected_config = {
         "family": expected_family,
@@ -1300,6 +1552,16 @@ def load_interaction_preserving_thermal_checkpoint(
             raise TypeError("Thermal native-routing seed must be an integer.")
         if mode == "P-R" and type(route_config.get("score_bound")) is not float:
             raise TypeError("Thermal P-R score bound must be stored as a float.")
+        if mode == "P-R2":
+            if type(route_config.get("score_hidden")) is not int:
+                raise TypeError("Thermal P-R2 score hidden width must be an integer.")
+            if type(route_config.get("score_bound")) is not float:
+                raise TypeError("Thermal P-R2 score bound must be stored as a float.")
+            if type(route_config.get("views")) is not int:
+                raise TypeError("Thermal P-R2 view count must be an integer.")
+            if (type(route_config.get("feature_blocks")) is not list
+                    or any(type(value) is not int for value in route_config["feature_blocks"])):
+                raise TypeError("Thermal P-R2 feature blocks must be a list of integers.")
     if config != expected_config:
         raise ValueError("Thermal P-family model config differs from the sealed 8/14/8, H128, E192 native contract.")
     expected_adapter = {
@@ -1334,7 +1596,28 @@ def load_interaction_preserving_thermal_checkpoint(
         raise ValueError("Thermal P-family model config does not round-trip canonically.")
     if any(not isinstance(name, str) or not name.startswith("core.") for name in state):
         raise ValueError("Thermal P-family checkpoint tensors must belong to its one active core.")
+    if fresh_engine_checkpoint:
+        from honf_runtime.unified_training import _validate_fresh_matched_initialization
+
+        assert engine_identity is not None
+        fresh_recipe = engine_identity["recipe"]
+        engine_config = engine_identity["engine_config"]
+        marker = engine_identity["fresh_initialization"]
+        _validate_fresh_matched_initialization(
+            marker, model, provider_identity,
+            arm=child_mode,
+            seed=fresh_recipe["seed"],
+            sampling_version=engine_config["sampling_version"],
+            deterministic_case_order=engine_config["deterministic_case_order"],
+        )
     model.load_state_dict(state, strict=True)
+    if fresh_engine_checkpoint:
+        setter = getattr(model.core, "set_consolidated_native_validation", None)
+        if not callable(setter):
+            raise TypeError("Fresh Thermal P-family adapter does not expose consolidated validation controls.")
+        setter(True)
+        if getattr(model.core, "consolidated_native_validation", None) is not True:
+            raise RuntimeError("Fresh Thermal consolidated native-validation policy did not reactivate after load.")
     if any(not name.startswith("core.") for name, _ in model.named_parameters()):
         raise RuntimeError("Thermal P-family adapter registered parameters outside the new joint core.")
     return model.to(device)

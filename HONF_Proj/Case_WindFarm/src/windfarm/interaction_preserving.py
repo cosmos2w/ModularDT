@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,12 +20,79 @@ from .joint_regional import (
 from .normalization import VelocityNormalizer, VerticalProfileBaseline
 
 INTERACTION_PRESERVING_WIND_MODES = ("P", "P-G", "P-H")
-NATIVE_ROUTING_WIND_MODES = ("P-R", "P-C")
+NATIVE_ROUTING_WIND_MODES = ("P-R", "P-C", "P-R2")
 ALL_INTERACTION_PRESERVING_WIND_MODES = (
     INTERACTION_PRESERVING_WIND_MODES + NATIVE_ROUTING_WIND_MODES
 )
 NATIVE_ROUTING_WIND_FAMILY = "wind_native_interaction_routing_v1"
 NATIVE_ROUTING_CONFIG_SCHEMA = "native_interaction_routing_v1"
+NATIVE_ROUTING_R2_CONFIG_SCHEMA = "native_interaction_routing_v2"
+FRESH_SEGMENTED_MULTIVIEW_WORKFLOW = "fresh_segmented_multiview_2500_v1"
+FRESH_MATCHED_INITIALIZATION_SCHEMA = "matched_fresh_multiview_initialization_v1"
+FRESH_MATCHED_ROUTING_PREFIXES = ["core.native_routing."]
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return (type(value) is str and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value))
+
+
+def _validate_wind_fresh_receipt_shape(
+    marker: Mapping[str, Any], provider_identity: Mapping[str, Any], *,
+    mode: str, seed: int, sampling_version: str, deterministic_case_order: bool,
+) -> None:
+    """Reject malformed or detached fresh-start metadata before model loading."""
+    from honf_runtime.unified_training import _sampling_dataset_id
+
+    expected_keys = {
+        "schema", "active_mode", "native_validation_policy", "source_checkpoint",
+        "inherited_parameter_names", "optimizer_state_start",
+        "common_parameter_exclusion_prefixes", "common_initialization_sha256",
+        "initial_model_state_sha256", "active_model_config_sha256",
+        "provider_identity_sha256", "provider_scale_binding_sha256", "sampler_namespace",
+    }
+    if set(marker) != expected_keys:
+        raise ValueError("Fresh Wind initialization receipt has an incomplete or extended schema.")
+    if marker.get("schema") != FRESH_MATCHED_INITIALIZATION_SCHEMA:
+        raise ValueError("Fresh matched initialization schema is unsupported.")
+    digest_names = (
+        "common_initialization_sha256", "initial_model_state_sha256",
+        "active_model_config_sha256", "provider_identity_sha256",
+        "provider_scale_binding_sha256",
+    )
+    if any(not _is_sha256_hex(marker.get(name)) for name in digest_names):
+        raise ValueError("Fresh Wind initialization receipt contains a malformed SHA-256 digest.")
+    if marker.get("common_parameter_exclusion_prefixes") != FRESH_MATCHED_ROUTING_PREFIXES:
+        raise ValueError("Fresh Wind common digest must exclude only private routing tensors.")
+    if (marker.get("active_mode") != mode
+            or marker.get("native_validation_policy") != "consolidated_route_flags_v1"
+            or marker.get("source_checkpoint") is not None
+            or marker.get("inherited_parameter_names") != []
+            or marker.get("optimizer_state_start") != "fresh_zero_moments"):
+        raise ValueError("Fresh Wind receipt does not describe a no-parent, zero-moment start.")
+    if (type(seed) is not int or type(sampling_version) is not str
+            or type(deterministic_case_order) is not bool or deterministic_case_order is not True):
+        raise ValueError("Fresh Wind receipt sampler controls have noncanonical types.")
+    expected_sampler = {
+        "sampling_version": sampling_version,
+        "seed": seed,
+        "dataset_id": _sampling_dataset_id(provider_identity),
+        "case_order": "seed_epoch_v1_deterministic_permutation",
+        "case_order_arm_independent": True,
+        "query_stream_keying": "dataset_seed_epoch_named_case_role_stream",
+        "query_stream_arm_independent": True,
+        "query_stream_update_independent": True,
+        "query_stream_microbatch_independent": True,
+    }
+    sampler = marker.get("sampler_namespace")
+    if (not isinstance(sampler, Mapping) or set(sampler) != set(expected_sampler)
+            or dict(sampler) != expected_sampler
+            or type(sampler.get("seed")) is not int
+            or any(type(sampler.get(name)) is not bool for name in (
+                "case_order_arm_independent", "query_stream_arm_independent",
+                "query_stream_update_independent", "query_stream_microbatch_independent",
+            ))):
+        raise ValueError("Fresh Wind receipt sampler namespace is not bound to this TRAIN provider.")
 
 
 class InteractionPreservingWindModel(WindFarmJointRegionalModel):
@@ -205,6 +273,17 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
                     "score_hidden": 32,
                     "score_bound": 2.0,
                 }
+            elif mode == "P-R2":
+                expected_route = {
+                    "schema": NATIVE_ROUTING_R2_CONFIG_SCHEMA,
+                    "mode": "P-R2",
+                    "policy": "learned_density",
+                    "initialization_seed": payload["seed"],
+                    "score_hidden": 32,
+                    "score_bound": 2.0,
+                    "views": 2,
+                    "feature_blocks": [64, 64],
+                }
             else:
                 expected_route = {
                     "schema": NATIVE_ROUTING_CONFIG_SCHEMA,
@@ -213,12 +292,21 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
                     "initialization_seed": payload["seed"],
                     "control_hidden": 34,
                 }
-            if route != expected_route:
-                raise ValueError("Saved Wind native-routing policy, schema, seed or sealed width is not canonical.")
             if type(route.get("initialization_seed")) is not int:
                 raise TypeError("Saved Wind native-routing seed must be an integer.")
-            if mode == "P-R" and type(route.get("score_bound")) is not float:
-                raise TypeError("Saved Wind P-R score bound must be stored as a float.")
+            if mode in ("P-R", "P-R2") and type(route.get("score_bound")) is not float:
+                label = "P-R2" if mode == "P-R2" else "P-R"
+                raise TypeError(f"Saved Wind {label} score bound must be stored as a float.")
+            if mode == "P-R2":
+                if type(route.get("score_hidden")) is not int:
+                    raise TypeError("Saved Wind P-R2 score hidden width must be an integer.")
+                if type(route.get("views")) is not int:
+                    raise TypeError("Saved Wind P-R2 view count must be an integer.")
+                if (type(route.get("feature_blocks")) is not list
+                        or any(type(value) is not int for value in route["feature_blocks"])):
+                    raise TypeError("Saved Wind P-R2 feature blocks must be a list of integers.")
+            if route != expected_route:
+                raise ValueError("Saved Wind native-routing policy, schema, seed or sealed width is not canonical.")
         elif "native_routing" in core:
             raise ValueError("Legacy Wind P/P-G/P-H configs cannot declare a native-routing module.")
         anchors = core.get("regional_anchors")
@@ -346,10 +434,181 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
         return result
 
 
+def load_interaction_preserving_wind_checkpoint(
+    source: Mapping[str, Any] | str | Path, device: torch.device | str = "cpu",
+) -> InteractionPreservingWindModel:
+    """Load an explicitly fresh matched P/R1/R2 Unified TrainingEngine checkpoint."""
+    if isinstance(source, Mapping):
+        payload = dict(source)
+    else:
+        payload = torch.load(Path(source), map_location="cpu", weights_only=False)
+    if not isinstance(payload, Mapping):
+        raise TypeError("Interaction-preserving Wind checkpoint must be a mapping.")
+    if any(key in payload for key in (
+        "parent_checkpoint", "flow_checkpoint", "thermal_parent", "flow_parent", "parent_model"
+    )):
+        raise ValueError("Interaction-preserving Wind checkpoints cannot bind an external learned parent.")
+    if (type(payload.get("checkpoint_schema_version")) is not int
+            or payload.get("checkpoint_schema_version") != 1
+            or payload.get("workflow") != FRESH_SEGMENTED_MULTIVIEW_WORKFLOW):
+        raise ValueError("Wind engine checkpoint is not from the fresh segmented multiview workflow.")
+    epoch = payload.get("epoch")
+    if type(epoch) is not int or epoch < 1:
+        raise ValueError("Fresh Wind engine checkpoint must declare a positive integer epoch.")
+    identity = payload.get("experiment_identity")
+    if not isinstance(identity, Mapping):
+        raise TypeError("Fresh Wind engine checkpoint has no sealed experiment identity.")
+    provider_identity = identity.get("provider_identity")
+    recipe = identity.get("recipe")
+    if not isinstance(provider_identity, Mapping) or not isinstance(recipe, Mapping):
+        raise TypeError("Fresh Wind engine checkpoint must bind provider identity and resolved recipe mappings.")
+    if identity.get("workflow") != FRESH_SEGMENTED_MULTIVIEW_WORKFLOW:
+        raise ValueError("Fresh Wind engine identity workflow differs from its checkpoint marker.")
+    mode = recipe.get("mode")
+    from honf_runtime.unified_training import fresh_matched_recipe_seed
+
+    declared_seed = fresh_matched_recipe_seed(recipe)
+    if (type(recipe.get("schema_version")) is not int or recipe.get("schema_version") != 1
+            or recipe.get("comparison_protocol") != FRESH_SEGMENTED_MULTIVIEW_WORKFLOW
+            or recipe.get("task") != "wind" or recipe.get("fresh_matched_comparison") is not True
+            or recipe.get("dataset_protocol") != "wind_shared_fixed24_v1"
+            or type(recipe.get("seed")) is not int or recipe.get("seed") != declared_seed
+            or type(recipe.get("total_epochs")) is not int or recipe.get("total_epochs") != 2500
+            or mode not in ("P", "P-R", "P-R2")
+            or recipe.get("native_validation_policy") != "consolidated_route_flags_v1"):
+        raise ValueError("Fresh Wind engine recipe is not the sealed fixed24 P/R1/R2 protocol.")
+    engine_config = identity.get("engine_config")
+    schedule = recipe.get("engine_schedule")
+    if (not isinstance(engine_config, Mapping) or not isinstance(schedule, Mapping)
+            or engine_config.get("seed") != recipe.get("seed")
+            or engine_config.get("total_epochs") != recipe.get("total_epochs")
+            or engine_config.get("sampling_version") != schedule.get("sampling_version")
+            or engine_config.get("sampling_version") != "case_epoch_v1"
+            or engine_config.get("deterministic_case_order") is not True
+            or engine_config.get("training_mode") != "joint"):
+        raise ValueError("Fresh Wind engine sampler/schedule differs from its resolved recipe.")
+    if (identity.get("native_validation_policy") != "consolidated_route_flags_v1"
+            or identity.get("initialization") != "fresh_common_trunk_private_router_rng"
+            or identity.get("inherited_parameter_names") != []
+            or identity.get("optimizer_state_start") != "fresh_zero_moments"
+            or identity.get("external_learned_field_files") != []
+            or payload.get("branch_parent") is not None):
+        raise ValueError("Fresh Wind engine checkpoint contains inherited state or a mismatched policy.")
+    config = provider_identity.get("standalone_model_config")
+    if (not isinstance(config, Mapping)
+            or provider_identity.get("dataset") != "WindFarm"
+            or provider_identity.get("fresh_matched_comparison") is not True
+            or provider_identity.get("mode") != mode
+            or payload.get("arm") != mode
+            or config.get("family") != provider_identity.get("family")
+            or config.get("dataset") != "WindFarm"):
+        raise ValueError("Fresh Wind engine arm, provider and recipe do not match.")
+    core_config = config.get("core")
+    if not isinstance(core_config, Mapping):
+        raise TypeError("Fresh Wind provider model config has no core mapping.")
+    model_contract = recipe.get("model_contract")
+    route_contract = model_contract.get("native_routing") if isinstance(model_contract, Mapping) else None
+    route_config = core_config.get("native_routing")
+    expected_route_contract = {
+        "P": {"enabled": False, "mode": "P"},
+        "P-R": {
+            "schema": NATIVE_ROUTING_CONFIG_SCHEMA, "mode": "P-R",
+            "policy": "learned_density", "views": 1, "score_hidden": 32, "score_bound": 2.0,
+        },
+        "P-R2": {
+            "schema": NATIVE_ROUTING_R2_CONFIG_SCHEMA, "mode": "P-R2",
+            "policy": "learned_density", "views": 2, "feature_blocks": [64, 64],
+            "score_hidden": 32, "score_bound": 2.0,
+        },
+    }[mode]
+    if mode == "P":
+        if (type(route_contract) is not dict
+                or type(route_contract.get("enabled")) is not bool
+                or type(route_contract.get("mode")) is not str):
+            raise TypeError("Fresh Wind direct-P route contract must use canonical boolean and string types.")
+    elif (type(route_contract) is not dict
+          or type(route_contract.get("views")) is not int
+          or type(route_contract.get("score_hidden")) is not int
+          or type(route_contract.get("score_bound")) is not float):
+        raise TypeError("Fresh Wind recipe route metadata has noncanonical numeric types.")
+    if mode == "P-R2" and (
+            type(route_contract.get("feature_blocks")) is not list
+            or any(type(value) is not int for value in route_contract["feature_blocks"])):
+        raise TypeError("Fresh Wind P-R2 recipe feature blocks must be exact integers.")
+    if route_contract != expected_route_contract:
+        raise ValueError("Fresh Wind recipe route contract is not canonical for its arm.")
+    if mode == "P":
+        if route_config is not None:
+            raise ValueError("Fresh Wind direct P cannot declare provider native-routing metadata.")
+    else:
+        if (not isinstance(route_config, Mapping)
+                or type(route_config.get("initialization_seed")) is not int
+                or type(route_config.get("score_hidden")) is not int
+                or type(route_config.get("score_bound")) is not float):
+            raise TypeError("Fresh Wind provider route metadata has noncanonical numeric types.")
+        if mode == "P-R2" and (
+                type(route_config.get("views")) is not int
+                or type(route_config.get("feature_blocks")) is not list
+                or any(type(value) is not int for value in route_config["feature_blocks"])):
+            raise TypeError("Fresh Wind provider P-R2 metadata must use exact integer types.")
+        if (not isinstance(route_config, Mapping)
+                or route_config.get("schema") != expected_route_contract["schema"]
+                or route_config.get("mode") != mode
+                or route_config.get("policy") != "learned_density"
+                or route_config.get("initialization_seed") != recipe.get("seed")
+                or route_config.get("score_hidden") != 32
+                or route_config.get("score_bound") != 2.0
+                or (mode == "P-R2" and (route_config.get("views") != 2
+                                        or route_config.get("feature_blocks") != [64, 64]))):
+            raise ValueError("Fresh Wind recipe and provider route metadata differ.")
+    marker = identity.get("fresh_initialization")
+    if not isinstance(marker, Mapping):
+        raise TypeError("Fresh Wind engine checkpoint has no matched-initialization receipt.")
+    _validate_wind_fresh_receipt_shape(
+        marker, provider_identity, mode=mode, seed=recipe["seed"],
+        sampling_version=engine_config["sampling_version"],
+        deterministic_case_order=engine_config["deterministic_case_order"],
+    )
+    if (marker.get("active_mode") != mode
+            or marker.get("native_validation_policy") != "consolidated_route_flags_v1"
+            or marker.get("source_checkpoint") is not None
+            or marker.get("inherited_parameter_names") != []
+            or marker.get("optimizer_state_start") != "fresh_zero_moments"
+            or identity.get("initial_model_state_sha256") != marker.get("initial_model_state_sha256")):
+        raise ValueError("Fresh Wind engine receipt does not match its no-parent arm identity.")
+    model = InteractionPreservingWindModel.from_config(config)
+    if model.mode != mode or model.export_config() != dict(config):
+        raise ValueError("Fresh Wind provider model config does not round-trip canonically.")
+    state = payload.get("model_state_dict")
+    if not isinstance(state, Mapping) or not state:
+        raise TypeError("Fresh Wind engine checkpoint has no model tensor mapping.")
+    if any(not isinstance(name, str) or not name.startswith("core.") for name in state):
+        raise ValueError("Fresh Wind engine checkpoint tensors must belong to its one active core.")
+    from honf_runtime.unified_training import _validate_fresh_matched_initialization
+
+    _validate_fresh_matched_initialization(
+        marker, model, provider_identity,
+        arm=mode,
+        seed=recipe["seed"],
+        sampling_version=engine_config["sampling_version"],
+        deterministic_case_order=engine_config["deterministic_case_order"],
+    )
+    model.load_state_dict(state, strict=True)
+    setter = getattr(model.core, "set_consolidated_native_validation", None)
+    if not callable(setter):
+        raise TypeError("Fresh Wind P-family adapter does not expose consolidated validation controls.")
+    setter(True)
+    if getattr(model.core, "consolidated_native_validation", None) is not True:
+        raise RuntimeError("Fresh Wind consolidated native-validation policy did not reactivate after load.")
+    return model.to(device)
+
+
 __all__ = [
     "ALL_INTERACTION_PRESERVING_WIND_MODES",
+    "FRESH_SEGMENTED_MULTIVIEW_WORKFLOW",
     "INTERACTION_PRESERVING_WIND_MODES",
     "NATIVE_ROUTING_WIND_FAMILY",
     "NATIVE_ROUTING_WIND_MODES",
     "InteractionPreservingWindModel",
+    "load_interaction_preserving_wind_checkpoint",
 ]

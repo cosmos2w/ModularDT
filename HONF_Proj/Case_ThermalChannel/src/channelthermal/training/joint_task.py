@@ -50,7 +50,7 @@ from .unified_task import (
 )
 
 JOINT_TRAINING_MODE = "joint"
-NATIVE_ROUTING_THERMAL_MODES = ("P-R", "P-C")
+NATIVE_ROUTING_THERMAL_MODES = ("P-R", "P-C", "P-R2")
 THERMAL_P_FAMILY_MODES = frozenset((*INTERACTION_PRESERVING_THERMAL_MODES, *NATIVE_ROUTING_THERMAL_MODES))
 THERMAL_RECOVERY_MODES = tuple(JOINT_THERMAL_MODES) + tuple(INTERACTION_PRESERVING_THERMAL_MODES) + NATIVE_ROUTING_THERMAL_MODES
 JOINT_MICROBATCH_DEFAULT = 4
@@ -421,6 +421,8 @@ class JointThermalTask(ThermalRefinementTask):
         native_sampling_protocol: str | None = None,
         flow_readout_law: str | None = None,
         full_train_followup1000: bool = False,
+        fresh_matched_comparison: bool = False,
+        conditional_confirmation: Mapping[str, Any] | None = None,
         validation_case_ids: Sequence[str] | None = None,
     ) -> None:
         if mode not in THERMAL_RECOVERY_MODES or model.mode != mode:
@@ -446,6 +448,25 @@ class JointThermalTask(ThermalRefinementTask):
         self.formal_full = bool(formal_full)
         self.full_train_followup1000 = bool(full_train_followup1000)
         self.total_epochs = int(total_epochs)
+        if type(fresh_matched_comparison) is not bool:
+            raise TypeError("Thermal fresh matched-comparison identity must be boolean.")
+        self.fresh_matched_comparison = fresh_matched_comparison
+        self.conditional_confirmation = None
+        if conditional_confirmation is not None:
+            from honf_runtime.unified_training import fresh_matched_recipe_seed
+
+            if not self.fresh_matched_comparison:
+                raise ValueError("Thermal confirmation is restricted to the separate fresh matched identity.")
+            fresh_matched_recipe_seed({
+                "task": "thermal", "mode": model.mode, "seed": model.seed,
+                "conditional_confirmation": conditional_confirmation,
+            }, verify_decision=True)
+            self.conditional_confirmation = dict(conditional_confirmation)
+        if self.fresh_matched_comparison and (
+                mode not in ("P", "P-R", "P-R2") or self.formal_full
+                or self.full_train_followup1000 or self.total_epochs != 2500
+                or self.flow_readout_law != NATIVE_CURL_READOUT_LAW):
+            raise ValueError("Fresh matched Thermal P/R1/R2 is fixed25_v1, native-curl, and 2500 epochs.")
         if mode in NATIVE_ROUTING_THERMAL_MODES and (
                 self.formal_full or self.full_train_followup1000 or self.total_epochs != 2500):
             raise ValueError("Thermal P-R/P-C children require the fixed25_v1 2500-epoch development identity.")
@@ -609,6 +630,10 @@ class JointThermalTask(ThermalRefinementTask):
             "formal_full_run_policy": "manual_only_not_launched" if self.formal_full else None,
             "solver_attempts": 0,
         }
+        if self.fresh_matched_comparison:
+            payload["fresh_matched_comparison"] = True
+        if getattr(self, "conditional_confirmation", None) is not None:
+            payload["conditional_confirmation"] = dict(self.conditional_confirmation)
         if self.full_train_followup1000:
             payload.update({
                 "execution_protocol": FULL_TRAIN_FOLLOWUP_PROTOCOL,
@@ -1704,6 +1729,8 @@ def build_thermal_joint_task(
     calibration_only: bool = False,
     flow_readout_law: str | None = None,
     full_train_followup1000: bool = False,
+    fresh_matched_comparison: bool = False,
+    conditional_confirmation: Mapping[str, Any] | None = None,
     include_dev_targets: bool = True,
     model_override: torch.nn.Module | None = None,
 ) -> tuple[JointThermalRegionalAdapter, JointThermalTask]:
@@ -1717,12 +1744,31 @@ def build_thermal_joint_task(
         raise ValueError(f"Joint Thermal mode must be one of {THERMAL_RECOVERY_MODES}.")
     if type(include_dev_targets) is not bool:
         raise TypeError("Thermal include_dev_targets must be boolean.")
+    if type(fresh_matched_comparison) is not bool:
+        raise TypeError("Thermal fresh matched-comparison identity must be boolean.")
+    declared_fresh_seed = 0
+    if conditional_confirmation is not None:
+        from honf_runtime.unified_training import fresh_matched_recipe_seed
+
+        if fresh_matched_comparison is not True:
+            raise ValueError("Thermal confirmation is restricted to the separate fresh matched identity.")
+        declared_fresh_seed = fresh_matched_recipe_seed({
+            "task": "thermal", "mode": mode, "seed": seed,
+            "conditional_confirmation": conditional_confirmation,
+        }, verify_decision=True)
+    if fresh_matched_comparison and (
+            mode not in ("P", "P-R", "P-R2") or formal_full or full_train_followup1000
+            or total_epochs != 2500 or seed != declared_fresh_seed or flow_readout_law != NATIVE_CURL_READOUT_LAW
+            or validation_scope is not None or native_sampling_protocol is not None):
+        raise ValueError("Fresh matched Thermal P/R1/R2 is fixed25_v1, native-curl, seed0, and the 2500-epoch development recipe.")
     if mode in NATIVE_ROUTING_THERMAL_MODES and (
             formal_full or full_train_followup1000 or total_epochs != 2500):
         raise ValueError("Thermal P-R/P-C children require the fixed25_v1 2500-epoch development identity.")
     if mode in NATIVE_ROUTING_THERMAL_MODES and (
-            saved_normalization_stats is None or saved_response_scales is None or auxiliary_calibration is None):
-        raise ValueError("P-R/P-C require the exact saved P normalization, response scales and TRAIN calibration receipt.")
+            not fresh_matched_comparison
+            and (saved_normalization_stats is None or saved_response_scales is None
+                 or auxiliary_calibration is None)):
+        raise ValueError("Thermal native-routing modes require the exact shared TRAIN normalization, response scales and calibration receipt.")
     if flow_readout_law not in (None, NATIVE_CURL_READOUT_LAW):
         raise ValueError("Unsupported opt-in Thermal flow readout law.")
     if flow_readout_law is not None and mode not in THERMAL_P_FAMILY_MODES:
@@ -1976,6 +2022,8 @@ def build_thermal_joint_task(
         native_sampling_protocol=native_sampling_protocol,
         flow_readout_law=flow_readout_law,
         full_train_followup1000=full_train_followup1000,
+        fresh_matched_comparison=fresh_matched_comparison,
+        conditional_confirmation=conditional_confirmation,
         validation_case_ids=(validation_ids if not calibration_only and not include_dev_targets else None),
     )
     if validation_budget is not None:

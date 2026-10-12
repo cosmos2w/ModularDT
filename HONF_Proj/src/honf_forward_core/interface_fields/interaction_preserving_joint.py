@@ -27,7 +27,7 @@ from .interaction_core import (
 )
 from .source_response_operator import PreparedSourceResponse, ResponseApplication
 
-DIRECT_INTERACTION_MODES = ('P', 'P-R', 'P-C')
+DIRECT_INTERACTION_MODES = ('P', 'P-R', 'P-R2', 'P-C')
 COLLECTIVE_INTERACTION_MODES = ('P-G', 'P-H')
 INTERACTION_PRESERVING_MODES = DIRECT_INTERACTION_MODES + COLLECTIVE_INTERACTION_MODES
 
@@ -155,11 +155,14 @@ class InteractionPreservingPreparedContext(PreparedResponseContext):
                      owner.collective_width, owner.field_outputs, owner.affine_outputs,
                      owner.forcing_scale, owner.zero_offset, owner.query_width,
                      owner.spatial_dim, owner.native_aggregation_policy,
-                     owner.native_control_hidden, owner.native_routing_enabled,
-                     owner._native_routing_generation)
+                     owner.native_control_hidden, owner.native_routing_views,
+                     owner.native_routing_enabled, owner._native_routing_generation,
+                     owner.consolidated_native_validation,
+                     owner._native_validation_generation)
         prepared_semantics = (self._incidence_mode, self._access_mode,
                               self._collective_enabled, self._matched_mass_shuffle,
-                              self.native_route_intervention)
+                              self.native_route_intervention,
+                              self.native_route_intervention_view)
         if (snapshot != self._model_config_snapshot or
                 semantics != self._model_semantic_snapshot or
                 prepared_semantics != self._prepared_semantic_snapshot):
@@ -167,7 +170,7 @@ class InteractionPreservingPreparedContext(PreparedResponseContext):
 
 
 class InteractionPreservingJointCore(NonlinearFieldReadout):
-    """Opt-in P, P-G/P-H and native P-R/P-C shared joint core.
+    """Opt-in P, P-G/P-H and native P-R/P-R2/P-C shared joint core.
 
     ``P`` executes only the maintained two-round source-conditioned path.
     ``P-G`` adds one fixed smooth geometric collective block. ``P-H`` uses the
@@ -189,9 +192,9 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                  locality_prior_strength: float | None = None,
                  initialization_reference_field_outputs: int | None = None,
                  factorized_affine_execution: bool = False,
-                 native_control_hidden: int | None = None):
+        native_control_hidden: int | None = None):
         if mode not in INTERACTION_PRESERVING_MODES:
-            raise ValueError("mode must be P, P-G, P-H, P-R or P-C.")
+            raise ValueError("mode must be P, P-G, P-H, P-R, P-R2 or P-C.")
         if field_outputs is None:
             field_outputs = 3 if output_width is None else output_width
         elif output_width is not None and output_width != field_outputs:
@@ -210,11 +213,11 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
         direct_mode = mode in DIRECT_INTERACTION_MODES
         collective_mode = mode in COLLECTIVE_INTERACTION_MODES
         if direct_mode and regional_anchors != 0:
-            raise ValueError('P/P-R/P-C have no collective anchor bank; set regional_anchors=0.')
+            raise ValueError('P/P-R/P-R2/P-C have no collective anchor bank; set regional_anchors=0.')
         if collective_mode and regional_anchors < 1:
             raise ValueError('P-G and P-H require at least one regional anchor.')
         if direct_mode and locality_prior_strength not in (None, 0, 0.0):
-            raise ValueError('P/P-R/P-C have no collective locality prior.')
+            raise ValueError('P/P-R/P-R2/P-C have no collective locality prior.')
         if collective_mode and (locality_prior_strength is None or
                              not math.isfinite(locality_prior_strength) or
                              locality_prior_strength < 0):
@@ -239,12 +242,14 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                              factorized_affine_execution=factorized_affine_execution,
                              native_aggregation_policy={
                                  'P-R': 'learned_density',
+                                 'P-R2': 'learned_density',
                                  'P-C': 'destination_gain',
                              }.get(mode, 'measure'),
                              native_control_hidden=native_control_hidden,
-                             native_routing_seed=initialization_seed)
+                             native_routing_seed=initialization_seed,
+                             native_routing_views=2 if mode == 'P-R2' else 1)
             self.mode = mode
-            if mode in ('P-R', 'P-C'):
+            if mode in ('P-R', 'P-R2', 'P-C'):
                 self.config['native_routing']['mode'] = mode
             self.collective_width = collective_width
             self.regional_anchors = regional_anchors
@@ -550,17 +555,18 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
                            .expand(batch, -1) if environment_ids is None else environment_ids)
         self._validate_ids(environment_ids, environment_present, (batch, environments),
                            'environment_ids')
-        if native_route_intervention is not None and self.mode != 'P-R':
-            raise ValueError('Native route interventions require the direct P-R density policy.')
+        if (native_route_intervention is not None
+                and self.mode not in ('P-R', 'P-R2')):
+            raise ValueError('Native route interventions require direct P-R/P-R2 density routing.')
         domain_origin = centers.new_zeros(batch, dimension) if domain_origin is None else domain_origin
         self._validate_shape(domain_origin, (batch, dimension), 'domain_origin')
 
         direct_mode = self.mode in DIRECT_INTERACTION_MODES
         if direct_mode:
             if incidence_mode not in (None, 'none') or receiver_access not in (None, 'none'):
-                raise ValueError('P/P-R/P-C have no collective incidence or receiver access to intervene on.')
+                raise ValueError('P/P-R/P-R2/P-C have no collective incidence or receiver access to intervene on.')
             if matched_mass_shuffle or not collective_enabled:
-                raise ValueError('P/P-R/P-C have no collective block to shuffle or disable.')
+                raise ValueError('P/P-R/P-R2/P-C have no collective block to shuffle or disable.')
             chosen_incidence, chosen_access = 'none', 'none'
         else:
             default_incidence = 'geometry' if self.mode == 'P-G' else 'learned'
@@ -639,11 +645,14 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             self.collective_width, self.field_outputs, self.affine_outputs,
             self.forcing_scale, self.zero_offset, self.query_width, self.spatial_dim,
             self.native_aggregation_policy, self.native_control_hidden,
-            self.native_routing_enabled, self._native_routing_generation)
+            self.native_routing_views, self.native_routing_enabled,
+            self._native_routing_generation, self.consolidated_native_validation,
+            self._native_validation_generation)
         prepared._prepared_semantic_snapshot = (
             prepared._incidence_mode, prepared._access_mode,
             prepared._collective_enabled, prepared._matched_mass_shuffle,
-            prepared.native_route_intervention)
+            prepared.native_route_intervention,
+            prepared.native_route_intervention_view)
         prepared._intervention_receipt = {
             'incidence': chosen_incidence,
             'receiver_access': chosen_access,
@@ -653,6 +662,7 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             'native_route_intervention': {
                 'kind': prepared.native_route_intervention[0],
                 'route_types': prepared.native_route_intervention[1],
+                'view': prepared.native_route_intervention_view,
             },
         }
         if collective is not None:
@@ -694,17 +704,17 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
         if self.mode in DIRECT_INTERACTION_MODES:
             if (incidence_mode is not None or receiver_access is not None
                     or matched_mass_shuffle or not collective_enabled):
-                raise ValueError('P/P-R/P-C have no collective graph to intervene on.')
-            if self.mode != 'P-R' and native_route_intervention is not None:
-                raise ValueError('Native route interventions require the direct P-R density policy.')
+                raise ValueError('P/P-R/P-R2/P-C have no collective graph to intervene on.')
+            if self.mode not in ('P-R', 'P-R2') and native_route_intervention is not None:
+                raise ValueError('Native route interventions require direct P-R/P-R2 density routing.')
             if native_route_intervention is None:
-                if self.mode == 'P-R':
-                    raise ValueError('P-R intervention rebuilds require an explicit native route intervention.')
+                if self.mode in ('P-R', 'P-R2'):
+                    raise ValueError('P-R/P-R2 intervention rebuilds require an explicit native route intervention.')
                 raise ValueError('P/P-C do not support a native route intervention.')
             trace = True if routing_trace is None else routing_trace
         else:
             if native_route_intervention is not None:
-                raise ValueError('P-G/P-H do not have native P-R routes to intervene on.')
+                raise ValueError('P-G/P-H do not have native P-R/P-R2 routes to intervene on.')
             trace = False if routing_trace is None else routing_trace
         rebuilt = self.prepare_context(
             **prepared._input_args, incidence_mode=incidence_mode,

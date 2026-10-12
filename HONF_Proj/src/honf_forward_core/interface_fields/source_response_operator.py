@@ -92,10 +92,16 @@ class SourceResponseOperator(InteractionContextCore):
     def __init__(self, source_width, context_width, environment_width, *, mode='direct',
                  spatial_dim=2, hidden=64, message=64, output_width=1, query_width=0,
                  background_mode=True, zero_offset=True, forcing_scale=1., far_hidden=None,
-                 max_sources=None):
+                 max_sources=None, native_aggregation_policy='measure',
+                 native_control_hidden=None, native_routing_seed=0,
+                 native_routing_views=1):
         super().__init__(source_width, context_width, environment_width,
             spatial_dim=spatial_dim, hidden=hidden, message=message,
-            query_width=query_width, max_sources=max_sources)
+            query_width=query_width, max_sources=max_sources,
+            native_aggregation_policy=native_aggregation_policy,
+            native_control_hidden=native_control_hidden,
+            native_routing_seed=native_routing_seed,
+            native_routing_views=native_routing_views)
         if mode not in ('direct', 'group') or spatial_dim not in (2, 3):
             raise ValueError('Response mode must be direct/group with 2-D or 3-D geometry.')
         if min(source_width, context_width, environment_width, hidden, message, output_width) < 1 or query_width < 0:

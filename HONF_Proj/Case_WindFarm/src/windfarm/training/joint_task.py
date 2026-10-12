@@ -65,7 +65,7 @@ from .unified_task import (
 
 JOINT_WIND_ENVIRONMENT_SHAPE = (4, 4, 4)
 JOINT_WIND_ENVIRONMENT_COUNT = 64
-NATIVE_ROUTING_WIND_MODES = ("P-R", "P-C")
+NATIVE_ROUTING_WIND_MODES = ("P-R", "P-C", "P-R2")
 WIND_P_FAMILY_MODES = frozenset((*INTERACTION_PRESERVING_WIND_MODES, *NATIVE_ROUTING_WIND_MODES))
 JOINT_WIND_PROFILE_ID = "wind_shared_fixed24_v1"
 JOINT_WIND_FORMAL_PROFILE_ID = "wind_formal_fulltrain_v1"
@@ -856,6 +856,8 @@ class WindJointRegionalTask:
         native_sampling_protocol: str | None = None,
         environment_token_shape: Sequence[int] = JOINT_WIND_ENVIRONMENT_SHAPE,
         full_train_followup1000: bool = False,
+        fresh_matched_comparison: bool = False,
+        conditional_confirmation: Mapping[str, Any] | None = None,
     ) -> None:
         self.view = view
         self.model = model
@@ -887,6 +889,25 @@ class WindJointRegionalTask:
         self.max_microbatch_cases = int(microbatch_size)
         self.effective_batch_size = int(effective_batch_size)
         self.total_epochs = int(total_epochs)
+        if type(fresh_matched_comparison) is not bool:
+            raise TypeError("Wind fresh matched-comparison identity must be boolean.")
+        self.fresh_matched_comparison = fresh_matched_comparison
+        self.conditional_confirmation = None
+        declared_fresh_seed = 42
+        if conditional_confirmation is not None:
+            from honf_runtime.unified_training import fresh_matched_recipe_seed
+
+            if not self.fresh_matched_comparison:
+                raise ValueError("Wind confirmation is restricted to the separate fresh matched identity.")
+            declared_fresh_seed = fresh_matched_recipe_seed({
+                "task": "wind", "mode": model.mode, "seed": self.seed,
+                "conditional_confirmation": conditional_confirmation,
+            }, verify_decision=True)
+            self.conditional_confirmation = dict(conditional_confirmation)
+        if self.fresh_matched_comparison and (
+                model.mode not in ("P", "P-R", "P-R2") or self.profile_id != "wind_shared_fixed24_v1"
+                or self.total_epochs != 2500 or self.seed != declared_fresh_seed or full_train_followup1000):
+            raise ValueError("Fresh matched Wind P/R1/R2 is fixed24_v1, seed42, and 2500 epochs.")
         self.catalogue_cache = catalogue_cache
         self.sampling_version = SamplingKey.CASE_EPOCH_VERSION
         manifest_fingerprint = str(self.manifest.get("manifest_sha256", self.training_fingerprint))
@@ -944,7 +965,7 @@ class WindJointRegionalTask:
             raise ValueError("Wind query/microbatch settings must be positive and cover all five roles.")
         if self.effective_batch_size != 24 or self.max_microbatch_cases > self.effective_batch_size:
             raise ValueError("Wind joint uses effective batch 24 and microbatches no larger than 24 cases.")
-        if self.seed != 42:
+        if self.seed != declared_fresh_seed:
             raise ValueError("Wind joint fixed-profile identity is sealed to initialization/sampling seed 42.")
         if self.total_epochs not in (2500, 5000):
             raise ValueError("Wind joint horizon must be 2500 development or 5000 formal/follow-up schedule epochs.")
@@ -1020,6 +1041,10 @@ class WindJointRegionalTask:
             "physical_reference": "stored native OpenFOAM velocity fields; no solver calls",
             "wind_test_target_values_read": False,
         }
+        if self.fresh_matched_comparison:
+            payload["fresh_matched_comparison"] = True
+        if getattr(self, "conditional_confirmation", None) is not None:
+            payload["conditional_confirmation"] = dict(self.conditional_confirmation)
         if self.full_train_followup1000:
             payload.update({
                 "execution_protocol": FULL_TRAIN_FOLLOWUP_PROTOCOL,
@@ -1614,6 +1639,8 @@ def build_wind_joint_task(
     collective_width: int = 64,
     max_sources: int = 30,
     full_train_followup1000: bool = False,
+    fresh_matched_comparison: bool = False,
+    conditional_confirmation: Mapping[str, Any] | None = None,
     saved_role_scale_calibration: Mapping[str, Any] | None = None,
     saved_role_scale_cache_binding: Mapping[str, Any] | None = None,
     saved_role_scale_source_sha256: str | None = None,
@@ -1630,7 +1657,17 @@ def build_wind_joint_task(
     all_modes = {"J-H", "J-geometry", "J-direct", *INTERACTION_PRESERVING_WIND_MODES, *NATIVE_ROUTING_WIND_MODES}
     if mode not in all_modes:
         raise ValueError(f"Wind joint mode must be one of {sorted(all_modes)}.")
-    if int(seed) != 42:
+    declared_fresh_seed = 42
+    if conditional_confirmation is not None:
+        from honf_runtime.unified_training import fresh_matched_recipe_seed
+
+        if fresh_matched_comparison is not True:
+            raise ValueError("Wind confirmation is restricted to the separate fresh matched identity.")
+        declared_fresh_seed = fresh_matched_recipe_seed({
+            "task": "wind", "mode": mode, "seed": seed,
+            "conditional_confirmation": conditional_confirmation,
+        }, verify_decision=True)
+    if int(seed) != declared_fresh_seed:
         raise ValueError("Wind joint initialization and sampling are sealed to seed 42.")
     if int(effective_batch_size) != 24:
         raise ValueError("Wind joint comparison uses effective batch size 24.")
@@ -1640,10 +1677,17 @@ def build_wind_joint_task(
         raise ValueError("Wind joint primary query count must include every native role.")
     if type(full_train_followup1000) is not bool:
         raise TypeError("Wind full_train_followup1000 must be boolean.")
+    if type(fresh_matched_comparison) is not bool:
+        raise TypeError("Wind fresh matched-comparison identity must be boolean.")
+    if fresh_matched_comparison and (
+            mode not in ("P", "P-R", "P-R2") or formal_full or full_train_followup1000
+            or int(total_epochs) != 2500 or int(seed) != declared_fresh_seed or validation_scope is not None
+            or native_sampling_protocol is not None):
+        raise ValueError("Fresh matched Wind P/R1/R2 is fixed24_v1, seed42, and the 2500-epoch development recipe.")
     saved_role_values = (saved_role_scale_calibration, saved_role_scale_cache_binding, saved_role_scale_source_sha256)
     if any(value is not None for value in saved_role_values) and not all(value is not None for value in saved_role_values):
         raise ValueError("Saved Wind role scales require their exact calibration, cache binding and source hash together.")
-    if mode in NATIVE_ROUTING_WIND_MODES and saved_role_scale_calibration is None:
+    if mode in NATIVE_ROUTING_WIND_MODES and saved_role_scale_calibration is None and not fresh_matched_comparison:
         raise ValueError("Wind P-R/P-C require the exact checkpoint-owned W2401 TRAIN role calibration; refitting is disabled.")
     if mode in NATIVE_ROUTING_WIND_MODES and (formal_full or full_train_followup1000):
         raise ValueError("Native-routing Wind contexts are sealed to the existing fixed24 development profile.")
@@ -1924,6 +1968,8 @@ def build_wind_joint_task(
         native_sampling_protocol=native_sampling_protocol,
         environment_token_shape=resolved_environment_shape,
         full_train_followup1000=full_train_followup1000,
+        fresh_matched_comparison=fresh_matched_comparison,
+        conditional_confirmation=conditional_confirmation,
     )
     return model, provider
 

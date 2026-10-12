@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -1301,6 +1301,285 @@ def _case_order_digest(case_keys: Sequence[Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _named_tree_leaves(value: Any, prefix: str = "") -> Iterable[tuple[str, Any]]:
+    """Yield named leaves from the small receiver/target metadata trees."""
+    if isinstance(value, Mapping):
+        for name in sorted(value, key=str):
+            yield from _named_tree_leaves(value[name], f"{prefix}.{name}" if prefix else str(name))
+    elif is_dataclass(value) and not isinstance(value, type):
+        for item in fields(value):
+            name = item.name
+            yield from _named_tree_leaves(getattr(value, name), f"{prefix}.{name}" if prefix else name)
+    elif isinstance(value, (tuple, list)):
+        for index, child in enumerate(value):
+            yield from _named_tree_leaves(child, f"{prefix}[{index}]")
+    elif torch.is_tensor(value) or isinstance(value, np.ndarray):
+        yield prefix, value
+
+
+def _observed_mask_digest(batches: Sequence[TaskBatch]) -> str:
+    """Hash the exact first-epoch support/weight arrays without retaining them."""
+    digest = hashlib.sha256()
+    selectors = ("mask", "valid", "weight", "role_ids")
+    for batch_index, batch in enumerate(batches):
+        digest.update(json.dumps(list(batch.case_keys), sort_keys=True, default=str,
+                                 separators=(",", ":")).encode("utf-8"))
+        for section_name, tree in (("receivers", batch.receivers), ("targets", batch.targets)):
+            for path, value in _named_tree_leaves(tree, section_name):
+                leaf_name = path.rsplit(".", 1)[-1].lower()
+                if not any(selector in leaf_name for selector in selectors):
+                    continue
+                if torch.is_tensor(value):
+                    array = value.detach().to(device="cpu").contiguous().numpy()
+                else:
+                    array = np.ascontiguousarray(value)
+                digest.update(path.encode("utf-8") + b"\0")
+                digest.update(str(array.dtype).encode("ascii") + b"\0")
+                digest.update(json.dumps(list(array.shape), separators=(",", ":")).encode("ascii"))
+                digest.update(array.tobytes())
+        digest.update(str(batch_index).encode("ascii") + b"\0")
+    return digest.hexdigest()
+
+
+def _stream_records_digest(records: Sequence[Mapping[str, Any]]) -> str:
+    encoded = json.dumps(list(records), sort_keys=True, default=str,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def model_state_sha256(model: nn.Module, *, exclude_prefixes: Sequence[str] = ()) -> str:
+    """Hash a deterministic named-tensor inventory, optionally omitting declared modules."""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        if any(name.startswith(prefix) for prefix in exclude_prefixes):
+            continue
+        if not torch.is_tensor(tensor):
+            raise TypeError(f"Model state {name!r} is not a tensor and cannot be sealed.")
+        value = tensor.detach().to(device="cpu").contiguous()
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(str((tuple(value.shape), str(value.dtype))).encode("ascii"))
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value))
+
+
+def _canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"),
+                         allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def provider_scale_binding_sha256(provider_identity: Mapping[str, Any]) -> str:
+    """Hash the selected TRAIN-only transforms and loss calibration exposed by a provider."""
+    task = provider_identity.get("task", provider_identity.get("dataset"))
+    if task == "ThermalChannel":
+        binding = {
+            "normalization_stats_sha256": provider_identity.get("normalization_stats_sha256"),
+            "response_scales": provider_identity.get("response_scales"),
+            "loss_weights": provider_identity.get("loss_weights"),
+            "auxiliary_calibration": provider_identity.get("auxiliary_calibration"),
+        }
+    elif task == "WindFarm":
+        objective = provider_identity.get("objective")
+        if not isinstance(objective, Mapping):
+            raise ValueError("Wind provider identity is missing its TRAIN role calibration.")
+        binding = {
+            "normalizer_and_background_source": provider_identity.get("normalizer_and_background_source"),
+            "component_scales_mps": objective.get("component_scales_mps"),
+            "scale_rule": objective.get("scale_rule"),
+            "scale_source_sha256": objective.get("scale_source_sha256"),
+            "scale_calibration": objective.get("scale_calibration"),
+            "scale_cache_binding": objective.get("scale_cache_binding"),
+        }
+    else:
+        raise ValueError("Matched fresh initialization requires a supported Thermal or Wind provider identity.")
+    if any(value is None for value in binding.values()):
+        raise ValueError("Matched fresh provider scale binding has an unsealed TRAIN-only component.")
+    return _canonical_sha256(binding)
+
+
+FRESH_MATCHED_INITIALIZATION_SCHEMA = "matched_fresh_multiview_initialization_v1"
+FRESH_MATCHED_ROUTING_PREFIXES = ("core.native_routing.",)
+FRESH_MATCHED_NATIVE_VALIDATION_POLICY = "consolidated_route_flags_v1"
+
+
+def fresh_matched_recipe_seed(recipe: Mapping[str, Any], *, verify_decision: bool = False) -> int:
+    """Keep primary seeds fixed; admit only the plan's separately bound confirmation pair."""
+    task = recipe.get("task")
+    if task not in ("thermal", "wind"):
+        raise ValueError("Fresh matched seed requires a supported dataset.")
+    primary_seed = 0 if task == "thermal" else 42
+    confirmation = recipe.get("conditional_confirmation")
+    if "conditional_confirmation" not in recipe:
+        if type(recipe.get("seed")) is not int or recipe["seed"] != primary_seed:
+            raise ValueError("Fresh primary comparison must retain its fixed dataset seed.")
+        return primary_seed
+    required = {"schema", "task", "seed", "preferred_mode", "decision_path", "decision_sha256"}
+    second_seed = 1 if task == "thermal" else 43
+    if (not isinstance(confirmation, Mapping) or set(confirmation) != required
+            or confirmation.get("schema") != "conditional_second_seed_multiview_v1"
+            or confirmation.get("task") != task
+            or type(confirmation.get("seed")) is not int or confirmation["seed"] != second_seed
+            or type(recipe.get("seed")) is not int or recipe["seed"] != second_seed
+            or confirmation.get("preferred_mode") not in ("P-R", "P-R2")
+            or recipe.get("mode") not in ("P", confirmation["preferred_mode"])
+            or not isinstance(confirmation.get("decision_path"), str)
+            or not Path(confirmation["decision_path"]).is_absolute()
+            or not _is_sha256_hex(confirmation.get("decision_sha256"))):
+        raise ValueError("Conditional confirmation must bind one preferred-routing/P pair and its declared second seed.")
+    if verify_decision:
+        decision_bytes = Path(confirmation["decision_path"]).read_bytes()
+        if hashlib.sha256(decision_bytes).hexdigest() != confirmation["decision_sha256"]:
+            raise ValueError("Conditional confirmation decision receipt changed.")
+        decision = json.loads(decision_bytes)
+        endpoints = decision.get("primary_endpoints")
+        if (decision.get("schema") != "conditional_second_seed_eligibility_v1"
+                or decision.get("chosen_dataset") != task
+                or decision.get("preferred_mode") != confirmation["preferred_mode"]
+                or decision.get("second_seed") != second_seed
+                or decision.get("physical_direction_pass") is not True
+                or decision.get("robustness_pass") is not True
+                or decision.get("mandatory_measurements_complete") is not True
+                or decision.get("unresolved_implementation_failure") is not False
+                or type(decision.get("q8192_cost_ratio")) not in (int, float)
+                or not math.isfinite(decision["q8192_cost_ratio"])
+                or not 0 < decision["q8192_cost_ratio"] <= 1.30
+                or not _is_sha256_hex(decision.get("mandatory_measurements_sha256"))
+                or not isinstance(endpoints, list) or len(endpoints) != 6
+                or any(not isinstance(entry, Mapping) for entry in endpoints)
+                or {(entry.get("task"), entry.get("mode")) for entry in endpoints}
+                != {(domain, mode) for domain in ("thermal", "wind") for mode in ("P", "P-R", "P-R2")}
+                or any(type(entry.get("epoch")) is not int or entry["epoch"] != 2500
+                       or not _is_sha256_hex(entry.get("checkpoint_sha256")) for entry in endpoints)
+                or (task == "thermal" and decision.get("wind_eligible") is not False)
+                or (task == "wind" and decision.get("wind_eligible") is not True)):
+            raise ValueError("Conditional confirmation requires all six endpoints and completed eligible physical/cost evidence.")
+    return second_seed
+
+
+def _apply_fresh_native_validation_policy(model: nn.Module) -> None:
+    core = getattr(model, "core", None)
+    setter = getattr(core, "set_consolidated_native_validation", None)
+    if not callable(setter):
+        raise TypeError("Fresh matched model core does not expose consolidated native-validation controls.")
+    setter(True)
+    if getattr(core, "consolidated_native_validation", None) is not True:
+        raise RuntimeError("Fresh matched consolidated native-validation policy did not activate.")
+
+
+def fresh_matched_initialization_receipt(
+    model: nn.Module,
+    provider_identity: Mapping[str, Any],
+    *,
+    active_mode: str,
+    seed: int,
+    sampling_version: str,
+    deterministic_case_order: bool,
+) -> dict[str, Any]:
+    """Seal a P/R1/R2 common fresh start without any inherited model state."""
+    if active_mode not in ("P", "P-R", "P-R2"):
+        raise ValueError("Fresh matched initialization is limited to P, P-R and P-R2.")
+    if provider_identity.get("fresh_matched_comparison") is not True:
+        raise ValueError("Fresh initialization receipt requires an explicitly fresh matched provider identity.")
+    if type(seed) is not int or sampling_version != SamplingKey.CASE_EPOCH_VERSION:
+        raise ValueError("Fresh matched initialization requires its sealed seed and case_epoch_v1 streams.")
+    if type(deterministic_case_order) is not bool or not deterministic_case_order:
+        raise ValueError("Fresh matched initialization requires deterministic per-epoch TRAIN ordering.")
+    provider_identity = dict(provider_identity)
+    model_config = provider_identity.get("model_config", provider_identity.get("standalone_model_config"))
+    if not isinstance(model_config, Mapping):
+        raise TypeError("Fresh matched provider identity is missing its active model configuration.")
+    dataset_id = _sampling_dataset_id(provider_identity)
+    sampler_namespace = {
+        "sampling_version": sampling_version,
+        "seed": seed,
+        "dataset_id": dataset_id,
+        "case_order": "seed_epoch_v1_deterministic_permutation",
+        "case_order_arm_independent": True,
+        "query_stream_keying": "dataset_seed_epoch_named_case_role_stream",
+        "query_stream_arm_independent": True,
+        "query_stream_update_independent": True,
+        "query_stream_microbatch_independent": True,
+    }
+    return {
+        "schema": FRESH_MATCHED_INITIALIZATION_SCHEMA,
+        "active_mode": active_mode,
+        "native_validation_policy": FRESH_MATCHED_NATIVE_VALIDATION_POLICY,
+        "source_checkpoint": None,
+        "inherited_parameter_names": [],
+        "optimizer_state_start": "fresh_zero_moments",
+        "common_parameter_exclusion_prefixes": list(FRESH_MATCHED_ROUTING_PREFIXES),
+        "common_initialization_sha256": model_state_sha256(
+            model, exclude_prefixes=FRESH_MATCHED_ROUTING_PREFIXES),
+        "initial_model_state_sha256": model_state_sha256(model),
+        "active_model_config_sha256": _canonical_sha256(model_config),
+        "provider_identity_sha256": _canonical_sha256(provider_identity),
+        "provider_scale_binding_sha256": provider_scale_binding_sha256(provider_identity),
+        "sampler_namespace": sampler_namespace,
+    }
+
+
+def _validate_fresh_matched_initialization(
+    marker: Mapping[str, Any],
+    model: nn.Module,
+    provider_identity: Mapping[str, Any],
+    *,
+    arm: str,
+    seed: int,
+    sampling_version: str,
+    deterministic_case_order: bool,
+) -> None:
+    """Check the active fresh model/provider against its immutable start receipt."""
+    if marker.get("schema") != FRESH_MATCHED_INITIALIZATION_SCHEMA:
+        raise ValueError("Fresh matched initialization schema is unsupported.")
+    if marker.get("native_validation_policy") != FRESH_MATCHED_NATIVE_VALIDATION_POLICY:
+        raise ValueError("Fresh matched initialization has an unsupported native-validation policy.")
+    if marker.get("active_mode") != arm or arm not in ("P", "P-R", "P-R2"):
+        raise ValueError("Fresh initialization mode differs from the active P/R1/R2 arm.")
+    if (marker.get("source_checkpoint") is not None
+            or marker.get("inherited_parameter_names") != []
+            or marker.get("optimizer_state_start") != "fresh_zero_moments"):
+        raise ValueError("Fresh matched start cannot inherit model parameters, checkpoint state or optimizer moments.")
+    if marker.get("common_parameter_exclusion_prefixes") != list(FRESH_MATCHED_ROUTING_PREFIXES):
+        raise ValueError("Fresh common-initialization digest must exclude only private routing tensors.")
+    provider_identity = dict(provider_identity)
+    model_config = provider_identity.get("model_config", provider_identity.get("standalone_model_config"))
+    if not isinstance(model_config, Mapping):
+        raise TypeError("Active provider has no model configuration to bind to fresh initialization.")
+    current = {
+        "common_initialization_sha256": model_state_sha256(
+            model, exclude_prefixes=FRESH_MATCHED_ROUTING_PREFIXES),
+        "initial_model_state_sha256": model_state_sha256(model),
+        "active_model_config_sha256": _canonical_sha256(model_config),
+        "provider_identity_sha256": _canonical_sha256(provider_identity),
+        "provider_scale_binding_sha256": provider_scale_binding_sha256(provider_identity),
+        "sampler_namespace": {
+            "sampling_version": sampling_version,
+            "seed": seed,
+            "dataset_id": _sampling_dataset_id(provider_identity),
+            "case_order": "seed_epoch_v1_deterministic_permutation",
+            "case_order_arm_independent": True,
+            "query_stream_keying": "dataset_seed_epoch_named_case_role_stream",
+            "query_stream_arm_independent": True,
+            "query_stream_update_independent": True,
+            "query_stream_microbatch_independent": True,
+        },
+    }
+    for name, value in current.items():
+        if marker.get(name) != value:
+            raise ValueError(f"Fresh initialization receipt differs from the active {name}.")
+    if (type(seed) is not int or seed < 0
+            or sampling_version != SamplingKey.CASE_EPOCH_VERSION
+            or type(deterministic_case_order) is not bool or not deterministic_case_order):
+        raise ValueError("Fresh matched runs require the declared case_epoch_v1 deterministic sampler.")
+    if provider_identity.get("fresh_matched_comparison") is not True:
+        raise ValueError("Fresh initialization cannot be attached to a legacy provider identity.")
+
+
 def _optimizer_spec_payload(spec: OptimizerGroupSpec) -> dict[str, Any]:
     return {
         "name": spec.name,
@@ -1325,6 +1604,64 @@ class TrainingEngine:
         self.config = config
         self.device = torch.device(device)
         self.selection = selection or SelectionPolicy()
+
+    def epoch_case_order(
+        self, provider: TaskProvider, epoch: int,
+    ) -> tuple[list[Any], str]:
+        """Return the exact epoch case order and sealed case-epoch sampler namespace.
+
+        This read-only planning method is shared with bounded measurement tools
+        that need to exercise complete TRAIN update macros without launching a
+        scientific fit. ``fit`` uses the same method, so cost probes cannot
+        drift from its deterministic case-order or dataset-key rules.
+        """
+        ordered_cases = list(provider.epoch_cases(epoch, self.config.seed))
+        if not ordered_cases:
+            raise ValueError("Each development epoch must visit at least one selected TRAIN case.")
+        if self.config.deterministic_case_order:
+            rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, epoch, 0x484F4E46]))
+            order = rng.permutation(len(ordered_cases)).tolist()
+            ordered_cases = [ordered_cases[index] for index in order]
+        dataset_id = (
+            _sampling_dataset_id(provider.identity_payload())
+            if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION else ""
+        )
+        return ordered_cases, dataset_id
+
+    def epoch_update_slices(self, case_count: int) -> tuple[slice, ...]:
+        """Return the exact effective-case macro grouping used by ``fit``."""
+        if type(case_count) is not int or case_count < 0:
+            raise ValueError("Epoch case count must be a nonnegative integer.")
+        return tuple(_macro_update_slices(case_count, self.config.effective_cases))
+
+    def prepare_update_microbatches(
+        self,
+        provider: TaskProvider,
+        *,
+        arm: str,
+        phase: str,
+        epoch: int,
+        update_index: int,
+        update_cases: Sequence[Any],
+        sampling_dataset_id: str,
+    ) -> list[TaskBatch]:
+        """Build one macro update's exact fit microbatches without optimizing."""
+        microbatches: list[TaskBatch] = []
+        for micro_index, start in enumerate(range(0, len(update_cases), self.config.microbatch_cases)):
+            case_chunk = update_cases[start:start + self.config.microbatch_cases]
+            key = SamplingKey(
+                self.config.seed, epoch, update_index, micro_index, phase, arm,
+                sampling_version=self.config.sampling_version,
+                dataset_id=sampling_dataset_id,
+            )
+            batch = provider.make_batch(case_chunk, key)
+            if tuple(batch.case_keys) and list(batch.case_keys) != list(case_chunk):
+                raise ValueError("Provider changed the ordered case keys inside a microbatch.")
+            if not tuple(batch.case_keys):
+                batch = TaskBatch(batch.scene_inputs, batch.receivers, batch.targets, batch.auxiliary,
+                                  tuple(case_chunk))
+            microbatches.append(batch)
+        return microbatches
 
     def _make_optimizer(
         self,
@@ -2335,6 +2672,31 @@ class TrainingEngine:
                 raise ValueError("Exact resume requires this run's current latest checkpoint; historical checkpoints cannot rewind history.")
         identity = dict(identity)
         provider_identity = dict(provider.identity_payload())
+        fresh_initialization = identity.get("fresh_initialization")
+        fresh_provider = provider_identity.get("fresh_matched_comparison") is True
+        if (fresh_initialization is not None) != fresh_provider:
+            raise ValueError("Fresh matched provider identity and explicit initialization receipt must appear together.")
+        if fresh_initialization is not None:
+            if not isinstance(fresh_initialization, Mapping):
+                raise TypeError("Fresh matched initialization receipt must be a mapping.")
+            if self.config.seed != fresh_matched_recipe_seed(identity.get("recipe", {}), verify_decision=True):
+                raise ValueError("Fresh matched engine seed differs from its primary/confirmation recipe.")
+            if (identity.get("native_validation_policy") != FRESH_MATCHED_NATIVE_VALIDATION_POLICY
+                    or identity.get("recipe", {}).get("native_validation_policy")
+                    != FRESH_MATCHED_NATIVE_VALIDATION_POLICY
+                    or fresh_initialization.get("native_validation_policy")
+                    != FRESH_MATCHED_NATIVE_VALIDATION_POLICY):
+                raise ValueError("Fresh matched recipe and identity must bind the consolidated validation policy.")
+            _apply_fresh_native_validation_policy(model)
+            if (branch_from_checkpoint is not None or architecture_child_initialization is not None
+                    or diagnostic_age_branch is not None or joint_core_revision is not None
+                    or mathematical_route_branch is not None or allow_microbatch_change
+                    or optimizer_seed is not None):
+                raise ValueError("Fresh matched arms may only start new histories or resume their own exact latest state.")
+            _validate_fresh_matched_initialization(
+                fresh_initialization, model, provider_identity, arm=arm,
+                seed=self.config.seed, sampling_version=self.config.sampling_version,
+                deterministic_case_order=self.config.deterministic_case_order)
         if "provider_identity" in identity and identity["provider_identity"] != provider_identity:
             raise ValueError("Sealed experiment provider identity differs from the active task adapter.")
         if "arm" in identity:
@@ -2377,6 +2739,10 @@ class TrainingEngine:
             from honf_runtime.compat import load_trusted_checkpoint
 
             source_payload = load_trusted_checkpoint(source_path, map_location="cpu")
+            if fresh_initialization is not None and (
+                    source_payload.get("experiment_identity", {}).get("fresh_initialization")
+                    != fresh_initialization):
+                raise ValueError("Fresh matched resume checkpoint does not preserve its original initialization receipt.")
         start_epoch = 1 if source_payload is None else int(source_payload["epoch"]) + 1
         if resume_checkpoint is not None and int(source_payload["epoch"]) >= stop_after:
             raise ValueError("Exact resume stop must advance the saved epoch.")
@@ -2447,6 +2813,8 @@ class TrainingEngine:
                     raise ValueError("Matched arms must branch at the declared common warmup boundary.")
             if architecture_child_initialization is None:
                 model.load_state_dict(source_payload["model_state_dict"], strict=True)
+                if fresh_initialization is not None:
+                    _apply_fresh_native_validation_policy(model)
             optimizer_seed = source_payload["optimizer_state_by_name"]
             restored_rng = source_payload["rng_state"]
             restore_provider_state = getattr(provider, "load_training_state_dict", None)
@@ -2483,6 +2851,19 @@ class TrainingEngine:
         if restored_rng is not None:
             restore_rng_state(restored_rng)
         history = list(source_payload.get("history", [])) if source_payload is not None else []
+        if fresh_initialization is not None and source_payload is not None:
+            first_epoch_row = next((row for row in history if int(row.get("epoch", -1)) == 1), None)
+            first_epoch_audit = (first_epoch_row.get("observed_stream_audit")
+                                 if isinstance(first_epoch_row, Mapping) else None)
+            if not isinstance(first_epoch_audit, Mapping):
+                raise ValueError("Fresh matched exact resume is missing its observed epoch-1 stream audit.")
+            if (first_epoch_audit.get("schema") != "observed_fresh_training_stream_v1"
+                    or first_epoch_audit.get("case_visits") != int(first_epoch_row["case_visits"])
+                    or first_epoch_audit.get("optimizer_updates") != int(first_epoch_row["optimizer_updates"])
+                    or not all(_is_sha256_hex(first_epoch_audit.get(name)) for name in (
+                        "case_order_sha256", "query_sampling_sha256", "observed_mask_sha256",
+                        "observed_denominators_sha256"))):
+                raise ValueError("Fresh matched resume epoch-1 stream audit is malformed or incomplete.")
         resume_amendments = list(source_payload.get("resume_amendments", [])) if source_payload is not None else []
         if amendment is not None:
             amendment = {**amendment, "source_epoch": int(source_payload["epoch"]), "next_epoch": start_epoch,
@@ -2621,9 +3002,7 @@ class TrainingEngine:
                 previous_phase = phase
                 self._set_schedules(optimizer, group_specs, epoch)
                 epoch_started = time.perf_counter()
-                ordered_cases = list(provider.epoch_cases(epoch, self.config.seed))
-                if not ordered_cases:
-                    raise ValueError("Each development epoch must visit at least one selected TRAIN case.")
+                ordered_cases, sampling_dataset_id = self.epoch_case_order(provider, epoch)
                 if diagnostic_contract is not None and (
                         len(set(ordered_cases)) != len(ordered_cases)
                         or set(ordered_cases) != set(diagnostic_contract["fit_case_keys"])
@@ -2636,11 +3015,11 @@ class TrainingEngine:
                         or completed_updates + math.ceil(len(ordered_cases) / self.config.effective_cases)
                         > architecture_contract["scientific_update_limit"]):
                     raise ValueError("Architecture child case membership or optimizer update cap changed during fitting.")
-                if self.config.deterministic_case_order:
-                    rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, epoch, 0x484F4E46]))
-                    order = rng.permutation(len(ordered_cases)).tolist()
-                    ordered_cases = [ordered_cases[index] for index in order]
                 order_hash = _case_order_digest(ordered_cases)
+                capture_fresh_stream = fresh_initialization is not None and epoch == 1
+                observed_mask_hashes: list[dict[str, Any]] = []
+                observed_query_hashes: list[dict[str, Any]] = []
+                observed_denominator_records: list[dict[str, Any]] = []
                 update_rows: list[dict[str, Any]] = []
                 update_count = math.ceil(len(ordered_cases) / self.config.effective_cases)
                 progress = tqdm(
@@ -2649,27 +3028,29 @@ class TrainingEngine:
                     disable=not bool(getattr(sys.stderr, "isatty", lambda: False)()), leave=False,
                 )
                 try:
-                    for update_index, group_slice in enumerate(
-                        _macro_update_slices(len(ordered_cases), self.config.effective_cases)
-                    ):
+                    for update_index, group_slice in enumerate(self.epoch_update_slices(len(ordered_cases))):
                         update_cases = ordered_cases[group_slice]
-                        microbatches = []
-                        for micro_index, start in enumerate(range(0, len(update_cases), self.config.microbatch_cases)):
-                            case_chunk = update_cases[start:start + self.config.microbatch_cases]
-                            key = SamplingKey(
-                                self.config.seed, epoch, update_index, micro_index, phase, arm,
-                                sampling_version=self.config.sampling_version,
-                                dataset_id=sampling_dataset_id,
-                            )
-                            batch = provider.make_batch(case_chunk, key)
-                            if tuple(batch.case_keys) and list(batch.case_keys) != list(case_chunk):
-                                raise ValueError("Provider changed the ordered case keys inside a microbatch.")
-                            if not tuple(batch.case_keys):
-                                batch = TaskBatch(batch.scene_inputs, batch.receivers, batch.targets, batch.auxiliary,
-                                                  tuple(case_chunk))
-                            microbatches.append(batch)
-                        losses, work, _denominators, sampling_hash = self._run_update(model, provider, optimizer, microbatches,
+                        microbatches = self.prepare_update_microbatches(
+                            provider, arm=arm, phase=phase, epoch=epoch,
+                            update_index=update_index, update_cases=update_cases,
+                            sampling_dataset_id=sampling_dataset_id)
+                        losses, work, denominators, sampling_hash = self._run_update(model, provider, optimizer, microbatches,
                             phase=phase, arm=arm, epoch=epoch, update_index=update_index)
+                        if capture_fresh_stream:
+                            if sampling_hash is None:
+                                raise ValueError("Fresh matched epoch 1 requires observed receiver/query-ID hashes.")
+                            observed_mask_hashes.append({
+                                "update_index": update_index,
+                                "sha256": _observed_mask_digest(microbatches),
+                            })
+                            observed_query_hashes.append({
+                                "update_index": update_index,
+                                "sha256": sampling_hash,
+                            })
+                            observed_denominator_records.append({
+                                "update_index": update_index,
+                                "denominators": {name: float(value) for name, value in sorted(denominators.items())},
+                            })
                         update_rows.append({"losses": losses, "work": work, "case_count": len(update_cases),
                                             "microbatch_count": len(microbatches),
                                             "query_sampling_sha256": sampling_hash})
@@ -2716,6 +3097,29 @@ class TrainingEngine:
                     row["query_sampling_sha256"] = hashlib.sha256(
                         json.dumps(sample_hashes, separators=(",", ":")).encode("utf-8")
                     ).hexdigest()
+                if capture_fresh_stream:
+                    if not sample_hashes or len(observed_query_hashes) != len(update_rows):
+                        raise ValueError("Fresh matched epoch-1 sampling audit is incomplete.")
+                    row["observed_stream_audit"] = {
+                        "schema": "observed_fresh_training_stream_v1",
+                        "sampler_namespace_sha256": _canonical_sha256(
+                            fresh_initialization["sampler_namespace"]),
+                        "case_order_sha256": order_hash,
+                        "case_visits": len(ordered_cases),
+                        "optimizer_updates": len(update_rows),
+                        "microbatches": sum(item["microbatch_count"] for item in update_rows),
+                        "query_sampling_sha256": row["query_sampling_sha256"],
+                        "query_sampling_by_update_sha256": observed_query_hashes,
+                        "observed_mask_sha256": _stream_records_digest(observed_mask_hashes),
+                        "mask_sha256_by_update": observed_mask_hashes,
+                        "observed_denominators_sha256": _stream_records_digest(observed_denominator_records),
+                        "observed_denominators_by_update": observed_denominator_records,
+                        "observed_denominator_totals": _sum_mapping([
+                            record["denominators"] for record in observed_denominator_records]),
+                        "effective_cases": self.config.effective_cases,
+                        "microbatch_cases": self.config.microbatch_cases,
+                        "sampling_dataset_id": sampling_dataset_id,
+                    }
                 if stage_receipt is not None:
                     row["stage_receipt"] = stage_receipt
                 clean_stop_request = _read_clean_stop_request(output, clean_stop_name)
@@ -2725,6 +3129,8 @@ class TrainingEngine:
                 improved_field = improved_guarded = False
                 if review:
                     validation_started = time.perf_counter()
+                    if fresh_initialization is not None:
+                        _apply_fresh_native_validation_policy(model)
                     metrics = self._evaluate(model, provider, arm, phase, epoch)
                     validation_terms = dict(metrics.pop("validation_loss_terms", {}))
                     validation_weights = dict(metrics.pop("validation_loss_term_weights", {}))

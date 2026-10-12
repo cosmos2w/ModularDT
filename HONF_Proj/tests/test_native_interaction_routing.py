@@ -32,9 +32,11 @@ from honf_forward_core.interface_fields.native_interaction_routing import (
 )
 
 
-def _core(mode: str, *, seed: int = 73) -> InteractionPreservingJointCore:
+def _core(mode: str, *, seed: int = 73, message: int | None = None) -> InteractionPreservingJointCore:
+    if message is None:
+        message = 128 if mode == "P-R2" else 8
     return InteractionPreservingJointCore(
-        4, 3, 5, spatial_dim=2, hidden=12, message=8, mode=mode,
+        4, 3, 5, spatial_dim=2, hidden=12, message=message, mode=mode,
         collective_width=6, regional_anchors=0, field_outputs=2,
         affine_outputs=0, initialization_seed=seed,
         native_control_hidden=(5 if mode == "P-C" else None),
@@ -313,6 +315,26 @@ def test_density_normalization_matches_independent_exp_reference(dtype, rtol, at
     assert torch.isfinite(density).all() and torch.isfinite(weights).all()
 
 
+def test_view_resolved_density_normalization_preserves_each_base_row_mass():
+    base = torch.tensor([[[0.0, 0.2, 0.8], [0.0, 0.0, 0.0]]], dtype=torch.float64)
+    zero = torch.zeros((*base.shape, 2), dtype=torch.float64)
+    zero_density, zero_weights = density_normalize(base, zero)
+    assert torch.equal(zero_density, torch.ones_like(zero_density))
+    assert torch.equal(zero_weights[..., 0], base)
+    assert torch.equal(zero_weights[..., 1], base)
+
+    scores = torch.tensor([[[[0.8, -0.5], [-0.2, 0.7], [0.4, 0.1]],
+                            [[-0.3, 0.2], [0.5, -0.8], [0.1, 0.6]]]],
+                          dtype=torch.float64, requires_grad=True)
+    density, weights = density_normalize(base, scores)
+    mass = base.sum(-1, keepdim=True)
+    torch.testing.assert_close(weights.sum(-2), mass.expand_as(weights.sum(-2)),
+                               rtol=0, atol=2.0e-16)
+    assert torch.equal(weights[0, 1], torch.zeros_like(weights[0, 1]))
+    assert torch.equal(density[0, 1], torch.ones_like(density[0, 1]))
+    torch.autograd.grad(weights.square().sum(), scores)
+
+
 def test_density_reassignment_only_permutes_equal_measure_present_donors():
     density = torch.tensor([[[0.5, 0.75, 0.6, 0.9, 0.25]]], dtype=torch.float64)
     base = torch.tensor([[[0.25, 0.25, 0.25, 0.25, 0.0]]], dtype=torch.float64)
@@ -339,11 +361,291 @@ def test_native_module_initialization_uses_a_private_cpu_rng_stream():
     assert model.native_routing.added_parameter_count() > 0
 
 
-@pytest.mark.parametrize("mode", ["P-R", "P-C"])
+def test_p_r2_reuses_r1_score_trunks_and_adds_exactly_96_parameters():
+    r1, r2 = _core("P-R", message=128), _core("P-R2")
+    assert r2.native_routing.added_parameter_count() - r1.native_routing.added_parameter_count() == 96
+    assert r2.config["native_routing"] == {
+        "schema": "native_interaction_routing_v2",
+        "policy": "learned_density",
+        "initialization_seed": 73,
+        "score_hidden": 32,
+        "score_bound": 2.0,
+        "views": 2,
+        "feature_blocks": [64, 64],
+        "mode": "P-R2",
+    }
+    assert r1.config["native_routing"] == {
+        "schema": "native_interaction_routing_v1",
+        "policy": "learned_density",
+        "initialization_seed": 73,
+        "score_hidden": 32,
+        "score_bound": 2.0,
+        "mode": "P-R",
+    }
+    for route in ("MM", "ME", "EM"):
+        old_trunk = r1.native_routing.score_mlps[route]
+        new_trunk = r2.native_routing.score_mlps[route]
+        assert torch.equal(old_trunk[0].weight, new_trunk[0].weight)
+        assert torch.equal(old_trunk[0].bias, new_trunk[0].bias)
+        assert torch.equal(old_trunk[2].weight, new_trunk[2].weight[0:1])
+        assert new_trunk[2].weight.shape == (2, 32)
+        assert torch.equal(new_trunk[2].weight, torch.zeros_like(new_trunk[2].weight))
+    assert all(torch.equal(value, _shared_parameters(r2)[name])
+               for name, value in _shared_parameters(r1).items())
+
+
+def test_p_r2_tied_heads_reproduce_r1_and_trace_native_view_content():
+    r1, r2 = _core("P-R", message=128), _core("P-R2")
+    with torch.no_grad():
+        for route in ("MM", "ME", "EM"):
+            old = r1.native_routing.score_mlps[route][-1].weight
+            r2.native_routing.score_mlps[route][-1].weight.copy_(old.expand(2, -1))
+    values = _inputs()
+    r1_context = _prepare(r1, values, routing_trace=True)
+    r2_context = _prepare(r2, values, routing_trace=True)
+    for name in ("source_states", "environment_states", "global_state"):
+        torch.testing.assert_close(getattr(r2_context, name), getattr(r1_context, name),
+                                   rtol=0, atol=0)
+    receivers = torch.tensor([[[0.1, 0.2], [0.8, -0.4]]], dtype=torch.float64)
+    torch.testing.assert_close(r2.predict_fields(r2_context, receivers),
+                               r1.predict_fields(r1_context, receivers), rtol=0, atol=0)
+    assert len(r2_context.native_routing_trace) == 6
+    metadata = r2_context.native_routing_trace_metadata
+    assert metadata["owner_id"] == id(r2)
+    assert metadata["configuration"]["native_routing"]["feature_blocks"] == [64, 64]
+    assert metadata["routing_semantics_version"] == "native_interaction_routing_semantics_v1"
+    assert metadata["active_routing_semantics"][0] == "native_interaction_routing_semantics_v1"
+    assert metadata["output_law_metadata"]["field_output_law"] == "nonlinear"
+    for item in r2_context.native_routing_trace:
+        assert item["view_ids"].tolist() == [0, 1]
+        assert item["s"].shape[-1] == 2
+        assert item["rho"].shape[-1] == 2 and item["w"].shape[-1] == 2
+        assert item["weighted_message_content"].shape[-2:] == (2, 64)
+        torch.testing.assert_close(item["head_aggregate"],
+                                   item["weighted_message_content"].sum(2),
+                                   rtol=0, atol=0)
+        torch.testing.assert_close(item["w"].sum(-2),
+                                   item["row_mass"][..., None].expand_as(item["w"].sum(-2)),
+                                   rtol=0, atol=2.0e-16)
+
+
+def test_p_r2_heads_can_choose_different_donors_for_the_same_destination():
+    model = _core("P-R2")
+    scorer = model.native_routing.score_mlps["MM"]
+    with torch.no_grad():
+        scorer[0].weight.zero_()
+        scorer[0].bias.zero_()
+        scorer[-1].weight.zero_()
+        scorer[0].weight[0, 0] = 1.0
+        scorer[0].weight[0, model.hidden] = 1.0
+        scorer[0].weight[1, 0] = 1.0
+        scorer[0].weight[1, model.hidden] = -1.0
+        scorer[0].weight[2, 0] = -1.0
+        scorer[0].weight[2, model.hidden] = 1.0
+        scorer[0].weight[3, 0] = -1.0
+        scorer[0].weight[3, model.hidden] = -1.0
+        scorer[-1].weight[0, :4] = torch.tensor([1.0, -1.0, -1.0, 1.0], dtype=torch.float64)
+        scorer[-1].weight[1, :4] = torch.tensor([-1.0, 1.0, 1.0, -1.0], dtype=torch.float64)
+    features = torch.zeros((1, 2, 2, 2 * model.hidden + model.spatial_dim * 9),
+                           dtype=torch.float64)
+    features[0, 0, :, 0] = 2.0
+    features[0, 1, :, 0] = -2.0
+    features[0, :, 0, model.hidden] = 1.0
+    features[0, :, 1, model.hidden] = -1.0
+    scores = model.native_routing.score("MM", features)
+    assert scores.shape == (1, 2, 2, 2)
+    assert scores[0, 0, 0, 0] > scores[0, 0, 1, 0]
+    assert scores[0, 0, 0, 1] < scores[0, 0, 1, 1]
+    assert scores[0, 1, 0, 0] < scores[0, 1, 1, 0]
+    assert scores[0, 1, 0, 1] > scores[0, 1, 1, 1]
+
+
+def test_p_r2_interventions_are_view_resolved_and_restore_rebuilds_default():
+    model = _core("P-R2")
+    with torch.no_grad():
+        base = torch.linspace(-0.08, 0.09, 32, dtype=torch.float64)
+        final = model.native_routing.score_mlps["MM"][-1].weight
+        final[0].copy_(base)
+        final[1].copy_(-base)
+    values = _inputs(all_equal_measures=True)
+    normal = _prepare(model, values, routing_trace=True)
+    normal_mm = [item for item in normal.native_routing_trace
+                 if item["legacy_route"] == "MM"]
+    assert any(not torch.equal(item["rho"][..., 0], item["rho"][..., 1])
+               for item in normal_mm)
+
+    per_view_reset = model.intervene_context(
+        normal,
+        native_route_intervention={"kind": "density_reset", "route_types": ["MM"], "view": 0},
+    )
+    reset_first_round = next(item for item in per_view_reset.native_routing_trace
+                             if item["round"] == 1 and item["legacy_route"] == "MM")
+    assert torch.equal(reset_first_round["rho"][..., 0],
+                       torch.ones_like(reset_first_round["rho"][..., 0]))
+    assert torch.equal(reset_first_round["rho"][..., 1], normal_mm[0]["rho"][..., 1])
+    assert reset_first_round["intervention_view"] == 0
+    torch.testing.assert_close(reset_first_round["w"].sum(-2),
+                               reset_first_round["row_mass"][..., None].expand_as(
+                                   reset_first_round["w"].sum(-2)),
+                               rtol=0, atol=2.0e-16)
+
+    joint_reset = model.intervene_context(
+        normal, native_route_intervention={"kind": "density_reset", "route_types": ["MM"]}
+    )
+    for item in joint_reset.native_routing_trace:
+        if item["legacy_route"] == "MM":
+            assert torch.equal(item["rho"], torch.ones_like(item["rho"]))
+            assert item["intervention_view"] is None
+
+    collapsed = model.intervene_context(
+        normal, native_route_intervention={"kind": "average_collapse", "route_types": ["MM"]}
+    )
+    collapsed_mm = [item for item in collapsed.native_routing_trace
+                    if item["legacy_route"] == "MM"]
+    for item in collapsed_mm:
+        torch.testing.assert_close(item["rho"][..., 0], item["rho"][..., 1], rtol=0, atol=0)
+    torch.testing.assert_close(collapsed_mm[0]["rho"][..., 0],
+                               normal_mm[0]["rho"].mean(-1), rtol=0, atol=0)
+
+    reassigned_one = model.intervene_context(
+        normal, native_route_intervention={
+            "kind": "equal_measure_reassignment", "route_types": ["MM"], "view": 1,
+        }
+    )
+    reassigned_all = model.intervene_context(
+        normal, native_route_intervention={"kind": "equal_measure_reassignment", "route_types": ["MM"]}
+    )
+    for rebuilt, selected_views in ((reassigned_one, (1,)), (reassigned_all, (0, 1))):
+        items = [item for item in rebuilt.native_routing_trace if item["legacy_route"] == "MM"]
+        assert sum(item["intervention_receipt"]["changed_donors"] for item in items) > 0
+        baseline, item = normal_mm[0], items[0]
+        for view in selected_views:
+            assert not torch.equal(item["rho"][..., view], baseline["rho"][..., view])
+        for view in {0, 1} - set(selected_views):
+            assert torch.equal(item["rho"][..., view], baseline["rho"][..., view])
+        torch.testing.assert_close(item["w"].sum(-2),
+                                   item["row_mass"][..., None].expand_as(item["w"].sum(-2)),
+                                   rtol=0, atol=2.0e-16)
+
+    receivers = torch.tensor([[[0.1, 0.2], [0.8, -0.4]]], dtype=torch.float64)
+    baseline_fields = model.predict_fields(normal, receivers)
+    for intervened in (per_view_reset, joint_reset, collapsed, reassigned_one, reassigned_all):
+        restored = model.restore(intervened)
+        assert restored.native_route_intervention == (None, ())
+        assert restored.native_routing_trace is None
+        torch.testing.assert_close(model.predict_fields(restored, receivers), baseline_fields,
+                                   rtol=0, atol=0)
+
+
+def test_consolidated_native_finite_check_keeps_early_raw_score_failure():
+    def inject_first_round_infinity(_module, _inputs, output):
+        calls["count"] += 1
+        if calls["count"] != 1:
+            return output
+        output = output.clone()
+        output[0, 0, 0, 0] = torch.inf
+        assert torch.isfinite(2.0 * torch.tanh(output / 2.0)).all()
+        return output
+
+    model = _core("P-R2")
+    calls = {"count": 0}
+    hook = model.native_routing.score_mlps["MM"].register_forward_hook(
+        inject_first_round_infinity
+    )
+    try:
+        model.set_consolidated_native_validation(True)
+        with pytest.raises(FloatingPointError, match="Native MM raw score MLP"):
+            _prepare(model, _inputs())
+    finally:
+        hook.remove()
+    assert calls["count"] == 2  # Round two ran; its finite flag did not erase round one's failure.
+
+    eager = _core("P-R2")
+    eager_calls = {"count": 0}
+
+    def inject_for_eager_path(_module, _inputs, output):
+        eager_calls["count"] += 1
+        output = output.clone()
+        output[0, 0, 0, 0] = torch.inf
+        return output
+
+    eager_hook = eager.native_routing.score_mlps["MM"].register_forward_hook(
+        inject_for_eager_path
+    )
+    try:
+        with pytest.raises(FloatingPointError, match="score MLP produced non-finite"):
+            _prepare(eager, _inputs())
+    finally:
+        eager_hook.remove()
+    assert eager_calls["count"] == 1
+
+
+def test_native_validation_and_partition_changes_invalidate_prepared_context():
+    model = _core("P-R2")
+    prepared = _prepare(model, _inputs())
+    with pytest.raises(ValueError, match="architectural"):
+        model.native_routing_views = 1
+    model.set_consolidated_native_validation(True)
+    with pytest.raises(ValueError, match="native validation mode changed"):
+        model.predict_fields(prepared, torch.zeros((1, 1, 2), dtype=torch.float64))
+
+    partition_model = _core("P-R2")
+    partition_prepared = _prepare(partition_model, _inputs())
+    partition_model.config["native_routing"]["feature_blocks"][0] = 32
+    with pytest.raises(ValueError, match="native routing config changed"):
+        partition_model.predict_fields(
+            partition_prepared, torch.zeros((1, 1, 2), dtype=torch.float64)
+        )
+
+
+@pytest.mark.parametrize(("attribute", "replacement"), [
+    ("policy", "destination_gain"),
+    ("views", 1),
+    ("feature_blocks", (128,)),
+])
+def test_live_native_routing_metadata_mutations_stale_prepared_and_reject_reprepare(
+        attribute, replacement):
+    model = _core("P-R2")
+    prepared = _prepare(model, _inputs())
+    setattr(model.native_routing, attribute, replacement)
+    with pytest.raises(ValueError, match="native routing semantics changed"):
+        model.predict_fields(prepared, torch.zeros((1, 1, 2), dtype=torch.float64))
+    with pytest.raises(ValueError, match="Native routing"):
+        _prepare(model, _inputs())
+
+
+def test_live_native_routing_metadata_change_and_restore_still_invalidates_prepared():
+    model = _core("P-R2")
+    prepared = _prepare(model, _inputs())
+    model.native_routing.views = 1
+    model.native_routing.views = 2
+    with pytest.raises(ValueError, match="native routing semantics changed"):
+        model.predict_fields(prepared, torch.zeros((1, 1, 2), dtype=torch.float64))
+
+
+@pytest.mark.parametrize(("key", "replacement"), [
+    ("views", 2.0),
+    ("feature_blocks", [64.0, 64]),
+    ("score_hidden", 32.0),
+    ("score_bound", 2),
+])
+def test_wrong_typed_equal_native_routing_config_stales_and_rejects_reprepare(
+        key, replacement):
+    model = _core("P-R2")
+    prepared = _prepare(model, _inputs())
+    model.config["native_routing"][key] = replacement
+    with pytest.raises(ValueError, match="native routing config changed"):
+        model.predict_fields(prepared, torch.zeros((1, 1, 2), dtype=torch.float64))
+    with pytest.raises(ValueError, match="Native routing declared config"):
+        _prepare(model, _inputs())
+
+
+@pytest.mark.parametrize("mode", ["P-R", "P-R2", "P-C"])
 def test_zero_initialized_native_modes_recover_full_core_input_vjps(mode):
     """Zero-start recovery includes every floating native context and query input."""
     for source_count in (1, 4):
-        baseline, routed = _core("P"), _core(mode)
+        baseline = _core("P", message=128 if mode == "P-R2" else 8)
+        routed = _core(mode)
         input_sets = []
         for _ in range(2):
             current = {}
@@ -380,7 +682,7 @@ def test_zero_initialized_native_modes_recover_full_core_input_vjps(mode):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("mode", ["P-R", "P-C"])
+@pytest.mark.parametrize("mode", ["P-R", "P-R2", "P-C"])
 def test_native_routing_one_source_has_finite_empty_mm_self_exclusion(mode):
     values = _inputs()
     for name in ("sources", "centers", "present", "source_lengths", "source_measures", "source_ids"):
@@ -399,10 +701,11 @@ def test_native_routing_one_source_has_finite_empty_mm_self_exclusion(mode):
         assert torch.isfinite(item["weighted_message_norm"]).all()
 
 
-@pytest.mark.parametrize("mode", ["P-R", "P-C"])
+@pytest.mark.parametrize("mode", ["P-R", "P-R2", "P-C"])
 def test_zero_initialized_native_modes_preserve_direct_outputs_and_common_weights(mode):
     values = _inputs()
-    direct, routed = _core("P"), _core(mode)
+    direct = _core("P", message=128 if mode == "P-R2" else 8)
+    routed = _core(mode)
     for name, parameter in direct.named_parameters():
         torch.testing.assert_close(parameter, dict(routed.named_parameters())[name], rtol=0, atol=0)
 
@@ -418,13 +721,16 @@ def test_zero_initialized_native_modes_preserve_direct_outputs_and_common_weight
 
     output_weights = torch.tensor([[[0.5, -0.7], [0.2, 0.4], [-0.3, 0.8]]], dtype=torch.float64)
     (routed_fields * output_weights).sum().backward()
-    modules = (routed.native_routing.score_mlps if mode == "P-R"
+    modules = (routed.native_routing.score_mlps if mode in ("P-R", "P-R2")
                else routed.native_routing.aggregate_modulators)
     for route in ("MM", "ME", "EM"):
         final = modules[route][-1]
-        assert final.bias is None if mode == "P-R" else final.bias is not None
+        assert final.bias is None if mode in ("P-R", "P-R2") else final.bias is not None
         assert final.weight.grad is not None and torch.isfinite(final.weight.grad).all()
         assert final.weight.grad.abs().sum() > 0
+        if mode == "P-R2":
+            assert final.weight.grad.shape == (2, 32)
+            assert (final.weight.grad.abs().sum(-1) > 0).all()
 
 
 def test_p_r_trace_keeps_literal_base_rows_detached_and_interventions_rebuild_restore():

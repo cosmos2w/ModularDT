@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,7 +13,10 @@ import torch
 from channelthermal.joint_regional import (
     JOINT_THERMAL_CHANNEL_ORDER,
     JOINT_THERMAL_MODES,
+    NATIVE_CURL_READOUT_LAW,
+    InteractionPreservingThermalAdapter,
     JointThermalRegionalAdapter,
+    load_interaction_preserving_thermal_checkpoint,
     load_joint_thermal_checkpoint,
 )
 from channelthermal.training import joint_task as joint_task_module
@@ -61,6 +66,97 @@ def _adapter(mode="J-H", locality_prior_strength=0.0):
         locality_prior_strength=locality_prior_strength,
         seed=91,
     )
+
+
+def _fresh_thermal_engine_checkpoint(mode="P"):
+    from honf_runtime.unified_training import fresh_matched_initialization_receipt
+
+    honf_root = Path(__file__).resolve().parents[2]
+    tools_path = str(honf_root / "tools")
+    if tools_path not in sys.path:
+        sys.path.insert(0, tools_path)
+    import joint_regional_train as fresh_runner
+
+    stats = _stats()
+    model = InteractionPreservingThermalAdapter(
+        mode=mode,
+        normalization_stats=stats,
+        hidden=128,
+        message=128,
+        regional_anchors=0,
+        receiver_tile=512,
+        seed=0,
+        flow_readout_law=NATIVE_CURL_READOUT_LAW,
+    )
+    model.core.set_consolidated_native_validation(True)
+    provider_identity = {
+        "task": "ThermalChannel",
+        "arm": mode,
+        "model_family": model.family_id,
+        "model_config": model.model_config(),
+        "adapter_config": model.adapter_config(),
+        "normalization_stats": {name: np.asarray(value).tolist() for name, value in stats.items()},
+        "normalization_stats_sha256": "a" * 64,
+        "response_scales": {"fluid": 1.0, "surface": 1.0, "material": 1.0},
+        "loss_weights": {"flow": 0.5, "thermal": 0.5},
+        "auxiliary_calibration": {"native_curl_receipt": "synthetic-test-binding"},
+        "dataset_split": "fixed25_v1",
+        "training_membership_scope": "fixed25_v1_selected_train_150",
+        "training_case_ids_sha256": "b" * 64,
+        "fresh_matched_comparison": True,
+    }
+    recipe = {
+        "schema_version": 1,
+        "comparison_protocol": "fresh_segmented_multiview_2500_v1",
+        "task": "thermal",
+        "mode": mode,
+        "fresh_matched_comparison": True,
+        "dataset_protocol": "fixed25_v1",
+        "seed": 0,
+        "total_epochs": 2500,
+        "regional_anchors": 0,
+        "flow_readout_law": NATIVE_CURL_READOUT_LAW,
+        "native_validation_policy": "consolidated_route_flags_v1",
+        "engine_schedule": {"sampling_version": "case_epoch_v1"},
+        "model_contract": fresh_runner._fresh_matched_model_contract("thermal", mode),
+    }
+    engine_config = {
+        "seed": 0,
+        "total_epochs": 2500,
+        "sampling_version": "case_epoch_v1",
+        "deterministic_case_order": True,
+        "training_mode": "joint",
+    }
+    marker = fresh_matched_initialization_receipt(
+        model,
+        provider_identity,
+        active_mode=mode,
+        seed=0,
+        sampling_version="case_epoch_v1",
+        deterministic_case_order=True,
+    )
+    identity = {
+        "workflow": "fresh_segmented_multiview_2500_v1",
+        "recipe": recipe,
+        "engine_config": engine_config,
+        "provider_identity": provider_identity,
+        "native_validation_policy": "consolidated_route_flags_v1",
+        "initialization": "fresh_common_trunk_private_router_rng",
+        "inherited_parameter_names": [],
+        "optimizer_state_start": "fresh_zero_moments",
+        "external_learned_field_files": [],
+        "fresh_initialization": marker,
+        "initial_model_state_sha256": marker["initial_model_state_sha256"],
+    }
+    return model, {
+        "checkpoint_schema_version": 1,
+        "workflow": "fresh_segmented_multiview_2500_v1",
+        "experiment_identity": identity,
+        "arm": mode,
+        "epoch": 1,
+        "model_state_dict": model.state_dict(),
+        "branch_parent": None,
+    }
 
 
 @pytest.mark.parametrize("mode", ("P-R", "P-C"))
@@ -191,6 +287,132 @@ def test_joint_native_heat_null_affinity_and_target_poisoning(mode):
     assert increment["fluid_temperature"].dtype == torch.float64
     assert "module_material_peak" not in increment
     assert "pred_port_condition" not in increment
+
+
+@pytest.mark.parametrize("flow_readout_law", (None, NATIVE_CURL_READOUT_LAW))
+def test_pr2_thermal_standalone_roundtrip_preserves_heat_null_affine_and_curl_contract(flow_readout_law):
+    torch.manual_seed(17)
+    model = InteractionPreservingThermalAdapter(
+        mode="P-R2",
+        normalization_stats=_stats(),
+        hidden=128,
+        message=128,
+        regional_anchors=0,
+        receiver_tile=512,
+        seed=0,
+        flow_readout_law=flow_readout_law,
+    ).eval()
+    payload = model.checkpoint_payload()
+    assert payload["model_config"]["native_routing"] == {
+        "schema": "native_interaction_routing_v2",
+        "mode": "P-R2",
+        "policy": "learned_density",
+        "initialization_seed": 0,
+        "score_hidden": 32,
+        "score_bound": 2.0,
+        "views": 2,
+        "feature_blocks": [64, 64],
+    }
+    loaded = load_interaction_preserving_thermal_checkpoint(payload).eval()
+    assert loaded.model_config() == model.model_config()
+    assert set(loaded.state_dict()) == set(model.state_dict())
+    for name, tensor in model.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[name], tensor, rtol=0.0, atol=0.0)
+
+    structure = _structure(2)
+    xy = torch.tensor(
+        [[[8.5 * 12.0 / 128.0, 8.5 * 6.0 / 64.0],
+          [40.5 * 12.0 / 128.0, 24.5 * 6.0 / 64.0],
+          [88.5 * 12.0 / 128.0, 40.5 * 6.0 / 64.0]]],
+        dtype=torch.float32,
+    )
+    local = torch.tensor([[[[0.0, 0.0], [0.35, 0.0]], [[0.0, 0.0], [0.35, 0.0]]]], dtype=torch.float32)
+    kwargs = {"native_solid_mask": torch.zeros((1, 64, 128), dtype=torch.bool)} if flow_readout_law else {}
+    prepared = model.prepare_native(structure, xy, local_query_points=local, ntheta=4, **kwargs)
+    heat = torch.tensor([[0.7, 1.1]], dtype=torch.float64)
+    delta = torch.tensor([[0.125, -0.25]], dtype=torch.float64)
+    baseline = model.apply_native(prepared, heat, accumulation_dtype=torch.float64)
+    changed = model.apply_native(prepared, heat + delta, accumulation_dtype=torch.float64)
+    increment = model.apply_native(prepared, delta, increment=True, accumulation_dtype=torch.float64)
+    assert torch.equal(baseline["pred_field"][..., :4], changed["pred_field"][..., :4])
+    assert torch.equal(increment["pred_field"][..., :4], torch.zeros_like(increment["pred_field"][..., :4]))
+    torch.testing.assert_close(changed["fluid_temperature"] - baseline["fluid_temperature"],
+                               increment["fluid_temperature"], rtol=1e-8, atol=1e-12)
+    loaded_prepared = loaded.prepare_native(structure, xy, local_query_points=local, ntheta=4, **kwargs)
+    loaded_prediction = loaded.apply_native(loaded_prepared, heat, accumulation_dtype=torch.float64)
+    torch.testing.assert_close(loaded_prediction["pred_field"], baseline["pred_field"], rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize(
+    ("name", "bad_value"),
+    (("score_hidden", 32.0), ("score_bound", 2), ("views", 2.0),
+     ("feature_blocks", [64.0, 64]), ("feature_blocks", [64, True])),
+)
+def test_pr2_thermal_loader_rejects_numeric_equivalent_v2_metadata_types(name, bad_value):
+    model = InteractionPreservingThermalAdapter(
+        mode="P-R2", normalization_stats=_stats(), seed=0,
+    )
+    payload = model.checkpoint_payload()
+    payload["model_config"]["native_routing"][name] = bad_value
+    with pytest.raises(TypeError, match="P-R2"):
+        load_interaction_preserving_thermal_checkpoint(payload)
+
+
+@pytest.mark.parametrize("mode", ("P", "P-R", "P-R2"))
+def test_fresh_thermal_engine_checkpoint_roundtrip_requires_matching_no_parent_identity(mode):
+    source_model, payload = _fresh_thermal_engine_checkpoint(mode)
+    loaded = load_interaction_preserving_thermal_checkpoint(payload)
+    assert loaded.model_config() == source_model.model_config()
+    assert loaded.core.consolidated_native_validation is True
+    for name, tensor in source_model.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[name], tensor, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (("receipt_hash", "Fresh initialization receipt differs"),
+     ("receipt_schema", "Fresh matched initialization schema"),
+     ("receipt_digest_format", "malformed SHA-256"),
+     ("common_digest_format", "malformed SHA-256"),
+     ("receipt_exclusion", "common digest must exclude"),
+     ("receipt_sampler", "sampler namespace is not bound"),
+     ("recipe_route_type", "recipe route widths and bounds must use their canonical numeric types"),
+     ("provider_route_type", "provider P-R2 metadata must use exact integer types"),
+     ("recipe_mode", "arm, provider and recipe"),
+     ("workflow", "Fresh Thermal engine checkpoints require")),
+)
+def test_fresh_thermal_engine_checkpoint_rejects_malformed_identity_markers(mutation, message):
+    _, payload = _fresh_thermal_engine_checkpoint("P-R2")
+    identity = payload["experiment_identity"]
+    if mutation == "receipt_hash":
+        identity["fresh_initialization"]["common_initialization_sha256"] = "0" * 64
+    elif mutation == "receipt_schema":
+        identity["fresh_initialization"]["schema"] = "matched_fresh_multiview_initialization_v0"
+    elif mutation == "receipt_digest_format":
+        identity["fresh_initialization"]["initial_model_state_sha256"] = "not-a-digest"
+    elif mutation == "common_digest_format":
+        identity["fresh_initialization"]["common_initialization_sha256"] = "not-a-digest"
+    elif mutation == "receipt_exclusion":
+        identity["fresh_initialization"]["common_parameter_exclusion_prefixes"] = ["core."]
+    elif mutation == "receipt_sampler":
+        identity["fresh_initialization"]["sampler_namespace"]["dataset_id"] = "other:dataset"
+    elif mutation == "recipe_route_type":
+        identity["recipe"]["model_contract"]["native_routing"]["views"] = 2.0
+    elif mutation == "provider_route_type":
+        identity["provider_identity"]["model_config"]["native_routing"]["views"] = 2.0
+    elif mutation == "recipe_mode":
+        identity["recipe"]["mode"] = "P-R"
+    else:
+        payload["workflow"] = "joint_regional_fields_v1"
+    with pytest.raises((TypeError, ValueError), match=message):
+        load_interaction_preserving_thermal_checkpoint(payload)
+
+
+def test_fresh_thermal_direct_p_engine_loader_rejects_bad_initialization_schema():
+    _, payload = _fresh_thermal_engine_checkpoint("P")
+    payload["experiment_identity"]["fresh_initialization"]["schema"] = "unknown"
+    with pytest.raises(ValueError, match="Fresh matched initialization schema"):
+        load_interaction_preserving_thermal_checkpoint(payload)
 
 
 @pytest.mark.parametrize("module_count", [1, 12])
@@ -648,6 +870,7 @@ def test_joint_provider_identity_is_strict_json_serializable():
     }
     provider.formal_full = False
     provider.full_train_followup1000 = False
+    provider.fresh_matched_comparison = False
     provider.source_binding = {"dataset_id": "synthetic_identity_test", "metadata_sha256": "b" * 64}
     provider.model = _adapter("J-H")
     provider.stats = _stats()
@@ -667,6 +890,7 @@ def test_joint_provider_identity_is_strict_json_serializable():
 
     identity = provider.identity_payload()
     json.dumps(identity, allow_nan=False)
+    assert "fresh_matched_comparison" not in identity
     assert identity["normalization_stats"]["field_mean_by_channel"] == [1.0, -2.0, 0.5, 3.0, 10.0]
     assert "locality_prior_strength" not in identity["model_config"]
     provider.model = _adapter("J-H", locality_prior_strength=1.0)

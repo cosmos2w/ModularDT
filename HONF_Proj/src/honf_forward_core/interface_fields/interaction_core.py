@@ -16,8 +16,10 @@ from torch import nn
 from torch.nn import functional as F
 
 from .native_interaction_routing import (
+    NATIVE_ROUTE_TYPES,
     NativeInteractionRouting,
     density_normalize,
+    intervention_view,
     normalize_intervention,
     reassign_equal_measure_densities,
     route_endpoint_types,
@@ -74,6 +76,22 @@ def _parameter_signature(model):
                  for name, parameter in model.named_parameters())
 
 
+def _type_sensitive_value_signature(value):
+    """Encode JSON-like metadata without Python's ``True == 1`` equality."""
+    value_type = type(value)
+    type_name = (value_type.__module__, value_type.__qualname__)
+    if value_type is dict:
+        entries = [(_type_sensitive_value_signature(key),
+                    _type_sensitive_value_signature(item))
+                   for key, item in value.items()]
+        return type_name, tuple(sorted(entries, key=repr))
+    if value_type in (list, tuple):
+        return type_name, tuple(_type_sensitive_value_signature(item) for item in value)
+    if value_type in (str, int, float, bool, type(None)):
+        return type_name, value
+    return type_name, repr(value)
+
+
 @dataclass
 class PreparedResponseContext:
     source_states: torch.Tensor
@@ -105,11 +123,17 @@ class PreparedResponseContext:
     factorized_affine_generation: int = 0
     native_routing_generation: int = 0
     native_routing_enabled: bool = True
+    native_routing_views: int = 1
+    native_validation_generation: int = 0
+    consolidated_native_validation: bool = False
     native_aggregation_policy: str = 'measure'
     native_routing_config_snapshot: object | None = None
+    native_routing_semantics_snapshot: object | None = None
     # Filled only when callers explicitly request a detached diagnostic trace.
     native_routing_trace: tuple[dict, ...] | None = None
+    native_routing_trace_metadata: dict | None = None
     native_route_intervention: tuple[str | None, tuple[str, ...]] = (None, ())
+    native_route_intervention_view: int | None = None
 
     def assert_fresh(self):
         _check_versions(self.input_versions)
@@ -123,15 +147,36 @@ class PreparedResponseContext:
             if (hasattr(owner, '_native_routing_generation')
                     and self.native_routing_generation != owner._native_routing_generation):
                 raise ValueError('Prepared native routing policy changed; rebuild this request.')
+            if (hasattr(owner, '_native_validation_generation')
+                    and self.native_validation_generation != owner._native_validation_generation):
+                raise ValueError('Prepared native validation mode changed; rebuild this request.')
+            if (hasattr(owner, 'consolidated_native_validation')
+                    and self.consolidated_native_validation != owner.consolidated_native_validation):
+                raise ValueError('Prepared native validation mode changed; rebuild this request.')
             if (hasattr(owner, 'native_routing_enabled')
                     and self.native_routing_enabled != owner.native_routing_enabled):
                 raise ValueError('Prepared native routing execution changed; rebuild this request.')
             if (hasattr(owner, 'native_aggregation_policy')
                     and self.native_aggregation_policy != owner.native_aggregation_policy):
                 raise ValueError('Prepared native aggregation policy changed; rebuild this request.')
+            if (hasattr(owner, 'native_routing_views')
+                    and self.native_routing_views != owner.native_routing_views):
+                raise ValueError('Prepared native routing views changed; rebuild this request.')
             if (self.native_routing_config_snapshot is not None
-                    and self.native_routing_config_snapshot != owner.config.get('native_routing')):
+                    and self.native_routing_config_snapshot
+                    != _type_sensitive_value_signature(owner.config.get('native_routing'))):
                 raise ValueError('Prepared native routing config changed; rebuild this request.')
+            if self.native_routing_semantics_snapshot is not None:
+                try:
+                    active_routing_semantics = owner._native_routing_semantics_signature()
+                except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                    raise ValueError(
+                        'Prepared native routing semantics changed; rebuild this request.'
+                    ) from exc
+                if active_routing_semantics != self.native_routing_semantics_snapshot:
+                    raise ValueError(
+                        'Prepared native routing semantics changed; rebuild this request.'
+                    )
 
 
 @dataclass(frozen=True)
@@ -218,7 +263,7 @@ class InteractionContextCore(nn.Module):
                  spatial_dim=2, hidden=64, message=64, query_width=0, max_sources=None,
                  factorized_affine_execution=False,
                  native_aggregation_policy='measure', native_control_hidden=None,
-                 native_routing_seed=0):
+                 native_routing_seed=0, native_routing_views=1):
         super().__init__()
         if spatial_dim not in (2, 3) or min(source_width, context_width, environment_width, hidden, message) < 1 or query_width < 0:
             raise ValueError('Interaction widths must be positive with 2-D or 3-D geometry.')
@@ -237,9 +282,18 @@ class InteractionContextCore(nn.Module):
         if native_aggregation_policy == 'destination_gain' and (
                 type(native_control_hidden) is not int or native_control_hidden < 1):
             raise ValueError('P-C requires a positive integer native control width.')
+        if type(native_routing_views) is not int or native_routing_views not in (1, 2):
+            raise ValueError('Native routing supports one or two feature views.')
+        if native_aggregation_policy != 'learned_density' and native_routing_views != 1:
+            raise ValueError('Only learned-density routing supports multiple feature views.')
+        if native_routing_views == 2 and message != 128:
+            raise ValueError('P-R2 requires one existing 128-coordinate message with two 64-coordinate views.')
         self.native_aggregation_policy = native_aggregation_policy
         self.native_control_hidden = native_control_hidden
         self._native_routing_generation = 0
+        self.native_routing_views = native_routing_views
+        self._native_validation_generation = 0
+        self._consolidated_native_validation = False
         self.native_routing_enabled = True
         if native_aggregation_policy != 'measure':
             pair_width = 2 * hidden + relative_width
@@ -251,15 +305,20 @@ class InteractionContextCore(nn.Module):
                 message_width=message,
                 control_hidden=native_control_hidden,
                 initialization_seed=native_routing_seed,
+                views=native_routing_views,
             )
             routing_config = {
-                'schema': 'native_interaction_routing_v1',
+                'schema': ('native_interaction_routing_v2' if native_routing_views == 2
+                           else 'native_interaction_routing_v1'),
                 'policy': native_aggregation_policy,
                 'initialization_seed': int(native_routing_seed),
             }
             if native_aggregation_policy == 'learned_density':
                 routing_config.update(score_hidden=NativeInteractionRouting.SCORE_HIDDEN,
                                       score_bound=NativeInteractionRouting.SCORE_BOUND)
+                if native_routing_views == 2:
+                    routing_config.update(views=2,
+                                          feature_blocks=list(self.native_routing.feature_blocks))
             else:
                 routing_config['control_hidden'] = native_control_hidden
             self.config['native_routing'] = routing_config
@@ -306,6 +365,46 @@ class InteractionContextCore(nn.Module):
             raise ValueError('The legacy measure policy has no native routing block to toggle.')
         self.native_routing_enabled = enabled
 
+    def set_consolidated_native_validation(self, enabled: bool) -> None:
+        """Opt into one synchronization for route-intermediate finite checks.
+
+        The ordinary path retains eager public score/gain checks. This runtime
+        switch is intentionally absent from serialized model configuration.
+        """
+        if type(enabled) is not bool:
+            raise TypeError('consolidated native validation setting must be a bool.')
+        self.consolidated_native_validation = enabled
+
+    @property
+    def consolidated_native_validation(self) -> bool:
+        return self._consolidated_native_validation
+
+    @consolidated_native_validation.setter
+    def consolidated_native_validation(self, enabled: bool) -> None:
+        if type(enabled) is not bool:
+            raise TypeError('consolidated native validation setting must be a bool.')
+        previous = getattr(self, '_consolidated_native_validation', None)
+        if previous is not None and previous != enabled:
+            self._native_validation_generation += 1
+        self._consolidated_native_validation = enabled
+
+    @property
+    def native_routing_views(self) -> int:
+        return self._native_routing_views
+
+    @native_routing_views.setter
+    def native_routing_views(self, views: int) -> None:
+        if type(views) is not int or views not in (1, 2):
+            raise ValueError('Native routing supports one or two feature views.')
+        if getattr(self, 'native_aggregation_policy', None) != 'learned_density' and views != 1:
+            raise ValueError('Only learned-density routing supports multiple feature views.')
+        if getattr(self, 'config', {}).get('message') and views == 2 and self.config['message'] != 128:
+            raise ValueError('P-R2 requires one existing 128-coordinate message with two 64-coordinate views.')
+        previous = getattr(self, '_native_routing_views', None)
+        if previous is not None and previous != views:
+            raise ValueError('Native routing view count is architectural; construct a new model.')
+        self._native_routing_views = views
+
     @property
     def native_routing_enabled(self) -> bool:
         return self._native_routing_enabled
@@ -330,15 +429,22 @@ class InteractionContextCore(nn.Module):
 
     def _native_route_weights(self, route, base_weights, pair_features, measures,
                               present, donor_ids, intervention_kind,
-                              intervention_routes):
+                              intervention_routes, intervention_view_index,
+                              finite_flags):
         scores = None
         if (self.native_aggregation_policy == 'learned_density'
                 and self.native_routing_enabled):
-            scores = self.native_routing.score(route, pair_features)
+            scores = self.native_routing.score(
+                route, pair_features, finite_flags=finite_flags)
             density, weights = density_normalize(base_weights, scores)
         else:
-            density = torch.ones_like(base_weights)
-            weights = base_weights
+            if self.native_routing_views == 2:
+                density = torch.ones((*base_weights.shape, 2), dtype=base_weights.dtype,
+                                     device=base_weights.device)
+                weights = base_weights[..., None] * density
+            else:
+                density = torch.ones_like(base_weights)
+                weights = base_weights
         receipt = {
             'changed_donors': 0,
             'skipped_singleton_buckets': 0,
@@ -347,18 +453,68 @@ class InteractionContextCore(nn.Module):
         }
         if intervention_kind is not None and route in intervention_routes:
             if self.native_aggregation_policy != 'learned_density' or not self.native_routing_enabled:
-                raise ValueError('Native route interventions require active P-R density routing.')
+                raise ValueError('Native route interventions require active P-R/P-R2 density routing.')
             if intervention_kind == 'density_reset':
-                eligible = base_weights > 0
-                receipt['changed_donors'] = int(((density != 1) & eligible).sum().item())
-                density = torch.ones_like(density)
+                eligible = (base_weights > 0 if density.ndim == 3 else
+                            (base_weights > 0)[..., None])
+                if intervention_view_index is None:
+                    receipt['changed_donors'] = int(((density != 1) & eligible).sum().item())
+                    density = torch.ones_like(density)
+                else:
+                    if intervention_view_index >= self.native_routing_views:
+                        raise ValueError('Native route intervention view is outside the model view axis.')
+                    if density.ndim == 3 and intervention_view_index != 0:
+                        raise ValueError('Single-view P-R exposes only view zero.')
+                    if density.ndim == 3:
+                        receipt['changed_donors'] = int(
+                            ((density != 1) & (base_weights > 0)).sum().item())
+                        density = torch.ones_like(density)
+                    else:
+                        receipt['changed_donors'] = int(
+                            ((density[..., intervention_view_index] != 1)
+                             & (base_weights > 0)).sum().item())
+                        density = density.clone()
+                        density[..., intervention_view_index] = 1
+            elif intervention_kind == 'average_collapse':
+                if self.native_routing_views != 2 or density.ndim != 4:
+                    raise ValueError('Average-collapse intervention requires two-view P-R2.')
+                collapsed = density.mean(-1, keepdim=True).expand_as(density)
+                eligible = (base_weights > 0)[..., None]
+                receipt['changed_donors'] = int(
+                    ((density != collapsed) & eligible).sum().item())
+                density = collapsed
+            elif intervention_kind == 'equal_measure_reassignment':
+                if intervention_view_index is None:
+                    density, receipt = reassign_equal_measure_densities(
+                        density, base_weights, measures, present, donor_ids)
+                elif density.ndim == 3:
+                    if intervention_view_index != 0:
+                        raise ValueError('Single-view P-R exposes only view zero.')
+                    density, receipt = reassign_equal_measure_densities(
+                        density, base_weights, measures, present, donor_ids)
+                else:
+                    if intervention_view_index >= self.native_routing_views:
+                        raise ValueError('Native route intervention view is outside the model view axis.')
+                    reassigned, receipt = reassign_equal_measure_densities(
+                        density[..., intervention_view_index], base_weights, measures,
+                        present, donor_ids)
+                    density = density.clone()
+                    density[..., intervention_view_index] = reassigned
             else:
-                density, receipt = reassign_equal_measure_densities(
-                    density, base_weights, measures, present, donor_ids)
-            weights = base_weights * density
+                raise ValueError(f'Unsupported native route intervention {intervention_kind!r}.')
+            if density.ndim == 3:
+                weights = base_weights * density
+            else:
+                weights = base_weights[..., None] * density
         for name, value in (('score', scores), ('density', density), ('weight', weights)):
-            if value is not None and not bool(torch.isfinite(value).all()):
-                raise FloatingPointError(f'Native {route} routing produced non-finite {name} values.')
+            if value is None:
+                continue
+            finite = torch.isfinite(value).all()
+            if finite_flags is None:
+                if not bool(finite):
+                    raise FloatingPointError(f'Native {route} routing produced non-finite {name} values.')
+            else:
+                finite_flags.append((f'Native {route} routing {name}', finite))
         return scores, density, weights, receipt
 
     @classmethod
@@ -367,12 +523,24 @@ class InteractionContextCore(nn.Module):
                             destination_measure, donor_measure, self_mask,
                             base_weights, scores, density, weights,
                             values, aggregate, modulation_gain, intervention,
-                            intervention_receipt):
+                            intervention_view_index, intervention_receipt):
         donor_type, destination_type = route_endpoint_types(route)
-        weighted_norm = torch.linalg.vector_norm(values * weights[..., None], dim=-1)
+        if weights.ndim == 4:
+            view_count = weights.shape[-1]
+            block_width = values.shape[-1] // view_count
+            value_blocks = values.reshape(*values.shape[:-1], view_count, block_width)
+            weighted_content = value_blocks * weights[..., None]
+            head_aggregate = weighted_content.sum(2)
+            weighted_norm = torch.linalg.vector_norm(weighted_content, dim=-1)
+        else:
+            view_count = 1
+            weighted_content = values * weights[..., None]
+            head_aggregate = weighted_content.sum(2).unsqueeze(-2)
+            weighted_norm = torch.linalg.vector_norm(weighted_content, dim=-1)
         return {
             'round': round_index + 1,
             'legacy_route': route,
+            'view_ids': cls._diagnostic_copy(torch.arange(view_count, device=weights.device)),
             'donor_type': donor_type,
             'destination_type': destination_type,
             'destination_ids': cls._diagnostic_copy(destination_ids),
@@ -389,15 +557,211 @@ class InteractionContextCore(nn.Module):
             'donor_mask': cls._diagnostic_copy(base_weights > 0),
             'self_exclusion_mask': cls._diagnostic_copy(self_mask),
             'w0': cls._diagnostic_copy(base_weights),
+            'row_mass': cls._diagnostic_copy(base_weights.sum(-1)),
             's': cls._diagnostic_copy(scores),
             'rho': cls._diagnostic_copy(density),
             'w': cls._diagnostic_copy(weights),
+            'weighted_message_content': cls._diagnostic_copy(weighted_content),
+            'head_aggregate': cls._diagnostic_copy(head_aggregate),
             'weighted_message_norm': cls._diagnostic_copy(weighted_norm),
             'aggregate': cls._diagnostic_copy(aggregate),
             'modulation_gain': cls._diagnostic_copy(modulation_gain),
             'intervention': intervention,
+            'intervention_view': intervention_view_index,
             'intervention_receipt': dict(intervention_receipt),
         }
+
+    def _native_routing_trace_metadata(self, routing_semantics=None) -> dict:
+        if routing_semantics is None:
+            routing_semantics = self._native_routing_semantics_signature()
+        output_law = {
+            key: getattr(self, key, None)
+            for key in ('output_law', 'field_output_law', 'response_output_law')
+        }
+        return {
+            'owner_id': id(self),
+            'configuration': copy.deepcopy(self.config),
+            'weight_freshness_binding': _parameter_signature(self),
+            'routing_generation': self._native_routing_generation,
+            'routing_semantics_version': 'native_interaction_routing_semantics_v1',
+            'active_routing_semantics': routing_semantics,
+            'native_validation_generation': self._native_validation_generation,
+            'output_law_metadata': output_law,
+        }
+
+    def _native_routing_semantics_signature(self):
+        """Validate and bind the active route module and its declared config.
+
+        ``config`` is a mutable export surface. Prepared state therefore binds
+        both its exact typed representation and the live module attributes
+        that determine view layout and route evaluation. This is runtime-only;
+        it does not alter serialized model configuration or parameter state.
+        """
+        policy = self.native_aggregation_policy
+        if policy == 'measure':
+            return None
+        if type(policy) is not str or policy not in ('learned_density', 'destination_gain'):
+            raise ValueError('Native routing active semantics have an unsupported core policy.')
+
+        routing = getattr(self, 'native_routing', None)
+        if routing is None:
+            raise ValueError('Native routing active semantics are missing the route module.')
+        semantics_generation = routing.routing_semantics_generation
+        if type(semantics_generation) is not int or semantics_generation < 0:
+            raise ValueError('Native routing semantic generation must be a nonnegative integer.')
+        views = self.native_routing_views
+        if type(views) is not int or views not in (1, 2):
+            raise ValueError('Native routing active semantics have an invalid core view count.')
+        if type(routing.policy) is not str or routing.policy != policy:
+            raise ValueError('Native routing module policy disagrees with the core policy.')
+        if type(routing.views) is not int or routing.views != views:
+            raise ValueError('Native routing module views disagree with the core view count.')
+        if (type(routing.feature_blocks) is not tuple
+                or any(type(width) is not int for width in routing.feature_blocks)):
+            raise ValueError('Native routing module feature blocks must be an integer tuple.')
+
+        hidden = self.config.get('hidden')
+        context_width = self.config.get('context_width')
+        message_width = self.config.get('message')
+        spatial_dim = self.config.get('spatial_dim')
+        if any(type(value) is not int for value in
+               (hidden, context_width, message_width, spatial_dim)):
+            raise ValueError('Native routing core widths must retain their declared integer types.')
+        expected_pair_width = 2 * hidden + spatial_dim * 9
+        expected_feature_blocks = ((message_width,) if views == 1 else (64, 64))
+        if (type(routing.pair_width) is not int or routing.pair_width != expected_pair_width
+                or type(routing.destination_width) is not int
+                or routing.destination_width != hidden
+                or type(routing.context_width) is not int
+                or routing.context_width != context_width
+                or type(routing.message_width) is not int
+                or routing.message_width != message_width
+                or routing.feature_blocks != expected_feature_blocks):
+            raise ValueError('Native routing module widths or feature partition disagree with the core.')
+        if (type(routing.initialization_seed) is not int
+                or routing.initialization_seed < 0):
+            raise ValueError('Native routing initialization seed must retain its nonnegative integer type.')
+
+        expected_config = {
+            'schema': ('native_interaction_routing_v2' if views == 2
+                       else 'native_interaction_routing_v1'),
+            'policy': policy,
+            'initialization_seed': routing.initialization_seed,
+        }
+        if policy == 'learned_density':
+            if type(routing.SCORE_HIDDEN) is not int or routing.SCORE_HIDDEN < 1:
+                raise ValueError('Native score hidden width must be a positive integer.')
+            if (type(routing.SCORE_BOUND) is not float
+                    or not math.isfinite(routing.SCORE_BOUND)
+                    or routing.SCORE_BOUND <= 0):
+                raise ValueError('Native score bound must be a finite positive float.')
+            if routing.control_hidden is not None:
+                raise ValueError('Learned-density routing cannot declare a destination-gain width.')
+            expected_config.update(score_hidden=routing.SCORE_HIDDEN,
+                                   score_bound=routing.SCORE_BOUND)
+            if views == 2:
+                expected_config.update(views=2, feature_blocks=[64, 64])
+            if (tuple(routing.score_mlps.keys()) != NATIVE_ROUTE_TYPES
+                    or tuple(routing.aggregate_modulators.keys())):
+                raise ValueError('Native learned-density route module inventory is inconsistent.')
+            network_layout = []
+            output_width = views
+            for route in NATIVE_ROUTE_TYPES:
+                network = routing.score_mlps[route]
+                if (type(network) is not nn.Sequential or len(network) != 3
+                        or type(network[0]) is not nn.Linear
+                        or type(network[1]) is not nn.SiLU
+                        or type(network[2]) is not nn.Linear
+                        or network[0].in_features != expected_pair_width
+                        or network[0].out_features != routing.SCORE_HIDDEN
+                        or network[1].inplace
+                        or network[2].in_features != routing.SCORE_HIDDEN
+                        or network[2].out_features != output_width
+                        or network[2].bias is not None):
+                    raise ValueError(f'Native {route} score network disagrees with its sealed widths.')
+                network_layout.append((route, tuple(
+                    (type(layer).__module__, type(layer).__qualname__,
+                     getattr(layer, 'in_features', None),
+                     getattr(layer, 'out_features', None),
+                     getattr(layer, 'inplace', None),
+                     getattr(layer, 'bias', None) is not None)
+                    for layer in network)))
+        else:
+            control_hidden = routing.control_hidden
+            if type(control_hidden) is not int or control_hidden < 1:
+                raise ValueError('Native destination-gain width must be a positive integer.')
+            if type(self.native_control_hidden) is not int or self.native_control_hidden != control_hidden:
+                raise ValueError('Native destination-gain module width disagrees with the core.')
+            if (tuple(routing.aggregate_modulators.keys()) != NATIVE_ROUTE_TYPES
+                    or tuple(routing.score_mlps.keys())):
+                raise ValueError('Native destination-gain route module inventory is inconsistent.')
+            expected_config['control_hidden'] = control_hidden
+            network_layout = []
+            for route in NATIVE_ROUTE_TYPES:
+                network = routing.aggregate_modulators[route]
+                if (type(network) is not nn.Sequential or len(network) != 3
+                        or type(network[0]) is not nn.Linear
+                        or type(network[1]) is not nn.SiLU
+                        or type(network[2]) is not nn.Linear
+                        or network[0].in_features != hidden + context_width
+                        or network[0].out_features != control_hidden
+                        or network[1].inplace
+                        or network[2].in_features != control_hidden
+                        or network[2].out_features != message_width
+                        or network[2].bias is None):
+                    raise ValueError(f'Native {route} destination-gain network disagrees with its sealed widths.')
+                network_layout.append((route, tuple(
+                    (type(layer).__module__, type(layer).__qualname__,
+                     getattr(layer, 'in_features', None),
+                     getattr(layer, 'out_features', None),
+                     getattr(layer, 'inplace', None),
+                     getattr(layer, 'bias', None) is not None)
+                    for layer in network)))
+
+        if hasattr(self, 'mode'):
+            mode = self.mode
+            if type(mode) is not str:
+                raise ValueError('Native routing mode must retain its declared string type.')
+            expected_config['mode'] = mode
+        declared_config = self.config.get('native_routing')
+        if (type(declared_config) is not dict
+                or _type_sensitive_value_signature(declared_config)
+                != _type_sensitive_value_signature(expected_config)):
+            raise ValueError('Native routing declared config disagrees with active module semantics.')
+
+        active_widths = (policy, views, routing.pair_width, routing.destination_width,
+                         routing.context_width, routing.message_width,
+                         routing.control_hidden, routing.initialization_seed,
+                         routing.SCORE_HIDDEN, routing.SCORE_BOUND,
+                         routing.feature_blocks, semantics_generation)
+        return (
+            'native_interaction_routing_semantics_v1',
+            _type_sensitive_value_signature(active_widths),
+            _type_sensitive_value_signature(declared_config),
+            _type_sensitive_value_signature(tuple(network_layout)),
+        )
+
+    @staticmethod
+    def _check_consolidated_finite_flags(flags):
+        if not flags:
+            return
+        combined = torch.stack([flag for _name, flag in flags]).all()
+        if not bool(combined):
+            checked = ', '.join(name for name, _flag in flags)
+            raise FloatingPointError(
+                'Native interaction preparation produced non-finite intermediate values; '
+                f'checked flags: {checked}.')
+
+    def _native_gather(self, values, weights):
+        """Gather one full message or R2's fixed equal-width feature blocks."""
+        if self.native_routing_views == 1:
+            return (values * weights[..., None]).sum(2)
+        views = self.native_routing_views
+        block_width = values.shape[-1] // views
+        if weights.shape[-1] != views or block_width * views != values.shape[-1]:
+            raise ValueError('Native view weights and message feature blocks are incompatible.')
+        blocks = values.reshape(*values.shape[:-1], views, block_width)
+        return (blocks * weights[..., None]).sum(2).reshape(*values.shape[:2], values.shape[-1])
 
     @staticmethod
     def _validate_shape(value, shape, name):
@@ -418,6 +782,7 @@ class InteractionContextCore(nn.Module):
         lengths[B,D], source_lengths[B,M] or [B,M,1], environments[B,N,F_E].
         Missing environmental type is represented by an empty donor catalogue.
         """
+        native_routing_semantics = self._native_routing_semantics_signature()
         batch, modules, dimension = centers.shape
         if dimension != self.spatial_dim or (self.max_sources is not None and modules > self.max_sources):
             raise ValueError('Source coordinates/capacity disagree with the response configuration.')
@@ -457,8 +822,14 @@ class InteractionContextCore(nn.Module):
         if type(routing_trace) is not bool:
             raise TypeError('routing_trace must be a bool.')
         intervention_kind, intervention_routes = normalize_intervention(native_route_intervention)
+        intervention_view_index = intervention_view(native_route_intervention)
         if intervention_kind is not None and self.native_aggregation_policy != 'learned_density':
-            raise ValueError('Native route interventions are supported only by P-R.')
+            raise ValueError('Native route interventions are supported only by P-R/P-R2.')
+        if intervention_view_index is not None:
+            if intervention_view_index >= self.native_routing_views:
+                raise ValueError('Native route intervention view is outside the model view axis.')
+            if intervention_kind not in ('density_reset', 'equal_measure_reassignment'):
+                raise ValueError('A selected view is supported only for reset or donor reassignment.')
         typed_native_ids = (self.native_aggregation_policy != 'measure' or routing_trace
                             or intervention_kind is not None)
         if typed_native_ids:
@@ -493,6 +864,9 @@ class InteractionContextCore(nn.Module):
         donor_mass = donor_mass / donor_mass.sum(-1, keepdim=True).clamp_min(torch.finfo(state.dtype).tiny)
         intermediate_context = None
         route_trace = [] if routing_trace else None
+        trace_metadata = (self._native_routing_trace_metadata(native_routing_semantics)
+                          if routing_trace else None)
+        finite_flags = [] if self.consolidated_native_validation else None
         for round_index, (module_message, environment_message, source_update, environment_update) in enumerate(zip(
                 self.module_messages, self.environment_messages, self.source_updates, self.environment_updates)):
             me_base_weights = environment_mass[:, None, :].expand(-1, modules, -1)
@@ -516,14 +890,16 @@ class InteractionContextCore(nn.Module):
             if collect_routes:
                 mm_scores, mm_density, mm_weights, mm_receipt = self._native_route_weights(
                     'MM', donor_mass, module_pair_features, source_measures, present,
-                    source_ids, intervention_kind, intervention_routes)
+                    source_ids, intervention_kind, intervention_routes,
+                    intervention_view_index, finite_flags)
                 me_scores, me_density, me_weights, me_receipt = self._native_route_weights(
                     'ME', me_base_weights, me_pair_features, environment_measures,
                     environment_present, environment_ids, intervention_kind,
-                    intervention_routes)
+                    intervention_routes, intervention_view_index, finite_flags)
                 em_scores, em_density, em_weights, em_receipt = self._native_route_weights(
                     'EM', em_base_weights, em_pair_features, source_measures,
-                    present, source_ids, intervention_kind, intervention_routes)
+                    present, source_ids, intervention_kind, intervention_routes,
+                    intervention_view_index, finite_flags)
             if not collect_routes:
                 # Keep the legacy P/P-G/P-H reduction and operation order
                 # unchanged unless a caller opts into new routing or traces.
@@ -579,7 +955,7 @@ class InteractionContextCore(nn.Module):
                 module_values = _finish_projected_mlp(module_message,
                     (mm_left[:, :, None], mm_right[:, None], mm_relative))
                 mm_gain = None
-                module_aggregate = (module_values * mm_weights[..., None]).sum(2)
+                module_aggregate = self._native_gather(module_values, mm_weights)
 
                 env_first = environment_message[0]
                 env_relative_start = 2 * self.hidden
@@ -595,36 +971,39 @@ class InteractionContextCore(nn.Module):
                 me_values = _finish_projected_mlp(environment_message,
                     (state_first[:, :, None], environment_second[:, None], me_relative))
                 me_gain = None
-                env_aggregate = (me_values * me_weights[..., None]).sum(2)
+                env_aggregate = self._native_gather(me_values, me_weights)
                 em_relative = _project_linear_slice(env_first, relative_em,
                     env_relative_start, env_first.in_features)
                 em_values = _finish_projected_mlp(environment_message,
                     (environment_first[:, :, None], state_second[:, None], em_relative))
                 em_gain = None
-                source_aggregate = (em_values * em_weights[..., None]).sum(2)
+                source_aggregate = self._native_gather(em_values, em_weights)
             else:
                 left = state[:, :, None].expand(-1, -1, modules, -1)
                 right = state[:, None].expand(-1, modules, -1, -1)
                 if module_pair_features is None:
                     module_pair_features = torch.cat((left, right, relative_mm), -1)
                 module_values = module_message(module_pair_features)
-                module_aggregate = (module_values * mm_weights[..., None]).sum(2)
+                module_aggregate = self._native_gather(module_values, mm_weights)
                 me_pair_features = (torch.cat((state[:, :, None].expand(-1, -1, environments, -1),
                     environment[:, None].expand(-1, modules, -1, -1), relative_me), -1)
                     if me_pair_features is None else me_pair_features)
                 me_values = environment_message(me_pair_features)
-                env_aggregate = (me_values * me_weights[..., None]).sum(2)
+                env_aggregate = self._native_gather(me_values, me_weights)
                 em_pair_features = (torch.cat((environment[:, :, None].expand(-1, -1, modules, -1),
                     state[:, None].expand(-1, environments, -1, -1), relative_em), -1)
                     if em_pair_features is None else em_pair_features)
                 em_values = environment_message(em_pair_features)
-                source_aggregate = (em_values * em_weights[..., None]).sum(2)
+                source_aggregate = self._native_gather(em_values, em_weights)
                 mm_gain = me_gain = em_gain = None
             if (self.native_aggregation_policy == 'destination_gain'
                     and self.native_routing_enabled):
-                mm_gain = self.native_routing.gain('MM', state, context)
-                me_gain = self.native_routing.gain('ME', state, context)
-                em_gain = self.native_routing.gain('EM', environment, context)
+                mm_gain = self.native_routing.gain(
+                    'MM', state, context, finite_flags=finite_flags)
+                me_gain = self.native_routing.gain(
+                    'ME', state, context, finite_flags=finite_flags)
+                em_gain = self.native_routing.gain(
+                    'EM', environment, context, finite_flags=finite_flags)
                 module_aggregate = module_aggregate * (1 + mm_gain)
                 env_aggregate = env_aggregate * (1 + me_gain)
                 source_aggregate = source_aggregate * (1 + em_gain)
@@ -632,8 +1011,13 @@ class InteractionContextCore(nn.Module):
                 for name, value in (('MM aggregate', module_aggregate),
                                     ('ME aggregate', env_aggregate),
                                     ('EM aggregate', source_aggregate)):
-                    if not bool(torch.isfinite(value).all()):
-                        raise FloatingPointError(f'Native interaction computation produced non-finite {name} values.')
+                    finite = torch.isfinite(value).all()
+                    if finite_flags is None:
+                        if not bool(finite):
+                            raise FloatingPointError(
+                                f'Native interaction computation produced non-finite {name} values.')
+                    else:
+                        finite_flags.append((name, finite))
             if route_trace is not None:
                 route_trace.extend((
                     self._native_route_trace(
@@ -646,6 +1030,8 @@ class InteractionContextCore(nn.Module):
                         values=module_values, aggregate=module_aggregate,
                         modulation_gain=mm_gain,
                         intervention=(intervention_kind if 'MM' in intervention_routes else None),
+                        intervention_view_index=(intervention_view_index
+                                                 if 'MM' in intervention_routes else None),
                         intervention_receipt=mm_receipt),
                     self._native_route_trace(
                         round_index=round_index, route='ME',
@@ -657,6 +1043,8 @@ class InteractionContextCore(nn.Module):
                         values=me_values, aggregate=env_aggregate,
                         modulation_gain=me_gain,
                         intervention=(intervention_kind if 'ME' in intervention_routes else None),
+                        intervention_view_index=(intervention_view_index
+                                                 if 'ME' in intervention_routes else None),
                         intervention_receipt=me_receipt),
                     self._native_route_trace(
                         round_index=round_index, route='EM',
@@ -668,14 +1056,24 @@ class InteractionContextCore(nn.Module):
                         values=em_values, aggregate=source_aggregate,
                         modulation_gain=em_gain,
                         intervention=(intervention_kind if 'EM' in intervention_routes else None),
+                        intervention_view_index=(intervention_view_index
+                                                 if 'EM' in intervention_routes else None),
                         intervention_receipt=em_receipt),
                 ))
             env_pool = (environment * environment_mass[..., None]).sum(1)[:, None].expand(-1, environments, -1)
             state = (state + source_update(torch.cat((state, module_aggregate, env_aggregate, source_context), -1))) * present[..., None]
             environment = (environment + environment_update(torch.cat((environment, source_aggregate, env_pool, environment_context), -1))) * environment_present[..., None]
-            if collect_routes and (not bool(torch.isfinite(state).all())
-                                   or not bool(torch.isfinite(environment).all())):
-                raise FloatingPointError('Native interaction update produced non-finite source or environment states.')
+            if collect_routes:
+                source_finite = torch.isfinite(state).all()
+                environment_finite = torch.isfinite(environment).all()
+                if finite_flags is None:
+                    if not bool(source_finite) or not bool(environment_finite):
+                        raise FloatingPointError(
+                            'Native interaction update produced non-finite source or environment states.')
+                else:
+                    finite_flags.append((f'Round {round_index + 1} source states', source_finite))
+                    finite_flags.append((f'Round {round_index + 1} environment states',
+                                         environment_finite))
             if round_index == 0 and _between_rounds is not None:
                 result = _between_rounds(state, environment)
                 if not isinstance(result, tuple) or len(result) != 3:
@@ -691,9 +1089,15 @@ class InteractionContextCore(nn.Module):
                     raise ValueError('Intermediate environment states must keep absent slots at zero.')
         global_state = self.global_encoder(torch.cat(((state * source_mass[..., None]).sum(1),
             (environment * environment_mass[..., None]).sum(1), context), -1))
-        if ((self.native_aggregation_policy != 'measure' or routing_trace)
-                and not bool(torch.isfinite(global_state).all())):
-            raise FloatingPointError('Native interaction global context is non-finite.')
+        if self.native_aggregation_policy != 'measure' or routing_trace:
+            global_finite = torch.isfinite(global_state).all()
+            if finite_flags is None:
+                if not bool(global_finite):
+                    raise FloatingPointError('Native interaction global context is non-finite.')
+            else:
+                finite_flags.append(('Global interaction state', global_finite))
+        if finite_flags is not None:
+            self._check_consolidated_finite_flags(finite_flags)
         prepared_type = getattr(self, 'prepared_context_type', PreparedResponseContext)
         prepared = prepared_type(state, environment, global_state, centers,
             source_lengths, present, source_mass, environment_coords, environment_present,
@@ -706,10 +1110,18 @@ class InteractionContextCore(nn.Module):
         prepared.factorized_affine_generation = self._factorized_affine_generation
         prepared.native_routing_generation = self._native_routing_generation
         prepared.native_routing_enabled = self.native_routing_enabled
+        prepared.native_routing_views = self.native_routing_views
+        prepared.native_validation_generation = self._native_validation_generation
+        prepared.consolidated_native_validation = self.consolidated_native_validation
         prepared.native_aggregation_policy = self.native_aggregation_policy
-        prepared.native_routing_config_snapshot = copy.deepcopy(self.config.get('native_routing'))
+        prepared.native_routing_config_snapshot = (
+            _type_sensitive_value_signature(self.config.get('native_routing'))
+            if self.native_aggregation_policy != 'measure' else None)
+        prepared.native_routing_semantics_snapshot = native_routing_semantics
         prepared.native_routing_trace = None if route_trace is None else tuple(route_trace)
+        prepared.native_routing_trace_metadata = trace_metadata
         prepared.native_route_intervention = (intervention_kind, intervention_routes)
+        prepared.native_route_intervention_view = intervention_view_index
         return prepared
 
     @staticmethod
@@ -772,14 +1184,15 @@ class NonlinearFieldReadout(InteractionContextCore):
                  spatial_dim=3, hidden=64, message=64, output_width=3,
                  query_width=0, max_sources=None, factorized_affine_execution=False,
                  native_aggregation_policy='measure', native_control_hidden=None,
-                 native_routing_seed=0):
+                 native_routing_seed=0, native_routing_views=1):
         super().__init__(source_width, context_width, environment_width,
             spatial_dim=spatial_dim, hidden=hidden, message=message,
             query_width=query_width, max_sources=max_sources,
             factorized_affine_execution=factorized_affine_execution,
             native_aggregation_policy=native_aggregation_policy,
             native_control_hidden=native_control_hidden,
-            native_routing_seed=native_routing_seed)
+            native_routing_seed=native_routing_seed,
+            native_routing_views=native_routing_views)
         if output_width < 1:
             raise ValueError('Nonlinear output width must be positive.')
         self.output_width = output_width
