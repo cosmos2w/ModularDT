@@ -38,13 +38,14 @@ After the source is sealed and the root has dispatched the measurement, the exis
 
 An example measurement driver should resolve Thermal recipes with `_bind_calibration_receipt`, build each arm from its immutable recipe, construct its ordinary declared AdamW groups and epoch-1 schedule, and use the sampler methods above for every macro before calling `_run_update`. It may call `_evaluate(model, provider, arm, "joint", 100)` once to time the exact full validation panel after explicit DEV materialization is authorized. The preparation seal must exist first. This probe is a cost measurement, not a result used to choose or amend an architecture; retain each arm's complete TRAIN, validation and process timing.
 
-After all three actual runs have saved their first reviewable history, compare the observed epoch-1 case order, per-update query hashes, masks and denominator streams:
+After all three actual runs have saved their first reviewable history, audit the observed epoch-1 case order, per-update query hashes, masks and denominator streams with the standalone read-only diagnostic. It reads RunStore artifacts from `configs/experiment_identity.json` and `metrics/history.json`, accepts a complete unambiguous legacy flat pair, rejects conflicting dual layouts, and leaves the sealed runner source unchanged:
 
 ```bash
-python tools/joint_regional_train.py validate-matched-streams --comparison-manifest PATH_TO_CAMPAIGN/comparison_manifest.json
+python tools/diagnostics/audit_fresh_matched.py streams --comparison-manifest PATH_TO_CAMPAIGN/comparison_manifest.json
+python tools/diagnostics/audit_fresh_matched.py forecast --output-dir PATH_TO_ALLOCATED_P_RUN --horizon 2500
 ```
 
-The command verifies the observed hashes in each epoch-1 checkpoint history and writes one comparison receipt. It does not regenerate missing stream evidence or accept a changed recipe/seal.
+The stream audit requires all three histories to contain the same complete epoch range, verifies case order, query stream and case/update/microbatch counters at every saved epoch, and checks the full mask and denominator receipts at epoch1. It writes an immutable `matched_stream_audit_eNNNN_<history-digest>.json` receipt for each shared completed age, so later reviews preserve earlier audit results. The forecast uses measured complete TRAIN-epoch and full-DEV validation durations from the run history and reports all remaining TRAIN epochs plus scheduled reviews. The older `joint_regional_train.py validate-matched-streams` and `forecast` subcommands expect flat artifact paths and do not read the maintained RunStore layout; use this standalone audit for fresh RunStore outputs.
 
 ## Reviewed fitting and forecast commands
 
@@ -55,9 +56,9 @@ python tools/joint_regional_train.py start --recipe-json PATH_TO_CAMPAIGN/recipe
 python tools/joint_regional_train.py start --recipe-json PATH_TO_CAMPAIGN/recipes/p_r.json --device cuda:0 --output-dir PATH_TO_ALLOCATED_R1_RUN --stop-after 100
 python tools/joint_regional_train.py start --recipe-json PATH_TO_CAMPAIGN/recipes/p_r2.json --device cuda:0 --output-dir PATH_TO_ALLOCATED_R2_RUN --stop-after 100
 python tools/joint_regional_train.py resume --recipe-json PATH_TO_CAMPAIGN/recipes/p.json --device cuda:0 --output-dir PATH_TO_ALLOCATED_P_RUN --stop-after 500
-python tools/joint_regional_train.py forecast --output-dir PATH_TO_ALLOCATED_P_RUN --forecast-horizon 2500
+python tools/diagnostics/audit_fresh_matched.py forecast --output-dir PATH_TO_ALLOCATED_P_RUN --horizon 2500
 ```
 
-Repeat exact resume for the remaining common review ages only after each review. `forecast` uses measured full TRAIN-epoch and full-DEV review durations from the run history, adds all remaining TRAIN epochs and scheduled validation reviews, and records observed case visits, optimizer updates, work counts, objective terms and current best-field age. The final selection remains a field-only `field_score` minimum over the same 25 saved100-epoch checkpoints for every arm.
+Repeat exact resume for the remaining common review ages only after each review. The standalone `forecast` command uses measured full TRAIN-epoch and full-DEV review durations from the run history, adds all remaining TRAIN epochs and scheduled validation reviews, and records observed case visits, optimizer updates, work counts, objective terms and current best-field age. The final selection remains a field-only `field_score` minimum over the same 25 saved100-epoch checkpoints for every arm.
 
 No second seed is included in these primary recipes. A separate `conditional_confirmation` receipt permits only Thermal1 or Wind43 and only P plus the frozen preferred routing arm, after all six literal e2500 endpoints and mandatory physical/cost measurements are complete. It binds an immutable eligibility decision and enforces the physical/robustness pass, Q8192 price at most1.30 P, no unresolved implementation failure, and Wind preference when both datasets qualify. Primary recipes without this receipt retain the exact Thermal0/Wind42 guards. Confirmation reuses the primary TRAIN-fitted coefficients/scales while drawing independently initialized common tensors and observed case/query streams; it cannot attach a primary checkpoint or use its optimizer state.

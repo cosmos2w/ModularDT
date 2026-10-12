@@ -159,6 +159,19 @@ def test_multiview_trace_shapes_and_content_sum_match_executed_aggregate() -> No
         validate_multiview_native_trace(broken, expected_views=2)
 
 
+def test_wind_metrics_promote_endpoints_before_subtraction() -> None:
+    roles = np.repeat(
+        ["volume", "hub_slab", "downstream_envelope", "near_turbine", "background"], 2,
+    )
+    prediction = np.full((10, 3), 3.0e38, dtype=np.float32)
+    reference = -prediction
+    result = wind_role_metrics(
+        prediction, reference, roles, np.ones(10, dtype=bool), expected_total_queries=10,
+    )
+    assert np.isfinite(result["vector_rmse_m_s"])
+    assert result["vector_rmse_m_s"] == pytest.approx(float(prediction[0, 0]) * 2.0 * np.sqrt(3.0))
+
+
 def test_r1_trace_retains_implicit_single_128_wide_view() -> None:
     content = np.arange(1 * 2 * 3 * 128, dtype=np.float32).reshape(1, 2, 3, 128)
     head_aggregate = content.sum(axis=2, dtype=np.float32)[:, :, None, :]
@@ -177,7 +190,13 @@ def test_r1_trace_retains_implicit_single_128_wide_view() -> None:
     assert result["native_dtype_exact_head_reduction"] is True
 
 
-def test_actual_core_r1_and_r2_traces_match_native_reduction_contract() -> None:
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_actual_core_r1_and_r2_traces_match_native_reduction_contract(
+    device: str, dtype: torch.dtype,
+) -> None:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("An authorized CUDA device is required for native GPU reduction qualification.")
     generator = torch.Generator().manual_seed(8301)
     rand = lambda *shape: torch.randn(*shape, generator=generator, dtype=torch.float64)
     values = {
@@ -188,14 +207,16 @@ def test_actual_core_r1_and_r2_traces_match_native_reduction_contract() -> None:
         "lengths": torch.tensor([[2.0, 1.5]], dtype=torch.float64),
         "source_lengths": torch.full((1, 4), 0.2, dtype=torch.float64),
         "source_measures": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float64),
-        "environment_tokens": rand(1, 2, 5),
-        "environment_coords": rand(1, 2, 2),
-        "environment_present": torch.ones(1, 2, dtype=torch.float64),
-        "environment_measures": torch.tensor([[0.4, 1.6]], dtype=torch.float64),
+        "environment_tokens": rand(1, 192, 5),
+        "environment_coords": rand(1, 192, 2),
+        "environment_present": torch.ones(1, 192, dtype=torch.float64),
+        "environment_measures": torch.linspace(0.4, 1.6, 192, dtype=torch.float64)[None],
         "source_ids": torch.tensor([[31, 7, 19, -1]], dtype=torch.int64),
-        "environment_ids": torch.tensor([[53, 11]], dtype=torch.int64),
+        "environment_ids": torch.arange(192, dtype=torch.int64)[None],
         "domain_origin": torch.tensor([[-1.0, -0.5]], dtype=torch.float64),
     }
+    values = {name: tensor.to(device=device, dtype=dtype if tensor.is_floating_point() else tensor.dtype)
+              for name, tensor in values.items()}
     for mode, expected_views, expected_route_ndim, expected_width in (
         ("P-R", 1, 3, 128),
         ("P-R2", 2, 4, 64),
@@ -204,16 +225,41 @@ def test_actual_core_r1_and_r2_traces_match_native_reduction_contract() -> None:
             4, 3, 5, spatial_dim=2, hidden=12, message=128, mode=mode,
             collective_width=6, regional_anchors=0, field_outputs=2,
             affine_outputs=0, initialization_seed=73,
-        ).double()
+        ).to(device=device, dtype=dtype)
         with torch.no_grad():
+            for scorer in model.native_routing.score_mlps.values():
+                projection = scorer[-1].weight
+                projection.copy_(torch.linspace(
+                    -0.1, 0.1, projection.numel(), device=device, dtype=projection.dtype,
+                ).reshape_as(projection))
             prepared = model.prepare_context(**values, routing_trace=True)
         assert len(prepared.native_routing_trace) == 6
         for native_trace in prepared.native_routing_trace:
             assert native_trace["s"].ndim == expected_route_ndim
             assert native_trace["weighted_message_content"].shape[-1] == expected_width
-            checked = validate_multiview_native_trace(native_trace, expected_views=expected_views)
+            checked = validate_multiview_native_trace(
+                native_trace, expected_views=expected_views, reduction_device=device,
+            )
             assert checked["native_dtype_exact_head_reduction"] is True
             assert checked["native_dtype_exact_flattened_aggregate"] is True
+            assert checked["reduction_backend"] == "torch"
+            assert checked["reduction_device"].startswith(device)
+
+
+def test_trace_reconstruction_rejects_silent_dtype_or_device_substitution() -> None:
+    content = torch.ones(1, 2, 3, 2, 64, dtype=torch.float32)
+    head = content.sum(dim=2)
+    trace = {
+        "s": torch.ones(1, 2, 3, 2), "rho": torch.ones(1, 2, 3, 2),
+        "w": torch.ones(1, 2, 3, 2), "view_ids": torch.arange(2),
+        "weighted_message_content": content, "head_aggregate": head,
+        "aggregate": head.reshape(1, 2, 128),
+    }
+    with pytest.raises(TypeError, match="same tensor dtype"):
+        validate_multiview_native_trace({**trace, "head_aggregate": head.double()})
+    arrays = {name: value.numpy() for name, value in trace.items()}
+    with pytest.raises(TypeError, match="original tensor trace representation"):
+        validate_multiview_native_trace(arrays, reduction_device="cpu")
 
 
 def test_response_replay_keeps_endpoint_peak_change_distinct_from_max_delta() -> None:

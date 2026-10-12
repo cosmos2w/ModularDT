@@ -231,7 +231,9 @@ def wind_role_metrics(
         raise ValueError(f"Wind roles differ from the declared five-role family: {sorted(observed_roles)}.")
     if not np.all(np.isfinite(predicted[mask])) or not np.all(np.isfinite(expected[mask])):
         raise ValueError("Selected Wind vector values contain NaN or infinity.")
-    difference = np.asarray(predicted - expected, dtype=np.float64)
+    # Compute metrics in FP64 from the preserved endpoint arrays. Casting an
+    # already-subtracted FP32 residual cannot recover overflow or rounding.
+    difference = np.asarray(predicted, dtype=np.float64) - np.asarray(expected, dtype=np.float64)
     all_truth = np.asarray(expected[mask], dtype=np.float64)
     role_results: dict[str, Any] = {}
     for role in required_roles:
@@ -312,14 +314,20 @@ def _as_cpu_array(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
-def validate_multiview_native_trace(trace: Mapping[str, Any], *, expected_views: int | None = None) -> dict[str, Any]:
+def validate_multiview_native_trace(
+    trace: Mapping[str, Any], *, expected_views: int | None = None,
+    reduction_device: Any = None,
+) -> dict[str, Any]:
     """Validate native R1 legacy-width or R2 split-view trace and executed aggregates.
 
     R1 deliberately retains scalar `[B,D,J]` routes and one full-width 128
     message. R2 exposes two `[B,D,J,2]` route tensors and two 64-wide message
     blocks. In either case `head_aggregate` is the route-specific sum across
     donors; `aggregate` remains the flattened 128-wide value passed to the
-    round update.
+    round update. The core serializes diagnostic tensors to CPU. A GPU
+    evaluator must therefore explicitly bind ``reduction_device`` to its
+    actual forward device to reconstruct the original reduction exactly.
+    Copying a GPU result to CPU does not make CPU summation bitwise equivalent.
     """
 
     required = {
@@ -370,19 +378,30 @@ def validate_multiview_native_trace(trace: Mapping[str, Any], *, expected_views:
     head_value = trace["head_aggregate"]
     full_value = trace["aggregate"]
     if hasattr(content_value, "detach") and hasattr(content_value, "sum"):
-        # Preserve the saved tensor dtype and native reduction implementation.
-        rebuilt_value = content_value.detach().cpu().sum(dim=2)
-        head_value_cpu = head_value.detach().cpu() if hasattr(head_value, "detach") else head_value
-        full_value_cpu = full_value.detach().cpu() if hasattr(full_value, "detach") else full_value
+        if not hasattr(head_value, "detach") or not hasattr(full_value, "detach"):
+            raise TypeError("Tensor trace content requires tensor head and full aggregates.")
+        if head_value.dtype != content_value.dtype or full_value.dtype != content_value.dtype:
+            raise TypeError("Native weighted content and aggregates must retain the same tensor dtype.")
+        device = content_value.device if reduction_device is None else reduction_device
+        native_content = content_value.detach().to(device=device)
+        native_head = head_value.detach().to(device=device)
+        native_full = full_value.detach().to(device=device)
+        rebuilt_value = native_content.sum(dim=2)
         if s.ndim == 3:
             # The historical R1 aggregate keeps an explicit singleton view axis.
             rebuilt_value = rebuilt_value.unsqueeze(-2)
-        flattened_head = head_value_cpu.squeeze(-2) if s.ndim == 3 else head_value_cpu.reshape(b, d, 128)
-        exact_head = bool((rebuilt_value == head_value_cpu).all())
-        exact_full = bool((flattened_head == full_value_cpu).all())
+        flattened_head = native_head.squeeze(-2) if s.ndim == 3 else native_head.reshape(b, d, 128)
+        exact_head = bool((rebuilt_value == native_head).all())
+        exact_full = bool((flattened_head == native_full).all())
         rebuilt = _as_cpu_array(rebuilt_value)
-        head_aggregate = _as_cpu_array(head_value_cpu)
+        head_aggregate = _as_cpu_array(native_head)
+        reduction_backend = "torch"
+        actual_reduction_device = str(native_content.device)
     else:
+        if reduction_device is not None:
+            raise TypeError("Explicit native reduction devices require the original tensor trace representation.")
+        if content.dtype != head_aggregate.dtype or content.dtype != aggregate.dtype:
+            raise TypeError("Native weighted content and aggregates must retain the same array dtype.")
         rebuilt = np.sum(content, axis=2)
         head_aggregate = np.asarray(head_aggregate)
         if s.ndim == 3:
@@ -392,6 +411,8 @@ def validate_multiview_native_trace(trace: Mapping[str, Any], *, expected_views:
                           else np.reshape(head_aggregate, (b, d, 128)))
         exact_head = bool(np.array_equal(rebuilt, head_aggregate))
         exact_full = bool(np.array_equal(flattened_head, aggregate))
+        reduction_backend = "numpy"
+        actual_reduction_device = "cpu"
     if not exact_head:
         raise ValueError("Native-dtype donor reduction does not exactly reproduce head_aggregate.")
     if not exact_full:
@@ -410,5 +431,8 @@ def validate_multiview_native_trace(trace: Mapping[str, Any], *, expected_views:
         "full_aggregate_shape": list(aggregate.shape),
         "native_dtype_exact_head_reduction": exact_head,
         "native_dtype_exact_flattened_aggregate": exact_full,
+        "reduction_backend": reduction_backend,
+        "reduction_device": actual_reduction_device,
+        "reduction_dtype": str(content.dtype),
         "weighted_content_reconstruction_max_abs": max_abs,
     }
