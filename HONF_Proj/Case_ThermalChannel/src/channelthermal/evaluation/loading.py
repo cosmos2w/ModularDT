@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import argparse
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
+
+from channelthermal.config import ChannelThermalHONFConfig
+from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
+from channelthermal.model import ChannelThermalHONFModel
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import (
     load_trusted_checkpoint,
@@ -17,10 +22,6 @@ from honf_runtime.compat import (
     strip_module_prefix,
 )
 from honf_runtime.run_layout import resolve_checkpoint
-
-from channelthermal.config import ChannelThermalHONFConfig
-from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
-from channelthermal.model import ChannelThermalHONFModel
 
 
 def checkpoint_file_name(selector: str) -> str:
@@ -112,6 +113,60 @@ def make_batch(sample: Dict[str, Any], query_xy: np.ndarray, device: torch.devic
     payload = {key: value for key, value in sample.items() if key not in {"x_grid", "y_grid", "steady_field", "rms_field", "case_id"}}
     payload["query_xy"] = query_xy.astype(np.float32)
     return recursive_to_device(numpy_to_batched_tensor(payload), device)
+
+
+def checkpoint_native_inputs_from_physical_sample(
+    sample: Dict[str, Any], checkpoint: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Apply the checkpoint's public input normalization to a physical sample.
+
+    This mirrors the input portion of ``GlobalChannelThermalDataset.__getitem__``:
+    local module parameters and teacher port tokens are assumed to have already
+    been derived from the raw physical arrays, then heat power and interface
+    conditions are normalized when the checkpoint's training dataset config
+    requests it. Targets and geometry remain in their original physical form.
+    The input mapping is not mutated.
+    """
+
+    train_config = checkpoint.get("train_config", {})
+    dataset_config = train_config.get("dataset", {}) if isinstance(train_config, Mapping) else {}
+    if not isinstance(dataset_config, Mapping) or not bool(dataset_config.get("normalize_inputs", False)):
+        return dict(sample)
+
+    from channelthermal.data.datasets import H5Normalizer
+
+    stats = checkpoint.get("global_normalization_stats")
+    if not isinstance(stats, Mapping):
+        raise ValueError("Checkpoint-native input normalization requires saved global normalization statistics.")
+    required = (
+        "heat_power_mean",
+        "heat_power_std",
+        "interface_condition_mean",
+        "interface_condition_std",
+    )
+    missing = [name for name in required if name not in stats]
+    if missing:
+        raise ValueError(
+            "Checkpoint-native input normalization is missing required saved statistics: "
+            + ", ".join(missing)
+        )
+    structure = sample.get("structure")
+    if not isinstance(structure, Mapping) or "heat_powers" not in structure:
+        raise ValueError("Checkpoint-native input normalization requires structure.heat_powers.")
+    if "interface_condition" not in sample:
+        raise ValueError("Checkpoint-native input normalization requires interface_condition.")
+
+    normalizer = H5Normalizer(dict(stats))
+    result = dict(sample)
+    normalized_structure = dict(structure)
+    normalized_structure["heat_powers"] = normalizer.normalize_heat_power(
+        np.asarray(structure["heat_powers"], dtype=np.float32)
+    )
+    result["structure"] = normalized_structure
+    result["interface_condition"] = normalizer.normalize_interface_condition(
+        np.asarray(sample["interface_condition"], dtype=np.float32)
+    )
+    return result
 
 
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelThermalHONFModel, Dict[str, Any]]:
