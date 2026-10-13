@@ -844,11 +844,25 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
     def predict_fields(self, prepared: InteractionPreservingPreparedContext,
                        receivers: torch.Tensor, receiver_features: torch.Tensor | None = None, *,
                        chunk_size: int = 512, return_messages: bool = False,
-                       return_organization: bool = False):
+                       return_organization: bool = False, read_plan=None,
+                       read_policy_identity=None, read_policy_generation=None,
+                       receiver_generation=None, receiver_ids=None):
         self.assert_owned(prepared)
+        read_plan_requested = any(value is not None for value in (
+            read_plan, read_policy_identity, read_policy_generation,
+            receiver_generation, receiver_ids))
+        if read_plan_requested and (
+                self.mode not in DIRECT_INTERACTION_MODES or return_organization):
+            raise ValueError(
+                'Prepared nonlinear read plans are supported only for direct '
+                'interaction modes without organization output.')
         if self.mode in DIRECT_INTERACTION_MODES and not return_organization:
             return super().predict(prepared, receivers, receiver_features,
-                                   chunk_size=chunk_size, return_messages=return_messages)
+                chunk_size=chunk_size, return_messages=return_messages,
+                read_plan=read_plan, read_policy_identity=read_policy_identity,
+                read_policy_generation=read_policy_generation,
+                receiver_generation=receiver_generation,
+                receiver_ids=receiver_ids)
         batch, queries, _ = receivers.shape
         self._validate_shape(receivers, (prepared.centers.shape[0], queries, self.spatial_dim),
                              'receivers')
@@ -914,8 +928,18 @@ class InteractionPreservingJointCore(NonlinearFieldReadout):
             return fields, exported
         return fields
 
-    def predict(self, prepared, receivers, receiver_features=None, **kwargs):
-        return self.predict_fields(prepared, receivers, receiver_features, **kwargs)
+    def predict(self, prepared, receivers, receiver_features=None, *,
+                chunk_size=512, return_messages=False,
+                return_organization=False, read_plan=None,
+                read_policy_identity=None, read_policy_generation=None,
+                receiver_generation=None, receiver_ids=None):
+        return self.predict_fields(
+            prepared, receivers, receiver_features, chunk_size=chunk_size,
+            return_messages=return_messages,
+            return_organization=return_organization, read_plan=read_plan,
+            read_policy_identity=read_policy_identity,
+            read_policy_generation=read_policy_generation,
+            receiver_generation=receiver_generation, receiver_ids=receiver_ids)
 
     def prepare_receivers(self, prepared: InteractionPreservingPreparedContext,
                           receivers: torch.Tensor,

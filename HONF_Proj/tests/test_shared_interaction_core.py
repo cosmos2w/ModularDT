@@ -9,6 +9,7 @@ from honf_forward_core.interface_fields.interaction_core import (
     InteractionContextCore,
     InteractionScene,
     NonlinearFieldReadout,
+    _geometry,
 )
 from honf_forward_core.interface_fields.source_response_operator import SourceResponseOperator
 
@@ -213,3 +214,266 @@ def test_factorized_affine_execution_handles_empty_environment_and_zero_query_wi
     torch.testing.assert_close(new, old, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(factored.predict(new_context, receivers, chunk_size=1),
                                new, rtol=1e-12, atol=1e-12)
+
+
+def _read_plan_kwargs(policy_identity, policy_generation, receiver_generation):
+    return {
+        'read_policy_identity': policy_identity,
+        'read_policy_generation': policy_generation,
+        'receiver_generation': receiver_generation,
+    }
+
+
+def test_active_dense_plan_removes_only_padding_and_preserves_legacy_reduction():
+    torch.manual_seed(43)
+    field = NonlinearFieldReadout(4, 2, 6, spatial_dim=2, hidden=8,
+        message=6, output_width=2).double()
+    state_keys = tuple(field.state_dict())
+    request = scene(2)
+    request.present = torch.tensor([[1., 0., 1.]], dtype=torch.float64)
+    prepared = field.prepare(request)
+    receivers = torch.rand(1, 7, 2, dtype=torch.float64)
+    legacy, legacy_messages = field.predict(prepared, receivers, return_messages=True)
+    plan = field.prepare_read_plan(prepared, receivers, mode='active_dense',
+        policy_identity='active_dense_v1', policy_generation=0, receiver_generation=9)
+    actual, messages = field.predict(prepared, receivers, return_messages=True,
+        read_plan=plan, chunk_size=3,
+        **_read_plan_kwargs('active_dense_v1', 0, 9))
+    torch.testing.assert_close(actual, legacy, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(messages, legacy_messages, rtol=0, atol=0)
+    torch.testing.assert_close(field.predict(prepared, receivers, read_plan=plan,
+        chunk_size=1, **_read_plan_kwargs('active_dense_v1', 0, 9)), actual,
+        rtol=1e-12, atol=1e-12)
+    assert plan.active_pair_count == 14
+    assert plan.evaluated_pair_count == 14
+    assert plan.padding_pair_count == 7
+    assert plan.omitted_active_pair_count == 0
+    assert plan.reduction_workspace_elements(chunk_size=3, message_width=6) == 54
+    assert plan.reduction_workspace_elements(chunk_size=1, message_width=6) == 18
+    assert tuple(field.state_dict()) == state_keys
+
+
+def test_selected_plan_gathers_before_mlp_and_keeps_original_measure_weights():
+    torch.manual_seed(61)
+    field = NonlinearFieldReadout(4, 2, 6, spatial_dim=2, hidden=8,
+        message=6, output_width=2).double()
+    field.bind_read_policy_generation('selected_test_v1', 3)
+    request = scene(2)
+    request.present = torch.tensor([[1., 0., 1.]], dtype=torch.float64)
+    prepared = field.prepare(request)
+    receivers = torch.rand(1, 5, 2, dtype=torch.float64)
+    selected = torch.zeros(1, 5, 3, dtype=torch.bool)
+    selected[0, 0, 0] = True
+    selected[0, 1, 2] = True
+    selected[0, 2, 0] = True
+    selected[0, 2, 2] = True
+    selected[0, 4, 0] = True
+    plan = field.prepare_read_plan(prepared, receivers, mode='selected',
+        selected_pairs=selected, policy_identity='selected_test_v1',
+        policy_generation=3, receiver_generation=12)
+    observed_rows = []
+    hook = field.source_read[0].register_forward_pre_hook(
+        lambda _module, inputs: observed_rows.append(inputs[0].shape[0]))
+    actual, messages = field.predict(prepared, receivers, read_plan=plan,
+        return_messages=True, chunk_size=2,
+        **_read_plan_kwargs('selected_test_v1', 3, 12))
+    hook.remove()
+    assert sum(observed_rows) == int(selected.sum()) == 5
+    assert plan.omitted_active_pair_count == 5
+    assert plan.reduction_workspace_elements(chunk_size=2, message_width=6) == 36
+
+    dense_fine = field.source_read(field._read_features(prepared, receivers,
+        prepared.source_states, prepared.centers, prepared.source_lengths,
+        receivers.new_empty(1, receivers.shape[1], 0)))
+    weighted = (dense_fine * prepared.source_measure[:, None, :, None]
+                * selected[..., None]).sum(2)
+    expected = field.field_head(torch.cat((weighted,
+        prepared.global_state[:, None].expand(-1, receivers.shape[1], -1),
+        _geometry(receivers / prepared.lengths[:, None]),
+        receivers.new_empty(1, receivers.shape[1], 0)), -1))
+    torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+    expected_messages = dense_fine * selected[..., None] * prepared.present[:, None, :, None]
+    torch.testing.assert_close(messages, expected_messages, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(field.predict(prepared, receivers, read_plan=plan,
+        chunk_size=5, **_read_plan_kwargs('selected_test_v1', 3, 12)),
+        actual, rtol=1e-12, atol=1e-12)
+
+
+def test_read_plan_rejects_illegal_pairs_and_stale_owner_policy_inputs_and_weights():
+    torch.manual_seed(71)
+    field = NonlinearFieldReadout(4, 2, 6, spatial_dim=2, hidden=8,
+        message=6, output_width=1).double()
+    field.bind_read_policy_generation('selected_guard_v1', 4)
+    request = scene(2)
+    request.present = torch.tensor([[1., 0., 1.]], dtype=torch.float64)
+    prepared = field.prepare(request)
+    receivers = torch.rand(1, 3, 2, dtype=torch.float64)
+    support = torch.zeros(1, 3, 3, dtype=torch.bool)
+    support[0, 0, 0] = True
+    illegal = support.clone()
+    illegal[0, 1, 1] = True
+    with pytest.raises(ValueError, match='absent or padded'):
+        field.prepare_read_plan(prepared, receivers, mode='selected',
+            selected_pairs=illegal, policy_identity='selected_guard_v1',
+            policy_generation=4, receiver_generation=2)
+    plan = field.prepare_read_plan(prepared, receivers, mode='selected',
+        selected_pairs=support, policy_identity='selected_guard_v1',
+        policy_generation=4, receiver_generation=2)
+    def call(model=field, context=prepared, query=receivers,
+             policy_identity='selected_guard_v1', policy_generation=4,
+             receiver_generation=2):
+        return model.predict(context, query, read_plan=plan,
+            **_read_plan_kwargs(policy_identity, policy_generation, receiver_generation))
+    other = NonlinearFieldReadout(4, 2, 6, spatial_dim=2, hidden=8,
+        message=6, output_width=1).double()
+    with pytest.raises(ValueError, match='another operator'):
+        call(model=other)
+    with pytest.raises(ValueError, match='input policy changed'):
+        call(policy_identity='stale')
+    with pytest.raises(ValueError, match='receiver generation changed'):
+        call(receiver_generation=3)
+    changed_receivers = receivers.clone()
+    with pytest.raises(ValueError, match='receiver inputs changed'):
+        call(query=changed_receivers)
+    field.bind_read_policy_generation('selected_guard_v1', 5)
+    with pytest.raises(ValueError, match='model policy generation changed'):
+        call()
+
+    field.bind_read_policy_generation('selected_guard_v2', 0)
+    fresh_prepared = field.prepare(request)
+    fresh_plan = field.prepare_read_plan(fresh_prepared, receivers, mode='selected',
+        selected_pairs=support, policy_identity='selected_guard_v2',
+        policy_generation=0, receiver_generation=2)
+    with torch.no_grad():
+        field.source_read[0].weight.add_(0.01)
+    with pytest.raises(ValueError, match='model weights changed'):
+        field.predict(fresh_prepared, receivers, read_plan=fresh_plan,
+            **_read_plan_kwargs('selected_guard_v2', 0, 2))
+
+
+def test_read_plan_keeps_input_gradients_live_and_rejects_mutated_bindings():
+    torch.manual_seed(83)
+    field = NonlinearFieldReadout(4, 2, 6, spatial_dim=2, hidden=8,
+        message=6, output_width=1, query_width=1).double()
+    field.bind_read_policy_generation('selected_grad_v1', 1)
+    request = scene(2)
+    request.sources = request.sources.detach().clone().requires_grad_(True)
+    request.centers = request.centers.detach().clone().requires_grad_(True)
+    prepared = field.prepare(request)
+    receivers = torch.rand(1, 3, 2, dtype=torch.float64, requires_grad=True)
+    features = torch.rand(1, 3, 1, dtype=torch.float64, requires_grad=True)
+    selected = torch.zeros(1, 3, 3, dtype=torch.bool)
+    selected[:, :, 0] = True
+    selected[:, :, 2] = True
+    plan = field.prepare_read_plan(prepared, receivers, features, mode='selected',
+        selected_pairs=selected, policy_identity='selected_grad_v1',
+        policy_generation=1, receiver_generation=5)
+    output = field.predict(prepared, receivers, features, read_plan=plan,
+        chunk_size=1, **_read_plan_kwargs('selected_grad_v1', 1, 5))
+    gradients = torch.autograd.grad(output.square().sum(),
+        (request.sources, request.centers, receivers, features))
+    assert all(torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+               for gradient in gradients)
+
+    mutated_indices = field.prepare_read_plan(prepared, receivers, features,
+        mode='selected', selected_pairs=selected, policy_identity='selected_grad_v1',
+        policy_generation=1, receiver_generation=5)
+    mutated_indices.pair_source.add_(0)
+    with pytest.raises(ValueError, match='pairs changed'):
+        field.predict(prepared, receivers, features, read_plan=mutated_indices,
+            **_read_plan_kwargs('selected_grad_v1', 1, 5))
+
+    changed_receivers = receivers.detach().clone()
+    bound_features = features.detach()
+    stale = field.prepare_read_plan(prepared, changed_receivers, bound_features,
+        mode='selected', selected_pairs=selected, policy_identity='selected_grad_v1',
+        policy_generation=1, receiver_generation=6)
+    with torch.no_grad():
+        changed_receivers.add_(0.01)
+    with pytest.raises(ValueError, match='receiver generation changed'):
+        field.predict(prepared, changed_receivers, bound_features, read_plan=stale,
+            **_read_plan_kwargs('selected_grad_v1', 1, 6))
+
+
+def test_batched_all_active_plan_preserves_native_ids_order_and_vjps():
+    torch.manual_seed(97)
+    field = NonlinearFieldReadout(4, 2, 6, spatial_dim=2, hidden=8,
+        message=6, output_width=2).double()
+    base = scene(2)
+    repeated = {
+        name: (None if value is None else value.expand(2, *value.shape[1:]).clone())
+        for name, value in base.tensors().items()
+    }
+    repeated.update(
+        present=torch.tensor([[1., 0., 1.], [0.5, 1., 0.]], dtype=torch.float64),
+        source_measures=torch.tensor([[0.5, 0., 1.], [2., 0.75, 0.]], dtype=torch.float64),
+        source_ids=torch.tensor([[108, 3, 77], [41, 900, 12]], dtype=torch.long))
+    request = replace(base, **repeated)
+    request.sources.requires_grad_(True)
+    request.centers.requires_grad_(True)
+    prepared = field.prepare(request)
+    receivers = torch.rand(2, 6, 2, dtype=torch.float64, requires_grad=True)
+    receiver_ids = torch.tensor([[900, 4, 900, 2, 77, 5],
+                                 [3, 3, 100, 8, 12, 12]], dtype=torch.long)
+    active = (prepared.present > 0)[:, None, :].expand(2, 6, -1).clone()
+    plan = field.prepare_read_plan(prepared, receivers, mode='selected',
+        selected_pairs=active, policy_identity='active_dense_v1',
+        policy_generation=0, receiver_generation=14, receiver_ids=receiver_ids)
+    assert plan.source_ids is prepared.source_ids
+    assert torch.equal(plan.source_ids, request.source_ids)
+    assert torch.equal(plan.pair_batch, torch.tensor([0] * 12 + [1] * 12))
+    assert torch.equal(plan.pair_receiver[:2], torch.tensor([0, 0]))
+    assert torch.equal(plan.pair_source[:2], torch.tensor([0, 2]))
+    assert torch.equal(plan.source_ids[plan.pair_batch, plan.pair_source],
+        torch.tensor([108, 77] * 6 + [41, 900] * 6))
+    assert torch.equal(receiver_ids[plan.pair_batch, plan.pair_receiver],
+        torch.tensor([900, 900, 4, 4, 900, 900, 2, 2, 77, 77, 5, 5,
+                      3, 3, 3, 3, 100, 100, 8, 8, 12, 12, 12, 12]))
+    assert plan.evaluated_pair_count == 24
+    assert plan.active_pair_count == 24
+    assert plan.padding_pair_count == 12
+    assert plan.omitted_active_pair_count == 0
+    assert plan.reduction_workspace_elements(chunk_size=2, message_width=6) == 72
+
+    legacy = field.predict(prepared, receivers)
+    selected = field.predict(prepared, receivers, read_plan=plan,
+        receiver_ids=receiver_ids, chunk_size=2,
+        **_read_plan_kwargs('active_dense_v1', 0, 14))
+    torch.testing.assert_close(selected, legacy, rtol=1e-12, atol=1e-12)
+    probe = torch.randn_like(legacy)
+    legacy_grad = torch.autograd.grad((legacy * probe).sum(),
+        (request.sources, request.centers, receivers), retain_graph=True)
+    selected_grad = torch.autograd.grad((selected * probe).sum(),
+        (request.sources, request.centers, receivers))
+    for actual, expected in zip(selected_grad, legacy_grad):
+        torch.testing.assert_close(actual, expected, rtol=2e-12, atol=2e-12)
+
+    with pytest.raises(ValueError, match='receiver IDs changed'):
+        field.predict(prepared, receivers, read_plan=plan,
+            receiver_ids=receiver_ids.clone(),
+            **_read_plan_kwargs('active_dense_v1', 0, 14))
+    receiver_ids[0, 0] += 1
+    with pytest.raises(ValueError, match='receiver IDs changed'):
+        field.predict(prepared, receivers, read_plan=plan,
+            receiver_ids=receiver_ids,
+            **_read_plan_kwargs('active_dense_v1', 0, 14))
+
+    fresh = field.prepare(request)
+    fresh_receivers = receivers.detach().clone()
+    fresh_plan = field.prepare_read_plan(fresh, fresh_receivers, mode='active_dense',
+        policy_identity='active_dense_v1', policy_generation=0,
+        receiver_generation=15)
+    fresh.source_ids = fresh.source_ids.clone()
+    with pytest.raises(ValueError, match='source IDs changed'):
+        field.predict(fresh, fresh_receivers, read_plan=fresh_plan,
+            **_read_plan_kwargs('active_dense_v1', 0, 15))
+
+    mutated = field.prepare(request)
+    mutated_plan = field.prepare_read_plan(mutated, fresh_receivers, mode='active_dense',
+        policy_identity='active_dense_v1', policy_generation=0,
+        receiver_generation=16)
+    with torch.no_grad():
+        mutated.source_ids[0, 0] += 1
+    with pytest.raises(ValueError, match='changed'):
+        field.predict(mutated, fresh_receivers, read_plan=mutated_plan,
+            **_read_plan_kwargs('active_dense_v1', 0, 16))

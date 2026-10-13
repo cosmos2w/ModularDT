@@ -95,6 +95,45 @@ def test_wind_p_is_exact_maintained_nonlinear_readout_and_loads_its_weights():
     torch.testing.assert_close(new_grad, old_grad, rtol=0, atol=0)
 
 
+def test_read_plan_forwards_only_through_direct_joint_modes():
+    values = _inputs()
+    model = _core('P-R', affine_outputs=0)
+    model.bind_read_policy_generation('joint_selected_v1', 2)
+    prepared = _prepare(model, values)
+    active = (prepared.present > 0)[:, None, :].expand(
+        values['receivers'].shape[0], values['receivers'].shape[1], -1).clone()
+    receiver_ids = torch.tensor([[101, 4, 101, 9, 2, 77, 8]], dtype=torch.long)
+    plan = model.prepare_read_plan(prepared, values['receivers'],
+        values['receiver_features'], mode='selected', selected_pairs=active,
+        policy_identity='joint_selected_v1', policy_generation=2,
+        receiver_generation=6, receiver_ids=receiver_ids)
+    legacy = model.predict_fields(prepared, values['receivers'], values['receiver_features'])
+    selected = model.predict_fields(prepared, values['receivers'], values['receiver_features'],
+        read_plan=plan, receiver_ids=receiver_ids,
+        read_policy_identity='joint_selected_v1', read_policy_generation=2,
+        receiver_generation=6)
+    torch.testing.assert_close(selected, legacy, rtol=1e-12, atol=1e-12)
+    forwarded_predict = model.predict(prepared, values['receivers'],
+        values['receiver_features'], read_plan=plan, receiver_ids=receiver_ids,
+        read_policy_identity='joint_selected_v1', read_policy_generation=2,
+        receiver_generation=6)
+    torch.testing.assert_close(forwarded_predict, legacy, rtol=1e-12, atol=1e-12)
+    with pytest.raises(ValueError, match='without organization output'):
+        model.predict_fields(prepared, values['receivers'], values['receiver_features'],
+            read_plan=plan, receiver_ids=receiver_ids,
+            read_policy_identity='joint_selected_v1', read_policy_generation=2,
+            receiver_generation=6, return_organization=True)
+
+    collective = _core('P-H', affine_outputs=0)
+    collective_context = _prepare(collective, values)
+    with pytest.raises(ValueError, match='only for direct interaction modes'):
+        collective.predict_fields(collective_context, values['receivers'],
+            values['receiver_features'], read_plan=object())
+    with pytest.raises(ValueError, match='only for direct interaction modes'):
+        collective.predict(collective_context, values['receivers'],
+            values['receiver_features'], read_policy_identity='unsupported')
+
+
 @pytest.mark.parametrize('mode', ['P-G', 'P-H'])
 def test_zero_collective_outputs_recover_p_exactly_with_fractional_presence(mode):
     values = _inputs(fractional=True)

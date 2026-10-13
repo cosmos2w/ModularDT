@@ -76,6 +76,13 @@ def _parameter_signature(model):
                  for name, parameter in model.named_parameters())
 
 
+def _tensor_identity_signature(tensor):
+    if tensor is None:
+        return None
+    return (id(tensor), tensor._version, tensor.data_ptr(), tuple(tensor.shape),
+            tuple(tensor.stride()), tensor.device, tensor.dtype)
+
+
 def _type_sensitive_value_signature(value):
     """Encode JSON-like metadata without Python's ``True == 1`` equality."""
     value_type = type(value)
@@ -177,6 +184,115 @@ class PreparedResponseContext:
                     raise ValueError(
                         'Prepared native routing semantics changed; rebuild this request.'
                     )
+
+
+@dataclass(frozen=True)
+class PreparedNonlinearReadPlan:
+    """Bound vectorized source/receiver pairs for one nonlinear final read.
+
+    The plan is an execution artifact, not model state. It binds the exact
+    prepared context and receiver tensors plus explicit policy and receiver
+    generations so a selected support cannot silently outlive its inputs.
+    """
+
+    mode: str
+    policy_identity: str
+    policy_generation: int
+    receiver_generation: int
+    owner_id: int
+    prepared: object
+    source_ids: torch.Tensor
+    receivers: torch.Tensor
+    receiver_ids: torch.Tensor | None
+    receiver_features: torch.Tensor | None
+    context_bindings: tuple
+    source_ids_binding: tuple
+    receiver_binding: tuple
+    receiver_ids_binding: tuple | None
+    receiver_features_binding: tuple | None
+    parameter_signature: tuple
+    pair_batch: torch.Tensor
+    pair_receiver: torch.Tensor
+    pair_source: torch.Tensor
+    pair_versions: tuple
+    active_pair_count: int
+    logical_pair_count: int
+    batch_size: int
+    query_count: int
+    source_capacity: int
+
+    @property
+    def evaluated_pair_count(self):
+        return self.pair_batch.numel()
+
+    @property
+    def padding_pair_count(self):
+        return self.logical_pair_count - self.active_pair_count
+
+    @property
+    def omitted_active_pair_count(self):
+        return self.active_pair_count - self.evaluated_pair_count
+
+    def reduction_workspace_elements(self, chunk_size, message_width):
+        """Return dense reduction scratch capacity, separate from evaluated rows.
+
+        Selected execution still allocates a source-axis reduction workspace
+        for each query chunk so the legacy ``sum(source_axis)`` order is
+        preserved. This capacity is therefore not a sparse-work count.
+        """
+        if (type(chunk_size) is not int or chunk_size < 1
+                or type(message_width) is not int or message_width < 1):
+            raise ValueError('Workspace accounting needs positive integer chunk and message widths.')
+        return (self.batch_size * min(self.query_count, chunk_size)
+                * self.source_capacity * message_width)
+
+    def assert_compatible(self, model, prepared, receivers, receiver_ids,
+                          receiver_features, *,
+                          policy_identity, policy_generation, receiver_generation):
+        if model is None or id(model) != self.owner_id:
+            raise ValueError('Prepared nonlinear read plan belongs to another operator.')
+        owner_reference = getattr(prepared, 'model_reference', None)
+        if owner_reference is None or owner_reference() is not model:
+            raise ValueError('Prepared nonlinear read plan owner is stale; rebuild this request.')
+        if prepared is not self.prepared:
+            raise ValueError('Prepared nonlinear read plan belongs to another context.')
+        if self.mode not in ('active_dense', 'selected'):
+            raise ValueError('Prepared nonlinear read plan mode changed; rebuild this request.')
+        if receivers is not self.receivers or receiver_features is not self.receiver_features:
+            raise ValueError('Prepared nonlinear read plan receiver inputs changed; rebuild this request.')
+        if receiver_ids is not self.receiver_ids:
+            raise ValueError('Prepared nonlinear read plan receiver IDs changed; rebuild this request.')
+        if _tensor_identity_signature(receivers) != self.receiver_binding:
+            raise ValueError('Prepared nonlinear read plan receiver generation changed; rebuild this request.')
+        if _tensor_identity_signature(receiver_ids) != self.receiver_ids_binding:
+            raise ValueError('Prepared nonlinear read plan receiver IDs changed; rebuild this request.')
+        if _tensor_identity_signature(receiver_features) != self.receiver_features_binding:
+            raise ValueError('Prepared nonlinear read plan receiver features changed; rebuild this request.')
+        if (getattr(prepared, 'source_ids', None) is not self.source_ids
+                or _tensor_identity_signature(getattr(prepared, 'source_ids', None))
+                != self.source_ids_binding):
+            raise ValueError('Prepared nonlinear read plan source IDs changed; rebuild this request.')
+        bindings = tuple(_tensor_identity_signature(getattr(prepared, name)) for name in (
+            'source_states', 'global_state', 'centers', 'source_lengths', 'present',
+            'source_measure', 'lengths', 'source_ids'))
+        if bindings != self.context_bindings:
+            raise ValueError('Prepared nonlinear read plan context inputs changed; rebuild this request.')
+        if _parameter_signature(model) != self.parameter_signature:
+            raise ValueError('Prepared nonlinear read plan model weights changed; rebuild this request.')
+        if (policy_identity != self.policy_identity
+                or type(policy_generation) is not int
+                or policy_generation != self.policy_generation):
+            raise ValueError('Prepared nonlinear read plan input policy changed; rebuild this request.')
+        if (getattr(model, '_read_policy_identity', None) != self.policy_identity
+                or getattr(model, '_read_policy_generation', None) != self.policy_generation):
+            raise ValueError('Prepared nonlinear read plan model policy generation changed; rebuild this request.')
+        if (type(receiver_generation) is not int
+                or receiver_generation != self.receiver_generation):
+            raise ValueError('Prepared nonlinear read plan receiver generation changed; rebuild this request.')
+        current_pair_versions = tuple(tensor._version for tensor in (
+            self.pair_batch, self.pair_receiver, self.pair_source))
+        if current_pair_versions != self.pair_versions:
+            raise ValueError('Prepared nonlinear read plan pairs changed; rebuild this request.')
 
 
 @dataclass(frozen=True)
@@ -1198,7 +1314,147 @@ class NonlinearFieldReadout(InteractionContextCore):
         self.output_width = output_width
         self.source_read = _mlp(2 * hidden + 3 * spatial_dim * 9 + query_width, message, hidden)
         self.field_head = _mlp(hidden + message + spatial_dim * 9 + query_width, output_width, hidden)
+        self._read_policy_identity = 'active_dense_v1'
+        self._read_policy_generation = 0
         self.config.update(output_width=output_width)
+
+    def bind_read_policy_generation(self, policy_identity, generation):
+        """Bind the runtime read policy whose plans this model may execute.
+
+        This execution binding adds no parameter or buffer and is deliberately
+        absent from ``state_dict``. Callers advance it when a selector or its
+        configuration changes; already prepared plans then fail closed.
+        """
+        if (not isinstance(policy_identity, str) or not policy_identity
+                or type(generation) is not int or generation < 0):
+            raise ValueError('Read policy binding requires a name and nonnegative integer generation.')
+        if (policy_identity == self._read_policy_identity
+                and generation < self._read_policy_generation):
+            raise ValueError('Read policy generation cannot move backward for the same policy.')
+        self._read_policy_identity = policy_identity
+        self._read_policy_generation = generation
+
+    def prepare_read_plan(self, prepared, receivers, receiver_features=None, *, mode,
+                          policy_identity, policy_generation, receiver_generation,
+                          selected_pairs=None, receiver_ids=None):
+        """Bind active-only or selected nonlinear reads to one prepared request.
+
+        ``selected_pairs`` is a boolean ``[B,Q,M]`` support. It must be a
+        subset of active physical sources. ``mode='active_dense'`` instead
+        admits every active physical source and is the padding-removal
+        control. The plan keeps the original prepared source measures; it
+        never renormalizes them over the admitted subset.
+        """
+        self.assert_owned(prepared)
+        if mode not in ('active_dense', 'selected'):
+            raise ValueError("Read-plan mode must be 'active_dense' or 'selected'.")
+        if mode == 'active_dense' and selected_pairs is not None:
+            raise ValueError('Active-dense read plans do not accept a selected support.')
+        if mode == 'selected' and selected_pairs is None:
+            raise ValueError('Selected read plans require an explicit boolean support.')
+        if (not isinstance(policy_identity, str) or not policy_identity
+                or type(policy_generation) is not int or policy_generation < 0
+                or type(receiver_generation) is not int or receiver_generation < 0):
+            raise ValueError('Read plans require a named policy and nonnegative integer generations.')
+        if (policy_identity != self._read_policy_identity
+                or policy_generation != self._read_policy_generation):
+            raise ValueError('Read plan does not match the model-bound input policy generation.')
+        batch, queries, _ = receivers.shape
+        self._validate_shape(receivers, (prepared.centers.shape[0], queries, self.spatial_dim), 'receivers')
+        features = receivers.new_empty(batch, queries, 0) if receiver_features is None else receiver_features
+        self._validate_shape(features, (batch, queries, self.query_width), 'receiver_features')
+        if receivers.device != prepared.centers.device or features.device != receivers.device:
+            raise ValueError('Read-plan context, receivers and features must share a device.')
+        source_ids = getattr(prepared, 'source_ids', None)
+        if (not torch.is_tensor(source_ids)
+                or tuple(source_ids.shape) != (batch, prepared.centers.shape[1])
+                or source_ids.dtype not in (torch.int32, torch.int64)):
+            raise ValueError('Read plans require aligned integer physical source IDs.')
+        if (receiver_ids is not None
+                and (not torch.is_tensor(receiver_ids)
+                     or tuple(receiver_ids.shape) != (batch, queries)
+                     or receiver_ids.dtype not in (torch.int32, torch.int64))):
+            raise ValueError('Receiver IDs must be an integer tensor with shape [B,Q].')
+        active = (prepared.present > 0)[:, None, :].expand(batch, queries, -1)
+        if mode == 'active_dense':
+            admitted = active
+        else:
+            if (not torch.is_tensor(selected_pairs)
+                    or selected_pairs.dtype != torch.bool
+                    or tuple(selected_pairs.shape) != (batch, queries, prepared.centers.shape[1])
+                    or selected_pairs.device != receivers.device):
+                raise ValueError('Selected support must be boolean [B,Q,M] on the receiver device.')
+            if bool((selected_pairs & ~active).any()):
+                raise ValueError('Selected read support includes an absent or padded source.')
+            admitted = selected_pairs
+        pair_batch, pair_receiver, pair_source = admitted.nonzero(as_tuple=True)
+        context_bindings = tuple(_tensor_identity_signature(getattr(prepared, name)) for name in (
+            'source_states', 'global_state', 'centers', 'source_lengths', 'present',
+            'source_measure', 'lengths', 'source_ids'))
+        pair_tensors = (pair_batch, pair_receiver, pair_source)
+        return PreparedNonlinearReadPlan(
+            mode=mode,
+            policy_identity=policy_identity,
+            policy_generation=policy_generation,
+            receiver_generation=receiver_generation,
+            owner_id=id(self),
+            prepared=prepared,
+            source_ids=source_ids,
+            receivers=receivers,
+            receiver_ids=receiver_ids,
+            receiver_features=receiver_features,
+            context_bindings=context_bindings,
+            source_ids_binding=_tensor_identity_signature(source_ids),
+            receiver_binding=_tensor_identity_signature(receivers),
+            receiver_ids_binding=_tensor_identity_signature(receiver_ids),
+            receiver_features_binding=_tensor_identity_signature(receiver_features),
+            parameter_signature=_parameter_signature(self),
+            pair_batch=pair_batch,
+            pair_receiver=pair_receiver,
+            pair_source=pair_source,
+            pair_versions=tuple(tensor._version for tensor in pair_tensors),
+            active_pair_count=int(active.sum().item()),
+            logical_pair_count=batch * queries * prepared.centers.shape[1],
+            batch_size=batch,
+            query_count=queries,
+            source_capacity=prepared.centers.shape[1],
+        )
+
+    def _predict_with_read_plan(self, prepared, receivers, features, read_plan, *,
+                                chunk_size, return_messages):
+        """Execute admitted pairs; exported messages are zero on omitted rows."""
+        batch, queries, _ = receivers.shape
+        values, messages = [], []
+        for start in range(0, queries, chunk_size):
+            stop = min(start + chunk_size, queries)
+            query, feature = receivers[:, start:stop], features[:, start:stop]
+            in_chunk = ((read_plan.pair_receiver >= start)
+                        & (read_plan.pair_receiver < stop))
+            pair_batch = read_plan.pair_batch[in_chunk]
+            pair_receiver = read_plan.pair_receiver[in_chunk] - start
+            pair_source = read_plan.pair_source[in_chunk]
+            selected = (pair_batch, pair_receiver, pair_source)
+            fine = self.source_read(self._read_selected_features(
+                prepared, query, feature, selected))
+            weighted = fine * prepared.source_measure[pair_batch, pair_source, None]
+            weighted_messages = weighted.new_zeros(
+                batch, stop - start, prepared.centers.shape[1], self.config['message'])
+            weighted_messages.index_put_(selected, weighted)
+            reduced = weighted_messages.sum(2)
+            values.append(self.field_head(torch.cat((reduced,
+                prepared.global_state[:, None].expand(-1, stop - start, -1),
+                _geometry(query / prepared.lengths[:, None]), feature), -1)))
+            if return_messages:
+                visible = fine * prepared.present[pair_batch, pair_source, None]
+                evaluated = visible.new_zeros(
+                    batch, stop - start, prepared.centers.shape[1], self.config['message'])
+                messages.append(evaluated.index_put_(selected, visible))
+        output = torch.cat(values, 1) if values else receivers.new_empty(batch, 0, self.output_width)
+        if return_messages:
+            exported = (torch.cat(messages, 1) if messages else receivers.new_empty(
+                batch, 0, prepared.centers.shape[1], self.config['message']))
+            return output, exported
+        return output
 
     def _prepare_factorized_source_read(self, prepared, receivers, features, module):
         """Project receiver-independent and query-only terms once per call."""
@@ -1239,7 +1495,9 @@ class NonlinearFieldReadout(InteractionContextCore):
         return _finish_projected_mlp(module, terms)
 
     def predict(self, prepared, receivers, receiver_features=None, *, chunk_size=512,
-                return_messages=False):
+                return_messages=False, read_plan=None, read_policy_identity=None,
+                read_policy_generation=None, receiver_generation=None,
+                receiver_ids=None):
         self.assert_owned(prepared)
         batch, queries, _ = receivers.shape
         self._validate_shape(receivers, (prepared.centers.shape[0], queries, self.spatial_dim), 'receivers')
@@ -1247,6 +1505,20 @@ class NonlinearFieldReadout(InteractionContextCore):
             raise ValueError('chunk_size must be positive.')
         features = receivers.new_empty(batch, queries, 0) if receiver_features is None else receiver_features
         self._validate_shape(features, (batch, queries, self.query_width), 'receiver_features')
+        if read_plan is not None:
+            if not isinstance(read_plan, PreparedNonlinearReadPlan):
+                raise TypeError('read_plan must be a PreparedNonlinearReadPlan.')
+            read_plan.assert_compatible(self, prepared, receivers, receiver_ids,
+                receiver_features,
+                policy_identity=read_policy_identity,
+                policy_generation=read_policy_generation,
+                receiver_generation=receiver_generation)
+            return self._predict_with_read_plan(prepared, receivers, features, read_plan,
+                chunk_size=chunk_size, return_messages=return_messages)
+        if any(value is not None for value in (
+                read_policy_identity, read_policy_generation, receiver_generation,
+                receiver_ids)):
+            raise ValueError('Read-plan identities require a prepared nonlinear read plan.')
         values, messages = [], []
         read_projections = (self._prepare_factorized_source_read(
             prepared, receivers, features, self.source_read)
