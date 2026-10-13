@@ -412,10 +412,19 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
         chunk_size: int | None = None,
         retained_access_mass: float | None = None,
         receiver_edge_executor: str = "dense",
+        read_plan=None,
+        read_policy_identity=None,
+        read_policy_generation=None,
+        receiver_generation=None,
+        receiver_ids=None,
     ) -> torch.Tensor:
         self._assert_prepared(prepared)
         if retained_access_mass is not None or receiver_edge_executor != "dense":
             raise ValueError("P-family Wind uses its declared full source-conditioned receiver read.")
+        if read_plan is not None and receiver_features is None:
+            raise ValueError(
+                "Wind read plans require caller-supplied receiver_features bound to the prepared plan."
+            )
         features = (
             wind_receiver_features(prepared.scene, receivers_D)
             if receiver_features is None
@@ -423,15 +432,78 @@ class InteractionPreservingWindModel(WindFarmJointRegionalModel):
         )
         if tuple(features.shape) != (*receivers_D.shape[:2], 7):
             raise ValueError("Wind receiver features must align with [B,Q] and have width seven.")
-        result = self.core.predict_fields(
-            prepared.core_context,
-            receivers_D,
-            receiver_features=features,
-            chunk_size=self.receiver_tile if chunk_size is None else int(chunk_size),
-        )
+        predict_options = {
+            "read_plan": read_plan,
+            "read_policy_identity": read_policy_identity,
+            "read_policy_generation": read_policy_generation,
+            "receiver_generation": receiver_generation,
+            "receiver_ids": receiver_ids,
+        }
+        if any(value is not None for value in predict_options.values()):
+            result = self.core.predict_fields(
+                prepared.core_context,
+                receivers_D,
+                receiver_features=features,
+                chunk_size=self.receiver_tile if chunk_size is None else int(chunk_size),
+                **predict_options,
+            )
+        else:
+            result = self.core.predict_fields(
+                prepared.core_context,
+                receivers_D,
+                receiver_features=features,
+                chunk_size=self.receiver_tile if chunk_size is None else int(chunk_size),
+            )
         if tuple(result.shape) != (*receivers_D.shape[:2], 3):
             raise RuntimeError("P-family Wind core returned an invalid three-component physical residual.")
         return result
+
+    def predict_physical(
+        self,
+        prepared: PreparedWindJointRegional,
+        receivers_D: torch.Tensor,
+        *,
+        chunk_size: int | None = None,
+        retained_access_mass: float | None = None,
+        receiver_edge_executor: str = "dense",
+        receiver_features: torch.Tensor | None = None,
+        read_plan=None,
+        read_policy_identity=None,
+        read_policy_generation=None,
+        receiver_generation=None,
+        receiver_ids=None,
+    ) -> torch.Tensor:
+        read_options = (
+            receiver_features, read_plan, read_policy_identity,
+            read_policy_generation, receiver_generation, receiver_ids,
+        )
+        if not any(value is not None for value in read_options):
+            # Keep the maintained native conversion path byte-for-byte on the
+            # default dense call, including its validation and operation order.
+            return super().predict_physical(
+                prepared,
+                receivers_D,
+                chunk_size=chunk_size,
+                retained_access_mass=retained_access_mass,
+                receiver_edge_executor=receiver_edge_executor,
+            )
+        residual = self.predict_standardized(
+            prepared,
+            receivers_D,
+            receiver_features=receiver_features,
+            chunk_size=chunk_size,
+            retained_access_mass=retained_access_mass,
+            receiver_edge_executor=receiver_edge_executor,
+            read_plan=read_plan,
+            read_policy_identity=read_policy_identity,
+            read_policy_generation=read_policy_generation,
+            receiver_generation=receiver_generation,
+            receiver_ids=receiver_ids,
+        )
+        scale = residual.new_tensor(self.velocity_transform.safe_std)
+        return self.profile_at_receivers(receivers_D) + residual * scale * float(
+            self.velocity_transform.u_ref_mps
+        )
 
 
 def load_interaction_preserving_wind_checkpoint(

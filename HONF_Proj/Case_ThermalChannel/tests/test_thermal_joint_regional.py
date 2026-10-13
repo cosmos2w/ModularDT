@@ -343,6 +343,95 @@ def test_pr2_thermal_standalone_roundtrip_preserves_heat_null_affine_and_curl_co
     torch.testing.assert_close(loaded_prediction["pred_field"], baseline["pred_field"], rtol=0.0, atol=0.0)
 
 
+def test_thermal_native_flow_read_plan_is_opt_in_and_keeps_affine_outputs_dense():
+    torch.manual_seed(29)
+    model = InteractionPreservingThermalAdapter(
+        mode="P-R2",
+        normalization_stats=_stats(),
+        hidden=128,
+        message=128,
+        regional_anchors=0,
+        receiver_tile=512,
+        seed=0,
+        flow_readout_law=NATIVE_CURL_READOUT_LAW,
+    ).eval()
+    model_config_before = model.model_config()
+    adapter_config_before = model.adapter_config()
+    normalization_before = {name: np.asarray(value).copy() for name, value in model.normalization_stats.items()}
+    state_before = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    structure = _structure(2)
+    fluid_xy = torch.tensor(
+        [[[8.5 * 12.0 / 128.0, 8.5 * 6.0 / 64.0],
+          [40.5 * 12.0 / 128.0, 24.5 * 6.0 / 64.0],
+          [88.5 * 12.0 / 128.0, 40.5 * 6.0 / 64.0]]],
+        dtype=torch.float32,
+    )
+    local = torch.tensor(
+        [[[[0.0, 0.0], [0.35, 0.0]], [[0.0, 0.0], [0.35, 0.0]]]],
+        dtype=torch.float32,
+    )
+    prepared = model.prepare_native(
+        structure,
+        fluid_xy,
+        local_query_points=local,
+        ntheta=4,
+        native_solid_mask=torch.zeros((1, 64, 128), dtype=torch.bool),
+    )
+    source_ids_before = prepared.context.source_ids.detach().clone()
+    policy_identity, policy_generation, receiver_generation = "thermal_adapter_read_test_v1", 1, 4
+    model.core.bind_read_policy_generation(policy_identity, policy_generation)
+    receivers = prepared.flow_query_receivers
+    active = (prepared.context.present > 0)[:, None, :].expand(
+        receivers.shape[0], receivers.shape[1], -1).clone()
+    plan = model.core.prepare_read_plan(
+        prepared.context,
+        receivers,
+        mode="selected",
+        selected_pairs=active,
+        policy_identity=policy_identity,
+        policy_generation=policy_generation,
+        receiver_generation=receiver_generation,
+    )
+    heat = torch.tensor([[0.7, 1.1]], dtype=torch.float64)
+    dense = model.apply_native(prepared, heat, accumulation_dtype=torch.float64)
+    planned = model.apply_native(
+        prepared,
+        heat,
+        accumulation_dtype=torch.float64,
+        flow_read_plan=plan,
+        read_policy_identity=policy_identity,
+        read_policy_generation=policy_generation,
+        receiver_generation=receiver_generation,
+    )
+    for name in ("fluid_temperature", "pred_interface", "pred_internal_temperature"):
+        torch.testing.assert_close(planned[name], dense[name], rtol=0.0, atol=0.0)
+    torch.testing.assert_close(planned["pred_field"], dense["pred_field"], rtol=1e-6, atol=1e-6)
+
+    with pytest.raises(ValueError, match="not affine increments"):
+        model.apply_native(
+            prepared,
+            heat,
+            increment=True,
+            flow_read_plan=plan,
+            read_policy_identity=policy_identity,
+            read_policy_generation=policy_generation,
+            receiver_generation=receiver_generation,
+        )
+
+    non_curl = InteractionPreservingThermalAdapter(
+        mode="P-R2", normalization_stats=_stats(), flow_readout_law=None,
+    )
+    with pytest.raises(ValueError, match="native-curl flow_query_receivers"):
+        non_curl.apply_native(None, None, flow_read_plan=object())
+    assert model.model_config() == model_config_before
+    assert model.adapter_config() == adapter_config_before
+    assert all(np.array_equal(model.normalization_stats[name], value)
+               for name, value in normalization_before.items())
+    assert set(model.state_dict()) == set(state_before)
+    assert all(torch.equal(model.state_dict()[name], value) for name, value in state_before.items())
+    assert torch.equal(prepared.context.source_ids, source_ids_before)
+
+
 @pytest.mark.parametrize(
     ("name", "bad_value"),
     (("score_hidden", 32.0), ("score_bound", 2), ("views", 2.0),

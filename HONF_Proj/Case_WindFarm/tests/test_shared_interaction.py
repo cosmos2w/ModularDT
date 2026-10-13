@@ -17,6 +17,7 @@ from windfarm.interaction_preserving import (
     InteractionPreservingWindModel,
     load_interaction_preserving_wind_checkpoint,
 )
+from windfarm.joint_regional import WindFarmJointRegionalModel, wind_receiver_features
 from windfarm.model import (
     REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
     SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
@@ -231,6 +232,86 @@ def test_pr2_wind_nonlinear_config_and_strict_state_roundtrip() -> None:
     assert prediction.shape == (1, 2, 3)
     assert torch.isfinite(prediction).all()
     torch.testing.assert_close(restored_prediction, prediction, rtol=0.0, atol=0.0)
+
+
+def test_wind_read_plan_adapter_requires_bound_features_and_preserves_physical_default():
+    torch.manual_seed(81)
+    model = InteractionPreservingWindModel(
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+        mode="P-R2",
+        seed=42,
+    ).eval()
+    prepared = model.prepare_scene(wind_scene_from_case(_case()))
+    config_before = copy.deepcopy(model.export_config())
+    state_before = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    source_ids_before = prepared.core_context.source_ids.detach().clone()
+    receivers = torch.tensor([[[0.5, 0.2, 0.875], [2.5, 0.4, 1.125]]])
+    features = wind_receiver_features(prepared.scene, receivers)
+    receiver_ids = torch.tensor([[19, 23]], dtype=torch.long)
+    policy_identity, policy_generation, receiver_generation = "adapter_read_test_v1", 2, 7
+    model.core.bind_read_policy_generation(policy_identity, policy_generation)
+    active = (prepared.core_context.present > 0)[:, None, :].expand(
+        receivers.shape[0], receivers.shape[1], -1).clone()
+    plan = model.core.prepare_read_plan(
+        prepared.core_context,
+        receivers,
+        features,
+        mode="selected",
+        selected_pairs=active,
+        policy_identity=policy_identity,
+        policy_generation=policy_generation,
+        receiver_generation=receiver_generation,
+        receiver_ids=receiver_ids,
+    )
+
+    dense_standardized = model.predict_standardized(
+        prepared, receivers, receiver_features=features,
+    )
+    planned_standardized = model.predict_standardized(
+        prepared,
+        receivers,
+        receiver_features=features,
+        read_plan=plan,
+        read_policy_identity=policy_identity,
+        read_policy_generation=policy_generation,
+        receiver_generation=receiver_generation,
+        receiver_ids=receiver_ids,
+    )
+    torch.testing.assert_close(planned_standardized, dense_standardized, rtol=1e-6, atol=1e-6)
+    with pytest.raises(ValueError, match="caller-supplied receiver_features"):
+        model.predict_standardized(
+            prepared,
+            receivers,
+            read_plan=plan,
+            read_policy_identity=policy_identity,
+            read_policy_generation=policy_generation,
+            receiver_generation=receiver_generation,
+            receiver_ids=receiver_ids,
+        )
+
+    default_physical = model.predict_physical(prepared, receivers)
+    inherited_physical = WindFarmJointRegionalModel.predict_physical(model, prepared, receivers)
+    torch.testing.assert_close(default_physical, inherited_physical, rtol=0.0, atol=0.0)
+    planned_physical = model.predict_physical(
+        prepared,
+        receivers,
+        receiver_features=features,
+        read_plan=plan,
+        read_policy_identity=policy_identity,
+        read_policy_generation=policy_generation,
+        receiver_generation=receiver_generation,
+        receiver_ids=receiver_ids,
+    )
+    expected_scale = planned_standardized.new_tensor(model.velocity_transform.safe_std)
+    expected_physical = model.profile_at_receivers(receivers) + planned_standardized * expected_scale * float(
+        model.velocity_transform.u_ref_mps
+    )
+    torch.testing.assert_close(planned_physical, expected_physical, rtol=0.0, atol=0.0)
+    assert model.export_config() == config_before
+    assert set(model.state_dict()) == set(state_before)
+    assert all(torch.equal(model.state_dict()[name], value) for name, value in state_before.items())
+    assert torch.equal(prepared.core_context.source_ids, source_ids_before)
 
 
 @pytest.mark.parametrize(

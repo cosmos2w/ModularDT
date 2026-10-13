@@ -1246,8 +1246,35 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
                     or not torch.equal(prepared.flow_query_receivers, snapshot["query_xy"])):
                 raise ValueError("Prepared native-curl geometry mask or node receivers changed; rebuild the state.")
 
-    def apply_native(self, prepared, physical_heat, *, increment=False, compression=None, accumulation_dtype=None):
+    def apply_native(
+        self,
+        prepared,
+        physical_heat,
+        *,
+        increment=False,
+        compression=None,
+        accumulation_dtype=None,
+        flow_read_plan=None,
+        read_policy_identity=None,
+        read_policy_generation=None,
+        receiver_generation=None,
+        flow_receiver_ids=None,
+    ):
+        read_options = (
+            flow_read_plan,
+            read_policy_identity,
+            read_policy_generation,
+            receiver_generation,
+            flow_receiver_ids,
+        )
+        read_plan_requested = any(value is not None for value in read_options)
+        if increment and read_plan_requested:
+            raise ValueError("Thermal read plans apply only to nonlinear flow outputs, not affine increments.")
         if not self.flow_readout_law:
+            if read_plan_requested:
+                raise ValueError(
+                    "Thermal read plans require the native-curl flow_query_receivers path."
+                )
             return super().apply_native(
                 prepared, physical_heat, increment=increment, compression=compression,
                 accumulation_dtype=accumulation_dtype,
@@ -1261,9 +1288,21 @@ class InteractionPreservingThermalAdapter(JointThermalRegionalAdapter):
         if increment:
             flow = output["fluid_temperature"].new_zeros((*output["fluid_temperature"].shape[:-1], 4))
         else:
-            normalized_uvp = self.core.predict_fields(
-                prepared.context, prepared.flow_query_receivers, chunk_size=self.receiver_tile,
-            )
+            if read_plan_requested:
+                normalized_uvp = self.core.predict_fields(
+                    prepared.context,
+                    prepared.flow_query_receivers,
+                    chunk_size=self.receiver_tile,
+                    read_plan=flow_read_plan,
+                    read_policy_identity=read_policy_identity,
+                    read_policy_generation=read_policy_generation,
+                    receiver_generation=receiver_generation,
+                    receiver_ids=flow_receiver_ids,
+                )
+            else:
+                normalized_uvp = self.core.predict_fields(
+                    prepared.context, prepared.flow_query_receivers, chunk_size=self.receiver_tile,
+                )
             flow = physical_uvp_native_curl(
                 normalized_uvp, prepared.native_curl_stencil,
                 self.normalization_stats["field_mean_by_channel"],
