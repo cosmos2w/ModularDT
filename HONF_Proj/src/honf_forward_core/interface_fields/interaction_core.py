@@ -1424,6 +1424,27 @@ class NonlinearFieldReadout(InteractionContextCore):
                                 chunk_size, return_messages):
         """Execute admitted pairs; exported messages are zero on omitted rows."""
         batch, queries, _ = receivers.shape
+        if read_plan.evaluated_pair_count == read_plan.logical_pair_count:
+            # With neither padding nor omitted reads the legacy dispatch is
+            # already active-only. Keep its native GEMM shapes and report all
+            # logical rows as executed; this is not a sparse-work saving.
+            return NonlinearFieldReadout.predict(
+                self, prepared, receivers, read_plan.receiver_features,
+                chunk_size=chunk_size, return_messages=return_messages)
+        # Batch actual admitted value rows at the legacy tile's row capacity.
+        # Query tiles still determine the original source-axis reduction and
+        # head dispatch. No omitted row enters either expensive value layer.
+        row_budget = batch * chunk_size * prepared.centers.shape[1]
+        fine_parts = []
+        for offset in range(0, read_plan.evaluated_pair_count, row_budget):
+            selected = (read_plan.pair_batch[offset:offset + row_budget],
+                        read_plan.pair_receiver[offset:offset + row_budget],
+                        read_plan.pair_source[offset:offset + row_budget])
+            fine_parts.append(self.source_read(self._read_selected_features(
+                prepared, receivers, features, selected)))
+        fine_rows = (torch.cat(fine_parts, 0) if fine_parts else
+                     receivers.new_empty(0, self.config['message']))
+        del fine_parts
         values, messages = [], []
         for start in range(0, queries, chunk_size):
             stop = min(start + chunk_size, queries)
@@ -1434,8 +1455,7 @@ class NonlinearFieldReadout(InteractionContextCore):
             pair_receiver = read_plan.pair_receiver[in_chunk] - start
             pair_source = read_plan.pair_source[in_chunk]
             selected = (pair_batch, pair_receiver, pair_source)
-            fine = self.source_read(self._read_selected_features(
-                prepared, query, feature, selected))
+            fine = fine_rows[in_chunk]
             weighted = fine * prepared.source_measure[pair_batch, pair_source, None]
             weighted_messages = weighted.new_zeros(
                 batch, stop - start, prepared.centers.shape[1], self.config['message'])
