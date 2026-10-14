@@ -1,6 +1,6 @@
 # Fresh matched P/R1/R2 comparison
 
-This guide records the maintained preparation path for the segmented P/R1/R2 comparison. It defines recipes and audit commands; the [multiview comparison report](../reports/HONF_Multiview_Native_Routing_20261012.md) and [evidence index](../reports/HONF_Multiview_Native_Evidence_Index_20261012.md) record the measured campaign and its limits. The shared native-routing implementation and existing `TrainingEngine` remain the only model and optimizer paths.
+This guide records the maintained preparation path for the segmented P/R1/R2 comparison. It defines recipes and audit commands; the [multiview comparison report](../reports/_bk/20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md) and [evidence index](../reports/_bk/20261013_035603Z_HONF_Multiview_Native_Evidence_Index_20261012.md) record the measured campaign and its limits. The shared native-routing implementation and existing `TrainingEngine` remain the only model and optimizer paths.
 
 | Dataset | Fixed protocol | Seed | Primary queries and native objectives | Effective/microbatch cases | Output law |
 |---|---|---:|---|---:|---|

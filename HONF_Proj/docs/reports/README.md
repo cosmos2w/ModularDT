@@ -2,11 +2,26 @@
 
 See the [complete document chronology and archive audit](DOCUMENT_CHRONOLOGY.md) for all reviewed plans/reports, timestamp origins and unresolved historical evidence.
 
-The current development round is [unified training and adaptive source-preserving refinement](HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md). It uses one real Thermal/Wind trainer, matched fixed-subset Full/Adaptive arms, explicit coarse/fine physical-source paths and measured native costs. Its evidence and manual-only formal capability are separate from completed formal3901/3902 and the archived [preceding shared-core/receiver-packet round](_bk/20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md).
+The latest closed round is [20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md](_bk/20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md). Wind continuation reached its original e2500 horizon, while useful sparse-read omission failed the physical guards and no sparse scorer was fitted. The [20261013_155014Z_HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md](_bk/20261013_155014Z_HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md) retains the failed native-interface qualification and quarantine; these limits remain part of the evidence. All current research reports are archived in `_bk`; archive location means a closed record, not a passed scientific gate.
 
 Start with the [two-week milestone review, 22 September–6 October2026](_bk/20261006_141642Z_HONF_Two_Week_Milestone_Review_2026-10-06.md). It connects the mathematical changes, mature1401/1804 anchors, predictor tradeoffs, actual execution, and inverse-response evidence, with nineteen selected existing figures.
 
 The review covers **20 pre-existing current top-level reports**, plus the September mature comparison and relevant archived studies. The count excludes this index, the new milestone review, helper command/findings documents, and the older nested Wind2500 baseline report. Completed reports now reside in `_bk` with evidence-based date prefixes; the [document chronology](DOCUMENT_CHRONOLOGY.md) records original paths, status, timestamps and uncertainties. This index organizes the reading order; it does not promote a research model or authorize experiments.
+
+## Recent closed rounds — 7–13 October 2026
+
+| Stage | Report | Closure and remaining limits |
+| --- | --- | --- |
+| 7–9 October; header states updated 9 October America/New_York | [20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md](_bk/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md) | Opening status: both fresh formal fits reached e5000 with return code 0; prior bounded development is a separate archived record. |
+| 8–9 October; follow-up dates retained | [20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md](_bk/20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md) | Opening status says completed bounded development and fresh formal follow-up; resource closeout reports no active campaign processes. |
+| 9 October | [20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md](_bk/20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md) | Opening status and computational closeout: final learned children reached e2500; wrapper exit143 and failed branches remain disclosed. Scientific GPU closeout: 2026-10-09 19:58:46Z. |
+| 10–11 October | [20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md](_bk/20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md) | Opening and final decision: Recovery failed; full-TRAIN e1000 follow-up stopped normally, no active campaign sessions. |
+| 11 October | [20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md](_bk/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md) | Four decisions and closeout: scientific work stopped, GPU2 released; later provenance corrections are retained. |
+| 11–12 October | [20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md](_bk/20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md) | Opening and closeout: both children reached absolute e2500; all38 governed sessions finalized, workers stopped; later authorized cache cleanup retained. |
+| 12–13 October | [20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md](_bk/20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md) | Start: 2026-10-12 15:57:01Z. All67 ledger entries closed; common e2000 comparison, missing e2500 endpoints unmeasured; subsequent R0 quarantine retained. Cutoff is not an exact finish clock. |
+| 13 October | [20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md](_bk/20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md) | Start: 2026-10-13 11:58:51Z. Explicit scientific GPU finish: 2026-10-13 18:26:28Z. Wind continuation reached e2500; sparse scorer deliberately unfitted after failed omission frontiers. |
+
+The linked reports retain their figure embeds and companion evidence indexes. Proposal and completion clocks, publication bounds and the newly added development archive are listed separately in the [document chronology](DOCUMENT_CHRONOLOGY.md).
 
 ## Consecutive reading order
 

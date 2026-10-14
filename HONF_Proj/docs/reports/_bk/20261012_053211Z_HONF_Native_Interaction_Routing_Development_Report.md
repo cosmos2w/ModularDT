@@ -72,23 +72,23 @@ Selected-state exposed DEV22 means are reported below using the same two physica
 | P-R / e2400 | 0.0224067 | 0.00337572 | 0.0101608 | 0.0642457 | 0.576405 | 0.623307 | 0.630914 | 2.18182 | 0.673187 |
 | P-C / e2400 | 0.0230413 | 0.00334152 | 0.0100184 | 0.0658533 | 0.592107 | 0.659958 | 0.656774 | 2.3613 | 0.715202 |
 
-![Thermal development trajectories and native endpoint field errors](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family1_thermal.png)
+![Thermal development trajectories and native endpoint field errors](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family1_thermal.png)
 
 Figure 1a. Saved exposed DEV22 trajectories over the common 15 monitoring ages and all nine native field/proxy endpoint error summaries. Thermal R reduces mean fluid-T error by 5.50% against P but only 2.86% against C, with worse mean v and the reported M5/material/peak misses; it fails the frozen direction criterion.
 
-![Wind development trajectories and fifteen component plus five vector endpoint errors](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family1_wind.png)
+![Wind development trajectories and fifteen component plus five vector endpoint errors](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family1_wind.png)
 
 Figure 1b. Exposed DEV24 comprises eight layouts and three correlated directions per layout. All 15 component means and five vector tail summaries are retained; R's four priority-component geometric mean ratios are 0.946386 against P and 0.942879 against C. This supports a warm-start learning direction under the stated single-parent and historical-P provenance limits.
 
-![Thermal full native grid v and temperature fields and residuals](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_physical_endpoints2500_v2/native_physical_maps_e2500_v10_page01_thermal.png)
+![Thermal full native grid v and temperature fields and residuals](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_physical_endpoints2500_v2/native_physical_maps_e2500_v10_page01_thermal.png)
 
 Figure 2a. Exact e2500 P/R/C on fixed TRAIN0002/M3 and 0619/M12, full 64×128 native grids with captured fluid-valid/solid-exclusion masks, common raw-extrema physical scales and separate residual scales. Fluid-T RMSE P/R/C is 0.462323/0.435316/0.455950 on M3 and 0.710078/0.616160/0.668980 on M12. The displayed v/T priority maps are descriptive TRAIN evidence; all five fluid channels are retained and validated numerically. Source-pack scales are not relabelled SI units.
 
-![Wind six-turbine native 3D horizontal and transverse velocity maps and residuals](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_physical_endpoints2500_v2/native_physical_maps_e2500_v10_page02_wind_row456.png)
+![Wind six-turbine native 3D horizontal and transverse velocity maps and residuals](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_physical_endpoints2500_v2/native_physical_maps_e2500_v10_page02_wind_row456.png)
 
 Figure 2b. Exact e2500 fields on fixed TRAIN row456/M6, direction 270°: all Ux/Uy/Uz m/s values and residuals, a 27,470-point native horizontal plane at selected z=70.8699 m (requested hub 70 m), and an 8,576-point native transverse plane at x=575.6979 m. The transverse Ux RMSE is 0.072108/0.069769/0.072580 for P/R/C, while R's transverse Uy is worse (0.010932 versus P 0.010671; relative-L2 0.70158 versus 0.68483). The aggregate role gain does not imply every native plane/component improves.
 
-![Wind thirty-turbine native 3D horizontal and transverse velocity maps and residuals](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_physical_endpoints2500_v2/native_physical_maps_e2500_v10_page03_wind_row533.png)
+![Wind thirty-turbine native 3D horizontal and transverse velocity maps and residuals](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_physical_endpoints2500_v2/native_physical_maps_e2500_v10_page03_wind_row533.png)
 
 Figure 2c. Exact e2500 fields on fixed TRAIN row533/M30, direction 300°: an 88,060-point horizontal plane at the same selected native z and a 16,576-point transverse plane at x=1340.4991 m. Horizontal Ux/Uy/Uz RMSE is 0.234485/0.045926/0.010631 for R versus P 0.240116/0.047027/0.010729; transverse Uy worsens slightly to 0.011537 versus P 0.011469. Axes remain native x/y/z divided by rotor diameter, with no second rotation. Componentwise relative-L2 annotations use raw native reference norms; weak transverse components can have large relative errors despite small m/s RMSE. Map Q is separate from the Q1024/Q8192 timed-call scopes.
 
@@ -100,19 +100,19 @@ The fixed TRAIN complete-rebuild probes reset densities or deterministically rea
 
 For Wind row456/M6, all-route reset increases near/downstream vector RMSE by 13.39%/18.27%; reassignment increases it by 27.09%/30.42%. For row533/M30, reset gives +18.72%/+23.81% and reassignment +23.57%/+28.62%. Vector errors here are reconstructed as sqrt(sum(component RMSE²)) on the exact same role queries. The result demonstrates functional reliance on learned gathering. Together with the independently trained capacity control, it supports a conditional Wind learning benefit; it establishes neither physical causality nor a computation-reuse benefit. Geometry-only rebuilds change inputs without a bound perturbed physical reference and are software invalidation checks.
 
-![Thermal selected-state native MM ME EM gathers and final source reads](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8_page01_route_T4301_0002.png)
+![Thermal selected-state native MM ME EM gathers and final source reads](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8_page01_route_T4301_0002.png)
 
 Figure 3a. T4301/R e2400, fixed TRAIN0002/M3, shows four norm-ranked display edges per route/round and both native query-to-source read columns; the numerical archive retains all pairs. Every one of the three physical sources is read. The input-only geometry probe preserves fixed queries and IDs, and has no perturbed physical reference.
 
-![Wind selected-state native MM ME EM gathers and thirty final source reads](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8_page02_route_W2601_533.png)
+![Wind selected-state native MM ME EM gathers and thirty final source reads](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8_page02_route_W2601_533.png)
 
 Figure 3b. W2601/R e2500, fixed TRAIN533/M30, retains all 30 physical-source read rows at a volume and a downstream native 3D query. These are latent message norms before the physical head, not velocity or causal source coefficients; the context weights are destination conditioned and every authoritative value path is dense.
 
-![Thermal native physical RMSE changes from complete routing interventions](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8_page03_interventions_thermal.png)
+![Thermal native physical RMSE changes from complete routing interventions](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8_page03_interventions_thermal.png)
 
 Figure 3c. Selected T4301/R e2400 on fixed TRAIN0002/M3 and 0619/M12: exact field-unit RMSE changes from complete two-round density reset/reassignment, with exact restored-ordinary zero rows. All-route reset increases M12 fluid-T RMSE by 55.72% but reduces M3 q-proxy RMSE by 3.41%. Colors normalize separately by scene and field, so numerical cell values carry the quantitative comparison.
 
-![Wind component RMSE changes from complete routing interventions](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8_page04_interventions_wind.png)
+![Wind component RMSE changes from complete routing interventions](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8_page04_interventions_wind.png)
 
 Figure 3d. Selected W2601/R e2500 on fixed TRAIN456/M6 and 533/M30: the full five-role Ux/Uy/Uz m/s error changes preserve masks and queries. All-route reset increases near/downstream vector RMSE by 13.39%/18.27% on M6 and 18.72%/23.81% on M30. MM perturbations dominate this panel, while ME/EM changes are much smaller; this establishes model reliance, without a sparse-work or physical-causality interpretation.
 
@@ -146,7 +146,7 @@ Wind R misses the predeclared 20% complete Q8192 target (max ratio 1.22851); it 
 
 Context/checkpoint construction is measured separately: Thermal P/R/C takes 2.577/2.274/2.271 s, Wind 0.134/0.095/0.151 s with the existing target-free catalogue cache. These are observed staged construction costs, not a universal cold-disk claim. The per-trial allocated/reserved baselines and peaks include all resident matched models; allocated peak deltas describe incremental call workspace, not total VRAM. At Q8192 the maximum measured workspace is about 7.58/20.38 MiB for Thermal M3/M12 and 11.07/44.40 MiB for Wind M6/M30; reserved deltas are zero with cached allocator blocks and are not zero memory use.
 
-![Matched complete inference training and memory costs](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family4_complete_cost.png)
+![Matched complete inference training and memory costs](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family4_complete_cost.png)
 
 Figure 4. GPU2 complete-call timing, every native output and CPU return, full-original-objective AdamW update timing, and incremental allocated workspace from the exact common e2500 endpoints. Wind R Q8192 costs 22.25–22.85% more than P, and the training update costs 11.08% more; lower-Q overhead is larger. These are measured dense-model costs, without a sparse speedup or matched-function executor comparison.
 
@@ -176,10 +176,10 @@ The optional fresh pair and 99%-mass context-cut probe are not run. No larger ro
 
 | Family | PDF master | Embedded pages | Evidence |
 |---|---|---:|---|
-| 1. Learning and exposed DEV fidelity | [Learning/physical PDF](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family1_learning_physical.pdf) | 2 | Shared 15-age monitoring and same-age native physical/tail comparisons |
-| 2. Native fields and residuals | [Native-map PDF](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_physical_endpoints2500_v2/native_physical_maps_e2500_v10.pdf) | 3 | Two fixed TRAIN scenes per dataset, native masks and all Wind velocity components |
-| 3. Native gathering and interventions | [Route/intervention PDF](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8.pdf) | 4 | Selected-state actual gathers, source reads and complete two-round rebuilds |
-| 4. Complete cost and memory | [Complete-cost PDF](../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family4_complete_cost.pdf) | 1 | Interleaved complete calls, full-objective updates and resident-baseline workspace |
+| 1. Learning and exposed DEV fidelity | [Learning/physical PDF](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family1_learning_physical.pdf) | 2 | Shared 15-age monitoring and same-age native physical/tail comparisons |
+| 2. Native fields and residuals | [Native-map PDF](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_physical_endpoints2500_v2/native_physical_maps_e2500_v10.pdf) | 3 | Two fixed TRAIN scenes per dataset, native masks and all Wind velocity components |
+| 3. Native gathering and interventions | [Route/intervention PDF](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_routes_selected_v3/native_routes_selected15_v8.pdf) | 4 | Selected-state actual gathers, source reads and complete two-round rebuilds |
+| 4. Complete cost and memory | [Complete-cost PDF](../../../diagnostics/generated/native_routing_20261012/evaluation/results/figures_learning_cost_v3/family4_complete_cost.pdf) | 1 | Interleaved complete calls, full-objective updates and resident-baseline workspace |
 
 PDF is the retained master; the ten small PNG companions exist for direct Markdown embedding. All ten pages were visually inspected, and all generated figures and one-time renderers remain in ignored local paths. Numerical arrays and physical reference artifacts are retained separately.
 
@@ -193,4 +193,4 @@ Only 19 superseded local PDF/PNG exports (5,295,638 bytes) were removed after va
 
 ## Authorized storage cleanup after measurement
 
-After the measured round closed, the user authorized removal of its duplicated geometry caches. The [cleanup receipt](../../diagnostics/generated/native_routing_20261012/storage_audit/cleanup_execution_v1/cleanup_receipt.json) records deletion of exactly 2,410 round-local `.npy` cache payloads, reclaiming 30.770035 GiB, while retaining all 241 cache-entry manifests. Full payload hashes were verified against the existing shared cache before deletion; the shared cache and all retained campaign files passed the recorded preservation checks. No scientific-result NPZ, checkpoint, physical reference, metric, figure, source script or solver artifact was deleted, and no model, sampling or measured cost/fidelity result changed. The earlier export-cleanup statement describes the measurement closeout before this separately authorized cache removal. The repository now requires a disk budget, shared-cache reuse and verified cleanup before future rounds are marked complete.
+After the measured round closed, the user authorized removal of its duplicated geometry caches. The [cleanup receipt](../../../diagnostics/generated/native_routing_20261012/storage_audit/cleanup_execution_v1/cleanup_receipt.json) records deletion of exactly 2,410 round-local `.npy` cache payloads, reclaiming 30.770035 GiB, while retaining all 241 cache-entry manifests. Full payload hashes were verified against the existing shared cache before deletion; the shared cache and all retained campaign files passed the recorded preservation checks. No scientific-result NPZ, checkpoint, physical reference, metric, figure, source script or solver artifact was deleted, and no model, sampling or measured cost/fidelity result changed. The earlier export-cleanup statement describes the measurement closeout before this separately authorized cache removal. The repository now requires a disk budget, shared-cache reuse and verified cleanup before future rounds are marked complete.

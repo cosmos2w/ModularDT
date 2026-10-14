@@ -1,6 +1,6 @@
 # HONF next phase: Wind fidelity recovery and shared execution consolidation
 
-**Mode:** Codex Goal mode; bounded development. **Reviewed revision:** `agent/honf-core-next` at `f792dd6ed340dba6954af7ac58df5be8cbb8a729` (8 October 2026). **Primary source:** `HONF_Proj/docs/reports/HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md`, the updated completed-formal comparison, plus its archived development report. **Document status:** proposed work, not completed experiments. Repository paths below are relative to `HONF_Proj/`, except root `AGENTS.md`.
+**Mode:** Codex Goal mode; bounded development. **Reviewed revision:** `agent/honf-core-next` at `f792dd6ed340dba6954af7ac58df5be8cbb8a729` (8 October 2026). **Primary source:** `HONF_Proj/docs/reports/_bk/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md`, the updated completed-formal comparison, plus its archived development report. **Document status:** proposed work, not completed experiments. Repository paths below are relative to `HONF_Proj/`, except root `AGENTS.md`.
 
 ## 0. The decision: consolidate this family, do not reset HONF again
 
@@ -330,9 +330,9 @@ Commit durable code/tests/guides/report on the non-default working branch, audit
 
 ## 15. Sources and basis of this proposed plan
 
-**S1 — Primary measured results:** `docs/reports/HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md` atf792dd6, especially comparison identity, completed training, native field tables, complete cost, organizer interventions and saved-pool failure. The attached report was read in full. Its formal results replace earlier development headlines but do not erase them.
+**S1 — Primary measured results:** `docs/reports/_bk/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md` atf792dd6, especially comparison identity, completed training, native field tables, complete cost, organizer interventions and saved-pool failure. The attached report was read in full. Its formal results replace earlier development headlines but do not erase them.
 
-**S2 — Previous development evidence:** `docs/reports/_bk/20261008_113547Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Development_Report.md`. Important distinctions include the actual trained H64/message64/E8 family, successful shared engine, limited transverse learning, repaired packet/normalizer guards, and inherited versus newly fitted objective scales. Its correction that an earlier H32 pilot actually used the native512-record default must not be replaced by the earlier erroneousE8 description.
+**S2 — Previous development evidence:** `docs/reports/_bk/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Development_Report.md`. Important distinctions include the actual trained H64/message64/E8 family, successful shared engine, limited transverse learning, repaired packet/normalizer guards, and inherited versus newly fitted objective scales. Its correction that an earlier H32 pilot actually used the native512-record default must not be replaced by the earlier erroneousE8 description.
 
 **S3 — Reviewed implementation:** `src/honf_forward_core/interface_fields/interaction_core.py`; `interaction_refinement.py`; `src/honf_runtime/unified_training.py`; `Case_WindFarm/src/windfarm/shared_interaction.py`; `normalization.py`; `training/unified_task.py`; `training/unified_formal.py`; `tools/unified_interaction_train.py`; `tools/unified_interaction_formal.py`; and root `AGENTS.md`. Source findings inSection2 refer to the fetched functions atf792dd6. This planning review did not rerun training or establish a measured profiler attribution.
 

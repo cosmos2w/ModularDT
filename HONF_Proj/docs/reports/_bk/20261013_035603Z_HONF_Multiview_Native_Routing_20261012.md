@@ -22,7 +22,7 @@ No inverse design, search, new solver call or Wind displacement-response experim
 
 Three comparison boards answer different questions: Board A measures the fresh matched-development mechanism effect; Board B measures current physical distance to the retained mature systems on the same panel; Board C assesses whether a separately launched full-data research recipe is justified. The later evidence sections A/B/C address added value, executed information flow and saved physical response, respectively.
 
-The requested [plan](../../UpgradePlan/HONF_Multiview_Native_Routing_and_Fair_Comparison_Plan.md) started at 2026-10-12 15:57:01 UTC. The scientific cutoff was 2026-10-13 01:57:01 UTC and the delivery cutoff 03:57:01 UTC. The user explicitly retained those cutoffs and allowed shared GPU 2 when memory was sufficient, waiving contention-sensitive computational latency measurements. The 10 aggregate GPU-associated-hour, 52,500 primary-update, 1,000 pre-seal-pilot, 20,000 conditional-second-seed and 192 disposable-update caps were retained. No pre-seal scientific pilot or second-seed fit ran. The full definition was sealed before new DEV outcomes were opened.
+The requested [plan](../../../UpgradePlan/ThemalChannel/20261012_155506Z_HONF_Multiview_Native_Routing_and_Fair_Comparison_Plan.md) started at 2026-10-12 15:57:01 UTC. The scientific cutoff was 2026-10-13 01:57:01 UTC and the delivery cutoff 03:57:01 UTC. The user explicitly retained those cutoffs and allowed shared GPU 2 when memory was sufficient, waiving contention-sensitive computational latency measurements. The 10 aggregate GPU-associated-hour, 52,500 primary-update, 1,000 pre-seal-pilot, 20,000 conditional-second-seed and 192 disposable-update caps were retained. No pre-seal scientific pilot or second-seed fit ran. The full definition was sealed before new DEV outcomes were opened.
 
 | Identity | Fresh Thermal controls | Fresh Wind controls | Mature system references |
 |---|---|---|---|
@@ -41,7 +41,7 @@ Normalization and calibration use only the selected TRAIN inventory and the decl
 
 The original 2500 schedule remains bound: warmup 20 from 3e-5 to 3e-4, hold through 1000, then cosine to3e-6 at 2500; AdamW betas0.9/0.999, epsilon1e-8, clip 1, weight decay Thermal1e-4/Wind1e-5. Resumes preserve schedule and streams. Every saved 100 milestone, best-field and latest alias is retained. Selection at the bounded comparison uses the same 20 eligible saved ages for all six arms; all six select 2000. This is explicitly a bounded saved 20 result, not the requested completed saved 25 result. Graphs, interventions and replay use those exact selected states.
 
-**R0 correction notice (2026-10-13):** The Thermal1404/1804 physical-output comparisons in this report, including fluid fields and interface/material auxiliaries, are quarantined because the prior evaluator supplied raw heat-power and interface-condition inputs to checkpoints whose saved configs require input normalization. The public-reader input transform was matched on actual HDF5 cases at 12:26:53.364910777 UTC, before the R0 cutoff; checkpoint-native model-prediction parity was not completed within the 60-minute bound. The old numerical arrays remain unchanged and must not support classic-performance claims pending the corrected full-DEV22 replay described in the [R0 addendum](HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md).
+**R0 correction notice (2026-10-13):** The Thermal1404/1804 physical-output comparisons in this report, including fluid fields and interface/material auxiliaries, are quarantined because the prior evaluator supplied raw heat-power and interface-condition inputs to checkpoints whose saved configs require input normalization. The public-reader input transform was matched on actual HDF5 cases at 12:26:53.364910777 UTC, before the R0 cutoff; checkpoint-native model-prediction parity was not completed within the 60-minute bound. The old numerical arrays remain unchanged and must not support classic-performance claims pending the corrected full-DEV22 replay described in the [R0 addendum](20261013_155014Z_HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md).
 
 ## A — added value under matched development
 
@@ -77,7 +77,7 @@ Thermal R2/R1 fluid-T error is 1.04465, with only a 2.00% v improvement; neither
 | Near vector | 0.295884 | 0.288580 | 0.287420 |
 | Background vector | 0.039278 | 0.039121 | 0.039042 |
 
-Wind R1/P priority geomean is 0.953847 and R2/P0.953971; R2/R1 is 1.000130. All 20 component/vector means remain within 1.05 P and their row-p95 within 1.10 P at this bounded endpoint. R1 background Uy mean is slightly worse (ratio 1.003); several Ux/vector and downstream Uz tails are also slightly worse. These are modest one-seed effects on eight correlated-layout clusters. The prospective 2500 threshold is unassessed because four endpoints are missing, and the 4.6% signal is not relabelled as a completed5% gate. Full per-layout and per-role tables are linked in the [evidence index](HONF_Multiview_Native_Evidence_Index_20261012.md).
+Wind R1/P priority geomean is 0.953847 and R2/P0.953971; R2/R1 is 1.000130. All 20 component/vector means remain within 1.05 P and their row-p95 within 1.10 P at this bounded endpoint. R1 background Uy mean is slightly worse (ratio 1.003); several Ux/vector and downstream Uz tails are also slightly worse. These are modest one-seed effects on eight correlated-layout clusters. The prospective 2500 threshold is unassessed because four endpoints are missing, and the 4.6% signal is not relabelled as a completed5% gate. Full per-layout and per-role tables are linked in the [evidence index](20261013_035603Z_HONF_Multiview_Native_Evidence_Index_20261012.md).
 
 Fixed-weight fitting probes use TRAIN4 and DEV4 selected from inputs, with exactly matched native queries/supports. Thermal P/R1/R2 TRAIN4 T errors evolve0.747125/0.718808/0.739208 at 1000 to0.622076/0.552825/0.586737 at 2000; DEV4 evolves0.665258/0.684033/0.670237 to0.540886/0.566763/0.608802. Wind TRAIN4 all-role vector errors evolve0.268910/0.256981/0.270726 to0.177062/0.176001/0.175776m/s; DEV4 evolves0.282735/0.268146/0.268453 to0.191601/0.187539/0.188479m/s. Several misses are already apparent on the fitting panel. These four-example probes do not estimate the entire TRAIN population or replace the full DEV summaries.
 
@@ -191,81 +191,81 @@ The protected historical inventory is886 present bindings plus 67 pre-existing a
 
 ## Figures and evidence
 
-The six figure families and their inspected PDFs, embedded raster companions, complete per-case/stratum errors, interventions, response supports, inference/update memory/work, run identities, storage cleanup and protection receipts are indexed in the [companion evidence index](HONF_Multiview_Native_Evidence_Index_20261012.md). Figure captions distinguish current native-grid evidence from monitor curves, descriptive organization from physical response, and matched controls from differently trained mature systems.
+The six figure families and their inspected PDFs, embedded raster companions, complete per-case/stratum errors, interventions, response supports, inference/update memory/work, run identities, storage cleanup and protection receipts are indexed in the [companion evidence index](20261013_035603Z_HONF_Multiview_Native_Evidence_Index_20261012.md). Figure captions distinguish current native-grid evidence from monitor curves, descriptive organization from physical response, and matched controls from differently trained mature systems.
 
-![Fresh segmented learning curves with measured epoch, updates and time](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family1_learning_and_endpoint_boards.png)
+![Fresh segmented learning curves with measured epoch, updates and time](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family1_learning_and_endpoint_boards.png)
 
 Figure 1. Fresh Thermal150/DEV22 and Wind72-row/DEV24 monitoring curves retain actual saved ages; all six controlled native/selected comparisons use2000, while actual Thermal P/R1 fits reach2500 and R2 reaches2100. Thermal Q1024 monitors and full masked-grid mature markers have different receiver supports; Wind monitors use Q8192 TOTAL. Mature checkpoints are contextual systems, not equal-age controls.
 
-![Thermal DEV0277 M3 native temperature and signed residuals](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0277_temperature_native_and_residual.png)
+![Thermal DEV0277 M3 native temperature and signed residuals](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0277_temperature_native_and_residual.png)
 
 Figure 2a. Thermal exposed DEV0277/M3, native64×128 grid and common external stencil-valid fluid mask: P/R1/R2 selected2000 T RMSE0.340674/0.309173/0.343456 in packed native temperature units. The two mature columns are1404/1804 literal5000 with own normalizers. Physical fields share an unclipped scale and signed residuals share a symmetric scale; every metric uses the same unclipped valid cells.
 
-![Thermal DEV0291 M5 temperature challenge and residuals](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0291_temperature_native_and_residual.png)
+![Thermal DEV0291 M5 temperature challenge and residuals](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0291_temperature_native_and_residual.png)
 
 Figure 2b. Thermal exposed DEV0291/M5, the same native grid/common mask and selected2000 states: T RMSE0.629479/0.792154/0.746338 for P/R1/R2. This input-selected challenge visibly retains the routed local miss; the full DEV22 aggregate is not substituted for this case. Units, references and unclipped scale/denominator conventions match Figure2a.
 
-![Thermal M5 transverse v fields and signed residuals](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0291_v_native_and_residual.png)
+![Thermal M5 transverse v fields and signed residuals](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0291_v_native_and_residual.png)
 
 Figure 2c. Thermal exposed DEV0291/M5, selected2000 P/R1/R2 v RMSE0.003196/0.003317/0.003133 in native velocity units, with mature1404/1804 e5000 references. These are native cells on the common stencil/fluid mask, without smoothing; zero-centered physical/residual scales are shared and metrics remain unclipped.
 
-![Thermal DEV0294 M7 native temperature and residuals](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0294_temperature_native_and_residual.png)
+![Thermal DEV0294 M7 native temperature and residuals](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0294_temperature_native_and_residual.png)
 
 Figure 2d. Thermal exposed DEV0294/M7, selected2000 P/R1/R2 T RMSE0.623129/0.528152/0.761397, native temperature units. R1 improves this case while R2 worsens it. The same64×128 external mask, saved low-fidelity native reference, mature e5000 context, shared display scales and unclipped metric denominator apply.
 
-![Thermal DEV0687 M10 native temperature and residuals](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0687_temperature_native_and_residual.png)
+![Thermal DEV0687 M10 native temperature and residuals](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0687_temperature_native_and_residual.png)
 
 Figure 2e. Thermal exposed DEV0687/M10, selected2000 P/R1/R2 T RMSE0.570262/0.637573/0.584017 in native temperature units. Native cell topology and the common stencil-valid mask are retained; no interpolation or display clipping enters the metrics. Mature1404/1804 remain separately labelled e5000 systems.
 
-![Thermal M5 native material peak and interface misses](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0291_local_auxiliary_misses.png)
+![Thermal M5 native material peak and interface misses](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_thermal_0291_local_auxiliary_misses.png)
 
 Figure 2f. Thermal exposed DEV0291/M5, selected2000 controls on identical saved material/interface supports. Surface/q panels use exact stride-four receiver indices and stored row order; absent padded slots are masked, and no unsupported row-to-module coordinate projection is inferred. q_normal is a native heat-flux proxy. The full M5 stratum peak RMSE is0.674542/0.768820/0.818754 for P/R1/R2; raw per-case metrics and unclipped values remain in the PDF/index.
 
-![Wind low-M hub plane streamwise wake context](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_wind_row69_hub_height_nearest_native_z_Ux.png)
+![Wind low-M hub plane streamwise wake context](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_wind_row69_hub_height_nearest_native_z_Ux.png)
 
 Figure 3a. Wind exposed DEV row69/M8 at270°, exact native hub z70.869949m, source-native cells and common receivers, velocities in m/s. Fresh selected2000 P/R1/R2, native E512 classic2102 e2440/2103 e2475 and migrated E8 P2202 e5000 retain own normalizers. No interpolation or double rotation is applied; Ux supplies the streamwise context for the transverse panels, and metric annotations use unclipped saved arrays.
 
-![Wind low-M hub plane Uy and Uz](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_wind_row69_hub_height_nearest_native_z_Uy_Uz.png)
+![Wind low-M hub plane Uy and Uz](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_wind_row69_hub_height_nearest_native_z_Uy_Uz.png)
 
 Figure 3b. The same DEV row69/M8 hub plane and systems, showing Uy/Uz in m/s on one shared zero-centered unclipped scale. Full DEV24 near Uy mean RMSE is0.058400/0.055447/0.055680 for the fresh controls; these panel annotations are the distinct native-plane errors. Weak-component reference amplitudes and the larger mature-system gap remain visible; no receiver-dependent metric mask is used.
 
-![Wind high-M hub plane transverse wakes](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_wind_row426_hub_height_nearest_native_z_Uy_Uz.png)
+![Wind high-M hub plane transverse wakes](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_wind_row426_hub_height_nearest_native_z_Uy_Uz.png)
 
 Figure 3c. Wind exposed DEV row426/M30 at270°, the same native hub z and units. Hub-plane Uy RMSE is about0.0535/0.0512/0.0514m/s for fresh P/R1/R2 versus0.00747/0.00793m/s for2102/2103. Uz is markedly weaker in amplitude; its axis and scale remain visible. All systems retain the same native mask, unclipped error denominator and own context/normalizer.
 
-![Wind high-M native transverse cut Uy and Uz](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_wind_row426_transverse_at_median_active_turbine_x_nearest_native_Uy_Uz.png)
+![Wind high-M native transverse cut Uy and Uz](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_wind_row426_transverse_at_median_active_turbine_x_nearest_native_Uy_Uz.png)
 
 Figure 3d. Wind DEV row426/M30 at270°, actual native transverse x−19.546692m (nearest to the input-selected requested position), showing y/z in meters and Uy/Uz in m/s. Q is the exact number of native cut cells recorded in plane-v10, not the8192 role panel. Shared zero-centered scales include all predictions/reference without clipping; saved native residual pages retain every method.
 
-![Executed Wind typed donor gathering into native destinations](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family4_wind_round2_directed_gathers.png)
+![Executed Wind typed donor gathering into native destinations](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family4_wind_round2_directed_gathers.png)
 
 Figure 4a. Wind selected R1/R2 e2000 on fixed DEV426/M30: round2 MM/ME/EM arrows show all eligible native donors at the same input-selected destination, actual weights and both R2 views. No top-K or error-selected edge cut is applied. Coordinates are captured adapter-native axes0/1 without inferred physical units or rotation. The full trace includes both rounds, source IDs, raw/normalized measures, absence/self masks and downstream ancestry.
 
-![Actual Thermal weights and weighted message content by view](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family4_thermal_same_destination_weights_content.png)
+![Actual Thermal weights and weighted message content by view](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family4_thermal_same_destination_weights_content.png)
 
 Figure 4b. Thermal DEV0291/M5 selected2000, same native destination: R1 full-width and both R2 feature-block weights/content are actual saved reductions. Six round/type networks each evaluate one128-wide pair value per context; R2 acts on64+64 coordinates. Content norms describe learned features, not physical energy or causal strength.
 
-![Actual direct final source-query reads in every Wind role](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family4_wind_actual_source_read_by_role.png)
+![Actual direct final source-query reads in every Wind role](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family4_wind_actual_source_read_by_role.png)
 
 Figure 4c. Wind selected R1/R2 e2000, DEV426/M30,640 captured native receivers across all five roles and30 actual sources. Raw pre-mask/pre-measure128-coordinate reader messages and source IDs are shown separately from context arrows. Every final source read remains executed; concentrated context weights are not executor savings.
 
-![Full-rebuild Wind near-region physical intervention effects](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family4_wind_near_turbine_intervention_component_rmse_deltas.png)
+![Full-rebuild Wind near-region physical intervention effects](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family4_wind_near_turbine_intervention_component_rmse_deltas.png)
 
 Figure 4d. Five full-rebuild R2 interventions on fixed TRAIN4+DEV4 scenes, selected2000 weights, near-region Ux/Uy/Uz RMSE changes in m/s. Reset/reassignment dependence is distinct from the fresh R2/R1 learning comparison; the latter shows no added priority gain. All16 scenes restore outputs/traces exactly, with30,552 per-key checks; no change in this plot establishes physical causality.
 
-![Measured dense executed pair work for Thermal and Wind](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family5_executed_value_route_work.png)
+![Measured dense executed pair work for Thermal and Wind](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family5_executed_value_route_work.png)
 
 Figure 5a. Actual TRAIN low/high-M forward-hook work at Q1024/Q8192: Thermal padded12/E192 executes9504 rows per call; Wind E8 executes264 atM6 and2760 atM30. P/R1/R2 counts agree. Domain panels prevent cross-dataset case joins; mature value-hook work is unavailable rather than zero. Final reads, valid/padded/self rows and measured memory remain separately priced.
 
-![Complete-objective macro work and memory scopes](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family5_macro0_work_memory.png)
+![Complete-objective macro work and memory scopes](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/family5_macro0_work_memory.png)
 
 Figure 5b. Six cloned common2000 macro0 updates use the complete maintained objectives and matched streams/denominators: Thermal48 cases and Wind24, micro8, seven/three contexts per typed round/route. Peak allocated/reserved memory covers input preparation through the optimizer boundary. No checkpoint is written; measured allocator/process scopes are separate from parameter bytes, cumulative fit peaks and unassessed comparative latency.
 
-![Saved negative heat-transfer native delta-temperature and residuals](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_response_0291_transfer_minus_native_delta_temperature_grid.png)
+![Saved negative heat-transfer native delta-temperature and residuals](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_response_0291_transfer_minus_native_delta_temperature_grid.png)
 
 Figure 6a. Already-exposed Thermal audit0291 minus transfer, selected2000 P/R1/R2, exact FP64 prepared/saved ΔT arrays on the bound64×128 receiver order and7837 common valid cells. Response RMSE is about0.02206/0.02200/0.02278 native temperature units. Index axes infer no missing coordinates; filled native cells use shared unclipped ΔT/residual scales and no interpolation. The saved analytic-wake/shared-grid reference has no CFD or SI certification.
 
-![Saved signed mean and nonlinear peak response summary](../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_response_0291_signed_endpoint_summary.png)
+![Saved signed mean and nonlinear peak response summary](../../../diagnostics/generated/multiview_20261012/evaluation/multiview_common_e2000_actual_completion_figures_v25/preview_response_0291_signed_endpoint_summary.png)
 
 Figure 6b. Six method/sign evaluations on audit0291, with both signed transfers and selected2000 states. The response strip records exact heat-null flow6/6,0277 unavailable, zero inverse search and the low-fidelity source limit. Peak bars show the maximum of per-module endpoint peak changes; module2 and measured signed means are compared numerically above. Individual K columns and geometry response remain unvalidated.
 
@@ -275,4 +275,4 @@ All67 owned GPU ledger entries are closed:20,337.598621 associated seconds (5.64
 
 Final cleanup removed742 regular files,7 disposable-fixture symlinks and76 directories:379,956,404 logical bytes (382,267,392 allocated inventory bytes). The earlier large qualification cleanup separately removed77 files/419,499,162 logical bytes, with smaller cleanup receipts retained individually. Selected19 PNG companions and six PDF masters, all scientific checkpoints/numerical arrays, source/scripts, historical failures and provenance remain. Actual remaining capacity is110,763,442,176bytes on/data (about103.1GiB) and42,771,361,792bytes on/home and/ (about39.8GiB). The final removal receipt identifies every expired payload; no source data, code or scientific checkpoint was deleted.
 
-The [final cleanup receipt](../../diagnostics/generated/multiview_20261012/cleanup/root_final_multiview_cleanup_receipt_v1.json), [final preservation receipt](../../diagnostics/generated/multiview_20261012/receipts/protection_final_multiview_round_v4.json), [source/plan seal check](../../diagnostics/generated/multiview_20261012/receipts/root_final_training_source_and_plan_seal_check_v1.json) and [browser QA](../../diagnostics/generated/multiview_20261012/receipts/root_browser_final_report_qa_v1.json) retain the closeout evidence. Browser QA loaded19/19 figures at1280/390px with no overflow, broken images or console errors/warnings; final cleanup prose was added afterward and static link/continuous-paragraph checks were repeated. Figures and one-time renderers remain ignored locally.
+The [final cleanup receipt](../../../diagnostics/generated/multiview_20261012/cleanup/root_final_multiview_cleanup_receipt_v1.json), [final preservation receipt](../../../diagnostics/generated/multiview_20261012/receipts/protection_final_multiview_round_v4.json), [source/plan seal check](../../../diagnostics/generated/multiview_20261012/receipts/root_final_training_source_and_plan_seal_check_v1.json) and [browser QA](../../../diagnostics/generated/multiview_20261012/receipts/root_browser_final_report_qa_v1.json) retain the closeout evidence. Browser QA loaded19/19 figures at1280/390px with no overflow, broken images or console errors/warnings; final cleanup prose was added afterward and static link/continuous-paragraph checks were repeated. Figures and one-time renderers remain ignored locally.

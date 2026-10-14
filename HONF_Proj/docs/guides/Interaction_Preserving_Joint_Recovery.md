@@ -1,6 +1,6 @@
 # Interaction-preserving joint recovery: technical protocol
 
-This protocol describes the opt-in P-family comparison. Its [evidence report](../reports/HONF_Interaction_Preserving_Recovery_20261010.md) records completed measurements and decisions; constructibility, inference parity, fitted field recovery, and organizer value are separate claims. The older [J-family protocol](Joint_Regional_Field_Development.md) and completed checkpoints retain their original identities.
+This protocol describes the opt-in P-family comparison. Its [evidence report](../reports/_bk/20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md) records completed measurements and decisions; constructibility, inference parity, fitted field recovery, and organizer value are separate claims. The older [J-family protocol](Joint_Regional_Field_Development.md) and completed checkpoints retain their original identities.
 
 ## Executed model
 
