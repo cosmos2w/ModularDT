@@ -351,6 +351,83 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             "trajectory_note": trajectory_note}
 
 
+def _content_pooling_source_amendment(
+    saved: Mapping[str, Any], current: Mapping[str, Any], declaration: Mapping[str, Any],
+    *, source_sha256: str, source_epoch: int, stop_after: int,
+) -> dict[str, Any]:
+    """Audit the one explicit Oct13 pooling arithmetic repair; seal all science.
+
+    Ordinary resumes retain exact identity checks. This opt-in permits only
+    audited imported-source hashes, with unchanged parameters, optimizer,
+    sampling, data, physical law and schedule checked by the usual fit path.
+    """
+    message = "Invalid content-hypergraph numerical pooling continuation."
+    recipe = saved.get("recipe", {})
+    if (not isinstance(declaration, Mapping)
+            or declaration.get("schema") != "content_hypergraph_pooling_numerical_repair_v1"
+            or saved.get("workflow") != "content_hypergraph_joint_v1"
+            or saved.get("model_family") != "honf_content_hypergraph"
+            or recipe.get("dataset") != "wind" or recipe.get("architecture") != "A-H6"
+            or recipe.get("protocol") != "full_train1000"
+            or recipe.get("approved_stop_after") != 1000
+            or declaration.get("approved_stop_after") != 1000
+            or type(source_epoch) is not int or source_epoch < 100 or source_epoch >= 1000
+            or source_epoch % 100 != 0 or declaration.get("source_epoch") != source_epoch
+            or type(stop_after) is not int or not source_epoch < stop_after <= 1000
+            or declaration.get("source_checkpoint_sha256") != source_sha256):
+        raise ValueError(message)
+    previous, proposed = saved.get("loaded_source"), current.get("loaded_source")
+    if not isinstance(previous, Mapping) or not isinstance(proposed, Mapping):
+        raise TypeError(message)
+    if (declaration.get("saved_loaded_source_sha256") != previous.get("sha256")
+            or declaration.get("current_loaded_source_sha256") != proposed.get("sha256")):
+        raise ValueError(message)
+    old_files, new_files = previous.get("files"), proposed.get("files")
+    if not isinstance(old_files, Mapping) or not isinstance(new_files, Mapping):
+        raise TypeError(message)
+    if set(old_files) != set(new_files):
+        raise ValueError(message)
+    for binding in (previous, proposed):
+        digest = hashlib.sha256(json.dumps(dict(binding["files"]), sort_keys=True,
+                                           separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        if digest != binding.get("sha256"):
+            raise ValueError(message)
+    allowed = {
+        "src/honf_forward_core/content_hypergraph/organization.py",
+        "src/honf_runtime/unified_training.py",
+        "tools/content_hypergraph_train.py",
+        "Case_WindFarm/src/windfarm/training/content_hypergraph_task.py",
+    }
+    changes = [{"path": path, "old_sha256": old_files[path], "new_sha256": new_files[path]}
+               for path in sorted(old_files) if old_files[path] != new_files[path]]
+    if (not changes or any(row["path"] not in allowed for row in changes)
+            or "src/honf_forward_core/content_hypergraph/organization.py"
+            not in {row["path"] for row in changes}
+            or declaration.get("changes") != changes):
+        raise ValueError(message)
+    amended = copy.deepcopy(dict(saved))
+    amended["loaded_source"] = copy.deepcopy(dict(proposed))
+    if amended != current:
+        raise ValueError(message)
+    evidence_path = Path(str(declaration.get("evidence_path", "")))
+    if not evidence_path.is_absolute() or not evidence_path.is_file():
+        raise ValueError(message)
+    evidence_bytes = evidence_path.read_bytes()
+    if hashlib.sha256(evidence_bytes).hexdigest() != declaration.get("evidence_sha256"):
+        raise ValueError(message)
+    evidence = json.loads(evidence_bytes)
+    checks = ("fp64_reference_pass", "extreme_finite_backward_pass", "checkpoint_forward_pass",
+              "native_backward_probe_pass", "old_finite_forward_nonfinite_backward_reproduced")
+    if (evidence.get("schema") != "content_hypergraph_stable_pooling_correctness_v1"
+            or any(evidence.get(key) is not True for key in checks)
+            or type(evidence.get("optimizer_updates")) is not int
+            or evidence["optimizer_updates"] != 0):
+        raise ValueError(message)
+    return {"kind": "explicit_content_pooling_numerical_repair", "declaration": dict(declaration),
+            "scientific_identity_unchanged": True,
+            "trajectory_note": "Stable evaluation of the same typed normalized-sum equations changes FP32 arithmetic; failed and repeated work remain separately charged. No sample, weight, moment, physical-law or schedule reset."}
+
+
 def _sampling_dataset_id(provider_identity: Mapping[str, Any]) -> str:
     """Build a small stable key from dataset and sealed TRAIN membership."""
 
@@ -2644,6 +2721,7 @@ class TrainingEngine:
         joint_core_revision: Mapping[str, Any] | None = None,
         diagnostic_age_branch: Mapping[str, Any] | None = None,
         architecture_child_initialization: Mapping[str, Any] | None = None,
+        numerical_pooling_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
@@ -2705,6 +2783,13 @@ class TrainingEngine:
             raise ValueError("A run cannot be both an exact resume and a new branch.")
         if allow_microbatch_change and resume_checkpoint is None:
             raise ValueError("A microbatch amendment requires an existing run's latest checkpoint.")
+        if numerical_pooling_amendment is not None and (
+                resume_checkpoint is None or branch_from_checkpoint is not None
+                or optimizer_seed is not None or allow_microbatch_change
+                or mathematical_route_branch is not None or joint_core_revision is not None
+                or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                or fresh_initialization is not None or arm != "A-H6"):
+            raise ValueError("A numerical pooling repair requires only the same run's exact latest-state continuation.")
         if architecture_child_initialization is not None and (
                 branch_from_checkpoint is None or resume_checkpoint is not None
                 or optimizer_seed is not None or allow_microbatch_change
@@ -2799,6 +2884,15 @@ class TrainingEngine:
             elif mathematical_route_branch is not None:
                 amendment = _branch_mathematical_route_amendment(
                     source_payload.get("experiment_identity", {}), sealed_identity, mathematical_route_branch)
+            elif numerical_pooling_amendment is not None:
+                if any(row.get("kind") == "explicit_content_pooling_numerical_repair"
+                       for row in source_payload.get("resume_amendments", [])):
+                    raise ValueError("This lineage already used its numerical pooling source amendment.")
+                amendment = _content_pooling_source_amendment(
+                    source_payload.get("experiment_identity", {}), sealed_identity,
+                    numerical_pooling_amendment,
+                    source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    source_epoch=int(source_payload["epoch"]), stop_after=stop_after)
             else:
                 amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
                     allow_microbatch_change=allow_microbatch_change)
@@ -2873,6 +2967,7 @@ class TrainingEngine:
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
             amendment_name = ('architecture_child_initialization' if architecture_child_initialization is not None else
+                              'numerical_pooling_amendment' if numerical_pooling_amendment is not None else
                               'diagnostic_age_branch' if diagnostic_age_branch is not None else
                               'joint_core_revision' if joint_core_revision is not None else
                               'mathematical_route_amendment' if mathematical_route_branch is not None

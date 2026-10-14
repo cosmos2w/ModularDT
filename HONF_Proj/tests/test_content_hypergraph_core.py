@@ -14,6 +14,7 @@ from honf_forward_core.content_hypergraph import (
     explicit_attention,
 )
 from honf_forward_core.content_hypergraph.decoding import pack_local_pairs
+from honf_forward_core.content_hypergraph.organization import _measure_weighted_pooling
 
 
 def _scene() -> SceneBatch:
@@ -66,6 +67,112 @@ def _core(architecture: str = "A-H6", **overrides) -> ContentHypergraphCore:
     core = ContentHypergraphCore(**kwargs)
     core.eval()
     return core
+
+
+@pytest.mark.parametrize("edge_score", [-55.0, -100.0])
+@pytest.mark.parametrize("measure_scale", [1.0, 1.0e-25])
+def test_measure_weighted_pooling_is_stable_for_tiny_mass_and_matches_fp64(edge_score, measure_scale):
+    scores = torch.tensor(
+        [[[0.0, 0.0, edge_score], [0.0, 0.0, edge_score], [0.0, 0.0, edge_score]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    measure = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32) * measure_scale
+    mask = torch.ones((1, 3), dtype=torch.bool)
+    reference = torch.tensor([measure_scale], dtype=torch.float32)
+
+    incidence, pooling, edge_mass, log_mass, available = _measure_weighted_pooling(
+        scores, measure, mask, reference
+    )
+    values = torch.tensor([[-0.7, 0.2, 1.1]], dtype=torch.float32)
+    loss = (pooling[:, 2] * values).sum() + log_mass[:, 2].sum()
+    gradient = torch.autograd.grad(loss, scores)[0]
+
+    score64 = scores.detach().to(torch.float64).requires_grad_(True)
+    measure64 = measure.to(torch.float64)
+    incidence64 = torch.softmax(score64, dim=-1)
+    weighted64 = incidence64 * measure64[:, :, None]
+    expected_pooling64 = (weighted64 / weighted64.sum(dim=1, keepdim=True)).transpose(1, 2)
+    expected_log_mass64 = torch.log1p(weighted64.sum(dim=1) / reference.to(torch.float64)[:, None])
+    expected_loss64 = (expected_pooling64[:, 2] * values.to(torch.float64)).sum() + expected_log_mass64[:, 2].sum()
+    expected_gradient64 = torch.autograd.grad(expected_loss64, score64)[0]
+
+    assert torch.isfinite(pooling).all()
+    assert torch.isfinite(log_mass).all()
+    assert torch.isfinite(gradient).all()
+    torch.testing.assert_close(pooling.double(), expected_pooling64, rtol=1e-5, atol=1e-7)
+    torch.testing.assert_close(log_mass.double(), expected_log_mass64, rtol=1e-5, atol=1e-7)
+    torch.testing.assert_close(gradient.double(), expected_gradient64, rtol=2e-5, atol=2e-7)
+    torch.testing.assert_close(pooling[0, 2], torch.tensor([1.0, 2.0, 3.0]) / 6.0)
+    if measure_scale == 1.0:
+        assert (edge_mass[:, 2] > 0).all()
+    else:
+        assert torch.equal(edge_mass[:, 2], torch.zeros_like(edge_mass[:, 2]))
+    assert available[:, 2].all()
+    assert (incidence[:, :, 2] > 0).all()
+
+
+def test_measure_weighted_pooling_empty_type_has_exact_zero_summary_and_finite_gradients():
+    scores = torch.randn((2, 3, 4), dtype=torch.float32, requires_grad=True)
+    measure = torch.zeros((2, 3), dtype=torch.float32)
+    mask = torch.tensor([[False, False, False], [True, True, True]])
+    reference = torch.ones((2,), dtype=torch.float32)
+
+    incidence, pooling, edge_mass, log_mass, available = _measure_weighted_pooling(
+        scores, measure, mask, reference
+    )
+    loss = pooling.sum() + edge_mass.sum() + log_mass.sum()
+    gradient = torch.autograd.grad(loss, scores)[0]
+
+    assert torch.equal(incidence[0], torch.zeros_like(incidence[0]))
+    torch.testing.assert_close(incidence[1].sum(dim=-1), torch.ones_like(incidence[1, :, 0]))
+    assert torch.equal(pooling, torch.zeros_like(pooling))
+    assert torch.equal(edge_mass, torch.zeros_like(edge_mass))
+    assert torch.equal(log_mass, torch.zeros_like(log_mass))
+    assert not available.any()
+    assert torch.isfinite(gradient).all()
+    assert torch.equal(gradient, torch.zeros_like(gradient))
+
+
+def test_measure_weighted_pooling_preserves_normal_mass_forward_rounding():
+    torch.manual_seed(812)
+    scores = torch.randn(2, 17, 6, requires_grad=True)
+    measure = torch.rand(2, 17) + 0.2
+    mask = torch.rand(2, 17) > 0.2
+    reference = torch.tensor([0.7, 1.3])
+    incidence, pooling, mass, feature, _ = _measure_weighted_pooling(scores, measure, mask, reference)
+    weighted = incidence.transpose(1, 2) * torch.where(mask, measure, 0)[:, None, :]
+    expected_pooling = weighted / weighted.sum(-1)[:, :, None]
+    expected_feature = torch.log1p(mass / reference[:, None])
+    assert torch.equal(pooling, expected_pooling)
+    assert torch.equal(feature, expected_feature)
+    gradient = torch.autograd.grad((pooling.square()).sum() + feature.sum(), scores, create_graph=True)[0]
+    second = torch.autograd.grad(gradient.square().sum(), scores)[0]
+    assert torch.isfinite(gradient).all()
+    assert torch.isfinite(second).all()
+
+
+def test_measure_weighted_pooling_jvp_matches_analytic_fp64_sum():
+    torch.manual_seed(813)
+    scores = torch.randn(1, 5, 3)
+    direction = torch.randn_like(scores)
+    measure = torch.tensor([[0.2, 0.7, 1.1, 0.4, 1.3]])
+    mask = torch.ones((1, 5), dtype=torch.bool)
+    reference = torch.tensor([0.8])
+
+    def actual(value):
+        _, pooling, _, feature, _ = _measure_weighted_pooling(value, measure, mask, reference)
+        return pooling, feature
+
+    def expected(value):
+        weighted = torch.softmax(value, -1).transpose(1, 2) * measure.double()[:, None, :]
+        mass = weighted.sum(-1)
+        return weighted / mass[:, :, None], torch.log1p(mass / reference.double()[:, None])
+
+    _, tangent = torch.func.jvp(actual, (scores,), (direction,))
+    _, reference_tangent = torch.func.jvp(expected, (scores.double(),), (direction.double(),))
+    for observed, wanted in zip(tangent, reference_tangent, strict=True):
+        torch.testing.assert_close(observed.double(), wanted, atol=1e-5, rtol=1e-4)
 
 
 def test_explicit_attention_matches_sdpa_and_zeros_empty_rows():

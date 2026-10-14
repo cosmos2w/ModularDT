@@ -33,6 +33,76 @@ def _reference_anchor_seeds(count: int, coordinate_dim: int) -> Tensor:
     return torch.tensor(rows, dtype=torch.float32).clamp(0.075, 0.925)
 
 
+def _measure_weighted_pooling(
+    scores: Tensor,
+    measure: Tensor,
+    mask: Tensor,
+    measure_reference: Tensor,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Return incidence, normalized pooling, raw mass, log-mass feature and availability.
+
+    ``scores`` has shape ``[B,N,H]``. The normalized pooling is evaluated in
+    log space so a small positive edge mass does not create a reciprocal of
+    that mass in the backward pass. The appended dummy donor is active only
+    for a genuinely empty typed set; it makes the empty softmax finite while
+    leaving every real donor weight exactly zero.
+    """
+    batch, nodes, edges = scores.shape
+    dtype = scores.dtype
+    measure = measure.to(dtype=dtype)
+    valid = mask & (measure > 0)
+    # Keep the learned projections/contents in their declared dtype. Evaluate
+    # the small normalized sums in FP64 for FP32 inputs: subtracting a large
+    # log assignment must not discard relative donor scores before softmax.
+    accumulation_dtype = torch.float64 if dtype == torch.float32 else dtype
+    safe_measure = torch.where(valid, measure, torch.ones_like(measure)).to(accumulation_dtype)
+    log_incidence = F.log_softmax(scores.to(accumulation_dtype), dim=-1)
+    log_weight_mass = log_incidence + torch.log(safe_measure)[:, :, None]
+    log_weight_mass = log_weight_mass.masked_fill(~valid[:, :, None], -torch.inf).transpose(1, 2)
+
+    has_donor = valid.any(dim=-1)
+    dummy_log_weight = torch.where(
+        has_donor[:, None, None],
+        torch.full((batch, edges, 1), -torch.inf, dtype=accumulation_dtype, device=scores.device),
+        torch.zeros((batch, edges, 1), dtype=accumulation_dtype, device=scores.device),
+    )
+    safe_log_weight_mass = torch.cat((log_weight_mass, dummy_log_weight), dim=-1)
+    pooling = torch.softmax(safe_log_weight_mass, dim=-1)[..., :nodes]
+    log_edge_mass = torch.logsumexp(safe_log_weight_mass, dim=-1)
+
+    # softplus(log(D) - log(reference)) is log1p(D / reference), without
+    # materializing a tiny D/reference ratio or adding an artificial mass.
+    reference = measure_reference.to(device=scores.device, dtype=accumulation_dtype).reshape(batch, 1)
+    reference = reference.clamp_min(torch.finfo(dtype).tiny)
+    log_mass_feature = F.softplus(log_edge_mass - torch.log(reference))
+    log_mass_feature = torch.where(has_donor[:, None], log_mass_feature, torch.zeros_like(log_mass_feature))
+
+    incidence = torch.softmax(scores, dim=-1) * mask[:, :, None].to(dtype)
+    physical_measure = torch.where(valid, measure, torch.zeros_like(measure))
+    weight_mass = incidence.transpose(1, 2) * physical_measure[:, None, :]
+    edge_mass = weight_mass.sum(dim=-1)
+    stable_pooling = pooling.to(dtype)
+    stable_log_mass = log_mass_feature.to(dtype)
+    # Preserve the already measured FP32 forward rounding on normal masses.
+    # The two expressions are the same analytic normalized sum: only their
+    # floating-point rounding differs. Differentiate its stable expression,
+    # avoiding the tiny reciprocal in the legacy quotient's backward pass.
+    # For zero/subnormal masses use the stable value as well. This threshold
+    # is the dtype's normal range, not a physical mass/occupancy regularizer.
+    normal_mass = edge_mass >= torch.finfo(dtype).tiny
+    legacy_denom = torch.where(normal_mass, edge_mass, torch.ones_like(edge_mass))
+    legacy_pooling = weight_mass / legacy_denom[:, :, None]
+    legacy_reference = measure_reference.to(device=scores.device, dtype=dtype).reshape(batch, 1)
+    legacy_reference = legacy_reference.clamp_min(torch.finfo(dtype).tiny)
+    legacy_log_mass = torch.log1p(edge_mass / legacy_reference)
+    forward_pooling = torch.where(normal_mass[:, :, None], legacy_pooling, stable_pooling)
+    forward_log_mass = torch.where(normal_mass, legacy_log_mass, stable_log_mass)
+    pooling = forward_pooling.detach() + (stable_pooling - stable_pooling.detach())
+    log_mass_feature = forward_log_mass.detach() + (stable_log_mass - stable_log_mass.detach())
+    available = has_donor[:, None].expand(batch, edges)
+    return incidence, pooling, edge_mass, log_mass_feature, available
+
+
 class HypergraphOrganizer(nn.Module):
     """Prepare content-bearing edge states from contextualized native tokens."""
 
@@ -97,51 +167,39 @@ class HypergraphOrganizer(nn.Module):
         module_scores = module_scores + self.module_geometry_bias(module_geom).squeeze(-1)
         environment_scores = environment_scores + self.environment_geometry_bias(environment_geom).squeeze(-1)
 
-        module_incidence = torch.softmax(module_scores, dim=-1)
-        environment_incidence = torch.softmax(environment_scores, dim=-1)
-        module_incidence = module_incidence * scene.module_mask[:, :, None].to(dtype)
-        environment_incidence = environment_incidence * scene.environment_mask[:, :, None].to(dtype)
+        if scene.module_measure_reference is None:
+            module_reference = module_states.new_ones(batch)
+        else:
+            module_reference = scene.module_measure_reference.to(dtype).reshape(batch)
+        if scene.environment_measure_reference is None:
+            environment_reference = environment_states.new_ones(batch)
+        else:
+            environment_reference = scene.environment_measure_reference.to(dtype).reshape(batch)
 
-        module_measure = torch.where(
-            scene.module_mask & (scene.module_measure > 0), scene.module_measure, torch.zeros_like(scene.module_measure)
-        ).to(dtype)
-        environment_measure = torch.where(
-            scene.environment_mask & (scene.environment_measure > 0),
-            scene.environment_measure,
-            torch.zeros_like(scene.environment_measure),
-        ).to(dtype)
-        module_weight_mass = module_incidence.transpose(1, 2) * module_measure[:, None, :]
-        environment_weight_mass = environment_incidence.transpose(1, 2) * environment_measure[:, None, :]
-        module_edge_mass = module_weight_mass.sum(dim=-1)
-        environment_edge_mass = environment_weight_mass.sum(dim=-1)
-        module_denom = torch.where(module_edge_mass > 0, module_edge_mass, torch.ones_like(module_edge_mass))
-        environment_denom = torch.where(
-            environment_edge_mass > 0, environment_edge_mass, torch.ones_like(environment_edge_mass)
+        (
+            module_incidence,
+            module_pooling,
+            module_edge_mass,
+            module_log_mass,
+            module_available,
+        ) = _measure_weighted_pooling(
+            module_scores, scene.module_measure, scene.module_mask, module_reference
         )
-        module_pooling = module_weight_mass / module_denom[:, :, None]
-        environment_pooling = environment_weight_mass / environment_denom[:, :, None]
-        module_pooling = module_pooling * (module_edge_mass > 0)[:, :, None].to(dtype)
-        environment_pooling = environment_pooling * (environment_edge_mass > 0)[:, :, None].to(dtype)
+        (
+            environment_incidence,
+            environment_pooling,
+            environment_edge_mass,
+            environment_log_mass,
+            environment_available,
+        ) = _measure_weighted_pooling(
+            environment_scores, scene.environment_measure, scene.environment_mask, environment_reference
+        )
 
         module_summary = torch.einsum("bhm,bmd->bhd", module_pooling, self.module_content(module_states))
         environment_summary = torch.einsum(
             "bhe,bed->bhd", environment_pooling, self.environment_content(environment_states)
         )
-        if scene.module_measure_reference is None:
-            module_reference = module_edge_mass.new_ones(batch, 1)
-        else:
-            module_reference = (
-                scene.module_measure_reference.to(dtype).reshape(batch, 1).clamp_min(torch.finfo(dtype).tiny)
-            )
-        if scene.environment_measure_reference is None:
-            environment_reference = environment_edge_mass.new_ones(batch, 1)
-        else:
-            environment_reference = (
-                scene.environment_measure_reference.to(dtype).reshape(batch, 1).clamp_min(torch.finfo(dtype).tiny)
-            )
-        module_log_mass = torch.log1p(module_edge_mass / module_reference)
-        environment_log_mass = torch.log1p(environment_edge_mass / environment_reference)
-        type_available = torch.stack((module_edge_mass > 0, environment_edge_mass > 0), dim=-1).to(dtype)
+        type_available = torch.stack((module_available, environment_available), dim=-1).to(dtype)
         anchors_normalized = (anchors - frame_origin[:, None, :]) / frame_scale[:, None, :]
         op = operating_state[:, None, :].expand(batch, self.edge_count, self.width)
         fusion_input = torch.cat(

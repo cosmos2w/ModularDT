@@ -144,6 +144,16 @@ def validate_qualification(path: Path, recipe: dict[str, Any]) -> dict[str, Any]
     return qualification
 
 
+def load_numerical_pooling_amendment(path: Path) -> dict[str, Any]:
+    """Load the engine-validated, separately evidenced resume amendment."""
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise TypeError("Numerical pooling amendment must be a JSON object.")
+    if value.get("schema") != "content_hypergraph_pooling_numerical_repair_v1":
+        raise ValueError("Unsupported numerical pooling amendment schema.")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--recipe", type=Path, required=True)
@@ -152,11 +162,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop-after", type=int, default=100)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--qualification", type=Path)
+    parser.add_argument("--numerical-pooling-amendment", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
     args = parser.parse_args(argv)
     recipe = validate_recipe(json.loads(args.recipe.read_text()))
     validate_stop(recipe, args.stop_after)
+    numerical_pooling_amendment = None
+    if args.numerical_pooling_amendment is not None:
+        if args.dry_run:
+            raise ValueError("A numerical pooling amendment is only valid for an exact scientific resume.")
+        if (recipe["dataset"], recipe["architecture"], recipe["protocol"]) != (
+            "wind",
+            "A-H6",
+            "full_train1000",
+        ):
+            raise ValueError("Numerical pooling amendment is limited to Wind A-H6 full_train1000.")
+        if args.resume is None:
+            raise ValueError("A numerical pooling amendment requires --resume.")
+        numerical_pooling_amendment = load_numerical_pooling_amendment(args.numerical_pooling_amendment)
     if args.resume is None and recipe["dataset"] == "wind" and recipe.get("optimizer_bias_norm_exclusion") is not True:
         raise ValueError("Fresh Wind recipes must explicitly enable optimizer_bias_norm_exclusion.")
     if args.dry_run and args.device != "cpu":
@@ -192,8 +216,17 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(summary, sort_keys=True, default=str, allow_nan=False), flush=True)
     if args.dry_run:
         return 0
-    result = engine.fit(model, provider, args.output, identity=identity, arm=recipe["architecture"],
-                        stop_after=args.stop_after, resume_checkpoint=args.resume)
+    fit_options = {"stop_after": args.stop_after, "resume_checkpoint": args.resume}
+    if numerical_pooling_amendment is not None:
+        fit_options["numerical_pooling_amendment"] = numerical_pooling_amendment
+    result = engine.fit(
+        model,
+        provider,
+        args.output,
+        identity=identity,
+        arm=recipe["architecture"],
+        **fit_options,
+    )
     print(json.dumps(result, sort_keys=True, default=str, allow_nan=False), flush=True)
     return 0
 
