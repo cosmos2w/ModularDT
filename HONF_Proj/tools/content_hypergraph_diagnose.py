@@ -119,6 +119,27 @@ def diagnose_scene(model, provider, batch, dataset, receiver_count=128):
         result["actual_module_W_maximum_donor_weight"] = w64.max(-1).values.cpu().tolist()
         result["actual_module_W_effective_donors"] = (-(w64 * w64.clamp_min(1e-300).log()).sum(-1)).exp().cpu().tolist()
         result["gather_semantics"] = "direct edge-to-donor W" if core.architecture.startswith("A2-") else "v1 incidence quotient pooling W"
+    if core.architecture == "A2-H6":
+        # Report content similarity independently of donor-weight concentration:
+        # broad W can still gather different values, and distinct W can read
+        # homogenized donors. Neither quantity is a success threshold.
+        for name in ("first_content", "mixed_content", "edges"):
+            content = torch.nn.functional.normalize(getattr(organization, name).detach().double(), dim=-1)
+            result[f"{name}_cosine_similarity"] = (content @ content.transpose(-1, -2)).cpu().tolist()
+        environment_w = organization.environment_gather_weights.detach().double()
+        result["actual_environment_W_effective_donors"] = (
+            -(environment_w * environment_w.clamp_min(1e-300).log()).sum(-1)
+        ).exp().cpu().tolist()
+        result["content_geometry"] = {
+            "frame_origin": scene.coordinate_origin.detach().cpu().tolist(),
+            "frame_extent": scene.coordinate_scale.detach().cpu().tolist(),
+            "module_coordinates": scene.module_coordinates[0, active].detach().cpu().tolist(),
+            "edge_anchors": organization.edge_anchors.detach().cpu().tolist(),
+            "edge_scales": organization.edge_scales.detach().cpu().tolist(),
+            "gather_temperature": float(core.content_bank.gather_temperature.detach()),
+            "units": "native adapter coordinates; scales are per-axis positive lengths",
+        }
+        result["final_module_state_variance"] = donor_variance(organization.module_states)
     c = organization.source_coefficients
     if c is not None:
         result["C_edge_squared_energy"] = c.detach().double().square().sum((-1, -2)).cpu().tolist()
