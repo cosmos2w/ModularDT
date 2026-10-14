@@ -136,7 +136,7 @@ def _state_sha256(state: Mapping[str, torch.Tensor]) -> str:
         ).encode("utf-8")
         digest.update(len(metadata).to_bytes(8, "little"))
         digest.update(metadata)
-        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 

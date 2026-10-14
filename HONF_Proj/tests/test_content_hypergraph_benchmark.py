@@ -17,6 +17,7 @@ from content_hypergraph_benchmark import (
     ARCHITECTURES,
     Arm,
     _model_state_cpu,
+    _state_sha256,
     _provider_identity_without_arm,
     _stress_core_probe,
     _stress_request,
@@ -55,6 +56,14 @@ def test_optimizer_budget_counts_both_arms_and_full_epochs() -> None:
     assert expected_optimizer_updates(150, 48, epochs=5, packings=1) == 40
     assert expected_optimizer_updates(72, 24, epochs=5, packings=3) == 90
     assert set(ARCHITECTURES) == {"A-D", "A-H6"}
+
+
+def test_state_digest_binds_scalar_routing_parameters_and_shape() -> None:
+    state = {"live_temperature": torch.tensor(0.5), "enabled": torch.tensor(True)}
+    original = _state_sha256(state)
+    assert _state_sha256({name: value.clone() for name, value in state.items()}) == original
+    assert _state_sha256({**state, "live_temperature": torch.tensor(0.6)}) != original
+    assert _state_sha256({**state, "live_temperature": torch.tensor([0.5])}) != original
 
 
 def test_reader128_cost_comparison_is_explicit_and_preserves_other_recipe_guards():
