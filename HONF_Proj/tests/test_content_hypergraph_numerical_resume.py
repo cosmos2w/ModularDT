@@ -111,3 +111,52 @@ def test_repair_never_authorizes_5000(repair):
     with pytest.raises(ValueError, match="numerical pooling continuation"):
         _content_pooling_source_amendment(*repair, source_sha256="d" * 64,
                                          source_epoch=800, stop_after=5000)
+
+
+def test_pooling_continuation_writes_audit_into_canonical_logs(tmp_path):
+    import torch
+    from test_unified_training import _ToyProvider
+
+    from honf_runtime.unified_training import EngineConfig, TrainingEngine
+
+    config = EngineConfig(seed=17, microbatch_cases=2, effective_cases=4, total_epochs=5000,
+        training_mode="joint", monitor_every=100, checkpoint_epochs=(100, 1000),
+        latest_every=100, curve_every=100, gradient_clip=10.0)
+    engine = TrainingEngine(config, device="cpu")
+    provider = _ToyProvider()
+    model = torch.nn.Linear(1, 1)
+    path = "src/honf_forward_core/content_hypergraph/organization.py"
+    old_files = {path: "a" * 64}
+    identity = {"workflow": "content_hypergraph_joint_v1", "model_family": "honf_content_hypergraph",
+        "recipe": {"dataset": "wind", "architecture": "A-H6", "protocol": "full_train1000",
+                   "approved_stop_after": 1000},
+        "loaded_source": {"files": old_files, "sha256": digest(old_files)}}
+    run = tmp_path / "toy_source_transition"
+    engine.fit(model, provider, run, identity=identity, arm="A-H6", stop_after=100)
+    latest = run / "checkpoints/latest_model.pt"
+    source_sha = hashlib.sha256(latest.read_bytes()).hexdigest()
+    evidence_path = tmp_path / "toy_evidence.json"
+    evidence = {"schema": "content_hypergraph_stable_pooling_correctness_v1", "optimizer_updates": 0,
+                **{key: True for key in ("fp64_reference_pass", "extreme_finite_backward_pass",
+                    "checkpoint_forward_pass", "native_backward_probe_pass",
+                    "old_finite_forward_nonfinite_backward_reproduced")}}
+    evidence_path.write_text(json.dumps(evidence))
+    new_files = {path: "c" * 64}
+    current = {**copy.deepcopy(identity), "loaded_source": {"files": new_files, "sha256": digest(new_files)}}
+    declaration = {"schema": "content_hypergraph_pooling_numerical_repair_v1", "source_epoch": 100,
+        "approved_stop_after": 1000, "source_checkpoint_sha256": source_sha,
+        "saved_loaded_source_sha256": digest(old_files), "current_loaded_source_sha256": digest(new_files),
+        "changes": [{"path": path, "old_sha256": "a" * 64, "new_sha256": "c" * 64}],
+        "evidence_path": str(evidence_path),
+        "evidence_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest()}
+    engine.fit(model, provider, run, identity=current, arm="A-H6", stop_after=101,
+               resume_checkpoint=latest, numerical_pooling_amendment=declaration)
+    audit = run / "logs/numerical_pooling_amendment_epoch_0101.json"
+    assert audit.is_file()
+    record = json.loads(audit.read_text())
+    assert record["source_epoch"] == 100
+    assert record["next_epoch"] == 101
+    assert record["source_checkpoint_sha256"] == source_sha
+    payload = torch.load(latest, map_location="cpu", weights_only=False)
+    assert payload["epoch"] == 101
+    assert payload["resume_amendments"][-1]["kind"] == "explicit_content_pooling_numerical_repair"

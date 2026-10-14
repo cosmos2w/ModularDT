@@ -2974,7 +2974,8 @@ class TrainingEngine:
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
                 category='logs' if (joint_core_revision is not None or diagnostic_age_branch is not None
-                                    or architecture_child_initialization is not None) else None), amendment)
+                                    or architecture_child_initialization is not None
+                                    or numerical_pooling_amendment is not None) else None), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = (copy.deepcopy(source_payload.get("branch_parent"))
