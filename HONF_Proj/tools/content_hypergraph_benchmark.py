@@ -922,6 +922,13 @@ def run_density_backward(arms: Mapping[str, Arm], high_batches: Mapping[str, Any
                 return {"loss": float(loss.detach().cpu()), "work": work}
 
             try:
+                # A previous arm's peak must not become the next arm's
+                # reserved-memory result. Keep the same live models/fixtures
+                # resident, but discard unused allocator blocks outside the
+                # timed region before every fixed-work point.
+                if device.type == "cuda":
+                    _device_sync(device)
+                    torch.cuda.empty_cache()
                 result, memory = _timed_once(run_backward, device)
             except BaseException as exc:
                 arm.model.zero_grad(set_to_none=True)
@@ -950,6 +957,8 @@ def run_density_backward(arms: Mapping[str, Arm], high_batches: Mapping[str, Any
                 "objective": "mean_squared_native_output; no targets passed to model/provider",
                 "loss_value": result["loss"],
                 "timing_and_memory": memory,
+                "allocator_cache_policy": "unused CUDA allocator blocks cleared before this point, outside timing; live resident tensors retained",
+                "resident_baseline_scope": "both retained models/providers, shared native fixtures and current target-free request",
                 "work": result["work"],
             })
     return records
