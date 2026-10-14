@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,15 +19,16 @@ from content_hypergraph_benchmark import (
     ARCHITECTURES,
     Arm,
     _model_state_cpu,
-    _state_sha256,
     _provider_identity_without_arm,
     _request_to_device,
+    _state_sha256,
     _stress_core_probe,
     _stress_request,
     comparison_recipes,
     expected_optimizer_updates,
     initialization_receipt,
     is_oom_error,
+    load_arms,
     oom_receipt,
     packing_independent_query_sha256,
     parse_int_list,
@@ -91,7 +93,8 @@ def test_complete_request_transfers_nested_prescribed_tensors_and_keeps_native_m
 
 
 def test_reader128_cost_comparison_is_explicit_and_preserves_other_recipe_guards():
-    ad = {"dataset": "thermal", "protocol": "development", "architecture": "A-D",
+    ad = {"schema": "content_hypergraph_recipe_v1", "dataset": "thermal",
+          "protocol": "development", "architecture": "A-D",
           "model": {"local_hidden_dim": 64, "thermal_response_rank": 4}, "seed": 0}
     h6 = {**ad, "architecture": "A-H6", "model": {**ad["model"], "local_hidden_dim": 128}}
     with pytest.raises(ValueError, match="recipes differ"):
@@ -102,9 +105,155 @@ def test_reader128_cost_comparison_is_explicit_and_preserves_other_recipe_guards
                      {**h6, "model": {**h6["model"], "thermal_response_rank": 8}}):
         with pytest.raises(ValueError, match="recipes differ"):
             comparison_recipes(ad, modified, thermal_reader128_revision=True)
-    with pytest.raises(ValueError, match="require Thermal development"):
+    with pytest.raises(ValueError, match="require Thermal v1 development"):
         comparison_recipes({**ad, "dataset": "wind"}, {**h6, "dataset": "wind"},
                            thermal_reader128_revision=True)
+
+
+def _round2_recipe(name: str) -> dict:
+    path = PROJECT / "src" / "config_core" / "forward" / "content_hypergraph" / name
+    return json.loads(path.read_text())
+
+
+@pytest.mark.parametrize(
+    ("dataset", "direct_name", "organized_name"),
+    [
+        ("thermal", "thermal_a2-d_development.json", "thermal_a2-h6_r1_centroids_development.json"),
+        ("wind", "wind_a2-d_development.json", "wind_a2-h6_r1_centroids_development.json"),
+    ],
+)
+def test_typed_centroid_cost_comparison_accepts_retained_r1_pair_for_both_datasets(
+    dataset: str, direct_name: str, organized_name: str,
+) -> None:
+    direct, organized = _round2_recipe(direct_name), _round2_recipe(organized_name)
+    original_organized = json.loads(json.dumps(organized))
+
+    normalized_direct, normalized_organized = comparison_recipes(
+        direct, organized, typed_centroid_revision=True,
+    )
+
+    assert direct["dataset"] == organized["dataset"] == dataset
+    assert normalized_direct == normalized_organized
+    assert organized == original_organized
+    assert "query_edge_geometry_mode" not in normalized_organized["model"]
+
+
+@pytest.mark.parametrize("dataset", ["thermal", "wind"])
+def test_typed_centroid_comparison_rejects_non_single_field_or_non_development_changes(dataset: str) -> None:
+    if dataset == "thermal":
+        direct = _round2_recipe("thermal_a2-d_development.json")
+        organized = _round2_recipe("thermal_a2-h6_r1_centroids_development.json")
+    else:
+        direct = _round2_recipe("wind_a2-d_development.json")
+        organized = _round2_recipe("wind_a2-h6_r1_centroids_development.json")
+
+    bad_dimension = json.loads(json.dumps(organized))
+    bad_dimension["model"]["context_dim"] = 64
+    with pytest.raises(ValueError):
+        comparison_recipes(direct, bad_dimension, typed_centroid_revision=True)
+
+    bad_flag = json.loads(json.dumps(organized))
+    bad_flag["model"]["unsupported_reader_flag"] = True
+    with pytest.raises(ValueError):
+        comparison_recipes(direct, bad_flag, typed_centroid_revision=True)
+
+    bad_direct_mode = json.loads(json.dumps(direct))
+    bad_direct_mode["model"]["query_edge_geometry_mode"] = "typed_w_centroids_v1"
+    with pytest.raises(ValueError):
+        comparison_recipes(bad_direct_mode, organized, typed_centroid_revision=True)
+
+    bad_loss = json.loads(json.dumps(organized))
+    bad_loss["native_loss_override"] = {"field": 0.5}
+    with pytest.raises(ValueError, match="losses or objectives"):
+        comparison_recipes(direct, bad_loss, typed_centroid_revision=True)
+
+    bad_protocol = json.loads(json.dumps(organized))
+    bad_protocol["protocol"] = "full_train1000"
+    with pytest.raises(ValueError, match="development"):
+        comparison_recipes(direct, bad_protocol, typed_centroid_revision=True)
+
+
+def test_typed_centroid_revision_is_mutually_exclusive_with_v1_reader_capacity_revision() -> None:
+    direct = _round2_recipe("thermal_a2-d_development.json")
+    organized = _round2_recipe("thermal_a2-h6_r1_centroids_development.json")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        comparison_recipes(
+            direct, organized, thermal_reader128_revision=True, typed_centroid_revision=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("dataset", "direct_name", "organized_name"),
+    [
+        ("thermal", "thermal_a2-d_development.json", "thermal_a2-h6_r1_centroids_development.json"),
+        ("wind", "wind_a2-d_development.json", "wind_a2-h6_r1_centroids_development.json"),
+    ],
+)
+def test_typed_centroid_load_arms_accepts_only_retained_pair_for_each_dataset(
+    tmp_path: Path, monkeypatch, dataset: str, direct_name: str, organized_name: str,
+) -> None:
+    import content_hypergraph_benchmark as benchmark
+
+    direct_recipe, organized_recipe = _round2_recipe(direct_name), _round2_recipe(organized_name)
+    direct_path, organized_path = tmp_path / "direct.pt", tmp_path / "organized.pt"
+    direct_path.write_bytes(b"fixture direct checkpoint")
+    organized_path.write_bytes(b"fixture organized checkpoint")
+    by_path = {direct_path.resolve(): ("A2-D", direct_recipe), organized_path.resolve(): ("A2-H6", organized_recipe)}
+
+    class Provider:
+        def __init__(self, architecture: str, recipe: dict) -> None:
+            self.architecture = architecture
+            self.recipe = recipe
+
+        def identity_payload(self) -> dict:
+            return {
+                "architecture": self.architecture,
+                "model_config": {"architecture": self.architecture},
+                "recipe": self.recipe,
+                "adapter_state": {"core": {"architecture": self.architecture}, "fixed_data": "same"},
+            }
+
+    def fake_loader(path: Path, device: str):
+        del device
+        architecture, recipe = by_path[path.resolve()]
+        payload = {"arm": architecture, "experiment_identity": {"recipe": recipe}}
+        return nn.Linear(2, 2), Provider(architecture, recipe), payload
+
+    monkeypatch.setattr(benchmark, "load_evaluation_components", fake_loader)
+    arms, _, _ = load_arms(
+        dataset=dataset,
+        device="cpu",
+        recipe_path=None,
+        checkpoint_ad=direct_path,
+        checkpoint_ah6=organized_path,
+        typed_centroid_revision=True,
+    )
+
+    assert set(arms) == {"A2-D", "A2-H6"}
+    assert all(arm.source == "retained_checkpoint" for arm in arms.values())
+
+
+@pytest.mark.parametrize("mode", ["fresh_recipe", "training_packings", "reader128"])
+def test_typed_centroid_cli_rejects_nonretained_or_mixed_revision_before_output(
+    tmp_path: Path, mode: str,
+) -> None:
+    import content_hypergraph_benchmark as benchmark
+
+    output = tmp_path / mode
+    args = ["--dataset", "thermal", "--output", str(output), "--typed-centroid-revision"]
+    if mode == "fresh_recipe":
+        args.extend(["--recipe", str(tmp_path / "unused.json")])
+    else:
+        args.extend(["--checkpoint-ad", str(tmp_path / "direct.pt"),
+                     "--checkpoint-ah6", str(tmp_path / "organized.pt")])
+    if mode == "training_packings":
+        args.extend(["--training-packings", "8", "--optimizer-update-budget", "1"])
+    elif mode == "reader128":
+        args.append("--thermal-reader128-revision")
+
+    with pytest.raises(SystemExit):
+        benchmark.main(args)
+    assert not output.exists()
 
 
 def test_microbatch_packings_are_unique_and_bounded_by_effective_batch() -> None:

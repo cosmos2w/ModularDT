@@ -54,6 +54,7 @@ _MODEL_FIELDS = {
     "dropout": 0.0,
     "init_seed": 0,
 }
+_TYPED_CENTROID_MODE = "typed_w_centroids_v1"
 _OPTIMIZER_FIELDS = {"weight_decay": 1.0e-4, "bias_and_norm_weight_decay": 0.0}
 
 
@@ -239,12 +240,24 @@ def build_thermal_content_hypergraph_task_v2(
         raise ValueError("Thermal v2 full_train1000 is A2-H6 with stop-after 1000.")
 
     model_fields = recipe.get("model")
-    if not isinstance(model_fields, Mapping) or dict(model_fields) != _MODEL_FIELDS:
+    if not isinstance(model_fields, Mapping):
+        raise ValueError("Thermal v2 model fields must match the sealed explicit constructor defaults.")
+    model_fields = dict(model_fields)
+    typed_centroids = "query_edge_geometry_mode" in model_fields
+    if typed_centroids and (
+        model_fields["query_edge_geometry_mode"] != _TYPED_CENTROID_MODE or architecture != "A2-H6"
+    ):
+        raise ValueError("Thermal typed centroid geometry is supported only for A2-H6 with the declared mode.")
+    expected_model_fields = {
+        **_MODEL_FIELDS,
+        **({"query_edge_geometry_mode": _TYPED_CENTROID_MODE} if typed_centroids else {}),
+    }
+    if model_fields != expected_model_fields:
         raise ValueError("Thermal v2 model fields must match the sealed explicit constructor defaults.")
     core_config = {
         "schema": "content_hypergraph_core_v2",
         "architecture": architecture,
-        **dict(model_fields),
+        **model_fields,
     }
 
     resolved_manifest, data_path, manifest_path = _load_data_binding(

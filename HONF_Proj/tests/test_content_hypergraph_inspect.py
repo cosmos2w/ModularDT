@@ -13,6 +13,7 @@ from tools.content_hypergraph_inspect import (
     _fp64_identity_error,
     _select_thermal_cases,
     _select_wind_rows,
+    _save_scene_and_organization,
     _validate_checkpoint_scope,
     _validate_thermal_full_binding,
     _validate_wind_full_binding,
@@ -25,6 +26,36 @@ from tools.content_hypergraph_inspect import (
     select_wind_probes,
     slice_query,
 )
+
+
+def test_optional_typed_centroid_arrays_are_exported_only_when_present():
+    scene_names = (
+        "module_features", "environment_features", "module_coordinates", "environment_coordinates",
+        "module_mask", "environment_mask", "module_measure", "environment_measure", "module_ids",
+        "environment_ids", "local_radius", "module_characteristic_lengths",
+        "environment_characteristic_lengths", "coordinate_origin", "coordinate_scale",
+    )
+    scene = SimpleNamespace(**{name: torch.ones(1) for name in scene_names})
+    organization_names = (
+        "edges", "raw_module_states", "raw_environment_states", "module_states", "environment_states",
+        "scene_summary", "first_content", "mixed_content", "second_content", "module_gather_weights",
+        "environment_gather_weights", "edge_anchors", "edge_scales",
+    )
+    base_organization = {name: torch.ones(1) for name in organization_names}
+    base_organization.update(trace=None, source_coefficients=None)
+    optional = (
+        "module_content_centroids", "environment_content_centroids",
+        "module_content_valid", "environment_content_valid",
+    )
+
+    absent_arrays = {}
+    _save_scene_and_organization(absent_arrays, scene, SimpleNamespace(**base_organization))
+    assert not any(f"organization__{name}" in absent_arrays for name in optional)
+
+    present_arrays = {}
+    present = {**base_organization, **{name: torch.ones(1) for name in optional}}
+    _save_scene_and_organization(present_arrays, scene, SimpleNamespace(**present))
+    assert all(f"organization__{name}" in present_arrays for name in optional)
 
 
 def _scene() -> SceneBatch:

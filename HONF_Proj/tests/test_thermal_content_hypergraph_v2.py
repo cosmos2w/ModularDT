@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import numpy as np
+from pathlib import Path
+import pytest
 import torch
+from channelthermal.training import content_hypergraph_task_v2 as thermal_task_v2
 
 from channelthermal.training.content_hypergraph_task import (
     THERMAL_CONTENT_PROVIDER_SCHEMA,
@@ -31,8 +35,8 @@ def _stats() -> dict[str, np.ndarray]:
     }
 
 
-def _core_config(architecture: str) -> dict[str, object]:
-    return {
+def _core_config(architecture: str, query_edge_geometry_mode: str | None = None) -> dict[str, object]:
+    result = {
         "schema": "content_hypergraph_core_v2",
         "architecture": architecture,
         "module_input_dim": 8,
@@ -50,6 +54,9 @@ def _core_config(architecture: str) -> dict[str, object]:
         "dropout": 0.0,
         "init_seed": 7,
     }
+    if query_edge_geometry_mode is not None:
+        result["query_edge_geometry_mode"] = query_edge_geometry_mode
+    return result
 
 
 def _structure() -> dict[str, torch.Tensor]:
@@ -76,10 +83,12 @@ def _receivers() -> tuple[torch.Tensor, torch.Tensor]:
     return fluid, local
 
 
-def _model(architecture: str = "A2-H6") -> ThermalContentHypergraphAdapterV2:
+def _model(
+    architecture: str = "A2-H6", query_edge_geometry_mode: str | None = None,
+) -> ThermalContentHypergraphAdapterV2:
     torch.manual_seed(11)
     return ThermalContentHypergraphAdapterV2(
-        _stats(), core_config=_core_config(architecture), nx=8, ny=6,
+        _stats(), core_config=_core_config(architecture, query_edge_geometry_mode), nx=8, ny=6,
     )
 
 
@@ -135,6 +144,29 @@ def test_v2_provider_keeps_the_fixed_sampling_and_supervision_methods():
         assert getattr(ThermalContentHypergraphTaskV2, name) is getattr(ThermalContentHypergraphTask, name)
 
 
+def test_thermal_builder_allows_only_the_typed_h6_mode_before_data_binding(monkeypatch):
+    recipe_path = (
+        Path(__file__).resolve().parents[1]
+        / "src/config_core/forward/content_hypergraph/thermal_a2-h6_r1_centroids_development.json"
+    )
+    recipe = json.loads(recipe_path.read_text())
+
+    def stop_at_binding(*args, **kwargs):
+        raise RuntimeError("reached data binding")
+
+    monkeypatch.setattr(thermal_task_v2, "_load_data_binding", stop_at_binding)
+    with pytest.raises(RuntimeError, match="reached data binding"):
+        thermal_task_v2.build_thermal_content_hypergraph_task_v2(recipe)
+
+    invalid_mode = {**recipe, "model": {**recipe["model"], "query_edge_geometry_mode": "unknown"}}
+    with pytest.raises(ValueError, match="typed centroid geometry"):
+        thermal_task_v2.build_thermal_content_hypergraph_task_v2(invalid_mode)
+
+    direct = {**recipe, "architecture": "A2-D"}
+    with pytest.raises(ValueError, match="only for A2-H6"):
+        thermal_task_v2.build_thermal_content_hypergraph_task_v2(direct)
+
+
 def test_v2_scene_has_explicit_frame_object_and_environment_lengths():
     model = _model("A2-D")
     scene = model.scene_batch(_structure(), scene_key=("geometry",))
@@ -155,8 +187,23 @@ def test_v2_scene_has_explicit_frame_object_and_environment_lengths():
     assert scene.environment_features.shape == (1, 192, 8)
 
 
-def test_v2_native_flow_temperature_curl_and_q_follow_thermal_laws():
-    model = _model("A2-H6").eval()
+def test_typed_centroids_are_valid_native_coordinates_inside_the_thermal_frame():
+    model = _model("A2-H6", "typed_w_centroids_v1")
+    scene = model.scene_batch(_structure(), scene_key=("typed-centroid-native",))
+    organization = model.core.prepare(scene)
+    extent = scene.coordinate_scale[:, None, :]
+    for name in ("module", "environment"):
+        centroids = getattr(organization, f"{name}_content_centroids")
+        valid = getattr(organization, f"{name}_content_valid")
+        assert torch.isfinite(centroids).all()
+        assert valid.dtype == torch.bool and valid.all()
+        assert torch.all(centroids >= 0.0)
+        assert torch.all(centroids <= extent)
+
+
+@pytest.mark.parametrize("query_edge_geometry_mode", [None, "typed_w_centroids_v1"])
+def test_v2_native_flow_temperature_curl_and_q_follow_thermal_laws(query_edge_geometry_mode):
+    model = _model("A2-H6", query_edge_geometry_mode).eval()
     prepared = _prepared(model)
     zero_heat = torch.zeros((1, 2))
     heat = torch.tensor([[0.4, 0.8]], requires_grad=True)
@@ -206,13 +253,18 @@ def test_v2_native_flow_temperature_curl_and_q_follow_thermal_laws():
     assert torch.count_nonzero(temperature_gradient) > 0
 
 
-def test_v2_checkpoint_payload_replays_all_adapter_transforms():
-    model = _model("A2-H6").eval()
+@pytest.mark.parametrize("query_edge_geometry_mode", [None, "typed_w_centroids_v1"])
+def test_v2_checkpoint_payload_replays_all_adapter_transforms(query_edge_geometry_mode):
+    model = _model("A2-H6", query_edge_geometry_mode).eval()
     prepared = _prepared(model)
     expected = model.apply_native(prepared, torch.tensor([[0.4, 0.8]]))
     payload = model.state_payload()
     assert payload["schema"] == THERMAL_CONTENT_ADAPTER_V2_SCHEMA
     assert payload["core"]["schema"] == "content_hypergraph_core_v2"
+    if query_edge_geometry_mode is None:
+        assert "query_edge_geometry_mode" not in payload["core"]
+    else:
+        assert payload["core"]["query_edge_geometry_mode"] == query_edge_geometry_mode
     restored = ThermalContentHypergraphAdapterV2.from_state_payload(
         payload, state_dict=model.state_dict(), device="cpu"
     ).eval()

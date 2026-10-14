@@ -362,6 +362,11 @@ class PreparedOrganizationV2:
     model_config_key: tuple[Any, ...]
     work_counts: dict[str, int]
     trace: dict[str, Tensor] | None = None
+    module_content_centroids: Tensor | None = None
+    environment_content_centroids: Tensor | None = None
+    module_content_valid: Tensor | None = None
+    environment_content_valid: Tensor | None = None
+    content_geometry_versions: tuple[tuple[int, int, int], ...] = ()
 
     @property
     def num_hyperedges(self) -> int:

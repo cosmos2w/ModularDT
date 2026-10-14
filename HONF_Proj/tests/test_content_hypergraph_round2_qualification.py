@@ -103,3 +103,45 @@ def test_v2_recipe_versions_and_shared_capacity_are_explicit():
     with pytest.raises(ValueError, match="local_hidden_dim"):
         launcher.validate_recipe(changed)
     assert recipe_architecture(value) == recipe_architecture(recipe(full=True))
+
+
+@pytest.mark.parametrize("dataset", ["thermal", "wind"])
+def test_typed_centroid_mode_is_explicit_h6_only_and_architecture_bound(dataset):
+    baseline = recipe(dataset)
+    typed_development = copy.deepcopy(baseline)
+    typed_development["model"]["query_edge_geometry_mode"] = "typed_w_centroids_v1"
+    typed_full = recipe(dataset, full=True)
+    typed_full["model"]["query_edge_geometry_mode"] = "typed_w_centroids_v1"
+
+    assert launcher.validate_recipe(typed_development) == typed_development
+    assert launcher.validate_recipe(typed_full) == typed_full
+    assert recipe_architecture(typed_development) == recipe_architecture(typed_full)
+    assert recipe_architecture(typed_development) != recipe_architecture(baseline)
+
+    direct = copy.deepcopy(typed_development)
+    direct["architecture"] = "A2-D"
+    with pytest.raises(ValueError, match="only for A2-H6"):
+        launcher.validate_recipe(direct)
+    for mode in (None, "unknown", "typed_w_centroids_v2"):
+        invalid = copy.deepcopy(typed_development)
+        invalid["model"]["query_edge_geometry_mode"] = mode
+        with pytest.raises(ValueError, match="query_edge_geometry_mode"):
+            launcher.validate_recipe(invalid)
+
+
+def test_thermal_r1_recipes_change_only_the_explicit_query_geometry_mode():
+    root = Path(__file__).resolve().parents[1] / "src/config_core/forward/content_hypergraph"
+    pairs = (
+        ("thermal_a2-h6_development.json", "thermal_a2-h6_r1_centroids_development.json"),
+        ("thermal_a2-h6_full1000.json", "thermal_a2-h6_r1_centroids_full1000.json"),
+    )
+    recipes = []
+    for baseline_name, candidate_name in pairs:
+        baseline = json.loads((root / baseline_name).read_text())
+        candidate = json.loads((root / candidate_name).read_text())
+        candidate_without_mode = copy.deepcopy(candidate)
+        assert candidate_without_mode["model"].pop("query_edge_geometry_mode") == "typed_w_centroids_v1"
+        assert candidate_without_mode == baseline
+        assert launcher.validate_recipe(candidate) == candidate
+        recipes.append(candidate)
+    assert recipe_architecture(recipes[0]) == recipe_architecture(recipes[1])

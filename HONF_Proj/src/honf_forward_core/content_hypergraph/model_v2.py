@@ -193,11 +193,16 @@ class ContentHypergraphCoreV2(nn.Module):
         local_hidden_dim: int = 128,
         dropout: float = 0.0,
         init_seed: int = 0,
+        query_edge_geometry_mode: str | None = None,
     ) -> None:
         super().__init__()
         architecture = str(architecture).strip().upper()
         if architecture not in {"A2-D", "A2-H6"}:
             raise ValueError("architecture must be 'A2-D' or 'A2-H6'.")
+        if query_edge_geometry_mode not in (None, "typed_w_centroids_v1"):
+            raise ValueError("Unsupported query_edge_geometry_mode.")
+        if query_edge_geometry_mode is not None and architecture != "A2-H6":
+            raise ValueError("query_edge_geometry_mode='typed_w_centroids_v1' is supported only by A2-H6.")
         if min(
             module_input_dim,
             environment_input_dim,
@@ -235,6 +240,7 @@ class ContentHypergraphCoreV2(nn.Module):
         self.local_hidden_dim = int(local_hidden_dim)
         self.dropout_probability = float(dropout)
         self.init_seed = int(init_seed)
+        self.query_edge_geometry_mode = query_edge_geometry_mode
         self._owner_token = id(self)
 
         module_encoder_input = self.module_input_dim + 8 * self.coordinate_dim
@@ -281,7 +287,11 @@ class ContentHypergraphCoreV2(nn.Module):
                     context_dim, coordinate_dim, edge_count=6, heads=num_heads, dropout=dropout
                 )
                 self.edge_reader = HeadwiseEdgeReaderV2(
-                    local_hidden_dim, coordinate_dim, thermal_response_rank, heads=num_heads
+                    local_hidden_dim,
+                    coordinate_dim,
+                    thermal_response_rank,
+                    heads=num_heads,
+                    query_edge_geometry_mode=query_edge_geometry_mode,
                 )
                 self.coefficient_bank = (
                     SourceCoefficientBankV2(context_dim, coordinate_dim, thermal_response_rank)
@@ -347,7 +357,7 @@ class ContentHypergraphCoreV2(nn.Module):
                 # modules and remain live tensors throughout training.
 
     def get_config(self) -> dict[str, Any]:
-        return {
+        config = {
             "schema": self.schema,
             "module_input_dim": self.module_input_dim,
             "environment_input_dim": self.environment_input_dim,
@@ -365,6 +375,9 @@ class ContentHypergraphCoreV2(nn.Module):
             "dropout": self.dropout_probability,
             "init_seed": self.init_seed,
         }
+        if self.query_edge_geometry_mode is not None:
+            config["query_edge_geometry_mode"] = self.query_edge_geometry_mode
+        return config
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> ContentHypergraphCoreV2:
@@ -591,6 +604,13 @@ class ContentHypergraphCoreV2(nn.Module):
             "module_states", "environment_states", "raw_module_states", "raw_environment_states",
             "scene_summary", "scene_summary_initial", "edge_edge_attention",
         ]
+        if self.query_edge_geometry_mode == "typed_w_centroids_v1":
+            prep_trace_available.extend((
+                "module_content_centroids",
+                "environment_content_centroids",
+                "module_content_valid",
+                "environment_content_valid",
+            ))
         for cycle in range(self.context_depth):
             prep_trace_available.extend(
                 f"cycle{cycle}/{name}"
@@ -658,6 +678,8 @@ class ContentHypergraphCoreV2(nn.Module):
         batch, modules, _ = module_states.shape
         environment_count = environment_states.shape[1]
         content_result: dict[str, Tensor] = {}
+        module_content_centroids = environment_content_centroids = None
+        module_content_valid = environment_content_valid = None
         if self.architecture == "A2-H6":
             organization = self.content_bank(
                 scene,
@@ -690,6 +712,27 @@ class ContentHypergraphCoreV2(nn.Module):
                     frame_scale,
                 )
             edge_keys, edge_values = self.edge_reader.prepare_edges(edges)
+            if self.query_edge_geometry_mode == "typed_w_centroids_v1":
+                module_coordinates = scene.module_coordinates.to(dtype=module_weights.dtype)
+                environment_coordinates = scene.environment_coordinates.to(dtype=environment_weights.dtype)
+                module_content_valid = (
+                    scene.module_mask & (scene.module_measure > 0)
+                ).any(dim=-1, keepdim=True).expand(-1, module_weights.shape[1])
+                environment_content_valid = (
+                    scene.environment_mask & (scene.environment_measure > 0)
+                ).any(dim=-1, keepdim=True).expand(-1, environment_weights.shape[1])
+                module_content_centroids = torch.bmm(module_weights, module_coordinates)
+                environment_content_centroids = torch.bmm(environment_weights, environment_coordinates)
+                module_content_centroids = torch.where(
+                    module_content_valid[:, :, None],
+                    module_content_centroids,
+                    torch.zeros_like(module_content_centroids),
+                )
+                environment_content_centroids = torch.where(
+                    environment_content_valid[:, :, None],
+                    environment_content_centroids,
+                    torch.zeros_like(environment_content_centroids),
+                )
             direct_source_keys = direct_source_values = None
             for key in prep_trace_available:
                 if key not in selected:
@@ -732,6 +775,15 @@ class ContentHypergraphCoreV2(nn.Module):
                 "direct_source_projection_rows": 0,
                 "direct_source_projection_entries": 0,
             }
+            if self.query_edge_geometry_mode == "typed_w_centroids_v1":
+                prep_work.update({
+                    "content_centroid_coordinate_products": int(
+                        scene.batch_size * 6 * (modules + environment_count) * self.coordinate_dim
+                    ),
+                    "content_centroid_output_coordinates": int(
+                        2 * scene.batch_size * 6 * self.coordinate_dim
+                    ),
+                })
         else:
             edges = module_states.new_zeros(scene.batch_size, 0, self.context_dim)
             module_weights = module_states.new_zeros(scene.batch_size, 0, modules)
@@ -769,6 +821,19 @@ class ContentHypergraphCoreV2(nn.Module):
                 "direct_source_projection_rows": int(scene.batch_size * modules),
                 "direct_source_projection_entries": int(scene.batch_size * modules * self.context_dim),
             }
+
+        if self.query_edge_geometry_mode == "typed_w_centroids_v1":
+            candidate_trace_values = {
+                "module_content_centroids": module_content_centroids,
+                "environment_content_centroids": environment_content_centroids,
+                "module_content_valid": module_content_valid,
+                "environment_content_valid": environment_content_valid,
+            }
+            for name, value in candidate_trace_values.items():
+                if name in selected:
+                    if value is None:
+                        raise ValueError("Typed content centroid trace requested without prepared centroids.")
+                    organization_trace[name] = value
 
         for key, value in (
             ("edges", edges),
@@ -818,6 +883,24 @@ class ContentHypergraphCoreV2(nn.Module):
             model_config_key=self._config_key(),
             work_counts=prep_work,
             trace=bounded_trace,
+            module_content_centroids=module_content_centroids,
+            environment_content_centroids=environment_content_centroids,
+            module_content_valid=module_content_valid,
+            environment_content_valid=environment_content_valid,
+            content_geometry_versions=(
+                tuple(
+                    _tensor_version(value)
+                    for value in (
+                        module_content_centroids,
+                        environment_content_centroids,
+                        module_content_valid,
+                        environment_content_valid,
+                    )
+                    if value is not None
+                )
+                if self.query_edge_geometry_mode == "typed_w_centroids_v1"
+                else ()
+            ),
         )
 
     @staticmethod
@@ -858,6 +941,31 @@ class ContentHypergraphCoreV2(nn.Module):
             organization.scene.coordinate_frame_key,
         ):
             raise ValueError("Scene identity or preprocessing keys changed after preparation.")
+        if self.query_edge_geometry_mode == "typed_w_centroids_v1":
+            content_geometry = (
+                organization.module_content_centroids,
+                organization.environment_content_centroids,
+                organization.module_content_valid,
+                organization.environment_content_valid,
+            )
+            if any(not isinstance(value, Tensor) for value in content_geometry):
+                raise ValueError("Prepared content geometry centroids or validity masks are missing.")
+            batch = organization.scene.batch_size
+            expected_shapes = (
+                (batch, 6, self.coordinate_dim),
+                (batch, 6, self.coordinate_dim),
+                (batch, 6),
+                (batch, 6),
+            )
+            if any(tuple(value.shape) != shape for value, shape in zip(content_geometry, expected_shapes)):
+                raise ValueError("Prepared content geometry centroid or validity shape changed.")
+            if content_geometry[2].dtype != torch.bool or content_geometry[3].dtype != torch.bool:
+                raise ValueError("Prepared content geometry validity masks must remain boolean.")
+            current_versions = tuple(_tensor_version(value) for value in content_geometry)
+            if len(organization.content_geometry_versions) != 4 or (
+                organization.content_geometry_versions != current_versions
+            ):
+                raise ValueError("Prepared content geometry centroid state changed; rebuild the organization.")
 
     def _validate_query(self, organization: PreparedOrganizationV2, query: QueryBatch) -> None:
         query.validate(
@@ -1233,6 +1341,17 @@ class ContentHypergraphCoreV2(nn.Module):
                 sum(value.numel() for value in (trace or {}).values())
             ),
         }
+        if self.query_edge_geometry_mode == "typed_w_centroids_v1":
+            centroid_descriptor_rows = int(2 * batch * query_count * edges)
+            result.update({
+                "content_centroid_descriptor_rows": centroid_descriptor_rows,
+                "content_centroid_geometry_feature_entries": int(
+                    centroid_descriptor_rows * (2 * self.coordinate_dim + 1)
+                ),
+                "content_centroid_relative_gamma_entries": int(
+                    centroid_descriptor_rows * 7 * self.coordinate_dim
+                ),
+            })
         return result
 
     def _decode_validated(

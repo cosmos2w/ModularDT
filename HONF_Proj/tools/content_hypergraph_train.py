@@ -103,6 +103,12 @@ def validate_recipe(value: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"Round2 requires model.{name}={expected}.")
         if recipe.get("optimizer_bias_norm_exclusion") is not True:
             raise ValueError("Fresh Round2 recipes require explicit optimizer_bias_norm_exclusion.")
+        if "query_edge_geometry_mode" in model:
+            mode = model["query_edge_geometry_mode"]
+            if mode != "typed_w_centroids_v1":
+                raise ValueError("Unsupported model.query_edge_geometry_mode.")
+            if recipe["architecture"] != "A2-H6":
+                raise ValueError("Typed centroid query-edge geometry is available only for A2-H6.")
     return recipe
 
 

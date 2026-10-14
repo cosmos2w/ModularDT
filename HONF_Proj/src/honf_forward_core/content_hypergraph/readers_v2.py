@@ -120,25 +120,35 @@ class LocalDetailReaderV2(nn.Module):
 class HeadwiseEdgeReaderV2(nn.Module):
     """One 128-wide query-edge message split into independently routed heads."""
 
-    def __init__(self, width: int, coordinate_dim: int, thermal_rank: int, heads: int = 4) -> None:
+    def __init__(
+        self, width: int, coordinate_dim: int, thermal_rank: int, heads: int = 4,
+        query_edge_geometry_mode: str | None = None,
+    ) -> None:
         super().__init__()
         if width % heads:
             raise ValueError("reader width must be divisible by feature-head count.")
+        if query_edge_geometry_mode not in (None, "typed_w_centroids_v1"):
+            raise ValueError("Unsupported query_edge_geometry_mode for the H6 reader.")
         self.width = int(width)
         self.heads = int(heads)
         self.head_width = self.width // self.heads
         self.thermal_rank = int(thermal_rank)
+        self.query_edge_geometry_mode = query_edge_geometry_mode
+        geometry_types = 1 if query_edge_geometry_mode is None else 3
+        if query_edge_geometry_mode is not None:
+            self.module_centroid_gate = nn.Parameter(torch.tensor(0.1))
+            self.environment_centroid_gate = nn.Parameter(torch.tensor(0.1))
         self.query_norm = nn.LayerNorm(width)
         self.edge_norm = nn.LayerNorm(width)
         self.query_key = nn.Linear(width, width, bias=False)
         self.edge_key = nn.Linear(width, width, bias=False)
         self.raw_temperature = nn.Parameter(torch.full((heads,), _temperature_logit(self.head_width)))
         self.geometry_score = nn.Sequential(
-            nn.Linear(2 * coordinate_dim + 1, 32), nn.SiLU(), nn.Linear(32, heads, bias=False)
+            nn.Linear(geometry_types * (2 * coordinate_dim + 1), 32), nn.SiLU(), nn.Linear(32, heads, bias=False)
         )
         self.query_value = nn.Linear(width, width, bias=False)
         self.edge_value = nn.Linear(width, width, bias=False)
-        self.relative_value = nn.Linear(7 * coordinate_dim, width, bias=False)
+        self.relative_value = nn.Linear(geometry_types * 7 * coordinate_dim, width, bias=False)
         self.message_output = nn.Linear(width, width)
         self.thermal_heads = nn.ModuleList(
             nn.Linear(self.head_width, 1) for _ in range(heads)
@@ -151,6 +161,43 @@ class HeadwiseEdgeReaderV2(nn.Module):
     def prepare_edges(self, edges: Tensor) -> tuple[Tensor, Tensor]:
         normalized = self.edge_norm(edges)
         return self.edge_key(normalized), self.edge_value(normalized)
+
+    def _geometry_features(self, query: QueryBatch, query_states: Tensor, organization, frame_scale: Tensor):
+        """Read typed final-W first moments without changing anchors or W.
+
+        The optional channels describe the actual gathered donor coordinates,
+        not physical ownership of the full residual/mixed content. All three
+        descriptors share one narrow score MLP and one value projection.
+        """
+        coordinates = query.coordinates.to(query_states.dtype)
+        if self.query_edge_geometry_mode is None:
+            return query_edge_features(
+                coordinates, organization.edge_anchors, frame_scale, organization.edge_scales,
+            )
+        names = ("module_content_centroids", "environment_content_centroids",
+                 "module_content_valid", "environment_content_valid")
+        if any(getattr(organization, name, None) is None for name in names):
+            raise ValueError("Prepared typed content centroid geometry is missing.")
+        centers = torch.cat((organization.edge_anchors, organization.module_content_centroids,
+                             organization.environment_content_centroids), dim=1)
+        geometry, gamma = query_edge_features(
+            coordinates, centers, frame_scale, organization.edge_scales.repeat(1, 3, 1),
+        )
+        batch, query_count = coordinates.shape[:2]
+        edge_count = organization.edges.shape[1]
+        typed_scale = torch.stack((
+            query_states.new_ones(batch, edge_count),
+            self.module_centroid_gate * organization.module_content_valid.to(query_states.dtype),
+            self.environment_centroid_gate * organization.environment_content_valid.to(query_states.dtype),
+        ), dim=-1)[:, None, :, :, None]
+
+        def concatenate_types(value: Tensor) -> Tensor:
+            # The combined edge axis is [anchor H, module H, environment H].
+            value = value.reshape(batch, query_count, 3, edge_count, value.shape[-1])
+            value = value.permute(0, 1, 3, 2, 4) * typed_scale
+            return value.flatten(-2)
+
+        return concatenate_types(geometry), concatenate_types(gamma)
 
     def forward(
         self,
@@ -173,12 +220,7 @@ class HeadwiseEdgeReaderV2(nn.Module):
             return query_states.new_zeros(batch, query_count, self.width), access, access, basis, messages
         if organization.edge_keys is None or organization.edge_values is None:
             raise ValueError("Prepared H6 edge projections are missing.")
-        geometry, relative_gamma = query_edge_features(
-            query.coordinates.to(query_states.dtype),
-            organization.edge_anchors,
-            frame_scale,
-            organization.edge_scales,
-        )
+        geometry, relative_gamma = self._geometry_features(query, query_states, organization, frame_scale)
         query_key = self.query_key(self.query_norm(query_states)).view(
             batch, query_count, self.heads, self.head_width
         )

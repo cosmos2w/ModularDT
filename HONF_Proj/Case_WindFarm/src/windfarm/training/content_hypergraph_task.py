@@ -1074,6 +1074,22 @@ def _validate_recipe_v2(recipe: Mapping[str, Any]) -> tuple[dict[str, Any], str,
         raise ValueError("Round2 Wind requires the full-access FP32 reference path.")
     if value.get("sampling_version", SamplingKey.CASE_EPOCH_VERSION) != SamplingKey.CASE_EPOCH_VERSION:
         raise ValueError("Round2 Wind requires unchanged deterministic case_epoch_v1 sampling.")
+    loss_overrides = sorted(
+        str(name) for name in value
+        if "loss" in str(name).lower() or str(name).lower() == "objective"
+    )
+    if loss_overrides:
+        raise ValueError(f"Round2 Wind native losses are provider-owned; recipe overrides are unsupported: {loss_overrides}.")
+    top_level_core_overrides = sorted({
+        "module_input_dim", "environment_input_dim", "coordinate_dim", "query_input_dim",
+        "operating_input_dim", "output_dim", "context_dim", "num_heads", "context_depth",
+        "num_hyperedges", "thermal_response_rank", "local_hidden_dim", "dropout", "init_seed",
+    } & set(value))
+    if top_level_core_overrides:
+        raise ValueError(
+            "Round2 Wind dimensions and initialization belong under the sealed model contract; "
+            f"top-level overrides are unsupported: {top_level_core_overrides}."
+        )
     expected_cache_bytes = (
         WIND_CONTENT_ROLE_CACHE_DEVELOPMENT_BYTES
         if protocol == "development"
@@ -1096,12 +1112,70 @@ def _validate_recipe_v2(recipe: Mapping[str, Any]) -> tuple[dict[str, Any], str,
         "local_hidden_dim": 128,
         "dropout": 0.0,
     }
-    if set(model_values) != set(required):
-        raise ValueError("Round2 Wind model overrides must explicitly declare the frozen shared-core dimensions.")
-    if any(model_values[name] != expected for name, expected in required.items()):
+    mode_key = "query_edge_geometry_mode"
+    allowed = set(required) | {mode_key}
+    if set(model_values) - allowed:
+        raise ValueError(f"Unsupported Round2 Wind model overrides: {sorted(set(model_values) - allowed)}")
+    if set(model_values) not in (set(required), set(required) | {mode_key}):
+        raise ValueError("Round2 Wind model overrides must explicitly declare every frozen shared-core dimension.")
+    if any(type(model_values[name]) is not type(expected) or model_values[name] != expected
+           for name, expected in required.items()):
         raise ValueError("Round2 Wind model overrides differ from the frozen width-128, four-head core contract.")
+    if mode_key in model_values:
+        if type(model_values[mode_key]) is not str or model_values[mode_key] != "typed_w_centroids_v1":
+            raise ValueError("Round2 Wind supports only query_edge_geometry_mode='typed_w_centroids_v1'.")
+        if architecture != "A2-H6":
+            raise ValueError("Round2 Wind typed centroid geometry is available only for A2-H6.")
     value["model"] = dict(model_values)
     return value, architecture, microbatch
+
+
+def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapping[str, Any]) -> None:
+    """Bind the optional Wind R1 recipe flag to the actual core identity."""
+    if recipe.get("schema") != "content_hypergraph_recipe_v2" or recipe.get("dataset") != "wind":
+        raise ValueError("Wind v2 core binding requires an explicit Round2 Wind recipe.")
+    model_recipe = recipe.get("model")
+    if not isinstance(model_recipe, Mapping):
+        raise TypeError("Round2 Wind model recipe must be a mapping.")
+    expected_mode = model_recipe.get("query_edge_geometry_mode")
+    expected_config = {
+        "schema": "content_hypergraph_core_v2",
+        "module_input_dim": 2,
+        "environment_input_dim": 7,
+        "coordinate_dim": 3,
+        "query_input_dim": 7,
+        "operating_input_dim": 11,
+        "output_dim": 3,
+        "architecture": recipe.get("architecture"),
+        "context_dim": 128,
+        "num_heads": 4,
+        "context_depth": 2,
+        "num_hyperedges": 6 if recipe.get("architecture") == "A2-H6" else 0,
+        "thermal_response_rank": 0,
+        "local_hidden_dim": 128,
+        "dropout": 0.0,
+        "init_seed": recipe.get("seed"),
+    }
+    expected_keys = set(expected_config)
+    if expected_mode is not None:
+        expected_config["query_edge_geometry_mode"] = expected_mode
+        expected_keys.add("query_edge_geometry_mode")
+    if set(model_config) != expected_keys:
+        raise ValueError("Round2 Wind core configuration contains missing or unsupported fields.")
+    if any(
+        type(model_config[name]) is not type(expected) or model_config[name] != expected
+        for name, expected in expected_config.items()
+    ):
+        raise ValueError("Round2 Wind core dimensions, outputs, or seed differ from the sealed recipe contract.")
+    if expected_mode is None:
+        if "query_edge_geometry_mode" in model_config:
+            raise ValueError("Default Round2 Wind recipes must retain the exact absent centroid-mode config key.")
+    elif (
+        recipe.get("architecture") != "A2-H6"
+        or expected_mode != "typed_w_centroids_v1"
+        or model_config.get("query_edge_geometry_mode") != expected_mode
+    ):
+        raise ValueError("Round2 Wind recipe and core typed centroid mode do not match the supported A2-H6 R1 contract.")
 
 
 class WindContentHypergraphTaskV2(WindContentHypergraphTask):
@@ -1124,10 +1198,7 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
             raise TypeError("Round2 Wind provider requires WindContentHypergraphAdapterV3.")
         if not isinstance(model, ContentHypergraphCoreV2):
             raise TypeError("Round2 Wind provider requires ContentHypergraphCoreV2.")
-        if model.get_config().get("schema") != "content_hypergraph_core_v2":
-            raise ValueError("Round2 Wind provider requires the explicit content_hypergraph_core_v2 config schema.")
-        if model.get_config().get("architecture") != recipe.get("architecture"):
-            raise ValueError("Round2 Wind recipe architecture and model architecture differ.")
+        _validate_wind_v2_core_binding(recipe, model.get_config())
         super().__init__(view, model=model, adapter=adapter, recipe=recipe, **kwargs)
 
     def identity_payload(self) -> Mapping[str, Any]:
@@ -1182,10 +1253,9 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
         if not isinstance(model, ContentHypergraphCoreV2):
             raise TypeError("Round2 Wind provider requires ContentHypergraphCoreV2; v1 cores are not accepted.")
         config = model.get_config()
+        _validate_wind_v2_core_binding(self.recipe, config)
         if config.get("architecture") != execution_mode:
             raise ValueError("Round2 Wind execution arm differs from the core's sealed architecture identity.")
-        if config.get("schema") != "content_hypergraph_core_v2":
-            raise ValueError("Round2 Wind provider requires the explicit content_hypergraph_core_v2 schema.")
         query = self.adapter.make_query_batch(scene, receivers)
         organization = model.prepare(scene, trace_request=trace_request)
         output = model.decode(organization, query)
@@ -1406,6 +1476,8 @@ def _build_wind_content_task(
         "dropout": 0.0,
         "init_seed": seed,
     }
+    if "query_edge_geometry_mode" in model_values:
+        model_config["query_edge_geometry_mode"] = model_values["query_edge_geometry_mode"]
     expected_model = {
         "context_dim": 128,
         "num_heads": 4,

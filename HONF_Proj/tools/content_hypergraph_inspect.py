@@ -88,6 +88,11 @@ def _save_scene_and_organization(arrays: dict[str, np.ndarray], scene: Any, orga
                      "environment_states", "scene_summary", "first_content", "mixed_content", "second_content",
                      "module_gather_weights", "environment_gather_weights", "edge_anchors", "edge_scales"):
             _put_array(arrays, f"organization__{name}", getattr(organization, name))
+        for name in ("module_content_centroids", "environment_content_centroids",
+                     "module_content_valid", "environment_content_valid"):
+            value = getattr(organization, name, None)
+            if value is not None:
+                _put_array(arrays, f"organization__{name}", value)
         for name, value in (organization.trace or {}).items():
             if torch.is_tensor(value):
                 _put_array(arrays, f"organization_trace__{name}", value)

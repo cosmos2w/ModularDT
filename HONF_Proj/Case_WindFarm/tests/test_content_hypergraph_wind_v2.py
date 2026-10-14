@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
 
 from windfarm.content_hypergraph import (
     WIND_CONTENT_COORDINATE_FRAME,
@@ -24,7 +25,6 @@ from windfarm.training.content_hypergraph_task import (
     WindContentHypergraphTaskV2,
     _validate_recipe_v2,
 )
-from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 import wind_native_reference_evaluate as native_evaluator
@@ -206,12 +206,12 @@ def test_v2_provider_dispatches_to_versioned_core_with_bounded_prepare_trace():
             "operating_input_dim": 11,
             "output_dim": 3,
             "architecture": "A2-H6",
-            "context_dim": 16,
+            "context_dim": 128,
             "num_heads": 4,
-            "context_depth": 1,
+            "context_depth": 2,
             "num_hyperedges": 6,
             "thermal_response_rank": 0,
-            "local_hidden_dim": 16,
+            "local_hidden_dim": 128,
             "dropout": 0.0,
             "init_seed": 42,
         }
@@ -219,7 +219,22 @@ def test_v2_provider_dispatches_to_versioned_core_with_bounded_prepare_trace():
     # Exercise prediction dispatch without opening a dataset or reading targets.
     provider = object.__new__(WindContentHypergraphTaskV2)
     provider.adapter = adapter
-    request = {"include": ["module_states"], "max_elements": 64}
+    provider.recipe = {
+        "schema": "content_hypergraph_recipe_v2",
+        "dataset": "wind",
+        "architecture": "A2-H6",
+        "seed": 42,
+        "model": {
+            "context_dim": 128,
+            "num_heads": 4,
+            "context_depth": 2,
+            "num_hyperedges": 6,
+            "thermal_response_rank": 0,
+            "local_hidden_dim": 128,
+            "dropout": 0.0,
+        },
+    }
+    request = {"include": ["module_states"], "max_elements": 512}
 
     predictions, auxiliary = provider.predict_native(
         model, scene, receivers, execution_mode="A2-H6", trace_request=request
@@ -228,7 +243,7 @@ def test_v2_provider_dispatches_to_versioned_core_with_bounded_prepare_trace():
     assert predictions.main_mps.shape == (1, 2, 3)
     assert torch.isfinite(predictions.main_mps).all()
     assert auxiliary["prepared_hyperedge_count"] == 6
-    assert auxiliary["organization"].trace["module_states"].shape == (1, 2, 16)
+    assert auxiliary["organization"].trace["module_states"].shape == (1, 2, 128)
     assert auxiliary["trace_request"] == request
     with pytest.raises(ValueError, match="max_elements"):
         provider.predict_native(
@@ -238,6 +253,96 @@ def test_v2_provider_dispatches_to_versioned_core_with_bounded_prepare_trace():
             execution_mode="A2-H6",
             trace_request={"include": ["module_states"], "max_elements": 1},
         )
+
+
+def test_typed_h6_native_prediction_preserves_law_roundtrip_and_rejects_provider_mode_mismatch():
+    normalizer, profile = _transforms()
+    adapter = WindContentHypergraphAdapterV3(normalizer, profile)
+    inputs = _scene_inputs()
+    scene = adapter.make_scene_batch((inputs,))
+    coordinates = np.asarray([[[0.0, 0.0, 0.5], [2.0, 1.0, 1.5]]], dtype=np.float32)
+    support = SimpleNamespace(
+        lower_D=inputs.support_lower_D,
+        upper_D=inputs.support_upper_D,
+        extent_D=inputs.support_extent_D,
+    )
+    receivers = WindContentReceivers(
+        coordinates_D=coordinates,
+        features=adapter.query_features(coordinates[0], support)[None],
+        flat_indices=np.asarray([[5, 6]], dtype=np.int64),
+        role_ids=np.asarray([[0, 1]], dtype=np.int8),
+        scene_keys=scene.scene_key,
+        local_batch_indices=np.asarray([0, 0], dtype=np.int64),
+        local_query_indices=np.asarray([0, 1], dtype=np.int64),
+        local_module_indices=np.asarray([0, 1], dtype=np.int64),
+    )
+    model_config = {
+        "schema": "content_hypergraph_core_v2",
+        "module_input_dim": 2,
+        "environment_input_dim": 7,
+        "coordinate_dim": 3,
+        "query_input_dim": 7,
+        "operating_input_dim": 11,
+        "output_dim": 3,
+        "architecture": "A2-H6",
+        "context_dim": 128,
+        "num_heads": 4,
+        "context_depth": 2,
+        "num_hyperedges": 6,
+        "thermal_response_rank": 0,
+        "local_hidden_dim": 128,
+        "dropout": 0.0,
+        "init_seed": 42,
+        "query_edge_geometry_mode": "typed_w_centroids_v1",
+    }
+    model = ContentHypergraphCoreV2.from_config(model_config).eval()
+    recipe = {
+        "schema": "content_hypergraph_recipe_v2",
+        "dataset": "wind",
+        "architecture": "A2-H6",
+        "seed": 42,
+        "model": {
+            "context_dim": 128,
+            "num_heads": 4,
+            "context_depth": 2,
+            "num_hyperedges": 6,
+            "thermal_response_rank": 0,
+            "local_hidden_dim": 128,
+            "dropout": 0.0,
+            "query_edge_geometry_mode": "typed_w_centroids_v1",
+        },
+    }
+    provider = object.__new__(WindContentHypergraphTaskV2)
+    provider.adapter = adapter
+    provider.recipe = recipe
+
+    query = adapter.make_query_batch(scene, receivers)
+    with torch.no_grad():
+        organization = model.prepare(scene)
+        decoded = model.decode(organization, query)
+        expected_physical = adapter.physical_velocity(decoded.nonlinear_field, query.coordinates)[0]
+        predictions, _ = provider.predict_native(model, scene, receivers, execution_mode="A2-H6")
+    torch.testing.assert_close(predictions.main_mps, expected_physical, atol=1e-6, rtol=1e-6)
+
+    restored_adapter = WindContentHypergraphAdapterV3.from_state_payload(adapter.state_payload())
+    assert restored_adapter.state_payload() == adapter.state_payload()
+    restored_model = ContentHypergraphCoreV2.from_config(model.get_config())
+    restored_model.load_state_dict(model.state_dict(), strict=True)
+    assert restored_model.get_config() == model.get_config()
+    assert all(torch.equal(value, restored_model.state_dict()[name]) for name, value in model.state_dict().items())
+
+    default_model_config = dict(model_config)
+    default_model_config.pop("query_edge_geometry_mode")
+    default_model = ContentHypergraphCoreV2.from_config(default_model_config)
+    with pytest.raises(ValueError, match="missing or unsupported fields"):
+        provider.predict_native(default_model, scene, receivers, execution_mode="A2-H6")
+
+    default_recipe = dict(recipe)
+    default_recipe["model"] = dict(recipe["model"])
+    default_recipe["model"].pop("query_edge_geometry_mode")
+    provider.recipe = default_recipe
+    with pytest.raises(ValueError, match="missing or unsupported fields"):
+        provider.predict_native(model, scene, receivers, execution_mode="A2-H6")
 
 
 def test_v3_state_is_versioned_and_cannot_be_loaded_by_the_v1_adapter():

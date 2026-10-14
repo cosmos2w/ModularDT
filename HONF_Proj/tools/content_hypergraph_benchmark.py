@@ -303,21 +303,90 @@ def _arm_recipe(recipe: Mapping[str, Any], architecture: str) -> dict[str, Any]:
 
 def comparison_recipes(
     ad: Mapping[str, Any], h6: Mapping[str, Any], *, thermal_reader128_revision: bool = False,
+    typed_centroid_revision: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Compare recipes; only an explicit Thermal width-revision cost is exempt."""
+    """Compare recipes, allowing only a separately named single-field revision."""
+    if thermal_reader128_revision and typed_centroid_revision:
+        raise ValueError("Thermal reader128 and typed-centroid R1 revisions are mutually exclusive.")
     normalized = [json.loads(json.dumps(dict(recipe))) for recipe in (ad, h6)]
     for recipe in normalized:
         recipe.pop("architecture", None)
     if thermal_reader128_revision:
         if (
-            ad.get("dataset") != "thermal" or h6.get("dataset") != "thermal"
+            ad.get("schema") != "content_hypergraph_recipe_v1"
+            or h6.get("schema") != "content_hypergraph_recipe_v1"
+            or ad.get("dataset") != "thermal" or h6.get("dataset") != "thermal"
             or ad.get("protocol") != "development" or h6.get("protocol") != "development"
             or ad.get("architecture") != "A-D" or h6.get("architecture") != "A-H6"
             or ad.get("model", {}).get("local_hidden_dim") != 64
             or h6.get("model", {}).get("local_hidden_dim") != 128
         ):
-            raise ValueError("Reader128 revision costs require Thermal development A-D64 versus A-H6-128.")
+            raise ValueError("Reader128 revision costs require Thermal v1 development A-D64 versus A-H6-128.")
         normalized[1]["model"]["local_hidden_dim"] = 64
+    if typed_centroid_revision:
+        dataset = ad.get("dataset")
+        if (
+            ad.get("schema") != "content_hypergraph_recipe_v2"
+            or h6.get("schema") != "content_hypergraph_recipe_v2"
+            or dataset not in ("thermal", "wind") or h6.get("dataset") != dataset
+            or ad.get("protocol") != "development" or h6.get("protocol") != "development"
+            or ad.get("architecture") != "A2-D" or h6.get("architecture") != "A2-H6"
+        ):
+            raise ValueError(
+                "Typed-centroid R1 requires a same-dataset Thermal or Wind development A2-D/A2-H6 v2 pair."
+            )
+        validate_recipe(dict(ad))
+        validate_recipe(dict(h6))
+        ad_model, h6_model = ad.get("model"), h6.get("model")
+        if not isinstance(ad_model, Mapping) or not isinstance(h6_model, Mapping):
+            raise ValueError("Typed-centroid R1 requires explicit model mappings on both recipes.")
+        if any("loss" in str(name).lower() or str(name).lower() == "objective"
+               for recipe in (ad, h6) for name in recipe):
+            raise ValueError("Typed-centroid R1 cannot change provider-owned losses or objectives.")
+        if "query_edge_geometry_mode" in ad_model:
+            raise ValueError("The A2-D comparator must retain its default absent centroid-mode key.")
+        if h6_model.get("query_edge_geometry_mode") != "typed_w_centroids_v1":
+            raise ValueError("The A2-H6 checkpoint must bind typed_w_centroids_v1 explicitly.")
+        if dataset == "wind":
+            from windfarm.training.content_hypergraph_task import _validate_recipe_v2
+
+            _validate_recipe_v2(ad)
+            _validate_recipe_v2(h6)
+        else:
+            thermal_model_fields = {
+                "module_input_dim": 8,
+                "environment_input_dim": 8,
+                "coordinate_dim": 2,
+                "query_input_dim": 0,
+                "operating_input_dim": 14,
+                "output_dim": 3,
+                "context_dim": 128,
+                "num_heads": 4,
+                "context_depth": 2,
+                "num_hyperedges": 6,
+                "thermal_response_rank": 4,
+                "local_hidden_dim": 128,
+                "dropout": 0.0,
+                "init_seed": 0,
+            }
+            expected_ad_model = thermal_model_fields
+            expected_h6_model = {**thermal_model_fields, "query_edge_geometry_mode": "typed_w_centroids_v1"}
+            if dict(ad_model) != expected_ad_model or dict(h6_model) != expected_h6_model:
+                raise ValueError("Thermal typed-centroid R1 requires the sealed v2 dimensions and H6-only mode.")
+            if (
+                ad.get("model_family") != "honf_content_hypergraph"
+                or h6.get("model_family") != "honf_content_hypergraph"
+                or ad.get("adapter_schema") != "thermal_content_hypergraph_adapter_v2"
+                or h6.get("adapter_schema") != "thermal_content_hypergraph_adapter_v2"
+                or ad.get("optimizer") != {
+                    "name": "AdamW", "weight_decay": 1.0e-4, "bias_and_norm_weight_decay": 0.0,
+                }
+                or h6.get("optimizer") != {
+                    "name": "AdamW", "weight_decay": 1.0e-4, "bias_and_norm_weight_decay": 0.0,
+                }
+            ):
+                raise ValueError("Thermal typed-centroid R1 must retain the sealed v2 provider and optimizer bindings.")
+        normalized[1]["model"].pop("query_edge_geometry_mode", None)
     if normalized[0] != normalized[1]:
         raise ValueError("A-D and A-H6 recipes differ beyond their declared architecture arm/revision.")
     return normalized[0], normalized[1]
@@ -331,11 +400,12 @@ def load_arms(
     checkpoint_ad: Path | None,
     checkpoint_ah6: Path | None,
     thermal_reader128_revision: bool = False,
+    typed_centroid_revision: bool = False,
 ) -> tuple[dict[str, Arm], dict[str, Any], dict[str, Any]]:
     """Load and bind one same-dataset pair without touching checkpoint files."""
     if recipe_path is not None:
-        if thermal_reader128_revision:
-            raise ValueError("Reader128 revision costs require retained checkpoints, not fresh packing probes.")
+        if thermal_reader128_revision or typed_centroid_revision:
+            raise ValueError("Named architecture revisions require retained checkpoints, not fresh recipe probes.")
         if checkpoint_ad is not None or checkpoint_ah6 is not None:
             raise ValueError("Use either --recipe or the two checkpoint paths, not both.")
         base_recipe = validate_recipe(json.loads(recipe_path.read_text()))
@@ -375,13 +445,19 @@ def load_arms(
 
     direct, organized = architecture_pair(arms)
     ad, h6 = arms[direct], arms[organized]
-    comparison_recipes(ad.recipe, h6.recipe, thermal_reader128_revision=thermal_reader128_revision)
+    comparison_recipes(
+        ad.recipe, h6.recipe,
+        thermal_reader128_revision=thermal_reader128_revision,
+        typed_centroid_revision=typed_centroid_revision,
+    )
     ad_identity = dict(ad.provider.identity_payload())
     h6_identity = dict(h6.provider.identity_payload())
     bindings = [_provider_identity_without_arm(identity) for identity in (ad_identity, h6_identity)]
-    if thermal_reader128_revision and all("recipe" in binding for binding in bindings):
+    if (thermal_reader128_revision or typed_centroid_revision) and all("recipe" in binding for binding in bindings):
         for binding, recipe in zip(bindings, comparison_recipes(
-            ad.recipe, h6.recipe, thermal_reader128_revision=True,
+            ad.recipe, h6.recipe,
+            thermal_reader128_revision=thermal_reader128_revision,
+            typed_centroid_revision=typed_centroid_revision,
         ), strict=True):
             binding["recipe"] = recipe
     if bindings[0] != bindings[1]:
@@ -1354,6 +1430,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Optional target-free Q32768 stress after the three fixed-B8 native points.")
     parser.add_argument("--thermal-reader128-revision", action="store_true",
                         help="Explicit retained Thermal A-D64/A-H6-128 revision cost; not a matched decoder ablation.")
+    parser.add_argument("--typed-centroid-revision", action="store_true",
+                        help="Explicit retained Thermal or Wind A2-D/default versus A2-H6 typed-centroid R1 pair.")
     parser.add_argument("--training-packings", default="",
                         help="Optional comma-separated microbatch sizes; effective batch and Q stay fixed.")
     parser.add_argument("--training-epochs", type=int, default=5)
@@ -1376,8 +1454,20 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Training packings require positive --training-epochs and explicit update budget.")
     if packings and len(packings) > 3:
         parser.error("At most three microbatch packings may be tested in one invocation.")
-    if args.thermal_reader128_revision and (args.dataset != "thermal" or args.recipe is not None or packings):
+    if args.thermal_reader128_revision and args.typed_centroid_revision:
+        parser.error("Thermal reader128 and typed-centroid R1 revisions are mutually exclusive.")
+    if args.thermal_reader128_revision and (
+        args.dataset != "thermal" or args.recipe is not None or packings
+        or args.checkpoint_ad is None or args.checkpoint_ah6 is None
+    ):
         parser.error("Reader128 revision mode requires Thermal retained checkpoints and zero training packings.")
+    if args.typed_centroid_revision and (
+        args.dataset not in ("thermal", "wind") or args.recipe is not None or packings
+        or args.checkpoint_ad is None or args.checkpoint_ah6 is None
+    ):
+        parser.error(
+            "Typed-centroid R1 comparison requires Thermal or Wind retained checkpoints and zero training packings."
+        )
     if not packings and args.optimizer_update_budget != 0:
         parser.error("An optimizer update budget is meaningful only with --training-packings.")
     if args.output.exists():
@@ -1398,6 +1488,7 @@ def main(argv: list[str] | None = None) -> int:
             dataset=args.dataset, device=args.device, recipe_path=args.recipe,
             checkpoint_ad=args.checkpoint_ad, checkpoint_ah6=args.checkpoint_ah6,
             thermal_reader128_revision=args.thermal_reader128_revision,
+            typed_centroid_revision=args.typed_centroid_revision,
         )
         _device_sync(device)
         provider_setup_seconds = time.perf_counter() - provider_started
@@ -1457,7 +1548,12 @@ def main(argv: list[str] | None = None) -> int:
             "device": args.device,
             "cuda_visible_device_uuid": device_binding,
             "weight_source": "retained_checkpoint_pair" if args.recipe is None else "fresh_recipe_pair",
-            "comparison": "Thermal reader128 capacity revision" if args.thermal_reader128_revision else "matched decoder pair",
+            "comparison": (
+                "Thermal reader128 capacity revision" if args.thermal_reader128_revision
+                else "typed-centroid R1 model revision" if args.typed_centroid_revision
+                else "matched decoder pair"
+            ),
+            "typed_centroid_revision": args.typed_centroid_revision,
             "matched_reader_capacity": not args.thermal_reader128_revision,
             "recipe": arms[architecture_pair(arms)[0]].recipe,
             "checkpoint_sha256": initial_checkpoint_hashes,
