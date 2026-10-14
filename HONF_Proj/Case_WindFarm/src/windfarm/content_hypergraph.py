@@ -251,7 +251,7 @@ class WindContentHypergraphAdapter:
         self._profile_scalars = (self.background_profile.z_min_D, self.background_profile.z_max_D)
         self.device = torch.device(device)
         self._state_payload = {
-            "schema": "wind_content_hypergraph_adapter_v1",
+            "schema": "wind_content_hypergraph_adapter_v2",
             "coordinate_frame": WIND_CONTENT_COORDINATE_FRAME,
             "environment_token_shape": list(WIND_CONTENT_ENVIRONMENT_SHAPE),
             "module_features": ["rotor_radius_D", "hub_height_D"],
@@ -288,7 +288,12 @@ class WindContentHypergraphAdapter:
             ],
             "normalizer": normalizer.to_dict(),
             "background_profile": background_profile.to_dict(),
-            "physical_output": "TRAIN height profile plus inverse TRAIN residual transform, in m/s",
+            "physical_output": "TRAIN height profile m/s + normalized residual * safe_std * u_ref_mps",
+            "residual_transform": {
+                "kind": "native_profile_residual_scale_v1",
+                "centering": "TRAIN height profile only",
+                "absolute_velocity_mean_added": False,
+            },
             "wind_direction_handling": "native wind-aligned coordinates; direction remains prescribed operating input; no second rotation",
             "local_radius_D": WIND_CONTENT_LOCAL_RADIUS_D,
         }
@@ -330,7 +335,7 @@ class WindContentHypergraphAdapter:
         *,
         device: torch.device | str = "cpu",
     ) -> WindContentHypergraphAdapter:
-        if payload.get("schema") != "wind_content_hypergraph_adapter_v1":
+        if payload.get("schema") != "wind_content_hypergraph_adapter_v2":
             raise ValueError("Unsupported Wind content-hypergraph adapter state schema.")
         if payload.get("coordinate_frame") != WIND_CONTENT_COORDINATE_FRAME:
             raise ValueError("Wind adapter checkpoint uses a different native coordinate frame.")
@@ -553,11 +558,12 @@ class WindContentHypergraphAdapter:
         self._assert_transforms_unchanged()
         if normalized_residual.shape != (*coordinates_D.shape[:-1], 3):
             raise ValueError("Wind normalized residual and receiver coordinates must align as [B,Q,3].")
-        mean = torch.tensor(self.normalizer.mean, device=normalized_residual.device, dtype=normalized_residual.dtype)
         safe_std = torch.tensor(
             self.normalizer.safe_std, device=normalized_residual.device, dtype=normalized_residual.dtype
         )
-        residual_mps = (normalized_residual * safe_std + mean) * float(self.normalizer.u_ref_mps)
+        # The stored normalizer mean describes absolute velocity. Native Wind
+        # residuals are centered by the height profile and use only its scale.
+        residual_mps = normalized_residual * safe_std * float(self.normalizer.u_ref_mps)
         profile_mps = self.profile_at(coordinates_D)
         return profile_mps + residual_mps, profile_mps, residual_mps
 

@@ -239,10 +239,7 @@ def test_adapter_state_roundtrip_and_profile_residual_inverse_are_self_contained
     normalized = torch.tensor([[[0.5, -1.0, 0.25], [0.0, 0.0, 0.0]]], dtype=torch.float64)
     coords = torch.tensor([[[0.5, 0.0, 0.5], [0.0, 0.0, 3.0]]], dtype=torch.float64)
     physical, baseline, residual = restored.physical_velocity(normalized, coords)
-    expected_residual = (
-        normalized * torch.tensor(normalizer.safe_std, dtype=torch.float64)
-        + torch.tensor(normalizer.mean, dtype=torch.float64)
-    ) * normalizer.u_ref_mps
+    expected_residual = normalized * torch.tensor(normalizer.safe_std, dtype=torch.float64) * normalizer.u_ref_mps
     expected_profile = torch.tensor([[[3.0, 0.5, 1.5], [6.0, 2.0, 3.0]]], dtype=torch.float64)
     torch.testing.assert_close(residual, expected_residual)
     torch.testing.assert_close(baseline, expected_profile)
@@ -250,6 +247,32 @@ def test_adapter_state_roundtrip_and_profile_residual_inverse_are_self_contained
     coords.requires_grad_(True)
     restored.profile_at(coords).sum().backward()
     assert coords.grad is not None and torch.isfinite(coords.grad).all()
+
+
+def test_residual_output_matches_maintained_native_conversion_with_nonzero_absolute_mean():
+    from windfarm.joint_regional import WindFarmJointRegionalModel
+
+    normalizer, profile = _transforms()
+    adapter = WindContentHypergraphAdapter(normalizer, profile)
+    coords = torch.tensor([[[0.0, 1.0, 0.3], [1.0, 2.0, 1.1]]], dtype=torch.float64)
+    residual = torch.tensor([[[0.2, -0.8, 1.1], [0.0, 0.0, 0.0]]], dtype=torch.float64)
+    # Invoke the maintained native law without constructing a legacy model or
+    # loading learned state. Its absolute mean is deliberately nonzero.
+    oracle = SimpleNamespace(
+        velocity_transform=normalizer,
+        predict_standardized=lambda *args, **kwargs: residual,
+        profile_at_receivers=adapter.profile_at,
+    )
+    expected = WindFarmJointRegionalModel.predict_physical(oracle, None, coords)
+    actual, baseline, _ = adapter.physical_velocity(residual, coords)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    restored = WindFarmJointRegionalModel.normalize_residual(oracle, actual, coords)
+    torch.testing.assert_close(restored, residual, rtol=1e-13, atol=1e-13)
+    torch.testing.assert_close(actual[:, 1], baseline[:, 1], rtol=0, atol=0)
+    invalid_state = adapter.state_payload()
+    invalid_state["schema"] = "wind_content_hypergraph_adapter_v1"
+    with pytest.raises(ValueError, match="schema"):
+        WindContentHypergraphAdapter.from_state_payload(invalid_state)
 
 
 def test_bound_transform_arrays_reject_direct_and_forced_mutation():
