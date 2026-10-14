@@ -29,6 +29,11 @@ from honf_runtime.unified_training import (
     SelectionPolicy,
     TrainingEngine,
 )
+from honf_runtime.content_hypergraph_formal import (
+    FORMAL_PROTOCOL,
+    validate_formal_d_recipe,
+    validate_formal_d_stop,
+)
 
 SCHEMA = "content_hypergraph_recipe_v1"
 WORKFLOW = "content_hypergraph_joint_v1"
@@ -62,6 +67,8 @@ def loaded_source_binding() -> dict[str, Any]:
 def validate_recipe(value: dict[str, Any]) -> dict[str, Any]:
     """Keep this family's schema separate from sealed historical recipes."""
     recipe = dict(value)
+    if recipe.get("protocol") == FORMAL_PROTOCOL:
+        return validate_formal_d_recipe(recipe)
     version = {SCHEMA: 1, SCHEMA_V2: 2}.get(recipe.get("schema"))
     if version is None:
         raise ValueError(f"Expected {SCHEMA} or {SCHEMA_V2}.")
@@ -113,6 +120,9 @@ def validate_recipe(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_stop(recipe: dict[str, Any], stop_after: int) -> None:
+    if recipe["protocol"] == FORMAL_PROTOCOL:
+        validate_formal_d_stop(recipe, stop_after)
+        return
     maximum = 1000 if recipe["protocol"] == "full_train1000" else 2500
     if type(stop_after) is not int or stop_after < 1 or stop_after > maximum:
         raise ValueError(f"Execution stop must lie in 1..{maximum}; the schedule is not launch authorization.")
@@ -126,7 +136,14 @@ def build(recipe: dict[str, Any], *, device: str):
     torch.set_num_threads(int(os.getenv("OMP_NUM_THREADS", "4")))
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    if recipe["dataset"] == "thermal":
+    if recipe["protocol"] == FORMAL_PROTOCOL:
+        if recipe["dataset"] == "thermal":
+            from channelthermal.training.content_hypergraph_task_v2 import build_thermal_formal_content_task_v1
+            result = build_thermal_formal_content_task_v1(recipe, device=device)
+        else:
+            from windfarm.training.content_hypergraph_task import build_wind_formal_content_task_v1
+            result = build_wind_formal_content_task_v1(recipe, device=device)
+    elif recipe["dataset"] == "thermal":
         from channelthermal.training.content_hypergraph_task import build_thermal_content_hypergraph_task
         result = build_thermal_content_hypergraph_task(recipe, device=device)
     else:
@@ -141,6 +158,19 @@ def build(recipe: dict[str, Any], *, device: str):
 
 
 def engine_for(recipe: dict[str, Any], device: str) -> TrainingEngine:
+    if recipe["protocol"] == FORMAL_PROTOCOL:
+        policy = recipe["execution"]
+        config = EngineConfig(
+            seed=recipe["sampling_seed"], microbatch_cases=recipe["microbatch_size"],
+            effective_cases=recipe["effective_batch_size"], total_epochs=recipe["total_epochs"],
+            monitor_every=policy["monitor_every"],
+            checkpoint_epochs=tuple(policy["checkpoint_epochs"]),
+            latest_every=policy["latest_every"], curve_every=policy["curve_every"],
+            gradient_clip=1.0, sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+            training_mode="joint",
+        )
+        return TrainingEngine(config, device=device,
+                              selection=SelectionPolicy(field_metric=policy["field_metric"]))
     maximum = 1000 if recipe["protocol"] == "full_train1000" else 2500
     config = EngineConfig(
         seed=recipe["seed"], microbatch_cases=recipe["microbatch_size"],
@@ -209,8 +239,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.resume is None:
             raise ValueError("A numerical pooling amendment requires --resume.")
         numerical_pooling_amendment = load_numerical_pooling_amendment(args.numerical_pooling_amendment)
-    if args.resume is None and recipe["dataset"] == "wind" and recipe.get("optimizer_bias_norm_exclusion") is not True:
+    if (recipe["protocol"] != FORMAL_PROTOCOL and args.resume is None
+            and recipe["dataset"] == "wind" and recipe.get("optimizer_bias_norm_exclusion") is not True):
         raise ValueError("Fresh Wind recipes must explicitly enable optimizer_bias_norm_exclusion.")
+    if recipe["protocol"] == FORMAL_PROTOCOL:
+        if args.qualification is not None or args.numerical_pooling_amendment is not None:
+            raise ValueError("Formal D authorization is separate from H6 qualification and pooling repairs.")
+        if not args.dry_run:
+            if args.output is None:
+                raise ValueError("A formal D run requires a distinct output directory.")
+            if args.resume is None:
+                if args.output.exists() and any(args.output.iterdir()):
+                    raise ValueError("Fresh formal D initialization requires an empty new run directory.")
+            else:
+                from honf_runtime.run_layout import resolve_checkpoint
+                if resolve_checkpoint(args.output, args.resume) != resolve_checkpoint(args.output, "latest"):
+                    raise ValueError("Formal D can resume only this run's current latest state.")
     if args.dry_run and args.device != "cpu":
         raise ValueError("Dry-run must be CUDA-hidden CPU preparation.")
     if not args.dry_run:
@@ -253,6 +297,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     if recipe["schema"] == SCHEMA_V2:
         identity["round2_plan_sha256"] = "4138ca37dbf51fe9a28368e27a51b1e1d7fcc5f31ff327075f9d3e18d4b4234f"
+    if recipe["protocol"] == FORMAL_PROTOCOL:
+        identity["formal_d_authorization"] = {
+            "scope": "fresh full-TRAIN A2-D, independent of the H6 full1000 protocol",
+            "dataset": recipe["dataset"], "approved_stop_after": recipe["approved_stop_after"],
+            "initialization": "fresh model weights and empty AdamW state; exact same-run latest resume only",
+        }
     if qualification is not None:
         identity["full1000_qualification"] = qualification
     summary = {"recipe": recipe, "provider": dict(provider.identity_payload()),

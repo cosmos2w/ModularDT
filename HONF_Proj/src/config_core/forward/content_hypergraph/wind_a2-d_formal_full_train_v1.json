@@ -1,0 +1,55 @@
+{
+  "schema": "content_hypergraph_recipe_v2",
+  "dataset": "wind",
+  "architecture": "A2-D",
+  "protocol": "formal_d_full_train_v1",
+  "seed": 0,
+  "sampling_seed": 42,
+  "primary_queries": 8192,
+  "volume_queries": 6144,
+  "hub_band_queries": 2048,
+  "validation_volume_queries": 8192,
+  "validation_hub_band_queries": 2048,
+  "effective_batch_size": 16,
+  "microbatch_size": 8,
+  "total_epochs": 2500,
+  "approved_stop_after": 2500,
+  "precision": "fp32",
+  "edge_access": "full",
+  "sampling_version": "case_epoch_v1",
+  "optimizer_bias_norm_exclusion": false,
+  "optimizer": {
+    "name": "AdamW",
+    "lr": 0.0003,
+    "weight_decay": 0.00001,
+    "bias_and_norm_weight_decay": 0.00001,
+    "betas": [0.9, 0.999],
+    "eps": 0.00000001
+  },
+  "objective": {
+    "volume_sampling_fraction": 0.75,
+    "volume_loss_weight": 0.75,
+    "hub_band_loss_weight": 0.25,
+    "validation_volume_loss_weight": 0.8,
+    "validation_hub_band_loss_weight": 0.2,
+    "channel_weights": [1.0, 1.0, 1.0],
+    "sampler": "native_uniform_with_replacement_volume_and_hub_band_v1"
+  },
+  "execution": {
+    "monitor_every": 5,
+    "latest_every": 5,
+    "curve_every": 100,
+    "checkpoint_epochs": [100, 500, 1000, 1500, 2000, 2500],
+    "field_metric": "val_volume_mse"
+  },
+  "model": {
+    "context_dim": 128,
+    "num_heads": 4,
+    "context_depth": 2,
+    "num_hyperedges": 6,
+    "thermal_response_rank": 0,
+    "local_hidden_dim": 128,
+    "dropout": 0.0
+  },
+  "catalogue_cache_ram_bytes": 137438953472
+}

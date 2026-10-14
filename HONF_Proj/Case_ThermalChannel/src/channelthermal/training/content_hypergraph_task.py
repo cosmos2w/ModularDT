@@ -272,7 +272,7 @@ class ThermalContentHypergraphTask:
         expected = (150, 22, 2500) if self.protocol == "development" else (600, 89, 5000)
         if (len(self.training_cases), len(self.validation_cases), self.total_epochs) != expected:
             raise ValueError("Thermal provider membership/horizon differs from the declared protocol.")
-        if self.protocol not in ("development", "full_train1000"):
+        if self.protocol not in ("development", "full_train1000", "formal_d_full_train_v1"):
             raise ValueError("Unsupported Thermal content-hypergraph protocol.")
         if tuple(str(item["family_id"]) for item in self.train_families) != TRAIN_RESPONSE_IDS:
             raise ValueError("Response auxiliary must use the ordered original-TRAIN family inventory.")

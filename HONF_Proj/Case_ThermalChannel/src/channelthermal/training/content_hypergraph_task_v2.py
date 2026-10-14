@@ -10,6 +10,9 @@ from typing import Any
 import torch
 from torch import nn
 
+from honf_runtime.content_hypergraph_formal import FORMAL_PROTOCOL, validate_formal_d_recipe
+from honf_runtime.unified_training import OptimizerGroupSpec, ScheduleSpec
+
 from ..content_hypergraph import (
     THERMAL_CONTENT_COORDINATE_FRAME_V2,
     THERMAL_CONTENT_GEOMETRY_CONTRACT_V2,
@@ -191,17 +194,89 @@ class ThermalContentHypergraphTaskV2(ThermalContentHypergraphTask):
         return groups
 
 
+class ThermalFormalContentHypergraphTaskV1(ThermalContentHypergraphTaskV2):
+    """Full-TRAIN A2-D provider with the historical constant AdamW schedule."""
+
+    def optimizer_groups(self, model: nn.Module, arm: str, stage: str):
+        del stage
+        if model is not self.model or arm != "A2-D" or model.architecture != "A2-D":
+            raise ValueError("Thermal formal optimizer requires its bound A2-D model.")
+        names = tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
+        if not names:
+            raise ValueError("Thermal formal A2-D has no trainable parameters.")
+        schedule = ScheduleSpec(
+            peak_lr=3.0e-4,
+            warmup_start_lr=3.0e-4,
+            warmup_epochs=0,
+            hold_through_epoch=4999,
+            total_epochs=5000,
+            final_lr=3.0e-4,
+        )
+        return (OptimizerGroupSpec("formal_joint", names, schedule, weight_decay=1.0e-5),)
+
+    def identity_payload(self) -> Mapping[str, Any]:
+        payload = dict(super().identity_payload())
+        training = dict(payload["training"])
+        training.update({
+            "optimizer_schedule": {
+                "kind": "constant",
+                "learning_rate": 3.0e-4,
+                "total_epochs": 5000,
+                "historical_anchor": "Run_1804_and_Run_1404_saved_epoch_0500_and_epoch_5000_AdamW_state",
+            },
+            "weight_decay": 1.0e-5,
+            "bias_and_norm_weight_decay": 1.0e-5,
+            "bias_and_norm_decay_exclusion": False,
+        })
+        payload["training"] = training
+        objective = dict(payload["objective"])
+        objective["historical_objective_compatibility"] = {
+            "compatible": False,
+            "reason": (
+                "A2-D exposes native flow, affine temperature, heat-null flow, and q-proxy/response laws; "
+                "the historical models' port/interface heads have no compatible A2-D output heads."
+            ),
+            "formal_objective": "current equal-case native flow-temperature-flux and TRAIN response objective",
+        }
+        payload["objective"] = objective
+        payload["formal_contract"] = {
+            "protocol": FORMAL_PROTOCOL,
+            "horizon_epochs": 5000,
+            "approved_stop_after": 5000,
+            "normalization_scope": "all_original_TRAIN600_only",
+            "validation_scope": "canonical89_exposed_original_test_excluding_0273",
+        }
+        return payload
+
+    def preparation_summary(self) -> Mapping[str, Any]:
+        return {
+            **dict(super().preparation_summary()),
+            "protocol": FORMAL_PROTOCOL,
+            "optimizer": "AdamW",
+            "learning_rate_schedule": "constant_3e-4_through_epoch_5000",
+            "weight_decay": 1.0e-5,
+            "bias_and_norm_weight_decay": 1.0e-5,
+            "optimizer_bias_norm_exclusion": False,
+            "historical_port_interface_objective_compatible": False,
+        }
+
+
 def build_thermal_content_hypergraph_task_v2(
     recipe: Mapping[str, Any],
     *,
     device: torch.device | str = "cpu",
 ) -> tuple[ThermalContentHypergraphAdapterV2, ThermalContentHypergraphTaskV2, Mapping[str, Any]]:
-    """Build A2-D/A2-H6 using the original fixed25 data and response protocol."""
+    """Build Thermal A2-D/A2-H6 for fixed25, the H6 follow-up, or formal A2-D."""
     if not isinstance(recipe, Mapping) or recipe.get("schema") != THERMAL_CONTENT_RECIPE_V2_SCHEMA:
         raise ValueError("Thermal v2 builder requires schema=content_hypergraph_recipe_v2.")
+    formal = recipe.get("protocol") == FORMAL_PROTOCOL
+    if formal:
+        recipe = validate_formal_d_recipe(recipe)
+        if recipe.get("dataset") != "thermal":
+            raise ValueError("Thermal formal builder requires dataset=thermal.")
     protocol = str(recipe.get("protocol", ""))
-    if protocol not in ("development", "full_train1000"):
-        raise ValueError("Thermal v2 protocol must be development or full_train1000.")
+    if protocol not in ("development", "full_train1000", FORMAL_PROTOCOL):
+        raise ValueError("Thermal v2 protocol must be development, full_train1000, or formal_d_full_train_v1.")
     architecture = str(recipe.get("architecture", "")).upper()
     if architecture not in ("A2-D", "A2-H6"):
         raise ValueError("Thermal v2 architecture must be A2-D or A2-H6.")
@@ -211,7 +286,10 @@ def build_thermal_content_hypergraph_task_v2(
         raise ValueError("Thermal v2 recipe must retain model_family=honf_content_hypergraph.")
     if recipe.get("adapter_schema") != "thermal_content_hypergraph_adapter_v2":
         raise ValueError("Thermal v2 recipe must select the versioned Thermal adapter explicitly.")
-    if recipe.get("optimizer_bias_norm_exclusion") is not True:
+    if formal:
+        if recipe.get("optimizer_bias_norm_exclusion") is not False:
+            raise ValueError("Thermal formal recipe must decay bias and normalization parameters.")
+    elif recipe.get("optimizer_bias_norm_exclusion") is not True:
         raise ValueError("Thermal v2 recipe must explicitly exclude bias and normalization weights from decay.")
     expected_epochs = 2500 if protocol == "development" else 5000
     if int(recipe.get("total_epochs", -1)) != expected_epochs:
@@ -228,16 +306,18 @@ def build_thermal_content_hypergraph_task_v2(
     if recipe.get("precision") != "fp32" or recipe.get("edge_access") != "full":
         raise ValueError("Thermal v2 requires FP32 and full edge access.")
     optimizer = recipe.get("optimizer")
-    if not isinstance(optimizer, Mapping) or dict(optimizer) != {
+    if not formal and (not isinstance(optimizer, Mapping) or dict(optimizer) != {
         "name": "AdamW",
         **_OPTIMIZER_FIELDS,
-    }:
+    }):
         raise ValueError("Thermal v2 requires explicit AdamW decay=1e-4 and bias/norm decay=0.")
     if protocol == "full_train1000" and (
         architecture != "A2-H6"
         or int(recipe.get("approved_stop_after", 0)) != 1000
     ):
         raise ValueError("Thermal v2 full_train1000 is A2-H6 with stop-after 1000.")
+    if formal and (architecture != "A2-D" or int(recipe.get("approved_stop_after", 0)) != 5000):
+        raise ValueError("Thermal formal protocol requires A2-D with approved_stop_after=5000.")
 
     model_fields = recipe.get("model")
     if not isinstance(model_fields, Mapping):
@@ -282,7 +362,7 @@ def build_thermal_content_hypergraph_task_v2(
         validation_ids = tuple(case_id for case_id in original_test_ids if case_id != "0273")
         followup_identity = validate_full_train_followup_membership(train_ids, validation_ids)
         followup_manifest = {
-            "execution_protocol": THERMAL_CONTENT_FULL_TRAIN_PROTOCOL,
+            "execution_protocol": FORMAL_PROTOCOL if formal else THERMAL_CONTENT_FULL_TRAIN_PROTOCOL,
             "dataset_protocol": THERMAL_CONTENT_FULL_TRAIN_DATASET,
             "base_manifest_sha256": base_manifest_sha256,
             "training_case_ids": list(train_ids),
@@ -292,11 +372,18 @@ def build_thermal_content_hypergraph_task_v2(
             "excluded_validation_id": "0273",
             "excluded_validation_reason": "historical duplicate in original90 validation; preserve canonical89",
         }
-        effective_manifest = {
-            **resolved_manifest,
-            "full_train_followup1000": followup_manifest,
-            "manifest_sha256": _stable_sha256(followup_manifest),
-        }
+        if formal:
+            effective_manifest = {
+                **resolved_manifest,
+                "formal_full_train_v1": followup_manifest,
+                "manifest_sha256": _stable_sha256(followup_manifest),
+            }
+        else:
+            effective_manifest = {
+                **resolved_manifest,
+                "full_train_followup1000": followup_manifest,
+                "manifest_sha256": _stable_sha256(followup_manifest),
+            }
 
     normalizer = fit_global_normalizer(data_path, train_ids)
     training_cases = _read_selected_cases(
@@ -341,7 +428,8 @@ def build_thermal_content_hypergraph_task_v2(
         "full_followup_membership": followup_identity,
         "original_test_targets_outside_declared_panel_read": False,
     }
-    provider = ThermalContentHypergraphTaskV2(
+    provider_type = ThermalFormalContentHypergraphTaskV1 if formal else ThermalContentHypergraphTaskV2
+    provider = provider_type(
         model=model,
         training_cases=training_cases,
         validation_cases=validation_cases,
@@ -368,7 +456,20 @@ def build_thermal_content_hypergraph_task_v2(
     return model, provider, preparation
 
 
+def build_thermal_formal_content_task_v1(
+    recipe: Mapping[str, Any],
+    *,
+    device: torch.device | str = "cpu",
+) -> tuple[ThermalContentHypergraphAdapterV2, ThermalFormalContentHypergraphTaskV1, Mapping[str, Any]]:
+    """Build the sealed fresh A2-D full-TRAIN formal profile."""
+    if not isinstance(recipe, Mapping) or recipe.get("protocol") != FORMAL_PROTOCOL:
+        raise ValueError(f"Thermal formal builder requires protocol={FORMAL_PROTOCOL}.")
+    return build_thermal_content_hypergraph_task_v2(recipe, device=device)
+
+
 __all__ = [
     "ThermalContentHypergraphTaskV2",
+    "ThermalFormalContentHypergraphTaskV1",
     "build_thermal_content_hypergraph_task_v2",
+    "build_thermal_formal_content_task_v1",
 ]

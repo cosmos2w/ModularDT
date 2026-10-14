@@ -155,6 +155,7 @@ class WindContentHypergraphTask:
         total_epochs: int,
         device: torch.device | str,
         catalogue_cache: NativeRoleCatalogueCache,
+        allow_formal_protocol: bool = False,
     ) -> None:
         self.view = view
         self.model = model
@@ -178,6 +179,7 @@ class WindContentHypergraphTask:
         self.max_microbatch_cases = int(microbatch_size)
         self.effective_batch_size = int(effective_batch_size)
         self.total_epochs = int(total_epochs)
+        self.allow_formal_protocol = bool(allow_formal_protocol)
         self.catalogue_cache = catalogue_cache
         self.sampling_version = SamplingKey.CASE_EPOCH_VERSION
         self.sampling_dataset_id = _runtime_sampling_dataset_id(
@@ -201,12 +203,20 @@ class WindContentHypergraphTask:
             raise ValueError("Wind development rows must retain canonical native order.")
         if set(map(int, self.train_rows)) & set(map(int, self.validation_rows)):
             raise ValueError("Wind TRAIN and exposed development row membership must be disjoint.")
-        if self.seed != 42:
-            raise ValueError("Wind content-hypergraph initialization and sampling are fixed at seed 42.")
-        if self.effective_batch_size != 24 or not 1 <= self.max_microbatch_cases <= 24:
-            raise ValueError("Wind content-hypergraph uses effective batch 24 and microbatches in [1,24].")
-        if self.total_epochs not in (2500, 5000):
-            raise ValueError("Wind content-hypergraph requires a 2500 development or 5000 full-follow-up horizon.")
+        if self.allow_formal_protocol:
+            if self.seed != 42:
+                raise ValueError("Formal Wind case/query sampling is fixed at sampling_seed=42.")
+            if self.effective_batch_size != 16 or not 1 <= self.max_microbatch_cases <= 8:
+                raise ValueError("Formal Wind A2-D requires effective batch 16 and microbatches in [1,8].")
+            if self.total_epochs != 2500:
+                raise ValueError("Formal Wind A2-D is fixed to its 2500-epoch horizon.")
+        else:
+            if self.seed != 42:
+                raise ValueError("Wind content-hypergraph initialization and sampling are fixed at seed 42.")
+            if self.effective_batch_size != 24 or not 1 <= self.max_microbatch_cases <= 24:
+                raise ValueError("Wind content-hypergraph uses effective batch 24 and microbatches in [1,24].")
+            if self.total_epochs not in (2500, 5000):
+                raise ValueError("Wind content-hypergraph requires a 2500 development or 5000 full-follow-up horizon.")
         if set(self.role_component_scales) != set(ROLE_NAMES) or any(
             value.shape != (3,) or not np.isfinite(value).all() or np.any(value <= 0.0)
             for value in self.role_component_scales.values()
@@ -738,6 +748,7 @@ class WindContentHypergraphTask:
         if chunk_size < 1 or chunk_size > 24:
             raise ValueError("Wind endpoint microbatch size must lie in [1,24].")
         is_validation = split == "validation"
+        query_count = int(getattr(self, "validation_query_count", self.primary_queries)) if is_validation else self.primary_queries
         for batch_index, start in enumerate(range(0, len(rows), chunk_size)):
             key = SamplingKey(
                 self.seed,
@@ -754,7 +765,7 @@ class WindContentHypergraphTask:
                 key,
                 validation=is_validation,
                 stream_validation=True,
-                query_count=8192,
+                query_count=query_count,
                 track_samples=False,
             )
 
@@ -1178,6 +1189,93 @@ def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapp
         raise ValueError("Round2 Wind recipe and core typed centroid mode do not match the supported A2-H6 R1 contract.")
 
 
+def _validate_formal_wind_a2d_recipe_v1(
+    recipe: Mapping[str, Any],
+) -> tuple[dict[str, Any], str, int]:
+    """Validate the separate historical-anchor full-TRAIN A2-D recipe."""
+    value = dict(recipe)
+    if value.get("schema") != "content_hypergraph_recipe_v2" or value.get("dataset") != "wind":
+        raise ValueError("Formal Wind requires content_hypergraph_recipe_v2 with dataset='wind'.")
+    if value.get("protocol") != "formal_d_full_train_v1" or value.get("architecture") != "A2-D":
+        raise ValueError("Formal Wind builder accepts only protocol formal_d_full_train_v1 and architecture A2-D.")
+    expected_fields = {
+        "seed": 0,
+        "sampling_seed": 42,
+        "primary_queries": 8192,
+        "volume_queries": 6144,
+        "hub_band_queries": 2048,
+        "validation_volume_queries": 8192,
+        "validation_hub_band_queries": 2048,
+        "effective_batch_size": 16,
+        "microbatch_size": 8,
+        "total_epochs": 2500,
+        "approved_stop_after": 2500,
+        "precision": "fp32",
+        "edge_access": "full",
+        "optimizer_bias_norm_exclusion": False,
+        "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
+        "catalogue_cache_ram_bytes": WIND_CONTENT_ROLE_CACHE_FULL_BYTES,
+    }
+    for name, expected in expected_fields.items():
+        actual = value.get(name)
+        if type(actual) is not type(expected) or actual != expected:
+            raise ValueError(f"Formal Wind recipe requires {name}={expected!r}.")
+    model = value.get("model")
+    expected_model = {
+        "context_dim": 128,
+        "num_heads": 4,
+        "context_depth": 2,
+        "num_hyperedges": 6,
+        "thermal_response_rank": 0,
+        "local_hidden_dim": 128,
+        "dropout": 0.0,
+    }
+    if not isinstance(model, Mapping) or dict(model) != expected_model:
+        raise ValueError("Formal Wind A2-D fixes the shared E64, width-128 core configuration.")
+    optimizer = value.get("optimizer")
+    expected_optimizer = {
+        "name": "AdamW",
+        "lr": 3.0e-4,
+        "weight_decay": 1.0e-5,
+        "bias_and_norm_weight_decay": 1.0e-5,
+        "betas": [0.9, 0.999],
+        "eps": 1.0e-8,
+    }
+    if not isinstance(optimizer, Mapping) or dict(optimizer) != expected_optimizer:
+        raise ValueError("Formal Wind optimizer must be one constant-LR AdamW group with 1e-5 decay on all weights.")
+    expected_execution = {
+        "monitor_every": 5,
+        "latest_every": 5,
+        "curve_every": 100,
+        "checkpoint_epochs": [100, 500, 1000, 1500, 2000, 2500],
+        "field_metric": "val_volume_mse",
+    }
+    execution = value.get("execution")
+    if not isinstance(execution, Mapping) or dict(execution) != expected_execution:
+        raise ValueError("Formal Wind execution monitoring/checkpointing differs from the approved field selector contract.")
+    expected_objective = {
+        "volume_sampling_fraction": 0.75,
+        "volume_loss_weight": 0.75,
+        "hub_band_loss_weight": 0.25,
+        "validation_volume_loss_weight": 0.8,
+        "validation_hub_band_loss_weight": 0.2,
+        "channel_weights": [1.0, 1.0, 1.0],
+        "sampler": "native_uniform_with_replacement_volume_and_hub_band_v1",
+    }
+    objective = value.get("objective")
+    if not isinstance(objective, Mapping) or dict(objective) != expected_objective:
+        raise ValueError("Formal Wind objective must retain the historical volume/hub-band sampling and weighting.")
+    allowed = {
+        *expected_fields,
+        "schema", "dataset", "architecture", "protocol", "model", "optimizer", "execution", "objective",
+        "data_root", "derived_root", "role_scale_cache_dir",
+    }
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported formal Wind recipe fields: {sorted(unknown)}")
+    return value, "A2-D", int(value["microbatch_size"])
+
+
 class WindContentHypergraphTaskV2(WindContentHypergraphTask):
     """Round2 provider with strict A2 dispatch and bounded core tracing."""
 
@@ -1188,18 +1286,28 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
         model: nn.Module,
         adapter: WindContentHypergraphAdapterV3,
         recipe: Mapping[str, Any],
+        _allow_formal_protocol: bool = False,
         **kwargs: Any,
     ) -> None:
         from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
 
         if recipe.get("schema") != "content_hypergraph_recipe_v2":
             raise ValueError("Round2 Wind provider requires a content_hypergraph_recipe_v2.")
+        if _allow_formal_protocol is not (recipe.get("protocol") == "formal_d_full_train_v1"):
+            raise ValueError("The formal Wind protocol is accepted only by WindFormalA2DTaskV1.")
         if not isinstance(adapter, WindContentHypergraphAdapterV3):
             raise TypeError("Round2 Wind provider requires WindContentHypergraphAdapterV3.")
         if not isinstance(model, ContentHypergraphCoreV2):
             raise TypeError("Round2 Wind provider requires ContentHypergraphCoreV2.")
         _validate_wind_v2_core_binding(recipe, model.get_config())
-        super().__init__(view, model=model, adapter=adapter, recipe=recipe, **kwargs)
+        super().__init__(
+            view,
+            model=model,
+            adapter=adapter,
+            recipe=recipe,
+            allow_formal_protocol=_allow_formal_protocol,
+            **kwargs,
+        )
 
     def identity_payload(self) -> Mapping[str, Any]:
         result = dict(super().identity_payload())
@@ -1304,6 +1412,485 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
         return counts
 
 
+class WindFormalA2DTaskV1(WindContentHypergraphTaskV2):
+    """Historical-anchor full-TRAIN objective for a fresh Round2 A2-D fit."""
+
+    LOSS_NAME = "formal_wind/native_velocity_mse"
+    VOLUME_ROLE_ID = 0
+    HUB_BAND_ROLE_ID = 1
+    VOLUME_QUERIES = 6144
+    HUB_BAND_QUERIES = 2048
+    VALIDATION_VOLUME_QUERIES = 8192
+    VALIDATION_HUB_BAND_QUERIES = 2048
+    VALIDATION_QUERY_COUNT = VALIDATION_VOLUME_QUERIES + VALIDATION_HUB_BAND_QUERIES
+    VOLUME_WEIGHT = 0.75
+    HUB_BAND_WEIGHT = 0.25
+    VALIDATION_VOLUME_WEIGHT = 0.8
+    VALIDATION_HUB_BAND_WEIGHT = 0.2
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, _allow_formal_protocol=True, **kwargs)
+        self.initialization_seed = int(self.recipe["seed"])
+        self.sampling_seed = int(self.recipe["sampling_seed"])
+        if self.initialization_seed != 0 or self.sampling_seed != self.seed:
+            raise ValueError("Formal Wind initialization and sampling seeds must remain separately bound.")
+        self.role_query_counts = {"volume": self.VOLUME_QUERIES, "hub_band": self.HUB_BAND_QUERIES}
+        self.validation_role_query_counts = {
+            "volume": self.VALIDATION_VOLUME_QUERIES,
+            "hub_band": self.VALIDATION_HUB_BAND_QUERIES,
+        }
+        self.validation_query_count = self.VALIDATION_QUERY_COUNT
+
+    def identity_payload(self) -> Mapping[str, Any]:
+        result = dict(super().identity_payload())
+        result["formal_protocol"] = "formal_d_full_train_v1"
+        result["test_row_indices_sha256"] = self.manifest["test_row_indices_sha256"]
+        result["objective"] = {
+            "name": "historical_volume_hub_band_standardized_mse",
+            "role_names": ["volume", "hub_band"],
+            "role_query_counts": dict(self.role_query_counts),
+            "validation_role_query_counts": dict(self.validation_role_query_counts),
+            "volume_weight": self.VOLUME_WEIGHT,
+            "hub_band_weight": self.HUB_BAND_WEIGHT,
+            "validation_volume_weight": self.VALIDATION_VOLUME_WEIGHT,
+            "validation_hub_band_weight": self.VALIDATION_HUB_BAND_WEIGHT,
+            "channel_weights": [1.0, 1.0, 1.0],
+            "formula": (
+                "training: mean over cases of 0.75*standardized volume MSE + 0.25*standardized hub-band MSE; "
+                "validation loss: 0.8*standardized volume MSE + 0.2*standardized hub-band MSE on fixed Q10240; "
+                "field selection: val_volume_mse on the first 8192 fixed validation volume draws"
+            ),
+            "selection_metric": (
+                "val_volume_mse: mean per-TRAIN-normalized native volume MSE over fixed VALID draws; "
+                "validation draws are Q10240=8192 volume + 2048 hub-band"
+            ),
+            "role_component_scales_mps_are_training_objective_inputs": False,
+            "target_partition_access": "TRAIN targets for optimization; fixed VALID targets for monitoring; TEST targets locked",
+            "sampling": "native volume and hub-band draws with replacement; SeedSequence(sampling_seed, epoch, row, stream_id 101/102)",
+        }
+        training = dict(result["training"])
+        training.update(
+            {
+                "initialization_seed": self.initialization_seed,
+                "sampling_seed": self.sampling_seed,
+                "effective_batch_size": 16,
+                "microbatch_size": 8,
+                "primary_queries_per_case": 8192,
+                "validation_queries_per_case": self.VALIDATION_QUERY_COUNT,
+                "total_epochs": 2500,
+                "optimizer": "AdamW",
+                "optimizer_schedule": asdict(self._schedule()),
+                "optimizer_weight_decay": 1.0e-5,
+                "bias_and_norm_weight_decay": 1.0e-5,
+                "optimizer_bias_norm_exclusion": False,
+                "optimizer_group_count": 1,
+                "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
+            }
+        )
+        result["training"] = training
+        result["native_role_catalogue_cache"]["roles"] = ["volume", "hub_band"]
+        result["native_role_catalogue_cache"]["usage"] = "not used by the historical two-region objective"
+        result["normalizer_and_background_source"] = {
+            **dict(result["normalizer_and_background_source"]),
+            "fit_rows": "all 420 original TRAIN rows only",
+            "fit_seed": self.sampling_seed,
+            "test_target_values_read": False,
+        }
+        return result
+
+    def preparation_summary(self) -> Mapping[str, Any]:
+        result = dict(super().preparation_summary())
+        result.update(
+            {
+                "formal_protocol": "formal_d_full_train_v1",
+                "initialization_seed": self.initialization_seed,
+                "sampling_seed": self.sampling_seed,
+                "role_query_counts": dict(self.role_query_counts),
+                "validation_role_query_counts": dict(self.validation_role_query_counts),
+                "validation_queries_per_case": self.VALIDATION_QUERY_COUNT,
+                "optimizer_updates_per_epoch": math.ceil(len(self.train_rows) / self.effective_batch_size),
+                "wind_test_target_values_read": False,
+            }
+        )
+        return result
+
+    def validation_batches(self) -> Iterable[TaskBatch]:
+        """Expose the historical fixed Q10240 selector panel, separate from train Q8192."""
+        return self.validation_batches_for(self.VALIDATION_QUERY_COUNT)
+
+    def _formal_rng(self, row: int, epoch: int, stream_id: int) -> np.random.Generator:
+        return np.random.default_rng(
+            np.random.SeedSequence((self.sampling_seed, int(epoch), int(row), int(stream_id)))
+        )
+
+    def _formal_query_hash(
+        self,
+        rows: Sequence[int],
+        volume_samples: Sequence[Any],
+        band_samples: Sequence[Any],
+        key: SamplingKey,
+        *,
+        validation: bool,
+    ) -> str:
+        if len(rows) != len(volume_samples) or len(rows) != len(band_samples):
+            raise ValueError("Formal Wind query receipt rows and region samples differ in length.")
+        epoch = 0 if validation else int(key.epoch)
+        payload = {
+            "protocol": "formal_d_full_train_v1",
+            "sampling_seed": self.sampling_seed,
+            "epoch": epoch,
+            "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
+            "dataset_id": key.dataset_id,
+            "region_query_counts": (
+                self.validation_role_query_counts if validation else self.role_query_counts
+            ),
+        }
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+        for row, volume, band in zip(rows, volume_samples, band_samples):
+            digest.update(int(row).to_bytes(8, "little", signed=False))
+            for role_id, sample in ((self.VOLUME_ROLE_ID, volume), (self.HUB_BAND_ROLE_ID, band)):
+                digest.update(bytes((role_id,)))
+                digest.update(np.ascontiguousarray(sample.flat_indices, dtype=np.int64).tobytes())
+                digest.update(np.ascontiguousarray(sample.coords_D, dtype=np.float32).tobytes())
+        return digest.hexdigest()
+
+    def _make_batch(
+        self,
+        rows: Sequence[int],
+        key: SamplingKey,
+        *,
+        validation: bool,
+        query_count: int,
+        stream_validation: bool | None = None,
+        track_samples: bool = True,
+    ) -> TaskBatch:
+        del stream_validation
+        expected_query_count = self.VALIDATION_QUERY_COUNT if validation else self.primary_queries
+        if query_count != expected_query_count:
+            if validation:
+                raise ValueError("Formal Wind validation batches use exactly Q10240=8192 volume + 2048 hub-band.")
+            raise ValueError("Formal Wind training batches use exactly Q8192=6144 volume + 2048 hub-band queries.")
+        if len(rows) == 0 or len(rows) > self.max_microbatch_cases:
+            raise ValueError("Formal Wind microbatch is empty or exceeds its declared case limit.")
+        row_ids = tuple(int(value) for value in rows)
+        if len(set(row_ids)) != len(row_ids):
+            raise ValueError("Formal Wind batches cannot repeat native rows.")
+        permitted = self._validation_row_set if validation else self._train_row_set
+        if any(row not in permitted for row in row_ids):
+            raise ValueError("Formal Wind batch contains a row outside its sealed TRAIN/VALID membership.")
+        expected_dataset_id = _runtime_sampling_dataset_id(self.identity_payload())
+        if (
+            key.sampling_version != SamplingKey.CASE_EPOCH_VERSION
+            or key.seed != self.sampling_seed
+            or key.dataset_id != expected_dataset_id
+        ):
+            raise ValueError("Formal Wind sampling key differs from its full-TRAIN case_epoch_v1 identity.")
+        sample_epoch = 0 if validation else int(key.epoch)
+        scenes: list[WindContentSceneInputs] = []
+        coordinates: list[np.ndarray] = []
+        features: list[np.ndarray] = []
+        flat_indices: list[np.ndarray] = []
+        role_ids: list[np.ndarray] = []
+        targets: list[np.ndarray] = []
+        local_batches: list[np.ndarray] = []
+        local_queries: list[np.ndarray] = []
+        local_modules: list[np.ndarray] = []
+        volume_samples: list[Any] = []
+        band_samples: list[Any] = []
+        metadata: list[Mapping[str, Any]] = []
+        for batch_index, row in enumerate(row_ids):
+            case = self.view.run(row)
+            scene_inputs = self.adapter.scene_inputs(case)
+            volume_queries = self.VALIDATION_VOLUME_QUERIES if validation else self.VOLUME_QUERIES
+            hub_band_queries = self.VALIDATION_HUB_BAND_QUERIES if validation else self.HUB_BAND_QUERIES
+            volume_sample = case.sample_queries(
+                volume_queries,
+                self._formal_rng(row, sample_epoch, 101),
+                mode="volume",
+            )
+            band_sample = case.sample_queries(
+                hub_band_queries,
+                self._formal_rng(row, sample_epoch, 102),
+                mode="hub_band",
+            )
+            query_coordinates = np.concatenate((volume_sample.coords_D, band_sample.coords_D), axis=0)
+            query_target = np.concatenate((volume_sample.velocity_mps, band_sample.velocity_mps), axis=0)
+            query_features = self.adapter.query_features(query_coordinates, case.support)
+            volume_role_ids = np.full(volume_queries, self.VOLUME_ROLE_ID, dtype=np.int8)
+            band_role_ids = np.full(hub_band_queries, self.HUB_BAND_ROLE_ID, dtype=np.int8)
+            query_role_ids = np.concatenate((volume_role_ids, band_role_ids))
+            local_query, local_module = self.adapter.packed_local_pair_indices(scene_inputs, query_coordinates)
+            scenes.append(scene_inputs)
+            coordinates.append(np.asarray(query_coordinates, dtype=np.float32))
+            features.append(np.asarray(query_features, dtype=np.float32))
+            flat_indices.append(
+                np.concatenate((volume_sample.flat_indices, band_sample.flat_indices)).astype(np.int64, copy=False)
+            )
+            role_ids.append(query_role_ids)
+            targets.append(np.asarray(query_target, dtype=np.float32))
+            local_batches.append(np.full(local_query.size, batch_index, dtype=np.int64))
+            local_queries.append(np.asarray(local_query, dtype=np.int64))
+            local_modules.append(np.asarray(local_module, dtype=np.int64))
+            volume_samples.append(volume_sample)
+            band_samples.append(band_sample)
+            metadata.append(
+                {
+                    "row_index": row,
+                    "case": scene_inputs.case_name,
+                    "layout_index": scene_inputs.layout_index,
+                    "wind_direction_deg": scene_inputs.wind_direction_deg,
+                    "n_turbines": int(np.count_nonzero(scene_inputs.module_present > 0.5)),
+                    "volume_query_count": volume_queries,
+                    "hub_band_query_count": hub_band_queries,
+                }
+            )
+        receivers = WindContentReceivers(
+            np.stack(coordinates),
+            np.stack(features),
+            np.stack(flat_indices),
+            np.stack(role_ids),
+            tuple(scene.scene_key for scene in scenes),
+            np.concatenate(local_batches),
+            np.concatenate(local_queries),
+            np.concatenate(local_modules),
+        )
+        target_batch = WindContentTargets(np.stack(targets), row_ids, tuple(metadata))
+        if track_samples:
+            if validation:
+                self.validation_samples += len(row_ids)
+            else:
+                self.training_samples += len(row_ids)
+        return TaskBatch(
+            scene_inputs=tuple(scenes),
+            receivers=receivers,
+            targets=target_batch,
+            auxiliary={
+                "role_names": ("volume", "hub_band"),
+                "role_query_counts": dict(
+                    self.validation_role_query_counts if validation else self.role_query_counts
+                ),
+                "query_sampling_sha256": self._formal_query_hash(
+                    row_ids,
+                    volume_samples,
+                    band_samples,
+                    key,
+                    validation=validation,
+                ),
+            },
+            case_keys=row_ids,
+        )
+
+    def loss_denominators(
+        self,
+        batches: Sequence[TaskBatch],
+        phase: str = "joint",
+        arm: str = "A2-D",
+    ) -> Mapping[str, float]:
+        del arm
+        if phase != "joint":
+            raise ValueError("Formal Wind A2-D uses one joint training objective.")
+        denominator = 0
+        for batch in batches:
+            role_ids = np.asarray(batch.receivers.role_ids)
+            if role_ids.shape != (len(batch.case_keys), 8192):
+                raise ValueError("Formal Wind role IDs must retain the complete [B,8192] native panel.")
+            expected = np.concatenate(
+                (
+                    np.zeros(self.VOLUME_QUERIES, dtype=np.int8),
+                    np.ones(self.HUB_BAND_QUERIES, dtype=np.int8),
+                )
+            )
+            if any(not np.array_equal(row, expected) for row in role_ids):
+                raise ValueError("Formal Wind native volume/hub-band partition changed its sealed order or counts.")
+            if not isinstance(batch.targets, WindContentTargets):
+                raise TypeError("Formal Wind loss requires native WindContentTargets.")
+            if tuple(batch.targets.row_indices) != tuple(int(value) for value in batch.case_keys):
+                raise ValueError("Formal Wind target rows differ from their microbatch case keys.")
+            denominator += len(batch.case_keys)
+        return {self.LOSS_NAME: float(denominator)}
+
+    def _formal_loss_terms(
+        self,
+        predictions: WindContentPredictions,
+        targets: WindContentTargets,
+        *,
+        validation: bool = False,
+    ) -> Mapping[str, LossTerm]:
+        target = torch.tensor(
+            targets.velocity_mps,
+            device=predictions.main_mps.device,
+            dtype=predictions.main_mps.dtype,
+        )
+        query_count = self.VALIDATION_QUERY_COUNT if validation else self.primary_queries
+        volume_queries = self.VALIDATION_VOLUME_QUERIES if validation else self.VOLUME_QUERIES
+        if target.shape != predictions.main_mps.shape or target.shape[1] != query_count:
+            raise ValueError(f"Formal Wind target panel must align with [B,{query_count},3] predictions.")
+        scale = torch.as_tensor(
+            np.array(self.adapter.normalizer.safe_std, copy=True) * self.adapter.normalizer.u_ref_mps,
+            device=predictions.main_mps.device,
+            dtype=predictions.main_mps.dtype,
+        )
+        error = (predictions.main_mps - target) / scale
+        squared = error.square()
+        volume_per_case = squared[:, :volume_queries].mean(dim=(1, 2))
+        band_per_case = squared[:, volume_queries:].mean(dim=(1, 2))
+        volume_weight = self.VALIDATION_VOLUME_WEIGHT if validation else self.VOLUME_WEIGHT
+        band_weight = self.VALIDATION_HUB_BAND_WEIGHT if validation else self.HUB_BAND_WEIGHT
+        per_case = volume_weight * volume_per_case + band_weight * band_per_case
+        return {self.LOSS_NAME: LossTerm(per_case.sum(), float(per_case.numel()), weight=1.0)}
+
+    def loss_terms(
+        self,
+        predictions: WindContentPredictions,
+        targets: WindContentTargets,
+        phase: str,
+        auxiliary_state: Any,
+    ) -> Mapping[str, LossTerm]:
+        del auxiliary_state
+        if phase != "joint":
+            raise ValueError("Formal Wind A2-D uses one joint training objective.")
+        return self._formal_loss_terms(predictions, targets)
+
+    def validation_loss_terms(
+        self,
+        predictions: WindContentPredictions,
+        targets: WindContentTargets,
+        auxiliary_state: Any,
+        *,
+        batch: TaskBatch,
+        arm: str,
+    ) -> Mapping[str, LossTerm]:
+        del auxiliary_state, batch, arm
+        return self._formal_loss_terms(predictions, targets, validation=True)
+
+    def loss_metadata(self) -> Mapping[str, Mapping[str, str]]:
+        return {
+            self.LOSS_NAME: {
+                "panel": "native_prediction",
+                "label": "standardized Wind velocity",
+                "unit": "dimensionless mean squared error",
+                "formula": (
+                    "TRAIN: equal-case 0.75 volume MSE + 0.25 hub-band MSE; "
+                    "VALID loss: 0.8 volume MSE + 0.2 hub-band MSE; "
+                    "field selector: volume MSE only; channels Ux/Uy/Uz equally weighted"
+                ),
+                "weight": "1.0",
+            }
+        }
+
+    def _schedule(self) -> ScheduleSpec:
+        optimizer = self.recipe["optimizer"]
+        learning_rate = float(optimizer["lr"])
+        return ScheduleSpec(
+            peak_lr=learning_rate,
+            warmup_start_lr=learning_rate,
+            warmup_epochs=0,
+            hold_through_epoch=2499,
+            total_epochs=2500,
+            final_lr=learning_rate,
+        )
+
+    def _weight_decay(self) -> float:
+        return float(self.recipe["optimizer"]["weight_decay"])
+
+    def optimizer_groups(
+        self,
+        model: nn.Module,
+        arm: str = "A2-D",
+        stage: str = "joint",
+    ) -> Sequence[OptimizerGroupSpec]:
+        del stage
+        if model is not self.model or arm != "A2-D" or model.get_config().get("architecture") != "A2-D":
+            raise ValueError("Formal Wind optimizer group is bound only to this A2-D model.")
+        optimizer = self.recipe["optimizer"]
+        if (
+            optimizer.get("name") != "AdamW"
+            or float(optimizer["weight_decay"]) != 1.0e-5
+            or float(optimizer["bias_and_norm_weight_decay"]) != 1.0e-5
+            or self.recipe.get("optimizer_bias_norm_exclusion") is not False
+        ):
+            raise ValueError("Formal Wind requires one AdamW group with 1e-5 decay on every trainable parameter.")
+        names = tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
+        if not names or names != tuple(name for name, _ in model.named_parameters()):
+            raise ValueError("Every formal Wind core parameter must train jointly from initialization.")
+        return (
+            OptimizerGroupSpec(
+                "wind_formal_adamw_all_parameters",
+                names,
+                self._schedule(),
+                weight_decay=float(optimizer["weight_decay"]),
+                betas=tuple(float(value) for value in optimizer["betas"]),
+                eps=float(optimizer["eps"]),
+            ),
+        )
+
+    def validation_metrics(
+        self,
+        predictions: WindContentPredictions,
+        targets: WindContentTargets,
+        auxiliary_state: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        del auxiliary_state
+        predicted = predictions.main_mps.detach().cpu().numpy().astype(np.float64, copy=False)
+        actual = np.asarray(targets.velocity_mps, dtype=np.float64)
+        expected_shape = (len(targets.row_indices), self.VALIDATION_QUERY_COUNT, 3)
+        if predicted.shape != expected_shape or actual.shape != expected_shape:
+            raise ValueError(
+                "Formal Wind validation metrics require the exact Q10240=8192 volume + 2048 hub-band panel."
+            )
+        scale = np.asarray(self.adapter.normalizer.safe_std, dtype=np.float64) * float(
+            self.adapter.normalizer.u_ref_mps
+        )
+        standardized_squared = np.square((predicted - actual) / scale.reshape(1, 1, 3))
+        rows: list[dict[str, Any]] = []
+        for index, metadata in enumerate(targets.case_metadata):
+            volume = standardized_squared[index, : self.VALIDATION_VOLUME_QUERIES]
+            band = standardized_squared[index, self.VALIDATION_VOLUME_QUERIES :]
+            volume_mse = float(np.mean(volume, dtype=np.float64))
+            band_mse = float(np.mean(band, dtype=np.float64))
+            rows.append(
+                {
+                    **dict(metadata),
+                    "val_volume_mse": volume_mse,
+                    "val_band_mse": band_mse,
+                    "val_weighted_mse": (
+                        self.VALIDATION_VOLUME_WEIGHT * volume_mse
+                        + self.VALIDATION_HUB_BAND_WEIGHT * band_mse
+                    ),
+                    "volume_vector_rmse_mps": float(
+                        np.sqrt(np.mean(np.sum(np.square(predicted[index, : self.VALIDATION_VOLUME_QUERIES] - actual[index, : self.VALIDATION_VOLUME_QUERIES]), axis=-1)))
+                    ),
+                    "hub_band_vector_rmse_mps": float(
+                        np.sqrt(np.mean(np.sum(np.square(predicted[index, self.VALIDATION_VOLUME_QUERIES :] - actual[index, self.VALIDATION_VOLUME_QUERIES :]), axis=-1)))
+                    ),
+                }
+            )
+        return {"rows": rows}
+
+    def reduce_native_metrics(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        *,
+        expected_rows: Sequence[int] | None = None,
+    ) -> Mapping[str, Any]:
+        rows = [dict(row) for record in records for row in record["rows"]]
+        expected = (
+            {int(value) for value in self.validation_rows}
+            if expected_rows is None
+            else {int(value) for value in expected_rows}
+        )
+        observed = [int(row["row_index"]) for row in rows]
+        if len(observed) != len(expected) or set(observed) != expected or len(set(observed)) != len(observed):
+            raise ValueError("Formal Wind validation metrics must contain the exact VALID rows once.")
+        return {
+            "val_volume_mse": float(np.mean([row["val_volume_mse"] for row in rows], dtype=np.float64)),
+            "val_band_mse": float(np.mean([row["val_band_mse"] for row in rows], dtype=np.float64)),
+            "val_weighted_mse": float(np.mean([row["val_weighted_mse"] for row in rows], dtype=np.float64)),
+            "validation_rows": len(rows),
+            "rows": rows,
+        }
+
+
 def build_wind_content_task(
     recipe: Mapping[str, Any],
     device: torch.device | str = "cpu",
@@ -1320,6 +1907,17 @@ def build_wind_content_task_v2(
     return _build_wind_content_task(recipe, device, schema_version=2)
 
 
+def build_wind_formal_content_task_v1(
+    recipe: Mapping[str, Any],
+    device: torch.device | str = "cpu",
+) -> tuple[nn.Module, WindFormalA2DTaskV1]:
+    """Build the separately validated full-TRAIN A2-D formal provider."""
+    model, provider = _build_wind_content_task(recipe, device, schema_version=3)
+    if not isinstance(provider, WindFormalA2DTaskV1):
+        raise RuntimeError("Formal Wind builder returned the wrong provider class.")
+    return model, provider
+
+
 def _build_wind_content_task(
     recipe: Mapping[str, Any],
     device: torch.device | str,
@@ -1330,9 +1928,12 @@ def _build_wind_content_task(
         value, architecture, microbatch = _validate_recipe(recipe)
     elif schema_version == 2:
         value, architecture, microbatch = _validate_recipe_v2(recipe)
+    elif schema_version == 3:
+        value, architecture, microbatch = _validate_formal_wind_a2d_recipe_v1(recipe)
     else:
-        raise ValueError("Wind content-hypergraph supports only explicit v1 or v2 recipe dispatch.")
-    seed = int(value["seed"])
+        raise ValueError("Wind content-hypergraph supports only explicit v1, v2, or formal v1 recipe dispatch.")
+    initialization_seed = int(value["seed"])
+    seed = int(value["sampling_seed"]) if schema_version == 3 else initialization_seed
     protocol = value["protocol"]
     total_epochs = int(value["total_epochs"])
     device = torch.device(device)
@@ -1474,7 +2075,7 @@ def _build_wind_content_task(
         "thermal_response_rank": 0,
         "local_hidden_dim": 64 if schema_version == 1 else 128,
         "dropout": 0.0,
-        "init_seed": seed,
+        "init_seed": initialization_seed,
     }
     if "query_edge_geometry_mode" in model_values:
         model_config["query_edge_geometry_mode"] = model_values["query_edge_geometry_mode"]
@@ -1491,9 +2092,9 @@ def _build_wind_content_task(
     if device.type == "cuda" and torch.cuda.is_available():
         devices = [torch.cuda.current_device() if device.index is None else int(device.index)]
     with torch.random.fork_rng(devices=devices):
-        torch.manual_seed(seed)
+        torch.manual_seed(initialization_seed)
         if devices:
-            torch.cuda.manual_seed_all(seed)
+            torch.cuda.manual_seed_all(initialization_seed)
         if schema_version == 1:
             model = ContentHypergraphCore(**model_config).to(device)
         else:
@@ -1502,7 +2103,13 @@ def _build_wind_content_task(
             model_config["schema"] = "content_hypergraph_core_v2"
             model = ContentHypergraphCoreV2.from_config(model_config).to(device)
 
-    provider_type = WindContentHypergraphTask if schema_version == 1 else WindContentHypergraphTaskV2
+    provider_type = (
+        WindContentHypergraphTask
+        if schema_version == 1
+        else WindFormalA2DTaskV1
+        if schema_version == 3
+        else WindContentHypergraphTaskV2
+    )
     provider = provider_type(
         view,
         model=model,
@@ -1535,8 +2142,10 @@ __all__ = [
     "WIND_CONTENT_ROLE_CACHE_RAM_BYTES",
     "WindContentHypergraphTask",
     "WindContentHypergraphTaskV2",
+    "WindFormalA2DTaskV1",
     "WindContentPredictions",
     "WindContentTargets",
+    "build_wind_formal_content_task_v1",
     "build_wind_content_task",
     "build_wind_content_task_v2",
     "_validate_recipe_v2",
