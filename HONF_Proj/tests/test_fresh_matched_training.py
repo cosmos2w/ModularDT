@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sys
@@ -182,10 +183,11 @@ def test_fresh_build_dispatches_thermal_dev_materialization_flag(monkeypatch):
         "formal_full": False,
         "total_epochs": 2,
     }
-    fresh_runner.build(
+    _, _, engine, _ = fresh_runner.build(
         recipe, device="cpu", include_dev_targets=False, require_clean_source=False,
     )
     assert seen["include_dev_targets"] is False
+    assert engine.config.curve_every == 10
 
 
 @pytest.mark.parametrize("task", ("thermal", "wind"))
@@ -249,6 +251,7 @@ def test_fresh_prepare_requests_and_enforces_no_dev_targets(
 @pytest.mark.parametrize("task", ("thermal", "wind"))
 def test_fresh_matched_allocator_seals_three_collision_checked_recipe_ids(tmp_path, task):
     config, config_path, config_sha256 = fresh_runner.fresh_matched_config(task)
+    assert config["engine_schedule"]["curve_every"] == 10
     campaign_root = tmp_path / f"{task}-campaign"
     manifest = fresh_runner.allocate_fresh_matched_comparison(task, campaign_root)
     assert manifest["source_config_path"] == str(config_path)
@@ -266,6 +269,21 @@ def test_fresh_matched_allocator_seals_three_collision_checked_recipe_ids(tmp_pa
         run_ids.append(run_id)
         recipe = fresh_runner.read_recipe(arm["recipe_path"])
         assert recipe["seed"] == config["seed"]
+        assert recipe["engine_schedule"]["curve_every"] == 10
+        if mode == "P":
+            fresh_runner._validate_fresh_matched_recipe(recipe)
+            legacy = copy.deepcopy(recipe)
+            legacy["engine_schedule"]["curve_every"] = 100
+            fresh_runner._validate_fresh_matched_recipe(legacy)
+            for unsupported in (5, 20, True):
+                invalid = copy.deepcopy(recipe)
+                invalid["engine_schedule"]["curve_every"] = unsupported
+                with pytest.raises(ValueError, match="engine_schedule"):
+                    fresh_runner._validate_fresh_matched_recipe(invalid)
+            invalid_other = copy.deepcopy(recipe)
+            invalid_other["engine_schedule"]["monitor_every"] = 50
+            with pytest.raises(ValueError, match="engine_schedule"):
+                fresh_runner._validate_fresh_matched_recipe(invalid_other)
         assert recipe["initialization"] == "fresh_all_trainable"
         assert recipe["native_validation_policy"] == FRESH_MATCHED_NATIVE_VALIDATION_POLICY
         if mode == "P-R2":

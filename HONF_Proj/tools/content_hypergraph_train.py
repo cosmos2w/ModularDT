@@ -13,6 +13,7 @@ import json
 import os
 import random
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,10 @@ from honf_runtime.content_hypergraph_formal import (
     FORMAL_PROTOCOL,
     validate_formal_d_recipe,
     validate_formal_d_stop,
+)
+from honf_runtime.training_output_policy import (
+    OUTPUT_POLICY_SCHEMA,
+    validate_output_policy_amendment,
 )
 
 SCHEMA = "content_hypergraph_recipe_v1"
@@ -176,7 +181,7 @@ def engine_for(recipe: dict[str, Any], device: str) -> TrainingEngine:
         seed=recipe["seed"], microbatch_cases=recipe["microbatch_size"],
         effective_cases=recipe["effective_batch_size"], total_epochs=recipe["total_epochs"],
         monitor_every=100, checkpoint_epochs=tuple(range(100, maximum + 1, 100)),
-        latest_every=100, curve_every=100, gradient_clip=1.0,
+        latest_every=100, curve_every=10, gradient_clip=1.0,
         sampling_version=SamplingKey.CASE_EPOCH_VERSION, training_mode="joint",
     )
     return TrainingEngine(config, device=device, selection=SelectionPolicy(field_metric="field_score"))
@@ -221,11 +226,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--qualification", type=Path)
     parser.add_argument("--numerical-pooling-amendment", type=Path)
+    parser.add_argument("--output-policy-amendment", type=Path,
+                        help="Explicit audited output-only continuation of these formal D histories.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
     args = parser.parse_args(argv)
     recipe = validate_recipe(json.loads(args.recipe.read_text()))
     validate_stop(recipe, args.stop_after)
+    output_policy_amendment = None
+    if args.output_policy_amendment is not None:
+        if (recipe["protocol"] != FORMAL_PROTOCOL or args.resume is None or args.output is None
+                or args.qualification is not None or args.numerical_pooling_amendment is not None):
+            raise ValueError("An output-policy amendment requires only a same-run formal D --resume and --output.")
+        output_policy_amendment = json.loads(args.output_policy_amendment.read_text())
+        if output_policy_amendment.get("schema") != OUTPUT_POLICY_SCHEMA:
+            raise ValueError("Unsupported output-policy amendment schema.")
     numerical_pooling_amendment = None
     if args.numerical_pooling_amendment is not None:
         if args.dry_run:
@@ -309,11 +324,58 @@ def main(argv: list[str] | None = None) -> int:
                "parameter_count": sum(p.numel() for p in model.parameters()),
                "trainable_parameter_count": sum(p.numel() for p in model.parameters() if p.requires_grad),
                "engine": vars(engine.config), "requested_stop": args.stop_after,
-               "optimizer_updates": 0, "run_allocated": False}
+               "optimizer_updates": 0, "run_allocated": False,
+               "loaded_source": identity["loaded_source"]}
+    if args.dry_run and output_policy_amendment is not None:
+        from honf_runtime.compat import load_trusted_checkpoint
+        from honf_runtime.run_layout import resolve_checkpoint
+        from honf_runtime.unified_training import (
+            _engine_config_payload, _optimizer_spec_payload, _sampling_dataset_id,
+            named_optimizer_state,
+        )
+        source = resolve_checkpoint(args.output, args.resume)
+        if source != resolve_checkpoint(args.output, "latest"):
+            raise ValueError("Output-policy continuation requires this run's current latest checkpoint.")
+        saved = load_trusted_checkpoint(source, map_location="cpu")
+        specs = tuple(provider.optimizer_groups(model, recipe["architecture"], "joint"))
+        sealed = {**identity, "provider_identity": dict(provider.identity_payload()),
+                  "engine_config": _engine_config_payload(engine.config),
+                  "selection_policy": asdict(engine.selection),
+                  "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in specs],
+                  "sampling_dataset_id": _sampling_dataset_id(provider.identity_payload())}
+        amendment = validate_output_policy_amendment(
+            saved["experiment_identity"], sealed, output_policy_amendment,
+            source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), source_epoch=int(saved["epoch"]),
+            stop_after=args.stop_after, run_directory=str(args.output.resolve()),
+        )
+        model.load_state_dict(saved["model_state_dict"], strict=True)
+        optimizer, _ = engine._make_optimizer(model, provider, recipe["architecture"],
+                                            int(saved["epoch"]) + 1, saved["optimizer_state_by_name"],
+                                            group_specs=specs)
+        restored = named_optimizer_state(model, optimizer)
+        def equal_tree(left, right):
+            if torch.is_tensor(left):
+                return torch.equal(left.cpu(), right.cpu())
+            if isinstance(left, dict):
+                return left.keys() == right.keys() and all(equal_tree(value, right[name]) for name, value in left.items())
+            if isinstance(left, (list, tuple)):
+                return len(left) == len(right) and all(equal_tree(a, b) for a, b in zip(left, right))
+            return left == right
+        if not equal_tree(saved["optimizer_state_by_name"], restored):
+            raise ValueError("Output-only resume did not preserve the exact named optimizer state.")
+        summary["output_policy_resume_preflight"] = {
+            "source_epoch": saved["epoch"], "source_checkpoint_sha256": output_policy_amendment["source_checkpoint_sha256"],
+            "preserved_case_visits": sum(row["case_visits"] for row in saved["history"]),
+            "preserved_optimizer_updates": sum(row["optimizer_updates"] for row in saved["history"]),
+            "model_state_loaded_strictly": True, "named_optimizer_state_exact": True,
+            "amendment": amendment,
+        }
     print(json.dumps(summary, sort_keys=True, default=str, allow_nan=False), flush=True)
     if args.dry_run:
         return 0
     fit_options = {"stop_after": args.stop_after, "resume_checkpoint": args.resume}
+    if output_policy_amendment is not None:
+        fit_options["output_policy_amendment"] = output_policy_amendment
     if numerical_pooling_amendment is not None:
         fit_options["numerical_pooling_amendment"] = numerical_pooling_amendment
     result = engine.fit(

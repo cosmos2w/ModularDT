@@ -253,7 +253,8 @@ class EngineConfig:
     monitor_epochs: tuple[int, ...] = ()
     checkpoint_epochs: tuple[int, ...] | None = None
     latest_every: int | None = None
-    curve_every: int | None = None
+    curve_every: int | None = 10
+    progress_enabled: bool = True
     sampling_version: str = SamplingKey.LEGACY_VERSION
     training_mode: str = "refinement"
     write_initial_artifacts: bool = False
@@ -263,6 +264,8 @@ class EngineConfig:
             raise ValueError("Training mode must be refinement or joint.")
         if type(self.write_initial_artifacts) is not bool:
             raise ValueError("Initial artifact control must be boolean.")
+        if type(self.progress_enabled) is not bool:
+            raise ValueError("Progress display control must be boolean.")
         if self.sampling_version not in SamplingKey.SUPPORTED_VERSIONS:
             raise ValueError(f"Unsupported query sampling version {self.sampling_version!r}.")
         if min(self.microbatch_cases, self.effective_cases, self.total_epochs, self.monitor_every) < 1:
@@ -314,11 +317,17 @@ def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
     """Keep legacy identities unchanged when new optional output controls are unused."""
     payload = asdict(config)
     for name, default in (("monitor_epochs", ()), ("checkpoint_epochs", None),
-                          ("latest_every", None), ("curve_every", None),
+                          ("latest_every", None), ("curve_every", 10),
+                          ("progress_enabled", True),
                           ("sampling_version", SamplingKey.LEGACY_VERSION),
                           ("training_mode", "refinement"), ("write_initial_artifacts", False)):
         if payload[name] == default:
             payload.pop(name)
+    # Older identities omitted both the default (None) and explicit disabled
+    # curve control. Keep that serialized form stable across this output-only
+    # default change.
+    if payload.get("curve_every", object()) is None:
+        payload.pop("curve_every")
     return payload
 
 
@@ -2722,6 +2731,7 @@ class TrainingEngine:
         diagnostic_age_branch: Mapping[str, Any] | None = None,
         architecture_child_initialization: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
+        output_policy_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
@@ -2790,6 +2800,14 @@ class TrainingEngine:
                 or diagnostic_age_branch is not None or architecture_child_initialization is not None
                 or fresh_initialization is not None or arm != "A-H6"):
             raise ValueError("A numerical pooling repair requires only the same run's exact latest-state continuation.")
+        if output_policy_amendment is not None and (
+                resume_checkpoint is None or branch_from_checkpoint is not None
+                or optimizer_seed is not None or allow_microbatch_change
+                or mathematical_route_branch is not None or joint_core_revision is not None
+                or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                or numerical_pooling_amendment is not None or fresh_initialization is not None
+                or arm != "A2-D"):
+            raise ValueError("An output-only amendment requires only this formal D run's exact latest resume.")
         if architecture_child_initialization is not None and (
                 branch_from_checkpoint is None or resume_checkpoint is not None
                 or optimizer_seed is not None or allow_microbatch_change
@@ -2893,6 +2911,15 @@ class TrainingEngine:
                     numerical_pooling_amendment,
                     source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
                     source_epoch=int(source_payload["epoch"]), stop_after=stop_after)
+            elif output_policy_amendment is not None:
+                from .training_output_policy import validate_output_policy_amendment
+
+                amendment = validate_output_policy_amendment(
+                    source_payload.get("experiment_identity", {}), sealed_identity, output_policy_amendment,
+                    source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    source_epoch=int(source_payload["epoch"]), stop_after=stop_after,
+                    run_directory=str(output),
+                )
             else:
                 amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
                     allow_microbatch_change=allow_microbatch_change)
@@ -2968,6 +2995,7 @@ class TrainingEngine:
             resume_amendments.append(amendment)
             amendment_name = ('architecture_child_initialization' if architecture_child_initialization is not None else
                               'numerical_pooling_amendment' if numerical_pooling_amendment is not None else
+                              'output_policy_amendment' if output_policy_amendment is not None else
                               'diagnostic_age_branch' if diagnostic_age_branch is not None else
                               'joint_core_revision' if joint_core_revision is not None else
                               'mathematical_route_amendment' if mathematical_route_branch is not None
@@ -2975,7 +3003,8 @@ class TrainingEngine:
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
                 category='logs' if (joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
-                                    or numerical_pooling_amendment is not None) else None), amendment)
+                                    or numerical_pooling_amendment is not None
+                                    or output_policy_amendment is not None) else None), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = (copy.deepcopy(source_payload.get("branch_parent"))
@@ -3129,7 +3158,7 @@ class TrainingEngine:
                 progress = tqdm(
                     total=len(ordered_cases), desc=f"epoch {epoch}/{stop_after}", unit="case",
                     dynamic_ncols=True, file=sys.stderr,
-                    disable=not bool(getattr(sys.stderr, "isatty", lambda: False)()), leave=False,
+                    disable=not self.config.progress_enabled, leave=False,
                 )
                 try:
                     for update_index, group_slice in enumerate(self.epoch_update_slices(len(ordered_cases))):
@@ -3354,8 +3383,14 @@ class TrainingEngine:
                     _atomic_json(layout.write_path("history.json"), history)
                     if milestone:
                         _atomic_torch_save(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
-                    if review:
+                    validation_sidecar_due = (
+                        epoch == stop_after or clean_stop_requested
+                        or (self.config.checkpoint_epochs is None
+                            or epoch in self.config.checkpoint_epochs)
+                    )
+                    if review and validation_sidecar_due:
                         _atomic_json(layout.write_path(f"validation_epoch_{epoch:04d}.json"), row["validation"])
+                    if review:
                         if improved_field:
                             _atomic_torch_save(layout.write_path("best_by_field_mse_model.pt"), payload)
                         if improved_guarded:

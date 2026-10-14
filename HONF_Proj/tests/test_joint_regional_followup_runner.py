@@ -88,6 +88,7 @@ def thermal_recipe() -> dict:
 def test_full_read_recipe_binds_calibration_dataset_protocol_and_source_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert runner.RECOVERY_ENGINE_SCHEDULE["curve_every"] == 100
     run_root = tmp_path / "honf"
     run_root.mkdir()
     monkeypatch.setattr(runner, "ROOT", run_root)

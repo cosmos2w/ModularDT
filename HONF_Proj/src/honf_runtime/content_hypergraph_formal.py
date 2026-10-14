@@ -162,10 +162,16 @@ def validate_formal_d_recipe(value: Mapping[str, Any]) -> dict[str, Any]:
     execution = recipe.get("execution")
     if not isinstance(execution, Mapping):
         raise ValueError("Formal D execution contract must be a mapping.")
+    curve_every = execution.get("curve_every")
+    # New recipes use 10. The explicit 100 value remains accepted so archived
+    # formal histories can be replayed; the resume CLI owns the field-only
+    # output-policy amendment for active runs.
+    if type(curve_every) is not int or curve_every not in (10, 100):
+        raise ValueError("Formal D curve_every must be 10 (default) or 100 (legacy replay).")
     expected_execution = {
         "monitor_every": contract["monitor_every"],
         "latest_every": contract["latest_every"],
-        "curve_every": 100,
+        "curve_every": curve_every,
         "checkpoint_epochs": contract["checkpoint_epochs"],
         "field_metric": contract["field_metric"],
     }

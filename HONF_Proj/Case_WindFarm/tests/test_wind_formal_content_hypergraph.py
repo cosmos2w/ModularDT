@@ -131,6 +131,14 @@ def test_formal_recipe_is_a_separate_strict_a2d_training_protocol():
     assert validated == recipe
     assert architecture == "A2-D"
     assert microbatch == 8
+    legacy_curve = copy.deepcopy(recipe)
+    legacy_curve["execution"]["curve_every"] = 100
+    assert _validate_formal_wind_a2d_recipe_v1(legacy_curve)[0] == legacy_curve
+    for unsupported_curve in (1, 5, 20, True):
+        invalid_curve = copy.deepcopy(recipe)
+        invalid_curve["execution"]["curve_every"] = unsupported_curve
+        with pytest.raises(ValueError, match="curve_every"):
+            _validate_formal_wind_a2d_recipe_v1(invalid_curve)
     with pytest.raises(ValueError, match="development or full_train1000"):
         _validate_recipe_v2(recipe)
     for key, invalid in (

@@ -1243,10 +1243,16 @@ def _validate_formal_wind_a2d_recipe_v1(
     }
     if not isinstance(optimizer, Mapping) or dict(optimizer) != expected_optimizer:
         raise ValueError("Formal Wind optimizer must be one constant-LR AdamW group with 1e-5 decay on all weights.")
+    execution = value.get("execution")
+    curve_every = execution.get("curve_every") if isinstance(execution, Mapping) else None
+    # Fresh formal recipes use 10; 100 is retained only as the explicit
+    # historical recipe value for replay. Resume policy is enforced by CLI.
+    if type(curve_every) is not int or curve_every not in (10, 100):
+        raise ValueError("Formal Wind curve_every must be 10 (default) or 100 (legacy replay).")
     expected_execution = {
         "monitor_every": 5,
         "latest_every": 5,
-        "curve_every": 100,
+        "curve_every": curve_every,
         "checkpoint_epochs": [100, 500, 1000, 1500, 2000, 2500],
         "field_metric": "val_volume_mse",
     }

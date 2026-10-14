@@ -38,7 +38,7 @@
   "execution": {
     "monitor_every": 5,
     "latest_every": 5,
-    "curve_every": 100,
+    "curve_every": 10,
     "checkpoint_epochs": [100, 500, 1000, 1500, 2000, 2500],
     "field_metric": "val_volume_mse"
   },

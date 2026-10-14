@@ -76,6 +76,7 @@ RECOVERY_ENGINE_SCHEDULE = {
     "latest_every": 100,
     "curve_every": 100,
 }
+FRESH_MATCHED_ENGINE_SCHEDULE = {**RECOVERY_ENGINE_SCHEDULE, "curve_every": 10}
 RECOVERY_CHECKPOINT_EPOCHS = list(range(100, 2501, 100))
 RECOVERY_SOURCE_FILES = (
     "HONF_Proj/tools/joint_regional_train.py",
@@ -436,7 +437,6 @@ def _validate_fresh_matched_recipe(recipe: dict[str, Any]) -> None:
         "max_sources": 12 if task == "thermal" else 30,
         "model_contract": _fresh_matched_model_contract(task, mode),
         "objective_contract": _recovery_objective_contract(task),
-        "engine_schedule": RECOVERY_ENGINE_SCHEDULE,
         "optimizer_name": "AdamW",
         "optimizer_betas": [0.9, 0.999],
         "optimizer_eps": 1.0e-8,
@@ -463,6 +463,10 @@ def _validate_fresh_matched_recipe(recipe: dict[str, Any]) -> None:
     for name, value in expected.items():
         if recipe.get(name) != value:
             raise ValueError(f"Fresh matched recipe {name} differs from its fixed segmented protocol.")
+    if recipe.get("engine_schedule") not in (FRESH_MATCHED_ENGINE_SCHEDULE, RECOVERY_ENGINE_SCHEDULE):
+        raise ValueError(
+            "Fresh matched recipe engine_schedule must match the new curve=10 default or sealed legacy curve=100 schedule."
+        )
     routing = recipe["model_contract"].get("native_routing")
     if mode == "P-R":
         if (not isinstance(routing, dict)
@@ -1408,7 +1412,7 @@ def build(recipe: dict[str, Any], *, device: str, calibration_only: bool = False
         open_through_epoch=declared_engine.get("open_through_epoch", 20),
         soft_through_epoch=declared_engine.get("soft_through_epoch", 20),
         latest_every=declared_engine.get("latest_every", 100),
-        curve_every=declared_engine.get("curve_every", 100),
+        curve_every=declared_engine.get("curve_every", 10),
         gradient_clip=recipe.get("gradient_clip_norm", 1.0),
         checkpoint_epochs=(tuple(recipe["checkpoint_epochs"]) if "checkpoint_epochs" in recipe else None),
         write_initial_artifacts=recipe.get("write_initial_artifacts", False),

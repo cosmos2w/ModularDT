@@ -247,6 +247,22 @@ def test_sparse_monitoring_is_sealed_and_used_by_formal_dry_run(tmp_path, monkey
     assert config['latest_every'] == config['curve_every'] == 100
 
 
+def test_new_prepare_curve_default_is_ten_and_explicit_legacy_hundred_remains_supported():
+    args = cli.build_parser().parse_args([
+        'prepare', '--task', 'wind', '--arm', 'full_detail', '--recipe', 'new-formal.json',
+    ])
+    assert args.curve_every == 10
+    explicit_legacy = {
+        'validation_every': 500,
+        'validation_epochs': [100],
+        'checkpoint_epochs': [100, 500, 1000, 2000, 2500, 5000],
+        'latest_every': 100,
+        'curve_every': 100,
+    }
+    config, _ = cli._profile('wind', monitoring=explicit_legacy)
+    assert config.curve_every == 100
+
+
 @pytest.mark.parametrize('overrides', [
     {'validation_every': 0}, {'checkpoint_epochs': [100, 500]},
     {'checkpoint_epochs': [5000, 100]}, {'latest_every': -1},

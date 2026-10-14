@@ -320,7 +320,7 @@ def build_parser():
     prep.add_argument('--validation-epochs', type=int, nargs='*', default=[100])
     prep.add_argument('--checkpoint-epochs', type=int, nargs='+', default=[100, 500, 1000, 2000, 2500, 5000])
     prep.add_argument('--latest-every', type=int, default=100)
-    prep.add_argument('--curve-every', type=int, default=100)
+    prep.add_argument('--curve-every', type=int, default=10)
     prep.set_defaults(handler=prepare)
     dry = commands.add_parser('dry-run', help='validate bindings/parser only; no full-data optimizer or step')
     dry.add_argument('--recipe', required=True)

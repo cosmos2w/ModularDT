@@ -67,7 +67,7 @@ def recipe(dataset: str) -> dict:
         "execution": {
             "monitor_every": 10 if thermal else 5,
             "latest_every": 10 if thermal else 5,
-            "curve_every": 100,
+            "curve_every": 10,
             "checkpoint_epochs": (
                 [10, 50, 100, 250, 500, 1000, 2500, 5000]
                 if thermal else [100, 500, 1000, 1500, 2000, 2500]
@@ -82,6 +82,22 @@ def recipe(dataset: str) -> dict:
 def test_formal_recipe_is_accepted_and_returned_unchanged(dataset: str) -> None:
     value = recipe(dataset)
     assert validate_formal_d_recipe(value) == value
+
+
+@pytest.mark.parametrize("dataset", ["thermal", "wind"])
+def test_formal_recipe_keeps_new_curve_default_and_accepts_legacy_100_for_replay(dataset: str) -> None:
+    value = recipe(dataset)
+    assert value["execution"]["curve_every"] == 10
+    assert validate_formal_d_recipe(value) == value
+    legacy = copy.deepcopy(value)
+    legacy["execution"]["curve_every"] = 100
+    assert validate_formal_d_recipe(legacy) == legacy
+    validate_formal_d_stop(legacy, 1)
+    for unsupported in (1, 5, 20, True):
+        changed = copy.deepcopy(value)
+        changed["execution"]["curve_every"] = unsupported
+        with pytest.raises(ValueError, match="curve_every"):
+            validate_formal_d_recipe(changed)
 
 
 @pytest.mark.parametrize(
