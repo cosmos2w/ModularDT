@@ -89,7 +89,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", choices=("validation", "train"), default="validation")
     parser.add_argument("--case-keys", help="Comma-separated physical case IDs or native Wind row IDs")
     parser.add_argument("--export-case", action="append", default=[])
+    parser.add_argument("--microbatch-cases", type=int, help="Native evaluation packing; exports default to one case")
     args = parser.parse_args(argv)
+    packing = args.microbatch_cases if args.microbatch_cases is not None else (1 if args.export_case else None)
+    if packing is not None and packing < 1:
+        raise ValueError("Native evaluation packing must be positive.")
+    if args.export_case and packing != 1:
+        raise ValueError("Detailed exports require packing one so only selected cases are materialized.")
     if args.output.exists():
         raise FileExistsError("Evaluation evidence is immutable; choose a fresh output directory.")
     started = time.perf_counter()
@@ -101,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     args.output.mkdir(parents=True)
     records, work, exports = [], [], []
     with torch.no_grad():
-        for index, batch in enumerate(provider.native_evaluation_batches(split=args.split, case_keys=selected)):
+        for index, batch in enumerate(provider.native_evaluation_batches(
+                split=args.split, case_keys=selected, microbatch_size=packing)):
             scene = provider.make_scene(batch.scene_inputs)
             prediction, auxiliary = provider.predict_native(
                 model, scene, batch.receivers, recipe["architecture"], "joint",
@@ -112,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
             keys = tuple(str(x) for x in batch.case_keys)
             if any(key in args.export_case for key in keys):
                 arrays = {}
-                for prefix, value in (("prediction", prediction), ("target", batch.targets),
+                for prefix, value in (("scene", scene), ("prediction", prediction), ("target", batch.targets),
                                       ("receiver", batch.receivers)):
                     arrays.update(observation_arrays(value, prefix))
                 path = args.output / f"observations_{index:03d}_{'-'.join(keys)}.npz"
@@ -129,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_sha256": hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
         "completed_epoch": int(payload["epoch"]), "split": args.split,
+        "evaluation_microbatch_cases": packing,
         "provider_binding_sha256": canonical_sha256(payload["experiment_identity"]["provider_identity"]),
         "metrics": metrics, "records": records, "work_counts": work, "exports": exports,
         "elapsed_seconds": time.perf_counter() - started, "optimizer_updates": 0,

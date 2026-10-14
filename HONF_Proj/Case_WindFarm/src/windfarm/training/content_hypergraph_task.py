@@ -430,7 +430,7 @@ class WindContentHypergraphTask:
         stream_validation: bool | None = None,
         track_samples: bool = True,
     ) -> TaskBatch:
-        if not rows or len(rows) > self.max_microbatch_cases:
+        if len(rows) == 0 or len(rows) > self.max_microbatch_cases:
             raise ValueError("Wind content-hypergraph microbatch is empty or exceeds its declared case limit.")
         row_ids = tuple(int(value) for value in rows)
         if len(set(row_ids)) != len(row_ids):

@@ -563,6 +563,14 @@ def test_native_endpoint_rows_are_input_selected_and_use_fixed_q8192_streams():
     assert all(batch[2]["validation"] and batch[2]["query_count"] == 8192 for batch in dev_batches)
 
 
+@pytest.mark.parametrize("rows", [np.asarray([], dtype=np.int64), np.asarray([1, 2, 3])])
+def test_native_batch_capacity_guard_accepts_numpy_row_arrays(rows):
+    task = object.__new__(WindContentHypergraphTask)
+    task.max_microbatch_cases = 2
+    with pytest.raises(ValueError, match="empty or exceeds"):
+        task._make_batch(rows, None, validation=True, query_count=4096)
+
+
 def _small_native_case():
     return SimpleNamespace(
         index=7,
