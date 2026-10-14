@@ -586,26 +586,32 @@ def _move_prediction_outputs_to_cpu(prediction: Any, dataset: str) -> int:
     return _tree_tensor_bytes(moved)
 
 
+def _request_to_device(batch: Any, device: torch.device | str) -> Any:
+    """Transfer prescribed tensors without changing native dataclass structure."""
+    def move(value):
+        if torch.is_tensor(value):
+            return value.detach().to(device=device)
+        if is_dataclass(value) and not isinstance(value, type):
+            return replace(value, **{item.name: move(getattr(value, item.name)) for item in fields(value) if item.init})
+        if isinstance(value, Mapping):
+            return {key: move(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return tuple(move(item) for item in value)
+        if isinstance(value, list):
+            return [move(item) for item in value]
+        return value
+    return SimpleNamespace(scene_inputs=move(batch.scene_inputs), receivers=move(batch.receivers),
+                           case_keys=batch.case_keys)
+
+
 def _host_request(batch: Any) -> Any:
     """Keep prescribed native inputs on the host until the complete call begins."""
-    def host(value):
-        if torch.is_tensor(value):
-            return value.detach().cpu()
-        if is_dataclass(value) and not isinstance(value, type):
-            return replace(value, **{item.name: host(getattr(value, item.name)) for item in fields(value) if item.init})
-        if isinstance(value, Mapping):
-            return {key: host(item) for key, item in value.items()}
-        if isinstance(value, tuple):
-            return tuple(host(item) for item in value)
-        if isinstance(value, list):
-            return [host(item) for item in value]
-        return value
-    return SimpleNamespace(scene_inputs=host(batch.scene_inputs), receivers=host(batch.receivers),
-                           case_keys=batch.case_keys)
+    return _request_to_device(batch, "cpu")
 
 
 def _run_native(arm: Arm, batch: Any, *, return_cpu: bool = False) -> tuple[Any, Mapping[str, Any]]:
     provider = arm.provider
+    batch = _request_to_device(batch, next(arm.model.parameters()).device)
     scene = provider.make_scene(batch.scene_inputs)
     prediction, auxiliary = provider.predict_native(
         arm.model, scene, batch.receivers, arm.architecture, "joint", epoch=0, temperature=1.0,

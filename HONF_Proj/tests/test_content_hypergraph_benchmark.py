@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from content_hypergraph_benchmark import (
     _model_state_cpu,
     _state_sha256,
     _provider_identity_without_arm,
+    _request_to_device,
     _stress_core_probe,
     _stress_request,
     comparison_recipes,
@@ -64,6 +66,28 @@ def test_state_digest_binds_scalar_routing_parameters_and_shape() -> None:
     assert _state_sha256({name: value.clone() for name, value in state.items()}) == original
     assert _state_sha256({**state, "live_temperature": torch.tensor(0.6)}) != original
     assert _state_sha256({**state, "live_temperature": torch.tensor([0.5])}) != original
+
+
+def test_complete_request_transfers_nested_prescribed_tensors_and_keeps_native_metadata() -> None:
+    @dataclass(frozen=True)
+    class NativeInputs:
+        structure: dict
+        case_ids: tuple[str, ...]
+
+    native_ids = np.array([7, 11], dtype=np.int64)
+    request = SimpleNamespace(
+        scene_inputs=NativeInputs({"coordinates": torch.ones(1, 2, 2), "ids": native_ids}, ("0006",)),
+        receivers={"heat": torch.ones(1, 2), "points": [torch.zeros(1, 3, 2)]},
+        case_keys=("0006",),
+    )
+    moved = _request_to_device(request, "meta")
+    assert isinstance(moved.scene_inputs, NativeInputs)
+    assert moved.scene_inputs.structure["coordinates"].device.type == "meta"
+    assert moved.receivers["heat"].device.type == "meta"
+    assert moved.receivers["points"][0].device.type == "meta"
+    assert moved.scene_inputs.structure["ids"] is native_ids
+    assert moved.scene_inputs.case_ids == moved.case_keys == ("0006",)
+    assert request.receivers["heat"].device.type == "cpu"
 
 
 def test_reader128_cost_comparison_is_explicit_and_preserves_other_recipe_guards():
