@@ -290,8 +290,8 @@ def test_complete_geometry_vjp_matches_two_centered_differences():
     central_one = (value_at(step) - value_at(-step)) / (2 * step)
     central_two = (value_at(2 * step) - value_at(-2 * step)) / (4 * step)
     assert abs(gradient) > 1.0e-8
-    assert gradient == pytest.approx(central_one, rel=3.0e-4, abs=2.0e-6)
-    assert gradient == pytest.approx(central_two, rel=3.0e-4, abs=2.0e-6)
+    assert gradient == pytest.approx(central_one, rel=1.0e-4, abs=1.0e-5)
+    assert gradient == pytest.approx(central_two, rel=1.0e-4, abs=1.0e-5)
 
 
 @pytest.mark.parametrize(

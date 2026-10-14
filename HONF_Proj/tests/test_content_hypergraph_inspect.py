@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
 
 from honf_forward_core.content_hypergraph import ContentHypergraphCore, QueryBatch, SceneBatch
@@ -11,6 +12,11 @@ from tools.content_hypergraph_inspect import (
     _condition_trace_arrays,
     _fp64_identity_error,
     _select_thermal_cases,
+    _select_wind_rows,
+    _validate_checkpoint_scope,
+    _validate_thermal_full_binding,
+    _validate_wind_full_binding,
+    _validation_panel_metadata,
     local_branch_zero_hook,
     rank_thermal_edge,
     rank_wind_edge,
@@ -143,6 +149,213 @@ def test_thermal_inspection_rejects_cases_outside_the_fixed_dev_panel():
             assert "0291 and 0687" in str(error)
         else:
             raise AssertionError("Missing fixed Thermal DEV case was accepted.")
+
+
+def _thermal_full_provider() -> tuple[SimpleNamespace, dict[str, object]]:
+    from channelthermal.training.content_hypergraph_task import (
+        THERMAL_CONTENT_FULL_TRAIN_DATASET,
+        THERMAL_CONTENT_FULL_TRAIN_PROTOCOL,
+    )
+
+    training_ids = tuple(f"train-{index:03d}" for index in range(600))
+    validation_ids = ("0291", "0687", *(f"valid-{index:03d}" for index in range(87)))
+    membership: dict[str, object] = {
+        "training_case_count": 600,
+        "training_membership_sha256": "train-membership",
+        "validation_case_count": 89,
+        "validation_membership_sha256": "validation-membership",
+        "validation_targets_are_original_h5_test_split_exposed": True,
+        "unexposed_original_test_targets_read": False,
+    }
+    source_binding = {
+        "protocol": "full_train1000",
+        "normalization_fit_scope": "exact original TRAIN600 only",
+        "original_test_targets_outside_declared_panel_read": False,
+        "base_manifest_sha256": "fixed-manifest",
+        "full_followup_membership": dict(membership),
+    }
+    followup_manifest = {
+        "execution_protocol": THERMAL_CONTENT_FULL_TRAIN_PROTOCOL,
+        "dataset_protocol": THERMAL_CONTENT_FULL_TRAIN_DATASET,
+        "base_manifest_sha256": "fixed-manifest",
+        "training_case_ids": list(training_ids),
+        "training_membership_sha256": membership["training_membership_sha256"],
+        "validation_case_ids": list(validation_ids),
+        "validation_membership_sha256": membership["validation_membership_sha256"],
+        "excluded_validation_id": "0273",
+    }
+    identity = {
+        "protocol": "full_train1000",
+        "dataset_profile": THERMAL_CONTENT_FULL_TRAIN_DATASET,
+        "validation_scope": "canonical89_exposed_original_test_excluding_0273",
+        "training_case_ids": list(training_ids),
+        "training_case_ids_sha256": membership["training_membership_sha256"],
+        "validation_case_ids": list(validation_ids),
+        "validation_case_ids_sha256": membership["validation_membership_sha256"],
+        "subset_manifest_sha256": "followup-manifest",
+        "base_fixed25_manifest_sha256": "fixed-manifest",
+        "source_binding": source_binding,
+    }
+    provider = SimpleNamespace(
+        protocol="full_train1000",
+        training_case_ids=training_ids,
+        validation_case_ids=validation_ids,
+        manifest={"manifest_sha256": "followup-manifest", "full_train_followup1000": followup_manifest},
+        base_manifest_sha256="fixed-manifest",
+        identity_payload=lambda: identity,
+    )
+    return provider, membership
+
+
+def _thermal_full_contract_patches(provider: SimpleNamespace, membership: dict[str, object]):
+    from channelthermal.training.content_hypergraph_task import THERMAL_CONTENT_FULL_TRAIN_DATASET
+
+    return (
+        patch(
+            "channelthermal.training.joint_task.validate_full_train_followup_membership",
+            return_value=membership,
+        ),
+        patch("channelthermal.training.unified_task.FIXED25_FINGERPRINT", "fixed-manifest"),
+        patch(
+            "channelthermal.training.content_hypergraph_task.THERMAL_CONTENT_FULL_TRAIN_DATASET",
+            THERMAL_CONTENT_FULL_TRAIN_DATASET,
+        ),
+    )
+
+
+def test_thermal_full_followup_binding_and_case_selection_use_metadata_only():
+    provider, membership = _thermal_full_provider()
+    patches = _thermal_full_contract_patches(provider, membership)
+    with patches[0], patches[1], patches[2]:
+        binding = _validate_thermal_full_binding(provider)
+        assert binding["protocol"] == "full_train1000"
+        assert binding["validation_scope"] == "canonical89_exposed_original_test_excluding_0273"
+        assert binding["normalization_fit_scope"] == "exact original TRAIN600 only"
+        assert binding["full_followup_membership"] == membership
+        assert binding["unexposed_original_test_targets_read"] is False
+        assert _select_thermal_cases(provider, "full_train1000") == ("0291", "0687")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda provider: provider.identity_payload()["source_binding"].update(
+            normalization_fit_scope="selected original TRAIN150 only"
+        ),
+        lambda provider: provider.identity_payload()["source_binding"].update(
+            original_test_targets_outside_declared_panel_read=True
+        ),
+        lambda provider: provider.identity_payload().update(base_fixed25_manifest_sha256="wrong-base"),
+        lambda provider: provider.identity_payload()["source_binding"]["full_followup_membership"].update(
+            unexposed_original_test_targets_read=True
+        ),
+    ),
+)
+def test_thermal_full_followup_rejects_scope_binding_or_target_lock_drift(mutate):
+    provider, membership = _thermal_full_provider()
+    mutate(provider)
+    patches = _thermal_full_contract_patches(provider, membership)
+    with patches[0], patches[1], patches[2], pytest.raises(ValueError, match="TRAIN600/canonical89"):
+        _validate_thermal_full_binding(provider)
+
+
+def test_thermal_full_followup_falls_back_to_bound_ids_when_dev_representatives_are_absent():
+    provider, membership = _thermal_full_provider()
+    provider.validation_case_ids = tuple(f"full-{index:02d}" for index in range(89))
+    identity = provider.identity_payload()
+    identity["validation_case_ids"] = list(provider.validation_case_ids)
+    followup = provider.manifest["full_train_followup1000"]
+    followup["validation_case_ids"] = list(provider.validation_case_ids)
+    patches = _thermal_full_contract_patches(provider, membership)
+    with patches[0], patches[1], patches[2]:
+        assert _select_thermal_cases(provider, "full_train1000") == ("full-00", "full-01")
+
+
+def test_wind_full_followup_selection_reuses_the_strict_provider_guard():
+    rows = np.asarray([69, 426, 10], dtype=np.int64)
+    counts = np.zeros(427, dtype=np.int64)
+    counts[69], counts[426], counts[10] = 3, 30, 8
+    identity = {
+        "protocol": "full_train1000",
+        "validation_rows": rows.tolist(),
+        "validation_row_indices_sha256": "valid90-membership",
+        "subset_manifest_sha256": "full-manifest",
+        "dataset_profile": "wind_full_profile",
+        "unexposed_test_target_values_read": False,
+        "wind_test_target_values_read": False,
+    }
+    provider = SimpleNamespace(
+        recipe={"protocol": "full_train1000"},
+        validation_rows=rows,
+        view=SimpleNamespace(metadata={"n_turbines": counts}),
+    )
+    with patch(
+        "wind_native_reference_evaluate._assert_full_train1000_provider", return_value=identity
+    ) as strict_guard:
+        binding = _validate_wind_full_binding(provider)
+        assert binding["validation_scope"] == "seed42_full_train1000_VALID90_exposed"
+        assert binding["validation_row_indices_sha256"] == "valid90-membership"
+        assert binding["unexposed_test_target_values_read"] is False
+        assert _select_wind_rows(provider, "full_train1000") == (69, 426)
+        assert strict_guard.call_count == 2
+
+
+@pytest.mark.parametrize("lock_field", ("wind_test_target_values_read", "unexposed_test_target_values_read"))
+def test_wind_full_followup_inspection_rejects_test_target_lock_drift(lock_field):
+    rows = np.asarray([69, 426], dtype=np.int64)
+    identity = {
+        "protocol": "full_train1000",
+        "validation_rows": rows.tolist(),
+        "validation_row_indices_sha256": "valid90-membership",
+        "subset_manifest_sha256": "full-manifest",
+        "dataset_profile": "wind_full_profile",
+        "wind_test_target_values_read": False,
+        "unexposed_test_target_values_read": False,
+    }
+    identity[lock_field] = True
+    provider = SimpleNamespace(recipe={"protocol": "full_train1000"}, validation_rows=rows)
+    with (
+        patch("wind_native_reference_evaluate._assert_full_train1000_provider", return_value=identity),
+        pytest.raises(ValueError, match="strict full VALID90 metadata check"),
+    ):
+        _validate_wind_full_binding(provider)
+
+
+def test_full_panel_metadata_labels_exposed_validation_and_test_lock_separately():
+    thermal_binding = {
+        "validation_scope": "canonical89_exposed_original_test_excluding_0273",
+        "validation_case_ids": ["0291", "0687", *(f"case-{i}" for i in range(87))],
+        "validation_case_ids_sha256": "thermal-valid89",
+    }
+    thermal = _validation_panel_metadata("thermal", "full_train1000", thermal_binding, ("0291", "0687"))
+    assert thermal["bound_validation_count"] == 89
+    assert thermal["exposed_validation_target_values_read_for_metrics"] is True
+    assert thermal["unexposed_original_test_targets_read"] is False
+    assert "DEV22" not in thermal["scope"]
+
+    wind_binding = {
+        "validation_scope": "seed42_full_train1000_VALID90_exposed",
+        "validation_rows": list(range(90)),
+        "validation_row_indices_sha256": "wind-valid90",
+    }
+    wind = _validation_panel_metadata("wind", "full_train1000", wind_binding, (69, 426))
+    assert wind["bound_validation_count"] == 90
+    assert wind["exposed_validation_target_values_read_for_metrics"] is True
+    assert wind["wind_test_target_values_read"] is False
+    assert wind["source_partition"] == "original_full_train1000_VALID90_exposed"
+
+
+def test_full_followup_inspection_requires_literal_approved_epoch_1000():
+    recipe = {"protocol": "full_train1000", "approved_stop_after": 1000, "architecture": "A-H6"}
+    assert _validate_checkpoint_scope("thermal", recipe, {"epoch": 1000}) == "full_train1000"
+    for bad_recipe, bad_payload in (
+        (recipe, {"epoch": 999}),
+        ({**recipe, "approved_stop_after": 2000}, {"epoch": 1000}),
+        ({**recipe, "architecture": "A-D"}, {"epoch": 1000}),
+        ({**recipe, "approved_stop_after": "1000"}, {"epoch": 1000}),
+    ):
+        with pytest.raises(ValueError, match="literal approved epoch 1000"):
+            _validate_checkpoint_scope("wind", bad_recipe, bad_payload)
 
 
 def test_fp64_native_identity_uses_frozen_software_tolerance_and_reports_raw_error():

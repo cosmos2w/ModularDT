@@ -487,6 +487,7 @@ def _prepare_decode(arm: Arm, batch: Any) -> tuple[Callable[[], Any], dict[str, 
             scene.structure,
             batch.receivers.fluid_xy,
             local_query_points=batch.receivers.local_query_points,
+            ntheta=batch.receivers.ntheta,
             scene_key=scene.case_ids,
         )
         organization, query = prepared.organization, prepared.query_batch
@@ -745,6 +746,7 @@ def _stress_request(arm: Arm, native_batch: Any, *, batch_size: int, query_count
             fluid_xy=_repeat_query_axis(_repeat_first_axis(native_batch.receivers.fluid_xy, batch_size), query_count),
             local_query_points=_repeat_first_axis(native_batch.receivers.local_query_points, batch_size),
             heat=_repeat_first_axis(native_batch.receivers.heat, batch_size),
+            ntheta=native_batch.receivers.ntheta,
         )
     else:
         from dataclasses import replace as dataclass_replace
@@ -885,7 +887,9 @@ def run_density_backward(arms: Mapping[str, Arm], high_batches: Mapping[str, Any
     return records
 
 
-def _stress_core_probe(arm: Arm, native_batch: Any, *, query_count: int) -> Mapping[str, Any]:
+def _stress_core_probe(
+    arm: Arm, native_batch: Any, *, query_count: int, backward: bool = False,
+) -> Mapping[str, Any]:
     """Target-free core-only density point, independent of native grid extraction."""
     dataset = arm.recipe["dataset"]
     batch_size = 8
@@ -893,6 +897,7 @@ def _stress_core_probe(arm: Arm, native_batch: Any, *, query_count: int) -> Mapp
     scene = arm.provider.make_scene(scene_inputs)
     core = _core_for(arm)
     if dataset == "thermal":
+        scene = arm.model.scene_batch(scene.structure, scene_key=scene.case_ids)
         # Generate new in-frame coordinates: this is coordinate-density stress,
         # not a physical-grid accuracy test and not a native-union benchmark.
         generator = torch.Generator(device=scene.module_features.device)
@@ -920,7 +925,7 @@ def _stress_core_probe(arm: Arm, native_batch: Any, *, query_count: int) -> Mapp
             coordinate_frame_key=THERMAL_CONTENT_COORDINATE_FRAME,
             receiver_key=("target_free_coordinate_density", query_count),
         )
-        controls = scene.module_features.new_zeros(scene.module_mask.shape)
+        controls = receivers.heat
     else:
         # Native Wind coordinates and query features are repeated only to raise
         # Q beyond the stored 8192 stress panel; no target enters the core.
@@ -947,6 +952,26 @@ def _stress_core_probe(arm: Arm, native_batch: Any, *, query_count: int) -> Mapp
         controls = None
     organization = core.prepare(scene)
     output = core.decode(organization, query, controls=controls)
+    backward_details = {}
+    if backward:
+        terms = [output.nonlinear_field.square().mean()]
+        if output.thermal_temperature is not None:
+            terms.append(output.thermal_temperature.square().mean())
+        loss = sum(terms)
+        if not bool(torch.isfinite(loss.detach())):
+            raise FloatingPointError("Large core backward stress produced a nonfinite objective.")
+        loss.backward()
+        gradients = [parameter.grad for parameter in core.parameters() if parameter.grad is not None]
+        finite = bool(gradients) and all(bool(torch.isfinite(value).all()) for value in gradients)
+        if not finite:
+            raise FloatingPointError("Large core backward stress produced absent/nonfinite gradients.")
+        backward_details = {
+            "backward_completed": True,
+            "finite_gradients": finite,
+            "gradient_tensor_count": len(gradients),
+            "loss_value": float(loss.detach().cpu()),
+            "objective": "mean squared core outputs at native heat; no target or optimizer step",
+        }
     work = dict(output.work_counts or {})
     source_factor_bytes = _tensor_bytes(organization.source_coefficients)
     output_bytes = _tree_tensor_bytes({
@@ -974,6 +999,7 @@ def _stress_core_probe(arm: Arm, native_batch: Any, *, query_count: int) -> Mapp
         "source_factor_bytes": source_factor_bytes,
         "native_grid_accuracy_claim": False,
         "work_counts": work,
+        **backward_details,
     }
 
 
@@ -1299,9 +1325,13 @@ def main(argv: list[str] | None = None) -> int:
                 architecture: fixture_batches[architecture]["high_m"] for architecture in ARCHITECTURES
             }
         native_records = [] if args.skip_native else run_native_matrix(arms, fixture_batches, device)
+        (args.output / "native_cost_matrix.json").write_text(
+            json.dumps(json_safe(native_records), indent=2, allow_nan=False) + "\n")
         density_records = []
         if not args.skip_density:
             density_records.extend(run_density_backward(arms, high_batches, device))
+            (args.output / "density_backward.json").write_text(
+                json.dumps(json_safe(density_records), indent=2, allow_nan=False) + "\n")
             density_records.extend(run_density_core_probe(arms, high_batches, device))
         training_records, executed_updates, packing_checks = run_training_throughput(
             arms, packings=packings, epochs=args.training_epochs,

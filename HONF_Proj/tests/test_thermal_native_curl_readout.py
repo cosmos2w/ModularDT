@@ -131,6 +131,7 @@ def test_native_adapter_zero_collective_roundtrip_and_curl_gradient(mode):
     envelope = _thermal_engine_payload(model)
     envelope["arm"] = mode
     identity = envelope["experiment_identity"]
+    identity["workflow"] = envelope["workflow"]
     identity["recipe"].update(
         mode=mode, regional_anchors=0 if mode == "P" else 16,
         flow_readout_law=NATIVE_CURL_READOUT_LAW,

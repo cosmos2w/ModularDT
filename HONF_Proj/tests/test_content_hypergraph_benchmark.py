@@ -18,6 +18,8 @@ from content_hypergraph_benchmark import (
     Arm,
     _model_state_cpu,
     _provider_identity_without_arm,
+    _stress_core_probe,
+    _stress_request,
     expected_optimizer_updates,
     initialization_receipt,
     is_oom_error,
@@ -152,3 +154,51 @@ def test_wind_query_stream_digest_is_independent_of_microbatch_boundaries() -> N
     packed = [batch(0, 4)]
     split = [batch(0, 1), batch(1, 3), batch(3, 4)]
     assert packing_independent_query_sha256(packed, "wind") == packing_independent_query_sha256(split, "wind")
+
+
+def test_thermal_stress_converts_native_scene_and_preserves_surface_support():
+    from channelthermal.content_hypergraph import ThermalContentHypergraphAdapter
+    from channelthermal.training.content_hypergraph_task import (
+        ThermalContentReceivers,
+        ThermalContentSceneInputs,
+    )
+
+    model = ThermalContentHypergraphAdapter({
+        "field_mean_by_channel": [0.0] * 5, "field_std_by_channel": [1.0] * 5,
+        "interface_targets_mean": [0.0, 0.0], "interface_targets_std": [1.0, 1.0],
+        "internal_temperature_mean": [0.0], "internal_temperature_std": [1.0],
+    }, nx=8, ny=6, core_config={
+        "architecture": "A-H6", "context_dim": 16, "num_heads": 4,
+        "context_depth": 1, "num_hyperedges": 6, "thermal_response_rank": 4,
+        "local_hidden_dim": 8, "init_seed": 7,
+    }).eval()
+    structure = {
+        "module_centers": torch.tensor([[[2.0, 2.0], [7.5, 4.0]]]),
+        "module_present": torch.ones(1, 2),
+        "module_source_ids": torch.tensor([[31, 47]]),
+        "material_params": torch.tensor([[0.02, 0.01, 0.02, 1.0, 2.0, 0.22]]),
+        "re": torch.tensor([[50.0]]), "u_in": torch.ones(1, 1),
+        "domain_length_x": torch.tensor([[12.0]]), "domain_length_y": torch.tensor([[6.0]]),
+    }
+    fluid = torch.tensor([[[1.0, 1.0], [4.0, 3.0]]])
+    material = torch.zeros(1, 2, 2, 2)
+    native = SimpleNamespace(
+        case_keys=("fixture",),
+        scene_inputs=ThermalContentSceneInputs(structure, None, ("fixture",)),
+        receivers=ThermalContentReceivers(fluid, material, torch.ones(1, 2), ntheta=64),
+    )
+    arm = Arm("A-H6", model, SimpleNamespace(make_scene=lambda inputs: inputs),
+              {"dataset": "thermal"}, "test", None, None, _model_state_cpu(model))
+    _, receivers = _stress_request(arm, native, batch_size=8, query_count=17)
+    assert receivers.ntheta == 64
+    assert receivers.fluid_xy.shape == (8, 17, 2)
+    with torch.no_grad():
+        result = _stress_core_probe(arm, native, query_count=19)
+    assert result["batch_size"] == 8
+    assert result["executed_receiver_rows"] == 8 * 19
+    assert result["padded_edge_rows"] == 8 * 19 * 6
+    assert result["native_grid_accuracy_claim"] is False
+    model.zero_grad(set_to_none=True)
+    backward_result = _stress_core_probe(arm, native, query_count=19, backward=True)
+    assert backward_result["backward_completed"] and backward_result["finite_gradients"]
+    assert backward_result["gradient_tensor_count"] > 0

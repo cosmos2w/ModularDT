@@ -349,7 +349,7 @@ def test_native_source_xy_geometry_vjp_matches_two_central_fd_steps():
     for step in (2.0e-2, 1.0e-2):
         delta = direction * step
         finite_difference = (evaluate(delta) - evaluate(-delta)) / (2.0 * step)
-        torch.testing.assert_close(finite_difference, vjp_directional, rtol=5.0e-2, atol=2.0e-4)
+        torch.testing.assert_close(finite_difference, vjp_directional, rtol=1.0e-4, atol=1.0e-5)
 
 
 def test_native_query_subset_and_source_permutation_preserve_receiver_predictions():

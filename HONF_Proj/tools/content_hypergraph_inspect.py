@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect same-weight A-H6 organization and receiver readout on fixed DEV rows.
+"""Inspect same-weight A-H6 organization and receiver readout on a bound validation panel.
 
 The command is CPU-only and read-only with respect to source data and model
 weights. Generated arrays and the result manifest must live beneath the
@@ -379,7 +379,7 @@ def _condition_trace_arrays(
 def _thermal_case_batch(provider: Any, selected: tuple[str, ...]):
     ids = set(provider.validation_case_ids)
     if any(case_id not in ids for case_id in selected):
-        raise ValueError("Thermal inspection case panel is outside fixed development membership.")
+        raise ValueError("Thermal inspection case panel is outside the bound validation membership.")
     return list(provider.native_evaluation_batches(split="validation", case_keys=selected, microbatch_size=1))
 
 
@@ -430,12 +430,128 @@ def _validate_thermal_development_binding(provider: Any) -> dict[str, Any]:
     }
 
 
-def _select_thermal_cases(provider: Any) -> tuple[str, ...]:
-    _validate_thermal_development_binding(provider)
+def _validate_thermal_full_binding(provider: Any) -> dict[str, Any]:
+    from channelthermal.training.content_hypergraph_task import (
+        THERMAL_CONTENT_FULL_TRAIN_DATASET,
+        THERMAL_CONTENT_FULL_TRAIN_PROTOCOL,
+    )
+    from channelthermal.training.joint_task import validate_full_train_followup_membership
+    from channelthermal.training.unified_task import FIXED25_FINGERPRINT
+
+    identity = provider.identity_payload()
+    source_binding = identity.get("source_binding", {})
+    training_ids = tuple(map(str, identity.get("training_case_ids", ())))
+    validation_ids = tuple(map(str, identity.get("validation_case_ids", ())))
+    if training_ids != tuple(map(str, provider.training_case_ids)):
+        raise ValueError("Thermal full-follow-up identity TRAIN IDs differ from the provider membership.")
+    if validation_ids != tuple(map(str, provider.validation_case_ids)):
+        raise ValueError("Thermal full-follow-up identity VALID IDs differ from the provider membership.")
+
+    membership = validate_full_train_followup_membership(provider.training_case_ids, provider.validation_case_ids)
+    manifest_followup = provider.manifest.get("full_train_followup1000", {})
+    if (
+        provider.protocol != "full_train1000"
+        or identity.get("protocol") != "full_train1000"
+        or identity.get("dataset_profile") != THERMAL_CONTENT_FULL_TRAIN_DATASET
+        or identity.get("validation_scope") != "canonical89_exposed_original_test_excluding_0273"
+        or identity.get("subset_manifest_sha256") != provider.manifest.get("manifest_sha256")
+        or identity.get("training_case_ids_sha256") != membership["training_membership_sha256"]
+        or identity.get("validation_case_ids_sha256") != membership["validation_membership_sha256"]
+        or identity.get("base_fixed25_manifest_sha256") != FIXED25_FINGERPRINT
+        or provider.base_manifest_sha256 != FIXED25_FINGERPRINT
+        or source_binding.get("base_manifest_sha256") != FIXED25_FINGERPRINT
+        or source_binding.get("protocol") != "full_train1000"
+        or source_binding.get("normalization_fit_scope") != "exact original TRAIN600 only"
+        or source_binding.get("original_test_targets_outside_declared_panel_read") is not False
+        or source_binding.get("full_followup_membership") != membership
+        or manifest_followup.get("execution_protocol") != THERMAL_CONTENT_FULL_TRAIN_PROTOCOL
+        or manifest_followup.get("dataset_protocol") != THERMAL_CONTENT_FULL_TRAIN_DATASET
+        or manifest_followup.get("base_manifest_sha256") != FIXED25_FINGERPRINT
+        or manifest_followup.get("training_case_ids") != list(training_ids)
+        or manifest_followup.get("validation_case_ids") != list(validation_ids)
+        or manifest_followup.get("training_membership_sha256") != membership["training_membership_sha256"]
+        or manifest_followup.get("validation_membership_sha256") != membership["validation_membership_sha256"]
+        or manifest_followup.get("excluded_validation_id") != "0273"
+    ):
+        raise ValueError("Thermal full-follow-up provider is not bound to the exact TRAIN600/canonical89 contract.")
+    return {
+        "protocol": "full_train1000",
+        "validation_scope": identity["validation_scope"],
+        "validation_case_ids": list(validation_ids),
+        "validation_case_ids_sha256": membership["validation_membership_sha256"],
+        "training_membership_sha256": membership["training_membership_sha256"],
+        "subset_manifest_sha256": identity["subset_manifest_sha256"],
+        "base_fixed25_manifest_sha256": FIXED25_FINGERPRINT,
+        "normalization_fit_scope": source_binding["normalization_fit_scope"],
+        "full_followup_membership": membership,
+        "unexposed_original_test_targets_read": membership["unexposed_original_test_targets_read"],
+    }
+
+
+def _select_thermal_cases(provider: Any, protocol: str | None = None) -> tuple[str, ...]:
+    scope = protocol or provider.protocol
+    if scope == "development":
+        _validate_thermal_development_binding(provider)
+    elif scope == "full_train1000":
+        _validate_thermal_full_binding(provider)
+    else:
+        raise ValueError("Thermal inspection supports only development or full_train1000 providers.")
     validation = set(provider.validation_case_ids)
-    if any(case_id not in validation for case_id in THERMAL_REPRESENTATIVE_IDS):
+    if all(case_id in validation for case_id in THERMAL_REPRESENTATIVE_IDS):
+        return THERMAL_REPRESENTATIVE_IDS
+    if scope == "development":
         raise ValueError("Fixed Thermal inspection cases 0291 and 0687 are not both in the bound DEV22 panel.")
-    return THERMAL_REPRESENTATIVE_IDS
+    selected = tuple(sorted(validation)[:2])
+    if len(selected) != 2:
+        raise ValueError("Thermal full-follow-up validation panel has fewer than two bound cases.")
+    return selected
+
+
+def _validate_wind_full_binding(provider: Any) -> dict[str, Any]:
+    from wind_native_reference_evaluate import _assert_full_train1000_provider
+
+    identity = _assert_full_train1000_provider(provider)
+    validation_rows = np.asarray(provider.validation_rows, dtype=np.int64)
+    if (
+        provider.recipe.get("protocol") != "full_train1000"
+        or identity.get("protocol") != "full_train1000"
+        or identity.get("validation_rows") != validation_rows.astype(int).tolist()
+        or identity.get("unexposed_test_target_values_read") is not False
+        or identity.get("wind_test_target_values_read") is not False
+    ):
+        raise ValueError("Wind inspection provider changed after its strict full VALID90 metadata check.")
+    return {
+        "protocol": "full_train1000",
+        "validation_scope": "seed42_full_train1000_VALID90_exposed",
+        "validation_rows": validation_rows.astype(int).tolist(),
+        "validation_row_indices_sha256": identity["validation_row_indices_sha256"],
+        "subset_manifest_sha256": identity["subset_manifest_sha256"],
+        "dataset_profile": identity["dataset_profile"],
+        "test_target_values_read": False,
+        "unexposed_test_target_values_read": False,
+    }
+
+
+def _validate_wind_development_binding(provider: Any) -> dict[str, Any]:
+    from wind_native_reference_evaluate import _assert_dev24_provider
+
+    if provider.recipe.get("protocol") != "development":
+        raise ValueError("Wind development inspection requires its fixed DEV24 provider.")
+    _assert_dev24_provider(provider)
+    identity = provider.identity_payload()
+    rows = np.asarray(provider.validation_rows, dtype=np.int64)
+    if identity.get("protocol") != "development" or identity.get("validation_rows") != rows.astype(int).tolist():
+        raise ValueError("Wind DEV24 identity differs from the provider validation rows.")
+    return {
+        "protocol": "development",
+        "validation_scope": "wind_shared_fixed24_v1_DEV24_exposed",
+        "validation_rows": rows.astype(int).tolist(),
+        "validation_row_indices_sha256": identity["validation_row_indices_sha256"],
+        "subset_manifest_sha256": identity["subset_manifest_sha256"],
+        "dataset_profile": identity["dataset_profile"],
+        "test_target_values_read": False,
+        "unexposed_test_target_values_read": False,
+    }
 
 
 def _fp64_identity_error(
@@ -464,9 +580,14 @@ def _fp64_identity_error(
     }
 
 
-def _select_wind_rows(provider: Any) -> tuple[int, ...]:
-    if provider.recipe["protocol"] != "development":
-        raise ValueError("The organizer inspection is restricted to fixed Wind DEV, not full-TRAIN follow-up.")
+def _select_wind_rows(provider: Any, protocol: str | None = None) -> tuple[int, ...]:
+    scope = protocol or provider.recipe["protocol"]
+    if scope == "full_train1000":
+        _validate_wind_full_binding(provider)
+    elif scope == "development":
+        _validate_wind_development_binding(provider)
+    else:
+        raise ValueError("Wind inspection supports only development or full_train1000 providers.")
     rows = np.asarray(provider.validation_rows, dtype=np.int64)
     counts = np.asarray(provider.view.metadata["n_turbines"], dtype=np.int64)
     low_count = int(counts[rows].min())
@@ -483,6 +604,57 @@ def _select_wind_rows(provider: Any) -> tuple[int, ...]:
     low = int(rows[counts[rows] == low_count][0])
     high = int(rows[counts[rows] == high_count][-1])
     return low, high
+
+
+def _validate_checkpoint_scope(dataset: str, recipe: dict[str, Any], payload: dict[str, Any]) -> str:
+    protocol = recipe.get("protocol")
+    if protocol == "development":
+        return "development"
+    if protocol != "full_train1000":
+        raise ValueError("Same-weight inspection supports only development or full_train1000 checkpoints.")
+    epoch = payload.get("epoch")
+    stop = recipe.get("approved_stop_after")
+    if (
+        type(epoch) is not int
+        or epoch != 1000
+        or type(stop) is not int
+        or stop != 1000
+        or str(recipe.get("architecture", "")).upper() != "A-H6"
+        or dataset not in ("thermal", "wind")
+    ):
+        raise ValueError("Full-follow-up inspection requires an A-H6 checkpoint at literal approved epoch 1000.")
+    return "full_train1000"
+
+
+def _validation_panel_metadata(
+    dataset: str,
+    protocol: str,
+    binding: dict[str, Any],
+    selected: tuple[str, ...] | tuple[int, ...],
+) -> dict[str, Any]:
+    if dataset == "thermal":
+        return {
+            "scope": binding["validation_scope"],
+            "source_partition": "original_h5_test_split_exposed_validation_panel",
+            "bound_validation_count": len(binding["validation_case_ids"]),
+            "bound_validation_membership_sha256": binding["validation_case_ids_sha256"],
+            "inspected_case_ids": list(selected),
+            "exposed_validation_target_values_read_for_metrics": True,
+            "unexposed_original_test_targets_read": False,
+        }
+    return {
+        "scope": binding["validation_scope"],
+        "source_partition": (
+            "original_full_train1000_VALID90_exposed"
+            if protocol == "full_train1000" else "wind_shared_fixed24_v1_DEV24_exposed"
+        ),
+        "bound_validation_count": len(binding["validation_rows"]),
+        "bound_validation_membership_sha256": binding["validation_row_indices_sha256"],
+        "inspected_native_rows": list(selected),
+        "exposed_validation_target_values_read_for_metrics": True,
+        "wind_test_target_values_read": False,
+        "unexposed_test_target_values_read": False,
+    }
 
 
 def _thermal_condition(
@@ -1041,8 +1213,7 @@ def main(argv: list[str] | None = None) -> int:
     model, provider, payload = load_evaluation_components(checkpoint, device="cpu")
     recipe = payload["experiment_identity"]["recipe"]
     dataset = str(recipe["dataset"])
-    if recipe.get("protocol") != "development":
-        raise ValueError("Same-weight organizer inspection is restricted to fixed development checkpoints.")
+    protocol = _validate_checkpoint_scope(dataset, recipe, payload)
     core = model.core if dataset == "thermal" else model
     if core.architecture != "A-H6":
         raise ValueError("The four organization interventions require an A-H6 checkpoint.")
@@ -1053,17 +1224,25 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir(parents=True, exist_ok=False)
 
     if dataset == "thermal":
-        thermal_binding = _validate_thermal_development_binding(provider)
-        selected = _select_thermal_cases(provider)
+        if protocol == "development":
+            binding = _validate_thermal_development_binding(provider)
+        else:
+            binding = _validate_thermal_full_binding(provider)
+        selected = _select_thermal_cases(provider, protocol)
         batches = _thermal_case_batch(provider, selected)
         with torch.no_grad():
             cases = [_run_thermal_case(model, provider, batch) for batch in batches]
     elif dataset == "wind":
-        thermal_binding = None
-        selected_rows = _select_wind_rows(provider)
+        binding = (
+            _validate_wind_development_binding(provider)
+            if protocol == "development"
+            else _validate_wind_full_binding(provider)
+        )
+        selected_rows = _select_wind_rows(provider, protocol)
         batches = list(provider.native_evaluation_batches(
             split="validation", case_keys=selected_rows, microbatch_size=1
         ))
+        selected = selected_rows
         with torch.no_grad():
             cases = [_run_wind_case(model, provider, batch) for batch in batches]
     else:
@@ -1085,30 +1264,42 @@ def main(argv: list[str] | None = None) -> int:
         all_results.append(case)
 
     result = {
-        "schema": "content_hypergraph_same_weight_inspection_v1",
+        "schema": "content_hypergraph_same_weight_inspection_v2",
         "status": "completed",
         "dataset": dataset,
         "architecture": core.architecture,
-        "protocol": recipe["protocol"],
+        "protocol": protocol,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": checkpoint_hash,
         "completed_epoch": int(payload["epoch"]),
         "provider_binding_sha256": canonical_sha256(payload["experiment_identity"]["provider_identity"]),
-        "selection": "fixed DEV membership and input geometry/counts only; no model-error selection",
-        "thermal_development_binding": thermal_binding,
+        "selection": (
+            "fixed DEV membership and input geometry/counts only; no model-error selection"
+            if protocol == "development"
+            else "independently bound full_train1000 validation membership and input geometry/counts only; no model-error selection"
+        ),
+        "validation_panel": _validation_panel_metadata(dataset, protocol, binding, selected),
+        "validation_binding": binding,
         "conditions": list(CONDITIONS),
         "cases": all_results,
         "array_files": array_files,
         "device": "cpu",
         "optimizer_updates": 0,
         "solver_attempts": 0,
-        "thermal_DEV22_targets": (
-            "exposed original TEST targets read only for the exact provider-bound DEV22 membership"
+        "target_access": (
+            {
+                "source_partition": "original_h5_test_split_exposed_validation_panel",
+                "exposed_validation_target_values_read_for_metrics": True,
+                "unexposed_original_test_targets_read": False,
+            }
             if dataset == "thermal"
-            else None
+            else {
+                "source_partition": binding["validation_scope"],
+                "exposed_validation_target_values_read_for_metrics": True,
+                "wind_test_target_values_read": False,
+                "unexposed_test_target_values_read": False,
+            }
         ),
-        "thermal_unexposed_original_test_targets_read": False if dataset == "thermal" else None,
-        "WindTEST": "locked",
         "execution_note": (
             "All interventions retain the dense full-H6 edge reader. Edge gates zero contributions after message computation; "
             "the local-zero hook preserves the packed rows and reports their original executed counts. No sparse-work or "
