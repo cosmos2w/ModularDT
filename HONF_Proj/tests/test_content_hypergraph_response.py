@@ -17,9 +17,27 @@ if str(TOOLS) not in sys.path:
 from content_hypergraph_response import (
     _precision_comparison,
     _typed_native_input,
+    _weighted_change_metrics,
     evaluate_checkpoint,
     module_peak_changes,
 )
+
+
+def test_response_metric_preserves_read_only_saved_validity():
+    mask = np.asarray([[True], [True], [True]])
+    mask.flags.writeable = False
+    role = SimpleNamespace(
+        valid_mask=mask,
+        quadrature_weights=np.asarray([1.0, 0.0, 3.0]),
+        channel_names=("temperature",),
+    )
+    result = _weighted_change_metrics(
+        np.asarray([2.0, 100.0, 4.0]), np.asarray([1.0, 1.0, 2.0]), role, 0
+    )
+    assert result["valid_receiver_count"] == 2
+    assert result["native_weighted_rmse"] == pytest.approx(np.sqrt(3.25))
+    np.testing.assert_array_equal(mask, np.ones((3, 1), dtype=bool))
+    assert not mask.flags.writeable
 
 
 def test_module_peak_change_is_difference_of_endpoint_maxima():

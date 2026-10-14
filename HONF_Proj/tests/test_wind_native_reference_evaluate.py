@@ -13,6 +13,43 @@ if str(TOOLS) not in sys.path:
 import wind_native_reference_evaluate as evaluator
 
 
+def test_endpoint_role_counts_come_from_actual_q8192_role_ids() -> None:
+    names = ("volume", "hub_slab", "downstream_envelope", "near_turbine", "background")
+    one_row = np.repeat(np.arange(len(names), dtype=np.int8), [1640, 1640, 1640, 1640, 1632])
+    role_ids = np.stack((one_row, one_row.copy()))
+
+    assert evaluator.endpoint_role_query_counts(
+        role_ids, names, expected_query_count=8192
+    ) == {
+        "volume": 1640,
+        "hub_slab": 1640,
+        "downstream_envelope": 1640,
+        "near_turbine": 1640,
+        "background": 1632,
+    }
+
+
+def test_endpoint_role_counts_reject_row_mismatch_and_wrong_query_count() -> None:
+    names = ("volume", "hub_slab", "downstream_envelope", "near_turbine", "background")
+    row = np.repeat(np.arange(len(names), dtype=np.int8), [4, 3, 3, 3, 3])
+    other_row = row.copy()
+    other_row[0] = 1
+    mismatched = np.stack((row, other_row))
+    try:
+        evaluator.endpoint_role_query_counts(mismatched, names, expected_query_count=16)
+    except ValueError as error:
+        assert "same role counts" in str(error)
+    else:
+        raise AssertionError("Endpoint metadata must reject inconsistent per-row role allocation.")
+
+    try:
+        evaluator.endpoint_role_query_counts(np.stack((row, row)), names, expected_query_count=15)
+    except ValueError as error:
+        assert "declared per-row query count" in str(error)
+    else:
+        raise AssertionError("Endpoint metadata must reject an incorrect declared query count.")
+
+
 class _Run:
     def __init__(self) -> None:
         self.nx, self.ny, self.nz = 5, 3, 4

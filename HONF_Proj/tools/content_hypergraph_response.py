@@ -198,7 +198,9 @@ def _native_role_arrays(output: dict[str, torch.Tensor], metadata: dict[str, Any
 def _weighted_change_metrics(prediction: np.ndarray, reference: np.ndarray, role: Any, channel: int) -> dict[str, float]:
     prediction = np.asarray(prediction, dtype=np.float64).reshape(-1)
     reference = np.asarray(reference, dtype=np.float64).reshape(-1)
-    valid = np.asarray(role.valid_mask[:, channel], dtype=bool)
+    # Typed saved records expose immutable arrays. Refining this local metric
+    # mask must not mutate their shared validity contract.
+    valid = np.array(role.valid_mask[:, channel], dtype=bool, copy=True)
     weights = np.asarray(role.quadrature_weights, dtype=np.float64)
     valid &= np.isfinite(weights) & (weights > 0)
     valid &= np.isfinite(prediction) & np.isfinite(reference)

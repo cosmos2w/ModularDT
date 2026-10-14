@@ -74,6 +74,36 @@ def _array_digest(*arrays: np.ndarray) -> str:
     return digest.hexdigest()
 
 
+def endpoint_role_query_counts(
+    role_ids: np.ndarray,
+    role_names: Sequence[str],
+    *,
+    expected_query_count: int,
+) -> dict[str, int]:
+    """Count each endpoint role from the sealed receiver IDs for every row."""
+    role_values = np.asarray(role_ids)
+    names = tuple(str(name) for name in role_names)
+    if role_values.ndim != 2 or role_values.shape[0] == 0:
+        raise ValueError("Endpoint role IDs must have shape [rows, queries] with at least one row.")
+    if not names or len(set(names)) != len(names):
+        raise ValueError("Endpoint role names must be nonempty and unique.")
+    if role_values.shape[1] != int(expected_query_count):
+        raise ValueError("Endpoint role IDs do not match the declared per-row query count.")
+    if not np.issubdtype(role_values.dtype, np.integer):
+        raise TypeError("Endpoint role IDs must use an integer dtype.")
+    if role_values.size and (int(role_values.min()) < 0 or int(role_values.max()) >= len(names)):
+        raise ValueError("Endpoint role IDs contain an index with no role name.")
+    counts_by_role = np.stack(
+        [np.count_nonzero(role_values == role_index, axis=1) for role_index in range(len(names))],
+        axis=1,
+    )
+    if not np.all(counts_by_role.sum(axis=1) == int(expected_query_count)):
+        raise ValueError("Endpoint role counts do not sum to the declared per-row query count.")
+    if not np.all(counts_by_role == counts_by_role[0]):
+        raise ValueError("The fixed endpoint panel must use the same role counts for every row.")
+    return {name: int(counts_by_role[0, index]) for index, name in enumerate(names)}
+
+
 def parse_named_paths(values: Sequence[str], option_name: str) -> dict[str, Path]:
     result: dict[str, Path] = {}
     for value in values:
@@ -1218,7 +1248,12 @@ def _evaluate_endpoints(
         "row_count": len(endpoint_rows),
         "row_order": endpoint_rows,
         "query_count_per_row": 8192,
-        "role_query_counts": dict(provider.role_query_counts),
+        "role_query_counts": endpoint_role_query_counts(
+            panel_arrays["role_ids"],
+            tuple(provider.role_query_counts),
+            expected_query_count=8192,
+        ),
+        "role_query_counts_basis": "counts derived from each saved endpoint row's role_ids; per-row Q8192",
         "row_native_panel_sha256": row_hashes,
         "coordinate_frame": "wind_aligned_rotor_diameters_v1; native x downstream, y crosswind, z vertical; no second rotation",
         "target_units": "m/s",

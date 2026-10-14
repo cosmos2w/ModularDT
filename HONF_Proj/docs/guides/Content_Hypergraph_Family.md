@@ -78,4 +78,55 @@ Continuation beyond1000 is manual future work requiring a new authorization and 
 
 Use full native endpoint metrics, fixed-weight TRAIN/DEV comparisons, source-to-edge pooling, receiver access and same-weight interventions to assess learning and actual content use. An arrow or nonzero gradient establishes a computational path; it does not identify physical causality. Count complete prediction, native extraction/CPU return, optimizer-boundary work and memory, requested versus unique union queries, and actual local/edge rows. Fixed-B density probes atQ1024/4096/8192 and the declared larger stress point measure memory scaling; reduced work does not itself establish faster execution.
 
+The maintained commands below use checkpoint-bound membership and TRAIN transforms. Native evaluation requests all8192 fluid points,64 surface angles and every stored material point for Thermal, and8192 total native role queries per Wind row. Fixed-weight TRAIN monitoring replays the checkpoint's declared epoch sampling without optimizer updates. It reports observed query counts separately from native endpoint counts. Detailed exports require one-case packing and explicit case IDs; the full statistical panel still contributes metrics.
+
+```bash
+# Run from HONF_Proj in the ModularDT environment; choose fresh output paths.
+CUDA_VISIBLE_DEVICES='' python tools/content_hypergraph_evaluate.py \
+  --checkpoint /absolute/run/checkpoints/epoch_1000_model.pt --device cpu \
+  --output /absolute/owned/native_endpoint --export-case 0291 --export-case 0687
+CUDA_VISIBLE_DEVICES='' python tools/content_hypergraph_evaluate.py \
+  --checkpoint /absolute/run/checkpoints/epoch_1000_model.pt --device cpu \
+  --panel monitor --split train --output /absolute/owned/fixed_weight_train
+CUDA_VISIBLE_DEVICES='' python tools/content_hypergraph_inspect.py \
+  --checkpoint /absolute/h6_run/checkpoints/epoch_1000_model.pt \
+  --round-root /absolute/authorized_round --output /absolute/authorized_round/inspection
+CUDA_VISIBLE_DEVICES='' python tools/content_hypergraph_response.py \
+  --checkpoint /absolute/thermal_run/checkpoints/best_by_field_mse_model.pt \
+  --output /absolute/owned/saved_response.json --device cpu
+CUDA_VISIBLE_DEVICES=GPU-233fcd85-5c6a-6212-3f44-655252afec70 \
+  python tools/content_hypergraph_benchmark.py --dataset thermal --device cuda:0 \
+  --checkpoint-ad /absolute/ad_run/checkpoints/epoch_1000_model.pt \
+  --checkpoint-ah6 /absolute/h6_run/checkpoints/epoch_1000_model.pt \
+  --output /absolute/owned/native_cost_and_fixed_b8_density
+```
+
+The inspector exports actual incidence, measure-weighted pooling, edge contents, three input-selected receivers, local pairs and four conditions at unchanged weights. Edge removal keeps the original access weights without renormalizing; local zeroing preserves executed pair rows. All six edges still execute. Development and full-TRAIN1000 inspection have separate membership checks; full checkpoints require the literal1000 stop. Thermal response replay uses only saved0291/0294/0687 baseline/minus/plus records, contracts retained factors precisely, retains FP32 subtraction errors, and computes material-peak changes from endpoint maxima. The missing0277 baseline remains absent. A smooth geometry VJP fixture per dataset tests the interface; no displacement truth or inverse-design validity follows from those fixtures.
+
+Thermal reference evaluation uses the maintained public legacy loader and its own checkpoint normalizer, then requires exact helper/public input and repeated CPU prediction agreement on0291/0687 before a population board. This separately qualified CPU board leaves the old failed GPU comparison quarantined. Wind references likewise use their retained native loaders and transforms. The full Wind board is an explicit `--board-scope full_train1000` operation, pinned to TRAIN420/VALID90 with TEST targets locked; its historical states are literal e1000 and actual mature e2440/e2475, not inferred e5000 states.
+
+```bash
+CUDA_VISIBLE_DEVICES='' python tools/thermal_native_reference_evaluate.py \
+  --panel-checkpoint /absolute/thermal_run/checkpoints/epoch_1000_model.pt \
+  --reference-checkpoint classic=/absolute/classic/epoch_5000_model.pt \
+  --qualification-only --output /absolute/owned/classic_cpu_qualification
+CUDA_VISIBLE_DEVICES='' python tools/wind_native_reference_evaluate.py \
+  --new-checkpoint ad=/absolute/wind_ad/checkpoints/epoch_2500_model.pt \
+  --new-checkpoint h6=/absolute/wind_h6/checkpoints/epoch_2500_model.pt \
+  --reference-checkpoint classic=/absolute/2102/best_by_field_mse_model.pt \
+  --reference-checkpoint dense=/absolute/2103/best_by_field_mse_model.pt \
+  --output /absolute/owned/wind_native_board
+```
+
+Full-TRAIN1000 continuation remains bounded by the same recipe even when a checkpoint stores a prospective5000 schedule. For example, the following preparation command intentionally fails before model/data construction or run allocation. A later authorized continuation requires a separately reviewed authorization-aware recipe/schema; editing a stop argument does not extend this round.
+
+```bash
+CUDA_VISIBLE_DEVICES='' python tools/content_hypergraph_train.py \
+  --recipe src/config_core/forward/content_hypergraph/thermal_a-h6_full1000.json \
+  --device cpu --dry-run --stop-after 5000
+# Expected: execution stop must lie in 1..1000.
+```
+
+The one Oct13 Thermal capacity revision is `thermal_a-h6_reader128_development.json`: `model.local_hidden_dim` changes64→128, widening both edge/global and compact local messages and the physical field-head hidden width. The contextualizer remains128/depth2; H6, response rank4, local support3r, physical laws, sampling, normalization, losses, schedule and batch sizes remain fixed. It starts fresh with seed0 and its own identity; unchanged same-shape tensors have identical named initialization. The completed original A-D/A-H6 pair remains the primary decoder comparison. This revision tests a capacity hypothesis after worse TRAIN and DEV fields, without establishing a modal-rank diagnosis or authorizing another revision. Its measured outcome and separate full1000 decision belong in the campaign report.
+
 Record a hard disk-byte ceiling and reserve before materialization. Reuse verified raw geometry catalogues by exact identity; learned prepared states expire at a weight update. Preserve source data, historical runs, declared milestones, native evidence and compact provenance. Only round-owned disposable caches and superseded selected-figure payloads qualify for routine cleanup. Generated arrays, figures, checkpoints and one-time renderers remain ignored; push durable code/tests/configuration/guides/report after auditing the entire outgoing history.
