@@ -1290,15 +1290,24 @@ def _evaluate_endpoints(
     for label, (model, path, payload, family) in all_models.items():
         records: list[dict[str, Any]] = []
         predictions_hash: list[str] = []
+        organization_summaries: list[dict[str, Any]] = []
         for batch in batches:
             receivers = batch.receivers
             if family == "native_content_hypergraph":
                 architecture = str(model.get_config()["architecture"])
                 scene = provider.make_scene(batch.scene_inputs)
                 with torch.no_grad():
-                    prediction_object, _ = provider.predict_native(
+                    prediction_object, auxiliary = provider.predict_native(
                         model, scene, receivers, architecture, "joint", epoch=int(payload["epoch"])
                     )
+                    if architecture == "A2-H6":
+                        from content_hypergraph_inspect_v2 import organization_summary
+
+                        query = provider.adapter.make_query_batch(scene, receivers)
+                        organization_summaries.append({
+                            "case_keys": [str(row) for row in batch.case_keys],
+                            **organization_summary(model, auxiliary["organization"], query),
+                        })
                 prediction = prediction_object.main_mps.detach().cpu().numpy()[...].astype(np.float32, copy=False)
             else:
                 row = int(batch.case_keys[0])
@@ -1339,6 +1348,13 @@ def _evaluate_endpoints(
             "height_profile_score_mean": float(np.mean([record["height_profile_score"] for record in records])),
             "role_summary": summarize_role_metrics(records),
         }
+        if organization_summaries:
+            results[label]["organization_summaries"] = organization_summaries
+            results[label]["organization_summary_scope"] = (
+                "Same prepared organization as each native endpoint prediction; final typed W/content "
+                "per scene and receiver-head access on at most 128 evenly spaced input rows. "
+                "The additional bounded decode is analysis work, outside inference cost measurements."
+            )
     return results, {"panel": panel_description, "models": model_metadata}
 
 
