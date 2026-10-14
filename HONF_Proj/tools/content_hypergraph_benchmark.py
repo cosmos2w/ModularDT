@@ -922,6 +922,13 @@ def run_density_backward(arms: Mapping[str, Arm], high_batches: Mapping[str, Any
                 return {"loss": float(loss.detach().cpu()), "work": work}
 
             try:
+                workspace_warmup_calls = 0
+                if device.type == "cuda" and query_count == DEFAULT_DENSITY_QUERIES[0]:
+                    # Backward libraries can retain a live workspace that
+                    # empty_cache cannot release. Establish it before the
+                    # first recorded point, with no optimizer update.
+                    run_backward()
+                    workspace_warmup_calls = 1
                 # A previous arm's peak must not become the next arm's
                 # reserved-memory result. Keep the same live models/fixtures
                 # resident, but discard unused allocator blocks outside the
@@ -959,6 +966,7 @@ def run_density_backward(arms: Mapping[str, Arm], high_batches: Mapping[str, Any
                 "timing_and_memory": memory,
                 "allocator_cache_policy": "unused CUDA allocator blocks cleared before this point, outside timing; live resident tensors retained",
                 "resident_baseline_scope": "both retained models/providers, shared native fixtures and current target-free request",
+                "workspace_warmup_forward_backward_calls": workspace_warmup_calls,
                 "work": result["work"],
             })
     return records
