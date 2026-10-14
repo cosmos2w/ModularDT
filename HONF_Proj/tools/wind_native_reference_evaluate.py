@@ -1115,11 +1115,14 @@ def _validate_full_train1000_provider_payload(
     recipe = identity.get("recipe", {})
     source = identity.get("normalizer_and_background_source", {})
     training = identity.get("training", {})
+    organized_arm = {"content_hypergraph_recipe_v1": "A-H6",
+                     "content_hypergraph_recipe_v2": "A2-H6"}.get(recipe.get("schema"))
     if (
         recipe.get("protocol") != "full_train1000"
         or recipe.get("approved_stop_after") != 1000
-        or identity.get("architecture") != "A-H6"
-        or identity.get("model_config", {}).get("architecture") != "A-H6"
+        or organized_arm is None
+        or identity.get("architecture") != organized_arm
+        or identity.get("model_config", {}).get("architecture") != organized_arm
         or training.get("total_epochs") != 5000
         or source.get("kind") != "verified_full_train_followup_train_fit_cache"
         or source.get("training_rows_sha256") != expected_contract["train_rows_sha256"]
@@ -1354,7 +1357,7 @@ def run_evaluation(
         full_binding = _assert_full_train1000_provider(provider)
         if (
             int(first_payload.get("epoch", first_payload.get("current_epoch", -1))) != 1000
-            or first_model.get_config().get("architecture") != "A-H6"
+            or first_model.get_config().get("architecture") not in {"A-H6", "A2-H6"}
         ):
             raise ValueError("Full VALID90 reference board requires the literal A-H6 epoch-1000 checkpoint.")
         expected_references = {

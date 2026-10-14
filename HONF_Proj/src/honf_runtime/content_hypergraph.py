@@ -24,14 +24,19 @@ def load_content_hypergraph_checkpoint(
     """
     payload = load_trusted_checkpoint(path, map_location="cpu")
     identity = payload.get("experiment_identity", {})
-    if payload.get("workflow") != "content_hypergraph_joint_v1":
+    workflow = payload.get("workflow")
+    version = {"content_hypergraph_joint_v1": 1, "content_hypergraph_joint_v2": 2}.get(workflow)
+    if version is None:
         raise ValueError("This loader accepts only the content-hypergraph joint family.")
     if identity.get("model_family") != "honf_content_hypergraph":
         raise ValueError("Checkpoint family identity is missing or inconsistent.")
     require_model_family("honf_content_hypergraph", "forward")
     recipe = identity.get("recipe")
-    if not isinstance(recipe, dict) or recipe.get("schema") != "content_hypergraph_recipe_v1":
+    if not isinstance(recipe, dict) or recipe.get("schema") != f"content_hypergraph_recipe_v{version}":
         raise ValueError("Missing self-contained content-hypergraph recipe.")
+    expected_arms = {1: {"A-D", "A-H6"}, 2: {"A2-D", "A2-H6"}}
+    if recipe.get("architecture") not in expected_arms[version]:
+        raise ValueError("Checkpoint architecture does not belong to its schema version.")
     digest = hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(",", ":"),
                                       allow_nan=False).encode()).hexdigest()
     if digest != identity.get("recipe_sha256"):
@@ -43,14 +48,24 @@ def load_content_hypergraph_checkpoint(
         raise TypeError("Checkpoint lacks its native model and TRAIN transform inventory.")
     if recipe.get("dataset") == "thermal":
         from channelthermal.content_hypergraph import ThermalContentHypergraphAdapter
-        model = ThermalContentHypergraphAdapter.from_state_payload(provider["adapter_state"], device=device)
+        adapter_type = ThermalContentHypergraphAdapter
+        if version == 2:
+            from channelthermal.content_hypergraph import ThermalContentHypergraphAdapterV2
+            adapter_type = ThermalContentHypergraphAdapterV2
+        model = adapter_type.from_state_payload(provider["adapter_state"], device=device)
         adapter = model
     elif recipe.get("dataset") == "wind":
         from windfarm.content_hypergraph import WindContentHypergraphAdapter
 
         from honf_forward_core.content_hypergraph import ContentHypergraphCore
-        model = ContentHypergraphCore(**provider["model_config"]).to(device)
-        adapter = WindContentHypergraphAdapter.from_state_payload(provider["adapter_state"], device=device)
+        if version == 1:
+            model = ContentHypergraphCore(**provider["model_config"]).to(device)
+            adapter = WindContentHypergraphAdapter.from_state_payload(provider["adapter_state"], device=device)
+        else:
+            from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
+            from windfarm.content_hypergraph import WindContentHypergraphAdapterV3
+            model = ContentHypergraphCoreV2.from_config(provider["model_config"]).to(device)
+            adapter = WindContentHypergraphAdapterV3.from_state_payload(provider["adapter_state"], device=device)
     else:
         raise ValueError("Unsupported physical dataset in content-hypergraph checkpoint.")
     if model.get_config() != provider["model_config"]:

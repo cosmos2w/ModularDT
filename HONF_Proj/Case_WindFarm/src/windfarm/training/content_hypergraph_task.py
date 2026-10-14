@@ -30,6 +30,7 @@ from ..content_hypergraph import (
     WIND_CONTENT_ENVIRONMENT_COUNT,
     WIND_CONTENT_ENVIRONMENT_SHAPE,
     WindContentHypergraphAdapter,
+    WindContentHypergraphAdapterV3,
     WindContentReceivers,
     WindContentSceneInputs,
 )
@@ -68,6 +69,8 @@ from .unified_task import (
 
 WIND_CONTENT_PROVIDER_SCHEMA = "wind_content_hypergraph_provider_v1"
 WIND_CONTENT_FAMILY = "honf_content_hypergraph_wind_v1"
+WIND_CONTENT_PROVIDER_SCHEMA_V2 = "wind_content_hypergraph_provider_v2"
+WIND_CONTENT_FAMILY_V2 = "honf_content_hypergraph_wind_v2"
 WIND_CONTENT_ROLE_CACHE_RAM_BYTES = 2 * 1024**3
 WIND_CONTENT_ROLE_CACHE_DEVELOPMENT_BYTES = 32 * 1024**3
 WIND_CONTENT_ROLE_CACHE_FULL_BYTES = 128 * 1024**3
@@ -1034,12 +1037,231 @@ def _validate_recipe(recipe: Mapping[str, Any]) -> tuple[dict[str, Any], str, in
     return value, architecture, microbatch
 
 
+def _validate_recipe_v2(recipe: Mapping[str, Any]) -> tuple[dict[str, Any], str, int]:
+    """Validate only the fresh Round2 Wind recipe schema and architecture IDs."""
+
+    value = dict(recipe)
+    if value.get("schema") != "content_hypergraph_recipe_v2" or value.get("dataset") != "wind":
+        raise ValueError("Round2 Wind builder requires content_hypergraph_recipe_v2 with dataset='wind'.")
+    architecture = str(value.get("architecture"))
+    if architecture not in ("A2-D", "A2-H6"):
+        raise ValueError("Round2 Wind content-hypergraph supports only A2-D and A2-H6.")
+    protocol = str(value.get("protocol"))
+    if protocol not in ("development", "full_train1000"):
+        raise ValueError("Round2 Wind content-hypergraph requires development or full_train1000 protocol.")
+    if value.get("optimizer_bias_norm_exclusion") is not True:
+        raise ValueError("Every fresh Round2 Wind recipe must explicitly enable optimizer_bias_norm_exclusion.")
+    expected_epochs = 2500 if protocol == "development" else 5000
+    if type(value.get("total_epochs")) is not int or value["total_epochs"] != expected_epochs:
+        raise ValueError(f"Round2 Wind {protocol} schedule horizon must be {expected_epochs}.")
+    if protocol == "full_train1000" and (
+        architecture != "A2-H6" or type(value.get("approved_stop_after")) is not int
+        or value["approved_stop_after"] != 1000
+    ):
+        raise ValueError("Round2 Wind full_train1000 is an inert A2-H6 candidate stopped at epoch 1000.")
+    if protocol == "development" and "approved_stop_after" in value:
+        raise ValueError("Round2 Wind development recipes do not carry a full-data approved stop field.")
+    if type(value.get("seed")) is not int or value["seed"] != 42:
+        raise ValueError("Round2 Wind recipes are sealed to initialization and sampling seed 42.")
+    if type(value.get("primary_queries")) is not int or value["primary_queries"] != 4096:
+        raise ValueError("Round2 Wind uses exactly 4096 native receiver queries per case.")
+    if type(value.get("effective_batch_size")) is not int or value["effective_batch_size"] != 24:
+        raise ValueError("Round2 Wind uses effective case batch size 24.")
+    microbatch = value.get("microbatch_size")
+    if type(microbatch) is not int or not 1 <= microbatch <= 24:
+        raise ValueError("Round2 Wind microbatch_size must be an integer in [1,24].")
+    if value.get("precision") != "fp32" or value.get("edge_access") != "full":
+        raise ValueError("Round2 Wind requires the full-access FP32 reference path.")
+    if value.get("sampling_version", SamplingKey.CASE_EPOCH_VERSION) != SamplingKey.CASE_EPOCH_VERSION:
+        raise ValueError("Round2 Wind requires unchanged deterministic case_epoch_v1 sampling.")
+    expected_cache_bytes = (
+        WIND_CONTENT_ROLE_CACHE_DEVELOPMENT_BYTES
+        if protocol == "development"
+        else WIND_CONTENT_ROLE_CACHE_FULL_BYTES
+    )
+    cache_bytes = value.get("catalogue_cache_ram_bytes")
+    if type(cache_bytes) is not int or cache_bytes != expected_cache_bytes:
+        raise ValueError(
+            f"Round2 Wind {protocol} catalogue cache RAM must be explicitly set to {expected_cache_bytes} bytes."
+        )
+    model_values = value.get("model")
+    if not isinstance(model_values, Mapping):
+        raise TypeError("Round2 Wind model overrides must be a mapping.")
+    required = {
+        "context_dim": 128,
+        "num_heads": 4,
+        "context_depth": 2,
+        "num_hyperedges": 6,
+        "thermal_response_rank": 0,
+        "local_hidden_dim": 128,
+        "dropout": 0.0,
+    }
+    if set(model_values) != set(required):
+        raise ValueError("Round2 Wind model overrides must explicitly declare the frozen shared-core dimensions.")
+    if any(model_values[name] != expected for name, expected in required.items()):
+        raise ValueError("Round2 Wind model overrides differ from the frozen width-128, four-head core contract.")
+    value["model"] = dict(model_values)
+    return value, architecture, microbatch
+
+
+class WindContentHypergraphTaskV2(WindContentHypergraphTask):
+    """Round2 provider with strict A2 dispatch and bounded core tracing."""
+
+    def __init__(
+        self,
+        view: WindFarmNativeView,
+        *,
+        model: nn.Module,
+        adapter: WindContentHypergraphAdapterV3,
+        recipe: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
+
+        if recipe.get("schema") != "content_hypergraph_recipe_v2":
+            raise ValueError("Round2 Wind provider requires a content_hypergraph_recipe_v2.")
+        if not isinstance(adapter, WindContentHypergraphAdapterV3):
+            raise TypeError("Round2 Wind provider requires WindContentHypergraphAdapterV3.")
+        if not isinstance(model, ContentHypergraphCoreV2):
+            raise TypeError("Round2 Wind provider requires ContentHypergraphCoreV2.")
+        if model.get_config().get("schema") != "content_hypergraph_core_v2":
+            raise ValueError("Round2 Wind provider requires the explicit content_hypergraph_core_v2 config schema.")
+        if model.get_config().get("architecture") != recipe.get("architecture"):
+            raise ValueError("Round2 Wind recipe architecture and model architecture differ.")
+        super().__init__(view, model=model, adapter=adapter, recipe=recipe, **kwargs)
+
+    def identity_payload(self) -> Mapping[str, Any]:
+        result = dict(super().identity_payload())
+        result["schema"] = WIND_CONTENT_PROVIDER_SCHEMA_V2
+        result["family"] = WIND_CONTENT_FAMILY_V2
+        result["model_family"] = "honf_content_hypergraph"
+        result["coordinate_frame"] = {
+            **dict(result["coordinate_frame"]),
+            "origin": "support.lower_D",
+            "extent": "support.extent_D",
+            "module_characteristic_length": "rotor_diameter_D = 2 * rotor_radius_D, per axis",
+            "environment_characteristic_length": "support.extent_D / [4,4,4], per E64 cell and axis",
+            "object_length_is_local_reader_radius": False,
+        }
+        result["environment_representation"] = {
+            **dict(result["environment_representation"]),
+            "characteristic_length": "support.extent_D / [4,4,4], per axis",
+            "length_feature_is_physical_sample_count": False,
+        }
+        result["training"] = {
+            **dict(result["training"]),
+            "core_schema": "content_hypergraph_core_v2",
+            "trace_policy": "trace_request is opt-in and bounded; ordinary prediction requests no trace",
+        }
+        return result
+
+    def serialization_payload(self) -> Mapping[str, Any]:
+        result = dict(super().serialization_payload())
+        result["schema"] = "wind_content_hypergraph_inference_v2"
+        result["coordinate_frame"] = dict(self.identity_payload()["coordinate_frame"])
+        return result
+
+    def predict_native(
+        self,
+        model: nn.Module,
+        scene: SceneBatch,
+        receivers: WindContentReceivers,
+        execution_mode: str = "A2-D",
+        phase: str = "joint",
+        epoch: int = 0,
+        temperature: float | None = None,
+        trace_request: Any | None = None,
+    ) -> tuple[WindContentPredictions, Mapping[str, Any]]:
+        del epoch, temperature
+        if phase not in ("joint", "development", "validation"):
+            raise ValueError("Round2 Wind prediction uses one joint path for TRAIN and exposed DEV.")
+        if execution_mode not in ("A2-D", "A2-H6"):
+            raise ValueError("Round2 Wind only supports A2-D and A2-H6 matched architectures.")
+        from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
+
+        if not isinstance(model, ContentHypergraphCoreV2):
+            raise TypeError("Round2 Wind provider requires ContentHypergraphCoreV2; v1 cores are not accepted.")
+        config = model.get_config()
+        if config.get("architecture") != execution_mode:
+            raise ValueError("Round2 Wind execution arm differs from the core's sealed architecture identity.")
+        if config.get("schema") != "content_hypergraph_core_v2":
+            raise ValueError("Round2 Wind provider requires the explicit content_hypergraph_core_v2 schema.")
+        query = self.adapter.make_query_batch(scene, receivers)
+        organization = model.prepare(scene, trace_request=trace_request)
+        output = model.decode(organization, query)
+        if not torch.is_tensor(output.nonlinear_field) or output.nonlinear_field.shape != query.coordinates.shape[:2] + (3,):
+            raise ValueError("Round2 Wind core must return a normalized nonlinear residual field [B,Q,3].")
+        physical, profile, residual = self.adapter.physical_velocity(output.nonlinear_field, query.coordinates)
+        role_ids = torch.tensor(receivers.role_ids, device=physical.device, dtype=torch.long)
+        predictions = WindContentPredictions(physical, output.nonlinear_field, residual, profile, role_ids)
+        auxiliary = {
+            "organization": organization,
+            "core_output": output,
+            "profile_mps": profile,
+            "residual_mps": residual,
+            "prepared_hyperedge_count": organization.num_hyperedges,
+            "execution_mode": execution_mode,
+            "phase": phase,
+            "trace_request": trace_request,
+        }
+        return predictions, auxiliary
+
+    def optimizer_groups(
+        self,
+        model: nn.Module,
+        arm: str = "A2-D",
+        stage: str = "joint",
+    ) -> Sequence[OptimizerGroupSpec]:
+        return super().optimizer_groups(model, arm=arm, stage=stage)
+
+    def work_counts(
+        self,
+        batch: TaskBatch,
+        predictions: WindContentPredictions,
+        auxiliary_state: Mapping[str, Any],
+    ) -> Mapping[str, int]:
+        counts = dict(super().work_counts(batch, predictions, auxiliary_state))
+        for prefix, values in (
+            ("core_prepare", auxiliary_state["organization"].work_counts),
+            ("core_decode", auxiliary_state["core_output"].work_counts),
+        ):
+            if not isinstance(values, Mapping):
+                raise RuntimeError("Round2 Wind prediction omitted complete shared-core work counts.")
+            for name, value in values.items():
+                if type(value) is not int or value < 0:
+                    raise RuntimeError("Round2 Wind core work counts must be nonnegative integers.")
+                counts[f"{prefix}_{name}"] = value
+        return counts
+
+
 def build_wind_content_task(
     recipe: Mapping[str, Any],
     device: torch.device | str = "cpu",
 ) -> tuple[ContentHypergraphCore, WindContentHypergraphTask]:
-    """Build a fresh Wind shared core/provider pair without legacy model construction."""
-    value, architecture, microbatch = _validate_recipe(recipe)
+    """Build a fresh v1 Wind shared core/provider pair for exact replay."""
+    return _build_wind_content_task(recipe, device, schema_version=1)
+
+
+def build_wind_content_task_v2(
+    recipe: Mapping[str, Any],
+    device: torch.device | str = "cpu",
+) -> tuple[nn.Module, WindContentHypergraphTaskV2]:
+    """Build a fresh Round2 Wind core/provider pair from its explicit v2 recipe."""
+    return _build_wind_content_task(recipe, device, schema_version=2)
+
+
+def _build_wind_content_task(
+    recipe: Mapping[str, Any],
+    device: torch.device | str,
+    *,
+    schema_version: int,
+) -> tuple[nn.Module, WindContentHypergraphTask]:
+    if schema_version == 1:
+        value, architecture, microbatch = _validate_recipe(recipe)
+    elif schema_version == 2:
+        value, architecture, microbatch = _validate_recipe_v2(recipe)
+    else:
+        raise ValueError("Wind content-hypergraph supports only explicit v1 or v2 recipe dispatch.")
     seed = int(value["seed"])
     protocol = value["protocol"]
     total_epochs = int(value["total_epochs"])
@@ -1164,7 +1386,8 @@ def build_wind_content_task(
     component_scales = {
         role: tuple(float(value) for value in calibration["component_role_scales_mps"][role]) for role in ROLE_NAMES
     }
-    adapter = WindContentHypergraphAdapter(normalizer, profile, device=device)
+    adapter_type = WindContentHypergraphAdapter if schema_version == 1 else WindContentHypergraphAdapterV3
+    adapter = adapter_type(normalizer, profile, device=device)
     model_values = value["model"]
     model_config = {
         "module_input_dim": 2,
@@ -1179,20 +1402,18 @@ def build_wind_content_task(
         "context_depth": 2,
         "num_hyperedges": 6,
         "thermal_response_rank": 0,
-        "local_hidden_dim": 64,
+        "local_hidden_dim": 64 if schema_version == 1 else 128,
         "dropout": 0.0,
         "init_seed": seed,
     }
-    if any(
-        model_values.get(name, expected) != expected
-        for name, expected in {
-            "context_dim": 128,
-            "num_heads": 4,
-            "context_depth": 2,
-            "num_hyperedges": 6,
-            "local_hidden_dim": 64,
-        }.items()
-    ):
+    expected_model = {
+        "context_dim": 128,
+        "num_heads": 4,
+        "context_depth": 2,
+        "num_hyperedges": 6,
+        "local_hidden_dim": 64 if schema_version == 1 else 128,
+    }
+    if any(model_values.get(name, expected) != expected for name, expected in expected_model.items()):
         raise ValueError("Wind core model configuration diverged from its matched scientific contract.")
     devices: list[int] = []
     if device.type == "cuda" and torch.cuda.is_available():
@@ -1201,9 +1422,16 @@ def build_wind_content_task(
         torch.manual_seed(seed)
         if devices:
             torch.cuda.manual_seed_all(seed)
-        model = ContentHypergraphCore(**model_config).to(device)
+        if schema_version == 1:
+            model = ContentHypergraphCore(**model_config).to(device)
+        else:
+            from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
 
-    provider = WindContentHypergraphTask(
+            model_config["schema"] = "content_hypergraph_core_v2"
+            model = ContentHypergraphCoreV2.from_config(model_config).to(device)
+
+    provider_type = WindContentHypergraphTask if schema_version == 1 else WindContentHypergraphTaskV2
+    provider = provider_type(
         view,
         model=model,
         adapter=adapter,
@@ -1228,11 +1456,16 @@ def build_wind_content_task(
 
 __all__ = [
     "WIND_CONTENT_FAMILY",
+    "WIND_CONTENT_FAMILY_V2",
+    "WIND_CONTENT_PROVIDER_SCHEMA_V2",
     "WIND_CONTENT_ROLE_CACHE_DEVELOPMENT_BYTES",
     "WIND_CONTENT_ROLE_CACHE_FULL_BYTES",
     "WIND_CONTENT_ROLE_CACHE_RAM_BYTES",
     "WindContentHypergraphTask",
+    "WindContentHypergraphTaskV2",
     "WindContentPredictions",
     "WindContentTargets",
     "build_wind_content_task",
+    "build_wind_content_task_v2",
+    "_validate_recipe_v2",
 ]

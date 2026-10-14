@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -568,12 +568,106 @@ class WindContentHypergraphAdapter:
         return profile_mps + residual_mps, profile_mps, residual_mps
 
 
+class WindContentHypergraphAdapterV3(WindContentHypergraphAdapter):
+    """Round2 Wind geometry adapter for the shared v2 content core.
+
+    The v1 adapter above remains the checkpoint-bound replay path. This class
+    preserves its target-free native frame, E64 inputs and corrected physical
+    residual law, while adding the explicit object/cell lengths required by
+    the geometry-carrying core. A turbine's object length is its rotor
+    diameter (2 * rotor_radius_D); its local-reader support remains 1.5D.
+    """
+
+    SCHEMA = "wind_content_hypergraph_adapter_v3"
+
+    def __init__(
+        self,
+        normalizer: VelocityNormalizer,
+        background_profile: VerticalProfileBaseline,
+        *,
+        device: torch.device | str = "cpu",
+    ) -> None:
+        super().__init__(normalizer, background_profile, device=device)
+        payload = dict(self._state_payload)
+        payload.update(
+            {
+                "schema": self.SCHEMA,
+                "geometry_contract": {
+                    "coordinate_origin": "support.lower_D",
+                    "coordinate_extent": "support.extent_D",
+                    "module_characteristic_length": "rotor_diameter_D = 2 * rotor_radius_D, repeated per axis",
+                    "environment_characteristic_length": "support.extent_D / [4,4,4], per E64 cell and axis",
+                    "local_reader_radius_D": WIND_CONTENT_LOCAL_RADIUS_D,
+                    "object_length_is_local_reader_radius": False,
+                },
+            }
+        )
+        self._state_payload = payload
+        self.normalizer_key = _stable_sha256(self._state_payload)
+
+    @classmethod
+    def from_state_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        device: torch.device | str = "cpu",
+    ) -> WindContentHypergraphAdapterV3:
+        if payload.get("schema") != cls.SCHEMA:
+            raise ValueError("Unsupported Round2 Wind content-hypergraph adapter state schema.")
+        if payload.get("coordinate_frame") != WIND_CONTENT_COORDINATE_FRAME:
+            raise ValueError("Round2 Wind adapter checkpoint uses a different native coordinate frame.")
+        normalizer = VelocityNormalizer.from_dict(dict(payload["normalizer"]))
+        profile = VerticalProfileBaseline.from_dict(dict(payload["background_profile"]))
+        adapter = cls(normalizer, profile, device=device)
+        if adapter.state_payload() != dict(payload):
+            raise ValueError("Round2 Wind adapter state does not match its canonical serialized transforms.")
+        return adapter
+
+    def make_scene_batch(self, inputs: Sequence[WindContentSceneInputs]) -> SceneBatch:
+        """Build the legacy native scene and attach explicit positive lengths."""
+
+        scene = super().make_scene_batch(inputs)
+        batch = len(inputs)
+        module_count = int(scene.module_features.shape[1])
+        # A padded module is masked, but its descriptor must remain finite and
+        # positive because the shared contract validates every supplied slot.
+        module_lengths = np.ones((batch, module_count, 3), dtype=np.float32)
+        environment_lengths = np.empty((batch, WIND_CONTENT_ENVIRONMENT_COUNT, 3), dtype=np.float32)
+        for batch_index, item in enumerate(inputs):
+            count = int(item.module_features.shape[0])
+            radii = np.asarray(item.module_features[:, 0], dtype=np.float64)
+            if not np.isfinite(radii).all() or np.any(radii <= 0.0):
+                raise ValueError("Wind physical turbine rotor radii must be finite and positive in D units.")
+            diameters = (2.0 * radii).astype(np.float32)
+            module_lengths[batch_index, :count] = diameters[:, None]
+            cell_lengths = np.asarray(item.support_extent_D, dtype=np.float64) / np.asarray(
+                WIND_CONTENT_ENVIRONMENT_SHAPE, dtype=np.float64
+            )
+            if cell_lengths.shape != (3,) or not np.isfinite(cell_lengths).all() or np.any(cell_lengths <= 0.0):
+                raise ValueError("Wind E64 cells require finite positive per-axis support extent divided by [4,4,4].")
+            environment_lengths[batch_index] = cell_lengths.astype(np.float32)[None, :]
+        if not np.isfinite(module_lengths).all() or np.any(module_lengths <= 0.0):
+            raise ValueError("Wind module characteristic lengths must be positive finite rotor diameters.")
+        if not np.isfinite(environment_lengths).all() or np.any(environment_lengths <= 0.0):
+            raise ValueError("Wind environment characteristic lengths must be positive finite E64 cell sizes.")
+        tensor = lambda value: torch.as_tensor(value, device=self.device, dtype=torch.float32)
+        # Keep the native v1 features, measures, IDs, origin, extent and 1.5D
+        # local radius bit-for-bit. Only the new v2 geometry fields are added.
+        scene = replace(
+            scene,
+            module_characteristic_lengths=tensor(module_lengths),
+            environment_characteristic_lengths=tensor(environment_lengths),
+        )
+        return scene
+
+
 __all__ = [
     "WIND_CONTENT_COORDINATE_FRAME",
     "WIND_CONTENT_ENVIRONMENT_COUNT",
     "WIND_CONTENT_ENVIRONMENT_SHAPE",
     "WIND_CONTENT_LOCAL_RADIUS_D",
     "WindContentHypergraphAdapter",
+    "WindContentHypergraphAdapterV3",
     "WindContentReceivers",
     "WindContentSceneInputs",
 ]

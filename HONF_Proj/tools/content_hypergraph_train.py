@@ -32,6 +32,8 @@ from honf_runtime.unified_training import (
 
 SCHEMA = "content_hypergraph_recipe_v1"
 WORKFLOW = "content_hypergraph_joint_v1"
+SCHEMA_V2 = "content_hypergraph_recipe_v2"
+WORKFLOW_V2 = "content_hypergraph_joint_v2"
 ALLOWED_UUIDS = {
     "GPU-233fcd85-5c6a-6212-3f44-655252afec70",
     "GPU-3ceda40c-fd5c-4b88-6c47-b3301711571e",
@@ -60,12 +62,14 @@ def loaded_source_binding() -> dict[str, Any]:
 def validate_recipe(value: dict[str, Any]) -> dict[str, Any]:
     """Keep this family's schema separate from sealed historical recipes."""
     recipe = dict(value)
-    if recipe.get("schema") != SCHEMA:
-        raise ValueError(f"Expected {SCHEMA}.")
+    version = {SCHEMA: 1, SCHEMA_V2: 2}.get(recipe.get("schema"))
+    if version is None:
+        raise ValueError(f"Expected {SCHEMA} or {SCHEMA_V2}.")
     if recipe.get("dataset") not in {"thermal", "wind"}:
         raise ValueError("dataset must be thermal or wind.")
-    if recipe.get("architecture") not in {"A-D", "A-H6"}:
-        raise ValueError("The primary family has only A-D and A-H6 architectures.")
+    arms = {1: {"A-D", "A-H6"}, 2: {"A2-D", "A2-H6"}}[version]
+    if recipe.get("architecture") not in arms:
+        raise ValueError("Architecture does not belong to the declared recipe schema.")
     if recipe.get("protocol") not in {"development", "full_train1000"}:
         raise ValueError("Use an explicitly bound development or full_train1000 protocol.")
     thermal = recipe["dataset"] == "thermal"
@@ -82,12 +86,23 @@ def validate_recipe(value: dict[str, Any]) -> dict[str, Any]:
     horizon = 5000 if full else 2500
     if recipe.get("total_epochs") != horizon:
         raise ValueError(f"The immutable schedule horizon must be {horizon}.")
-    if full and (recipe.get("approved_stop_after") != 1000 or recipe["architecture"] != "A-H6"):
+    organized = "A-H6" if version == 1 else "A2-H6"
+    if full and (recipe.get("approved_stop_after") != 1000 or recipe["architecture"] != organized):
         raise ValueError("A full-TRAIN follow-up requires an organized model and the explicit 1000 stop.")
     if recipe.get("precision", "fp32") != "fp32":
         raise ValueError("Unqualified precision policy; use the FP32 reference recipe.")
     if recipe.get("edge_access", "full") != "full":
         raise ValueError("Primary scientific fits require full edge access.")
+    if version == 2:
+        model = recipe.get("model", {})
+        fixed_model = {"context_dim": 128, "num_heads": 4, "context_depth": 2,
+                       "num_hyperedges": 6, "thermal_response_rank": 4 if thermal else 0,
+                       "local_hidden_dim": 128, "dropout": 0.0}
+        for name, expected in fixed_model.items():
+            if model.get(name) != expected:
+                raise ValueError(f"Round2 requires model.{name}={expected}.")
+        if recipe.get("optimizer_bias_norm_exclusion") is not True:
+            raise ValueError("Fresh Round2 recipes require explicit optimizer_bias_norm_exclusion.")
     return recipe
 
 
@@ -109,8 +124,12 @@ def build(recipe: dict[str, Any], *, device: str):
         from channelthermal.training.content_hypergraph_task import build_thermal_content_hypergraph_task
         result = build_thermal_content_hypergraph_task(recipe, device=device)
     else:
-        from windfarm.training.content_hypergraph_task import build_wind_content_task
-        result = build_wind_content_task(recipe, device=device)
+        if recipe["schema"] == SCHEMA_V2:
+            from windfarm.training.content_hypergraph_task import build_wind_content_task_v2
+            result = build_wind_content_task_v2(recipe, device=device)
+        else:
+            from windfarm.training.content_hypergraph_task import build_wind_content_task
+            result = build_wind_content_task(recipe, device=device)
     model, provider = result[:2]
     return model, provider
 
@@ -128,6 +147,9 @@ def engine_for(recipe: dict[str, Any], device: str) -> TrainingEngine:
 
 
 def validate_qualification(path: Path, recipe: dict[str, Any]) -> dict[str, Any]:
+    if recipe.get("schema") == SCHEMA_V2:
+        from honf_runtime.content_hypergraph_qualification import validate_round2_qualification
+        return validate_round2_qualification(path, recipe)
     qualification = json.loads(path.read_text())
     required = {"correctness_pass", "edge_content_used", "nontrivial_train_dev_fields", "budget_forecast_fits"}
     if qualification.get("schema") != "content_hypergraph_full1000_qualification_v1":
@@ -198,14 +220,33 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("A full-TRAIN start requires --qualification with measured Section13 evidence.")
         qualification = validate_qualification(args.qualification, recipe)
     model, provider = build(recipe, device=args.device)
+    if qualification is not None and recipe["schema"] == SCHEMA_V2:
+        if canonical_sha256(model.get_config()) != qualification["architecture_config_sha256"]:
+            raise ValueError("Full constructor differs from the qualified Round2 architecture.")
+        current_sources = loaded_source_binding()["files"]
+        if any(current_sources.get(name) != digest for name, digest in qualification["development_loaded_source"]["files"].items()):
+            raise ValueError("Imported runtime changed since the qualified Round2 development fit.")
+        binding = qualification["partition_binding"]
+        physical = dict(provider.identity_payload())
+        from honf_runtime.content_hypergraph_qualification import physical_output_law
+        if canonical_sha256(physical_output_law(physical, recipe["dataset"])) != qualification["physical_output_law_sha256"]:
+            raise ValueError("Full native output law differs from the qualified Round2 model.")
+        train_key = "training_case_ids_sha256" if recipe["dataset"] == "thermal" else "train_row_indices_sha256"
+        validation_key = "validation_case_ids_sha256" if recipe["dataset"] == "thermal" else "validation_row_indices_sha256"
+        if (binding.get("training_membership_sha256") != physical.get(train_key)
+                or binding.get("validation_membership_sha256") != physical.get(validation_key)):
+            raise ValueError("Full TRAIN/validation membership differs from its qualification binding.")
     engine = engine_for(recipe, args.device)
     identity = {
-        "workflow": WORKFLOW, "model_family": "honf_content_hypergraph",
+        "workflow": WORKFLOW_V2 if recipe["schema"] == SCHEMA_V2 else WORKFLOW,
+        "model_family": "honf_content_hypergraph",
         "recipe": recipe, "recipe_sha256": canonical_sha256(recipe),
         "design_sha256": "6887c5436f6006fa8b6451cca5abe753e08a2d27ca3fed08cbbd336caeb63a44",
         "loaded_source": loaded_source_binding(),
         "data_locks": {"WindTEST": "locked", "solver_usage": "326/326", "new_solver_attempts": 0},
     }
+    if recipe["schema"] == SCHEMA_V2:
+        identity["round2_plan_sha256"] = "4138ca37dbf51fe9a28368e27a51b1e1d7fcc5f31ff327075f9d3e18d4b4234f"
     if qualification is not None:
         identity["full1000_qualification"] = qualification
     summary = {"recipe": recipe, "provider": dict(provider.identity_payload()),
@@ -227,6 +268,16 @@ def main(argv: list[str] | None = None) -> int:
         arm=recipe["architecture"],
         **fit_options,
     )
+    if recipe["schema"] == SCHEMA_V2 and hasattr(provider, "catalogue_cache"):
+        cache = provider.catalogue_cache.summary()
+        receipt = {"schema": "content_hypergraph_provider_runtime_v2", "status": "completed",
+                   "completed_epoch": result["completed_epoch"], "architecture": recipe["architecture"],
+                   "native_catalogue_cache": cache, "scope": "this segment's process and shared cache",
+                   "WindTEST": "locked", "new_solver_attempts": 0}
+        destination = args.output / "metrics" / f"provider_runtime_epoch_{result['completed_epoch']:04d}.json"
+        if destination.exists():
+            raise FileExistsError("Provider runtime receipts are immutable; an epoch receipt already exists.")
+        destination.write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
     print(json.dumps(result, sort_keys=True, default=str, allow_nan=False), flush=True)
     return 0
 

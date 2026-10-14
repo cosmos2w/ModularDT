@@ -17,7 +17,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -40,6 +40,7 @@ from honf_runtime.unified_training import TrainingEngine
 
 SCHEMA = "content_hypergraph_benchmark_v1"
 ARCHITECTURES = ("A-D", "A-H6")
+ARCHITECTURES_V2 = ("A2-D", "A2-H6")
 DEFAULT_DENSITY_QUERIES = (1024, 4096, 8192, 32768)
 MAX_DISPOSABLE_UPDATES = 210
 
@@ -58,6 +59,13 @@ class Arm:
 
 class BenchmarkOOM(RuntimeError):
     """A fixed-size benchmark point exhausted device memory."""
+
+
+def architecture_pair(arms: Mapping[str, Arm]) -> tuple[str, str]:
+    pair = ARCHITECTURES_V2 if "A2-D" in arms else ARCHITECTURES
+    if set(arms) != set(pair):
+        raise ValueError("A benchmark requires one complete same-version direct/organized pair.")
+    return pair
 
 
 def sha256_file(path: Path) -> str:
@@ -138,15 +146,16 @@ def initialization_receipt(arms: Mapping[str, Arm], *, require_shared_match: boo
         architecture: _state_sha256(arm.initial_model_state)
         for architecture, arm in arms.items()
     }
-    ad_parameters = dict(arms["A-D"].model.named_parameters())
-    h6_parameters = dict(arms["A-H6"].model.named_parameters())
+    direct, organized = architecture_pair(arms)
+    ad_parameters = dict(arms[direct].model.named_parameters())
+    h6_parameters = dict(arms[organized].model.named_parameters())
     common = sorted(
         name for name in ad_parameters.keys() & h6_parameters.keys()
         if ad_parameters[name].shape == h6_parameters[name].shape
     )
     if not common:
         raise ValueError("A-D and A-H6 have no same-named, same-shaped shared parameter tensors.")
-    ad_state, h6_state = arms["A-D"].initial_model_state, arms["A-H6"].initial_model_state
+    ad_state, h6_state = arms[direct].initial_model_state, arms[organized].initial_model_state
     mismatched = None
     shared_digest = None
     if require_shared_match:
@@ -156,7 +165,7 @@ def initialization_receipt(arms: Mapping[str, Arm], *, require_shared_match: boo
                 "Fresh A-D/A-H6 shared initialization differs for named tensors: "
                 + ", ".join(mismatched[:8])
             )
-        if state_digests["A-D"] == state_digests["A-H6"]:
+        if state_digests[direct] == state_digests[organized]:
             raise ValueError("Fresh A-D and A-H6 complete initialization digests must be distinct.")
         shared_digest = _state_sha256({name: ad_state[name] for name in common})
     return {
@@ -333,7 +342,8 @@ def load_arms(
         if base_recipe["dataset"] != dataset:
             raise ValueError("--dataset differs from the fresh recipe dataset.")
         arms: dict[str, Arm] = {}
-        for architecture in ARCHITECTURES:
+        pair = ARCHITECTURES_V2 if base_recipe["schema"] == "content_hypergraph_recipe_v2" else ARCHITECTURES
+        for architecture in pair:
             arm_recipe = _arm_recipe(base_recipe, architecture)
             model, provider = build(arm_recipe, device=device)
             arms[architecture] = Arm(
@@ -344,7 +354,7 @@ def load_arms(
         if checkpoint_ad is None or checkpoint_ah6 is None:
             raise ValueError("Checkpoint mode requires both --checkpoint-ad and --checkpoint-ah6.")
         arms = {}
-        for architecture, path in (("A-D", checkpoint_ad), ("A-H6", checkpoint_ah6)):
+        for organized, path in ((False, checkpoint_ad), (True, checkpoint_ah6)):
             path = path.resolve()
             if not path.is_file():
                 raise FileNotFoundError(path)
@@ -352,6 +362,8 @@ def load_arms(
             model, provider, payload = load_evaluation_components(path, device)
             identity = payload.get("experiment_identity", {})
             recipe = validate_recipe(identity.get("recipe", {}))
+            pair = ARCHITECTURES_V2 if recipe["schema"] == "content_hypergraph_recipe_v2" else ARCHITECTURES
+            architecture = pair[int(organized)]
             if recipe["dataset"] != dataset or recipe["architecture"] != architecture:
                 raise ValueError(f"{path} is not a {dataset} {architecture} checkpoint.")
             if payload.get("arm") != architecture:
@@ -361,7 +373,8 @@ def load_arms(
                 _model_state_cpu(model),
             )
 
-    ad, h6 = arms["A-D"], arms["A-H6"]
+    direct, organized = architecture_pair(arms)
+    ad, h6 = arms[direct], arms[organized]
     comparison_recipes(ad.recipe, h6.recipe, thermal_reader128_revision=thermal_reader128_revision)
     ad_identity = dict(ad.provider.identity_payload())
     h6_identity = dict(h6.provider.identity_payload())
@@ -376,7 +389,7 @@ def load_arms(
     for arm in arms.values():
         arm.model.eval()
     initialization = initialization_receipt(arms, require_shared_match=recipe_path is not None)
-    return arms, {"A-D": ad_identity, "A-H6": h6_identity}, initialization
+    return arms, {direct: ad_identity, organized: h6_identity}, initialization
 
 
 def choose_low_high_train_keys(provider: Any, dataset: str) -> dict[str, dict[str, Any]]:
@@ -573,6 +586,24 @@ def _move_prediction_outputs_to_cpu(prediction: Any, dataset: str) -> int:
     return _tree_tensor_bytes(moved)
 
 
+def _host_request(batch: Any) -> Any:
+    """Keep prescribed native inputs on the host until the complete call begins."""
+    def host(value):
+        if torch.is_tensor(value):
+            return value.detach().cpu()
+        if is_dataclass(value) and not isinstance(value, type):
+            return replace(value, **{item.name: host(getattr(value, item.name)) for item in fields(value) if item.init})
+        if isinstance(value, Mapping):
+            return {key: host(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return tuple(host(item) for item in value)
+        if isinstance(value, list):
+            return [host(item) for item in value]
+        return value
+    return SimpleNamespace(scene_inputs=host(batch.scene_inputs), receivers=host(batch.receivers),
+                           case_keys=batch.case_keys)
+
+
 def _run_native(arm: Arm, batch: Any, *, return_cpu: bool = False) -> tuple[Any, Mapping[str, Any]]:
     provider = arm.provider
     scene = provider.make_scene(batch.scene_inputs)
@@ -593,9 +624,10 @@ def _alternating_scope(
     scope_name: str,
     fixture_name: str,
 ) -> dict[str, Any]:
-    samples: dict[str, list[dict[str, Any]]] = {architecture: [] for architecture in ARCHITECTURES}
+    samples: dict[str, list[dict[str, Any]]] = {architecture: [] for architecture in architecture_pair(arms)}
     for repetition in range(7):
-        order = ARCHITECTURES if repetition % 2 == 0 else tuple(reversed(ARCHITECTURES))
+        pair = architecture_pair(arms)
+        order = pair if repetition % 2 == 0 else tuple(reversed(pair))
         for architecture in order:
             try:
                 with torch.no_grad():
@@ -616,7 +648,7 @@ def _alternating_scope(
         "scope": scope_name,
         "warmups_per_arm": 2,
         "alternating_order": True,
-        "arms": {architecture: _summary(samples[architecture]) for architecture in ARCHITECTURES},
+        "arms": {architecture: _summary(samples[architecture]) for architecture in architecture_pair(arms)},
     }
 
 
@@ -640,7 +672,7 @@ def _native_description(arm: Arm, result: Any, batch: Any) -> Mapping[str, Any]:
             "direct_source_rows": (
                 int(prepared.query_batch.batch_size * prepared.query_batch.num_queries
                     * prepared.organization.scene.num_modules)
-                if arm.architecture == "A-D" else 0
+                if arm.architecture in {"A-D", "A2-D"} else 0
             ),
             "local_rows": int(prepared.query_batch.local_weights.numel()),
             "factor_buffer_bytes": _tensor_bytes(prepared.organization.source_coefficients),
@@ -674,13 +706,13 @@ def run_native_matrix(
 ) -> list[dict[str, Any]]:
     records = []
     for fixture_name in ("low_m", "high_m"):
-        batches = {architecture: fixture_batches[architecture][fixture_name] for architecture in ARCHITECTURES}
+        batches = {architecture: fixture_batches[architecture][fixture_name] for architecture in architecture_pair(arms)}
         prepared = {
             architecture: _prepare_decode(arms[architecture], batches[architecture])
-            for architecture in ARCHITECTURES
+            for architecture in architecture_pair(arms)
         }
-        decode_calls = {architecture: prepared[architecture][0] for architecture in ARCHITECTURES}
-        decode_details = {architecture: prepared[architecture][1] for architecture in ARCHITECTURES}
+        decode_calls = {architecture: prepared[architecture][0] for architecture in architecture_pair(arms)}
+        decode_details = {architecture: prepared[architecture][1] for architecture in architecture_pair(arms)}
 
         def describe_decode(architecture: str, result: Any, details=decode_details) -> Mapping[str, Any]:
             work = result.work_counts or {}
@@ -705,10 +737,12 @@ def run_native_matrix(
         del decode_calls, prepared
         for scope_name, return_cpu in (("fresh_scene_gpu_native_forward", False),
                                        ("complete_native_application_cpu_return", True)):
+            scoped_batches = ({architecture: _host_request(batch) for architecture, batch in batches.items()}
+                              if return_cpu else batches)
             calls = {
-                architecture: (lambda architecture=architecture, batch=batches[architecture], return_cpu=return_cpu:
+                architecture: (lambda architecture=architecture, batch=scoped_batches[architecture], return_cpu=return_cpu:
                     _run_native(arms[architecture], batch, return_cpu=return_cpu))
-                for architecture in ARCHITECTURES
+                for architecture in architecture_pair(arms)
             }
 
             def describe_native(architecture: str, result: Any, bound_batches=batches) -> Mapping[str, Any]:
@@ -823,7 +857,7 @@ def _native_loss_for_stress(arm: Arm, prediction: Any) -> torch.Tensor:
 
 def run_density_backward(arms: Mapping[str, Arm], high_batches: Mapping[str, Any], device: torch.device) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for architecture in ARCHITECTURES:
+    for architecture in architecture_pair(arms):
         arm = arms[architecture]
         for query_count in DEFAULT_DENSITY_QUERIES[:3]:
             request = _stress_request(arm, high_batches[architecture], batch_size=8, query_count=query_count)
@@ -858,7 +892,7 @@ def run_density_backward(arms: Mapping[str, Arm], high_batches: Mapping[str, Any
                         "direct_source_rows": (
                             int(prepared.query_batch.batch_size * prepared.query_batch.num_queries
                                 * prepared.organization.scene.num_modules)
-                            if arm.architecture == "A-D" else 0
+                            if arm.architecture in {"A-D", "A2-D"} else 0
                         ),
                         "local_rows": int(prepared.query_batch.local_weights.numel()),
                         "factor_buffer_bytes": _tensor_bytes(prepared.organization.source_coefficients),
@@ -1033,7 +1067,7 @@ def _stress_core_probe(
 
 def run_density_core_probe(arms: Mapping[str, Arm], high_batches: Mapping[str, Any], device: torch.device) -> list[dict[str, Any]]:
     records = []
-    for architecture in ARCHITECTURES:
+    for architecture in architecture_pair(arms):
         arm = arms[architecture]
         batch = high_batches[architecture]
         # The target-free Q=32768 point is distinct from native Q8192 grid
@@ -1080,8 +1114,8 @@ def run_training_throughput(
     if not packings:
         return [], 0, {"status": "not_requested"}
     dataset = next(iter(arms.values())).recipe["dataset"]
-    effective = _provider_capacity(arms["A-D"].provider, dataset)
-    train_count = len(arms["A-D"].provider.epoch_cases(1, int(arms["A-D"].recipe["seed"])))
+    effective = _provider_capacity(arms[architecture_pair(arms)[0]].provider, dataset)
+    train_count = len(arms[architecture_pair(arms)[0]].provider.epoch_cases(1, int(arms[architecture_pair(arms)[0]].recipe["seed"])))
     planned = expected_optimizer_updates(train_count, effective, epochs, len(packings))
     if planned > update_budget or planned > MAX_DISPOSABLE_UPDATES:
         raise ValueError(
@@ -1093,7 +1127,7 @@ def run_training_throughput(
     (output / "progress.json").write_text(json.dumps(progress, indent=2, allow_nan=False) + "\n")
     records = []
     actual_updates = 0
-    for architecture in ARCHITECTURES:
+    for architecture in architecture_pair(arms):
         arm = arms[architecture]
         if train_count != len(arm.provider.epoch_cases(1, int(arm.recipe["seed"]))):
             raise ValueError("Matched arms expose different full TRAIN case counts.")
@@ -1206,7 +1240,7 @@ def run_training_throughput(
     initial_state_checks = {}
     stream_checks = {}
     loss_checks = {}
-    for architecture in ARCHITECTURES:
+    for architecture in architecture_pair(arms):
         arm_records = [record for record in records if record["architecture"] == architecture]
         initial_hashes = {record["initial_state_sha256"] for record in arm_records}
         initial_state_checks[architecture] = {
@@ -1226,7 +1260,7 @@ def run_training_throughput(
             "all_packings_match": all(len(values) == 1 for values in by_step.values()),
         }
     first_packing = min(packings)
-    for architecture in ARCHITECTURES:
+    for architecture in architecture_pair(arms):
         reference = next(
             record for record in records
             if record["architecture"] == architecture and record["microbatch_cases"] == first_packing
@@ -1293,6 +1327,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--skip-native", action="store_true")
     parser.add_argument("--skip-density", action="store_true")
+    parser.add_argument("--extended-density", action="store_true",
+                        help="Optional target-free Q32768 stress after the three fixed-B8 native points.")
     parser.add_argument("--thermal-reader128-revision", action="store_true",
                         help="Explicit retained Thermal A-D64/A-H6-128 revision cost; not a matched decoder ablation.")
     parser.add_argument("--training-packings", default="",
@@ -1334,11 +1370,19 @@ def main(argv: list[str] | None = None) -> int:
     (args.output / "progress.json").write_text(json.dumps(progress, indent=2) + "\n")
     initial_checkpoint_hashes = {}
     try:
+        provider_started = time.perf_counter()
         arms, provider_identities, initialization = load_arms(
             dataset=args.dataset, device=args.device, recipe_path=args.recipe,
             checkpoint_ad=args.checkpoint_ad, checkpoint_ah6=args.checkpoint_ah6,
             thermal_reader128_revision=args.thermal_reader128_revision,
         )
+        _device_sync(device)
+        provider_setup_seconds = time.perf_counter() - provider_started
+        provider_phases = {"pair_model_and_provider_setup_wall_seconds": provider_setup_seconds,
+                           "scope": "both models/providers; native reference fixture loading and targets are separate from inference",
+                           "cache_after_setup": provider_cache_stats(next(iter(arms.values())).provider),
+                           "fixture_preparation": {},
+                           "filesystem_page_cache_state": "uncontrolled; no cold-disk claim"}
         initial_checkpoint_hashes = {
             architecture: arm.checkpoint_sha256 for architecture, arm in arms.items()
             if arm.checkpoint is not None
@@ -1346,16 +1390,21 @@ def main(argv: list[str] | None = None) -> int:
         resource_baseline = check_memory_headroom(device)
         fixture_selection, fixture_batches, high_batches = {}, {}, {}
         if not args.skip_native or not args.skip_density:
-            fixture_selection = choose_low_high_train_keys(arms["A-D"].provider, args.dataset)
+            fixture_selection = choose_low_high_train_keys(arms[architecture_pair(arms)[0]].provider, args.dataset)
             # Both providers bind the same TRAIN identities and transforms.
             # Read each native fixture once and share target-free inputs.
-            shared_fixture_batches = {
-                name: native_train_batch(arms["A-D"].provider, selection["case_key"])
-                for name, selection in fixture_selection.items()
-            }
-            fixture_batches = {architecture: shared_fixture_batches for architecture in ARCHITECTURES}
+            shared_fixture_batches = {}
+            for name, selection in fixture_selection.items():
+                fixture_started = time.perf_counter()
+                shared_fixture_batches[name] = native_train_batch(arms[architecture_pair(arms)[0]].provider, selection["case_key"])
+                _device_sync(device)
+                provider_phases["fixture_preparation"][name] = {
+                    "wall_seconds": time.perf_counter() - fixture_started,
+                    "case_key": selection["case_key"],
+                    "cache_after": provider_cache_stats(next(iter(arms.values())).provider)}
+            fixture_batches = {architecture: shared_fixture_batches for architecture in architecture_pair(arms)}
             high_batches = {
-                architecture: fixture_batches[architecture]["high_m"] for architecture in ARCHITECTURES
+                architecture: fixture_batches[architecture]["high_m"] for architecture in architecture_pair(arms)
             }
         native_records = [] if args.skip_native else run_native_matrix(arms, fixture_batches, device)
         (args.output / "native_cost_matrix.json").write_text(
@@ -1365,7 +1414,8 @@ def main(argv: list[str] | None = None) -> int:
             density_records.extend(run_density_backward(arms, high_batches, device))
             (args.output / "density_backward.json").write_text(
                 json.dumps(json_safe(density_records), indent=2, allow_nan=False) + "\n")
-            density_records.extend(run_density_core_probe(arms, high_batches, device))
+            if args.extended_density:
+                density_records.extend(run_density_core_probe(arms, high_batches, device))
         training_records, executed_updates, packing_checks = run_training_throughput(
             arms, packings=packings, epochs=args.training_epochs,
             update_budget=args.optimizer_update_budget, output=args.output, progress=progress,
@@ -1386,7 +1436,7 @@ def main(argv: list[str] | None = None) -> int:
             "weight_source": "retained_checkpoint_pair" if args.recipe is None else "fresh_recipe_pair",
             "comparison": "Thermal reader128 capacity revision" if args.thermal_reader128_revision else "matched decoder pair",
             "matched_reader_capacity": not args.thermal_reader128_revision,
-            "recipe": arms["A-D"].recipe,
+            "recipe": arms[architecture_pair(arms)[0]].recipe,
             "checkpoint_sha256": initial_checkpoint_hashes,
             "provider_identity_sha256": {
                 architecture: canonical_sha256(identity)
@@ -1396,6 +1446,8 @@ def main(argv: list[str] | None = None) -> int:
             "fixture_selection": fixture_selection,
             "parameter_inventory": inventory,
             "device_memory_baseline": resource_baseline,
+            "provider_phases": provider_phases,
+            "complete_scope": "host prescribed scene/query inputs through native physical outputs returned to host; includes H2D and D2H; target/reference fixture preparation separately timed",
             "native_cost_matrix": native_records,
             "density_scaling": density_records,
             "training_throughput": training_records,

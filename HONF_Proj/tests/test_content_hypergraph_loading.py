@@ -69,3 +69,47 @@ def test_loader_rejects_mismatched_or_incomplete_native_state(tmp_path, mutation
     torch.save(value, path)
     with pytest.raises((ValueError, KeyError, RuntimeError)):
         load_content_hypergraph_checkpoint(path)
+
+
+def payload_v2():
+    from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
+    from windfarm.content_hypergraph import WindContentHypergraphAdapterV3
+    _, physical, value = payload()
+    model = ContentHypergraphCoreV2(module_input_dim=2, environment_input_dim=7, coordinate_dim=3,
+                                  query_input_dim=7, operating_input_dim=11, context_dim=16,
+                                  local_hidden_dim=16, num_heads=4, context_depth=2, thermal_response_rank=0)
+    physical = WindContentHypergraphAdapterV3(physical.normalizer, physical.background_profile)
+    recipe = {"schema": "content_hypergraph_recipe_v2", "dataset": "wind", "architecture": "A2-H6"}
+    value.update(workflow="content_hypergraph_joint_v2", arm="A2-H6", model_state_dict=model.state_dict())
+    value["experiment_identity"].update(
+        recipe=recipe,
+        recipe_sha256=hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        provider_identity={"model_config": model.get_config(), "adapter_state": physical.state_payload()})
+    return model, physical, value
+
+
+def test_v2_standalone_load_is_strict_and_dataset_free(tmp_path, monkeypatch):
+    model, physical, value = payload_v2()
+    path = tmp_path / "v2.pt"
+    torch.save(value, path)
+    import windfarm.training.content_hypergraph_task as native_task
+    monkeypatch.setattr(native_task, "WindFarmNativeView", lambda *a, **k: pytest.fail("Dataset read in standalone v2 load"))
+    loaded, adapter, _ = load_content_hypergraph_checkpoint(path)
+    assert loaded.get_config() == model.get_config()
+    assert adapter.state_payload() == physical.state_payload()
+    assert all(torch.equal(tensor, loaded.state_dict()[name]) for name, tensor in model.state_dict().items())
+
+
+@pytest.mark.parametrize("mutation", ["workflow", "core_schema", "adapter_schema"])
+def test_v2_loader_rejects_cross_version_reconstruction(tmp_path, mutation):
+    _, _, value = payload_v2()
+    if mutation == "workflow":
+        value["workflow"] = "content_hypergraph_joint_v1"
+    elif mutation == "core_schema":
+        value["experiment_identity"]["provider_identity"]["model_config"].pop("schema")
+    else:
+        value["experiment_identity"]["provider_identity"]["adapter_state"]["schema"] = "wind_content_hypergraph_adapter_v2"
+    path = tmp_path / "mixed.pt"
+    torch.save(value, path)
+    with pytest.raises((ValueError, KeyError)):
+        load_content_hypergraph_checkpoint(path)

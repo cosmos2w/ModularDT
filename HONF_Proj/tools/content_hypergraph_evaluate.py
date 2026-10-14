@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     if selected is not None and recipe["dataset"] == "wind":
         selected = [int(x) for x in selected]
     args.output.mkdir(parents=True)
-    records, work, exports = [], [], []
+    records, work, exports, organizations = [], [], [], []
     if args.panel == "monitor":
         batches, selected = fixed_monitor_batches(provider, recipe, int(payload["epoch"]), args.split)
     else:
@@ -157,6 +157,18 @@ def main(argv: list[str] | None = None) -> int:
             records.append(provider.validation_metrics(prediction, batch.targets, auxiliary))
             work.append(dict(provider.work_counts(batch, prediction, auxiliary)))
             keys = tuple(str(x) for x in batch.case_keys)
+            if (recipe["schema"] == "content_hypergraph_recipe_v2"
+                    and recipe["architecture"] == "A2-H6" and args.panel == "native"):
+                from content_hypergraph_inspect_v2 import organization_summary
+                if recipe["dataset"] == "thermal":
+                    organization = prediction.native_prepared.organization
+                    query = prediction.native_prepared.query_batch
+                    core = model.core
+                else:
+                    organization = auxiliary["organization"]
+                    query = provider.adapter.make_query_batch(scene, batch.receivers)
+                    core = model
+                organizations.append({"case_keys": keys, **organization_summary(core, organization, query)})
             if any(key in args.export_case for key in keys):
                 arrays = {}
                 for prefix, value in (("scene", scene), ("prediction", prediction), ("target", batch.targets),
@@ -184,12 +196,13 @@ def main(argv: list[str] | None = None) -> int:
         "evaluation_microbatch_cases": packing,
         "provider_binding_sha256": canonical_sha256(payload["experiment_identity"]["provider_identity"]),
         "metrics": metrics, "records": records, "work_counts": work, "exports": exports,
+        "organization_summaries": organizations,
         "elapsed_seconds": time.perf_counter() - started, "optimizer_updates": 0,
         "new_solver_attempts": 0, "WindTEST": "locked",
     }
     destination = args.output / "result.json"
     destination.write_text(json.dumps(json_safe(result), indent=2, allow_nan=False) + "\n")
-    print(json.dumps(json_safe({k: v for k, v in result.items() if k not in {"records", "exports"}}),
+    print(json.dumps(json_safe({k: v for k, v in result.items() if k not in {"records", "exports", "organization_summaries"}}),
                      sort_keys=True, allow_nan=False), flush=True)
     return 0
 

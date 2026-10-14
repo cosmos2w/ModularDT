@@ -39,6 +39,9 @@ CONDITIONS = (
     "largest_contributing_edge_removed",
     "local_branch_removed",
 )
+CONDITIONS_V2 = (
+    "original_full_h6", "uniform_receiver_access", "input_declared_edge_removed", "local_branch_removed",
+)
 THERMAL_REPRESENTATIVE_IDS = ("0291", "0687")
 WIND_ROLE_INDEX = {
     "volume": 0,
@@ -77,6 +80,20 @@ def _save_scene_and_organization(arrays: dict[str, np.ndarray], scene: Any, orga
         "local_radius",
     ):
         _put_array(arrays, f"scene__{name}", getattr(scene, name))
+    if hasattr(organization, "module_gather_weights"):
+        for name in ("module_characteristic_lengths", "environment_characteristic_lengths",
+                     "coordinate_origin", "coordinate_scale"):
+            _put_array(arrays, f"scene__{name}", getattr(scene, name))
+        for name in ("edges", "raw_module_states", "raw_environment_states", "module_states",
+                     "environment_states", "scene_summary", "first_content", "mixed_content", "second_content",
+                     "module_gather_weights", "environment_gather_weights", "edge_anchors", "edge_scales"):
+            _put_array(arrays, f"organization__{name}", getattr(organization, name))
+        for name, value in (organization.trace or {}).items():
+            if torch.is_tensor(value):
+                _put_array(arrays, f"organization_trace__{name}", value)
+        if organization.source_coefficients is not None:
+            _put_array(arrays, "organization__source_coefficients_C", organization.source_coefficients)
+        return
     for name in (
         "edges",
         "module_incidence",
@@ -619,7 +636,7 @@ def _validate_checkpoint_scope(dataset: str, recipe: dict[str, Any], payload: di
         or epoch != 1000
         or type(stop) is not int
         or stop != 1000
-        or str(recipe.get("architecture", "")).upper() != "A-H6"
+        or str(recipe.get("architecture", "")).upper() not in {"A-H6", "A2-H6"}
         or dataset not in ("thermal", "wind")
     ):
         raise ValueError("Full-follow-up inspection requires an A-H6 checkpoint at literal approved epoch 1000.")
@@ -1215,7 +1232,8 @@ def main(argv: list[str] | None = None) -> int:
     dataset = str(recipe["dataset"])
     protocol = _validate_checkpoint_scope(dataset, recipe, payload)
     core = model.core if dataset == "thermal" else model
-    if core.architecture != "A-H6":
+    version2 = core.architecture == "A2-H6"
+    if core.architecture not in {"A-H6", "A2-H6"}:
         raise ValueError("The four organization interventions require an A-H6 checkpoint.")
     if next(core.parameters()).device.type != "cpu":
         raise RuntimeError("Inspection model unexpectedly left CPU-only execution.")
@@ -1231,7 +1249,11 @@ def main(argv: list[str] | None = None) -> int:
         selected = _select_thermal_cases(provider, protocol)
         batches = _thermal_case_batch(provider, selected)
         with torch.no_grad():
-            cases = [_run_thermal_case(model, provider, batch) for batch in batches]
+            if version2:
+                from content_hypergraph_inspect_v2 import run_case
+                cases = [run_case(model, provider, batch, dataset) for batch in batches]
+            else:
+                cases = [_run_thermal_case(model, provider, batch) for batch in batches]
     elif dataset == "wind":
         binding = (
             _validate_wind_development_binding(provider)
@@ -1244,7 +1266,11 @@ def main(argv: list[str] | None = None) -> int:
         ))
         selected = selected_rows
         with torch.no_grad():
-            cases = [_run_wind_case(model, provider, batch) for batch in batches]
+            if version2:
+                from content_hypergraph_inspect_v2 import run_case
+                cases = [run_case(model, provider, batch, dataset) for batch in batches]
+            else:
+                cases = [_run_wind_case(model, provider, batch) for batch in batches]
     else:
         raise ValueError(f"Unsupported content-hypergraph inspection dataset {dataset!r}.")
 
@@ -1264,7 +1290,7 @@ def main(argv: list[str] | None = None) -> int:
         all_results.append(case)
 
     result = {
-        "schema": "content_hypergraph_same_weight_inspection_v2",
+        "schema": "content_hypergraph_same_weight_inspection_v3" if version2 else "content_hypergraph_same_weight_inspection_v2",
         "status": "completed",
         "dataset": dataset,
         "architecture": core.architecture,
@@ -1280,7 +1306,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "validation_panel": _validation_panel_metadata(dataset, protocol, binding, selected),
         "validation_binding": binding,
-        "conditions": list(CONDITIONS),
+        "conditions": list(CONDITIONS_V2 if version2 else CONDITIONS),
         "cases": all_results,
         "array_files": array_files,
         "device": "cpu",
@@ -1309,6 +1335,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "elapsed_seconds_cpu": time.perf_counter() - started,
     }
+    if version2:
+        result["execution_note"] = (
+            "All six edge messages and all packed local rows execute in every condition. Fixed input-declared edge0 "
+            "is zeroed after headwise softmax without renormalization; local gates zero the executed local branch. "
+            "No sparse executor savings are measured. Thermal contractions and native extraction use FP64 with "
+            "unchanged FP32 neural factors. Actual donor-normalized W and head access describe learned use, not causality."
+        )
     (output / "result.json").write_text(json.dumps(json_safe(result), indent=2, allow_nan=False) + "\n")
     print(json.dumps(json_safe({k: v for k, v in result.items() if k != "cases"}), sort_keys=True, allow_nan=False))
     return 0

@@ -61,6 +61,10 @@ class SceneBatch:
     scene_key: Any = None
     normalizer_key: Any = None
     coordinate_frame_key: Any = None
+    # Explicit physical lengths used by the versioned geometry-aware v2 core.
+    # These remain optional for exact v1 replay; v2 requires both tensors.
+    module_characteristic_lengths: Tensor | None = None
+    environment_characteristic_lengths: Tensor | None = None
 
     @property
     def batch_size(self) -> int:
@@ -116,6 +120,14 @@ class SceneBatch:
         _require_shape("coordinate_scale", self.coordinate_scale, (batch, coordinate_dim))
         _require_shape("module_measure_reference", self.module_measure_reference, (batch,))
         _require_shape("environment_measure_reference", self.environment_measure_reference, (batch,))
+        _require_shape(
+            "module_characteristic_lengths", self.module_characteristic_lengths,
+            (batch, modules, coordinate_dim),
+        )
+        _require_shape(
+            "environment_characteristic_lengths", self.environment_characteristic_lengths,
+            (batch, env_count, coordinate_dim),
+        )
         for name, value in (
             ("module_measure", self.module_measure),
             ("environment_measure", self.environment_measure),
@@ -136,6 +148,15 @@ class SceneBatch:
         for name, value in (
             ("module_measure_reference", self.module_measure_reference),
             ("environment_measure_reference", self.environment_measure_reference),
+        ):
+            if value is not None:
+                _require_tensor_condition(
+                    torch.isfinite(value).all() & (value > 0).all(),
+                    f"{name} must contain only finite, positive values.",
+                )
+        for name, value in (
+            ("module_characteristic_lengths", self.module_characteristic_lengths),
+            ("environment_characteristic_lengths", self.environment_characteristic_lengths),
         ):
             if value is not None:
                 _require_tensor_condition(
@@ -171,6 +192,8 @@ class SceneBatch:
             self.coordinate_scale,
             self.module_measure_reference,
             self.environment_measure_reference,
+            self.module_characteristic_lengths,
+            self.environment_characteristic_lengths,
         )
         stamp = []
         for value in values:
@@ -284,6 +307,60 @@ class PreparedOrganization:
     frame_scale: Tensor
     operating_state: Tensor
     model_config_key: tuple[Any, ...]
+    trace: dict[str, Tensor] | None = None
+
+    @property
+    def num_hyperedges(self) -> int:
+        return int(self.edges.shape[1])
+
+    @property
+    def source_ids(self) -> Tensor:
+        return self.scene.module_ids
+
+    @property
+    def scene_key(self) -> Any:
+        return self.scene.scene_key
+
+
+@dataclass
+class PreparedOrganizationV2:
+    """Prepared v2 state with typed donor-normalized gathers.
+
+    ``module_gather_weights`` and ``environment_gather_weights`` are the
+    executed W tensors, normalized over donors independently for each edge.
+    The object deliberately has no v1 incidence/pooling aliases: any display
+    incidence derived from W belongs in an explicitly labelled exporter.
+    """
+
+    scene: SceneBatch
+    module_states: Tensor
+    environment_states: Tensor
+    raw_module_states: Tensor
+    raw_environment_states: Tensor
+    scene_summary: Tensor
+    edges: Tensor
+    first_content: Tensor
+    mixed_content: Tensor
+    second_content: Tensor
+    module_gather_weights: Tensor
+    environment_gather_weights: Tensor
+    edge_anchors: Tensor
+    edge_scales: Tensor
+    edge_keys: Tensor | None
+    edge_values: Tensor | None
+    direct_source_keys: Tensor | None
+    direct_source_values: Tensor | None
+    source_coefficients: Tensor | None
+    model_owner: int
+    model_parameter_versions: tuple[tuple[int, int], ...]
+    model_buffer_versions: tuple[tuple[int, int], ...]
+    scene_tensor_versions: tuple[tuple[int, int, int], ...]
+    scene_identity_snapshot: tuple[Any, Any, Any]
+    frame_origin: Tensor
+    frame_scale: Tensor
+    operating_state: Tensor
+    model_config_key: tuple[Any, ...]
+    work_counts: dict[str, int]
     trace: dict[str, Tensor] | None = None
 
     @property

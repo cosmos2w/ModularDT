@@ -51,6 +51,9 @@ from .unified_task import (
 )
 
 THERMAL_CONTENT_PROVIDER_SCHEMA = "thermal_content_hypergraph_provider_v1"
+THERMAL_CONTENT_PROVIDER_V2_SCHEMA = "thermal_content_hypergraph_provider_v2"
+THERMAL_CONTENT_RECIPE_V1_SCHEMA = "content_hypergraph_recipe_v1"
+THERMAL_CONTENT_RECIPE_V2_SCHEMA = "content_hypergraph_recipe_v2"
 THERMAL_CONTENT_SAMPLING_VERSION = SamplingKey.CASE_EPOCH_VERSION
 THERMAL_CONTENT_NATIVE_QUERY_COUNT = 8192
 THERMAL_CONTENT_THETA_COUNT = 64
@@ -1242,6 +1245,13 @@ def build_thermal_content_hypergraph_task(
     """Build the selected fixed25 development or full-TRAIN1000 provider."""
     if not isinstance(recipe, Mapping):
         raise TypeError("Thermal content-hypergraph recipe must be a mapping.")
+    recipe_schema = recipe.get("schema", THERMAL_CONTENT_RECIPE_V1_SCHEMA)
+    if recipe_schema == THERMAL_CONTENT_RECIPE_V2_SCHEMA:
+        from .content_hypergraph_task_v2 import build_thermal_content_hypergraph_task_v2
+
+        return build_thermal_content_hypergraph_task_v2(recipe, device=device)
+    if recipe_schema != THERMAL_CONTENT_RECIPE_V1_SCHEMA:
+        raise ValueError(f"Unsupported Thermal content-hypergraph recipe schema {recipe_schema!r}.")
     protocol = str(recipe.get("protocol", "development"))
     if protocol not in ("development", "full_train1000"):
         raise ValueError("Thermal recipe protocol must be development or full_train1000.")
@@ -1392,5 +1402,9 @@ __all__ = [
     "ThermalContentReceivers",
     "ThermalContentSceneInputs",
     "ThermalContentTargets",
+    "THERMAL_CONTENT_PROVIDER_SCHEMA",
+    "THERMAL_CONTENT_PROVIDER_V2_SCHEMA",
+    "THERMAL_CONTENT_RECIPE_V1_SCHEMA",
+    "THERMAL_CONTENT_RECIPE_V2_SCHEMA",
     "build_thermal_content_hypergraph_task",
 ]

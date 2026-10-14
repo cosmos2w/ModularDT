@@ -795,10 +795,283 @@ class ThermalContentHypergraphAdapter(nn.Module):
         return kernels * self.field_std[4].to(device=kernels.device, dtype=kernels.dtype)
 
 
+THERMAL_CONTENT_ADAPTER_V2_SCHEMA = "thermal_content_hypergraph_adapter_v2"
+THERMAL_CONTENT_COORDINATE_FRAME_V2 = "thermal_physical_rectangular_xy_v2"
+THERMAL_CONTENT_FEATURE_SCHEMA_V2 = "thermal_geometry_context_e192_v2"
+THERMAL_CONTENT_GEOMETRY_CONTRACT_V2 = {
+    "frame_origin": "[0,0]",
+    "frame_extent": "[Lx,Ly]",
+    "module_characteristic_length": "native_radius_r_broadcast_xy",
+    "environment_characteristic_length": "native_quadrature_cell_[Lx/24,Ly/8]",
+    "module_size_features": "[r/Lx,r/Ly] in module_features[2:4]",
+    "local_reader_support_radius": "3*r",
+    "length_pairing": "geometric_mean_per_axis",
+}
+THERMAL_CONTENT_NATIVE_LAW_CONTRACT_V2 = {
+    "flow": "fresh_nonlinear_u_v_p_head_independent_of_heat",
+    "curl": "physical_uvp_native_curl_cell_centred_v1",
+    "temperature": "linear_physical_heat_response_with_exact_T_of_zero_equal_zero",
+    "thermal_response": "factorized_native_affine_source_response",
+    "interpolation": "native_cell_center_stencil_v1",
+    "q_proxy": "minus_harmonic_conductivity_over_native_delta_times_outside_minus_surface_temperature",
+    "response_addendum": "same_original_train_thermal_families_and_native_objective_v1",
+}
+
+
+def _content_hypergraph_core_v2_type() -> type[nn.Module]:
+    """Load the additive v2 core without changing v1 import/replay behavior."""
+    from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
+
+    return ContentHypergraphCoreV2
+
+
+class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
+    """Thermal v2 adapter with explicit physical object and cell lengths.
+
+    Native flow conversion, interpolation, curl, flux proxy, and affine heat
+    operations are inherited verbatim from the v1 adapter. Only the versioned
+    core, frame identity, and geometry inputs differ.
+    """
+
+    def __init__(
+        self,
+        normalization_stats: Mapping[str, Any],
+        *,
+        core_config: Mapping[str, Any] | None = None,
+        core: nn.Module | None = None,
+        nx: int = 128,
+        ny: int = 64,
+        environment_nx: int = 24,
+        environment_ny: int = 8,
+    ) -> None:
+        if (environment_nx, environment_ny) != (24, 8):
+            raise ValueError("Thermal v2 requires the fixed 24x8 geometry-only environment catalogue.")
+        core_type = _content_hypergraph_core_v2_type()
+        if core is None:
+            config = dict(core_config or {})
+            if config.get("schema") != "content_hypergraph_core_v2":
+                raise ValueError("Thermal v2 requires a content_hypergraph_core_v2 config.")
+            required = {
+                "module_input_dim": THERMAL_CONTENT_MODULE_FEATURES,
+                "environment_input_dim": THERMAL_CONTENT_ENVIRONMENT_FEATURES,
+                "coordinate_dim": 2,
+                "query_input_dim": 0,
+                "operating_input_dim": THERMAL_CONTENT_OPERATING_FEATURES,
+                "output_dim": 3,
+            }
+            for name, expected in required.items():
+                if config.get(name) != expected:
+                    raise ValueError(f"Thermal v2 core requires explicit {name}={expected}.")
+            core = core_type.from_config(config)
+        if not isinstance(core, core_type):
+            raise TypeError("Thermal v2 adapter requires ContentHypergraphCoreV2.")
+        core_config_value = core.get_config()
+        if core_config_value.get("schema") != "content_hypergraph_core_v2":
+            raise ValueError("Thermal v2 core config has the wrong schema.")
+        expected_dimensions = {
+            "module_input_dim": THERMAL_CONTENT_MODULE_FEATURES,
+            "environment_input_dim": THERMAL_CONTENT_ENVIRONMENT_FEATURES,
+            "coordinate_dim": 2,
+            "query_input_dim": 0,
+            "operating_input_dim": THERMAL_CONTENT_OPERATING_FEATURES,
+            "output_dim": 3,
+        }
+        if any(core_config_value.get(name) != expected for name, expected in expected_dimensions.items()):
+            raise ValueError("Thermal v2 core dimensions differ from the native Thermal feature contract.")
+        if core_config_value.get("architecture") not in ("A2-D", "A2-H6"):
+            raise ValueError("Thermal v2 architecture must be A2-D or A2-H6.")
+        super().__init__(
+            normalization_stats,
+            core=core,
+            nx=nx,
+            ny=ny,
+            environment_nx=environment_nx,
+            environment_ny=environment_ny,
+        )
+        self.normalizer_key = _canonical_hash({
+            "schema": THERMAL_CONTENT_FEATURE_SCHEMA_V2,
+            "coordinate_frame": THERMAL_CONTENT_COORDINATE_FRAME_V2,
+            "geometry_contract": THERMAL_CONTENT_GEOMETRY_CONTRACT_V2,
+            "normalization_stats": self.normalization_stats,
+            "native_grid_nx_ny": [self.nx, self.ny],
+            "environment_grid_nx_ny": [self.environment_nx, self.environment_ny],
+        })
+
+    def get_config(self) -> dict[str, Any]:
+        """Return the standalone v2 adapter and native-geometry contract."""
+        return {
+            "schema": THERMAL_CONTENT_ADAPTER_V2_SCHEMA,
+            "coordinate_frame": THERMAL_CONTENT_COORDINATE_FRAME_V2,
+            "feature_schema": THERMAL_CONTENT_FEATURE_SCHEMA_V2,
+            "geometry_contract": copy.deepcopy(THERMAL_CONTENT_GEOMETRY_CONTRACT_V2),
+            "native_law_contract": copy.deepcopy(THERMAL_CONTENT_NATIVE_LAW_CONTRACT_V2),
+            "native_grid_nx_ny": [self.nx, self.ny],
+            "environment_grid_nx_ny": [self.environment_nx, self.environment_ny],
+            "core": self.core.get_config(),
+        }
+
+    def state_payload(self) -> dict[str, Any]:
+        """Serialize all versioned transforms needed for dataset-free replay."""
+        return {
+            **self.get_config(),
+            "normalization_stats": _stats_json(self.normalization_stats),
+            "normalizer_key": self.normalizer_key,
+        }
+
+    @classmethod
+    def from_state_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        device: torch.device | str = "cpu",
+        state_dict: Mapping[str, Any] | None = None,
+    ) -> ThermalContentHypergraphAdapterV2:
+        """Reconstruct the v2 adapter from a self-contained checkpoint payload."""
+        if payload.get("schema") != THERMAL_CONTENT_ADAPTER_V2_SCHEMA:
+            raise ValueError("Unsupported Thermal v2 content-hypergraph adapter payload.")
+        if payload.get("coordinate_frame") != THERMAL_CONTENT_COORDINATE_FRAME_V2:
+            raise ValueError("Thermal v2 checkpoint uses a different physical coordinate frame.")
+        if payload.get("feature_schema") != THERMAL_CONTENT_FEATURE_SCHEMA_V2:
+            raise ValueError("Thermal v2 checkpoint uses a different prescribed feature inventory.")
+        if payload.get("geometry_contract") != THERMAL_CONTENT_GEOMETRY_CONTRACT_V2:
+            raise ValueError("Thermal v2 checkpoint has a different object/cell length convention.")
+        if payload.get("native_law_contract") != THERMAL_CONTENT_NATIVE_LAW_CONTRACT_V2:
+            raise ValueError("Thermal v2 checkpoint has a different native output-law contract.")
+        grid = payload.get("native_grid_nx_ny")
+        environment = payload.get("environment_grid_nx_ny")
+        if not isinstance(grid, (list, tuple)) or len(grid) != 2:
+            raise ValueError("Thermal v2 checkpoint is missing its native grid dimensions.")
+        if environment != [24, 8] and tuple(environment or ()) != (24, 8):
+            raise ValueError("Thermal v2 checkpoint is missing the fixed E192 environment catalogue.")
+        core_type = _content_hypergraph_core_v2_type()
+        core_config = dict(payload.get("core", {}))
+        core = core_type.from_config(core_config)
+        adapter = cls(
+            payload["normalization_stats"],
+            core=core,
+            nx=int(grid[0]),
+            ny=int(grid[1]),
+            environment_nx=int(environment[0]),
+            environment_ny=int(environment[1]),
+        )
+        expected_config = adapter.get_config()
+        if expected_config != {key: payload[key] for key in expected_config}:
+            raise ValueError("Thermal v2 adapter payload differs from its canonical reconstructed config.")
+        if adapter.normalizer_key != payload.get("normalizer_key"):
+            raise ValueError("Thermal v2 adapter normalizer identity differs from its checkpoint payload.")
+        if state_dict is not None:
+            adapter.load_state_dict(state_dict, strict=True)
+        return adapter.to(device)
+
+    def scene_batch(self, structure: Mapping[str, Any], *, scene_key: Any = None) -> SceneBatch:
+        """Bind explicit native frame, module radius, and E192 cell lengths."""
+        scene = super().scene_batch(structure, scene_key=scene_key)
+        # The native radius is source_lengths from the prescribed Thermal
+        # inventory. Reuse the normalized radii and physical frame to recover
+        # it without introducing another source of geometry or targets.
+        radius = scene.module_features[..., 2:3] * scene.coordinate_scale[:, None, 0:1]
+        module_lengths = radius.expand(-1, -1, 2)
+        cell = scene.coordinate_scale / scene.coordinate_scale.new_tensor(
+            [self.environment_nx, self.environment_ny]
+        )
+        environment_lengths = cell[:, None, :].expand(-1, scene.environment_features.shape[1], -1)
+        return replace(
+            scene,
+            module_characteristic_lengths=module_lengths,
+            environment_characteristic_lengths=environment_lengths,
+            coordinate_frame_key=THERMAL_CONTENT_COORDINATE_FRAME_V2,
+        )
+
+    def apply_native_with_work_counts(
+        self,
+        prepared: PreparedThermalContentHypergraph,
+        physical_heat: torch.Tensor,
+        *,
+        increment: bool = False,
+        accumulation_dtype: torch.dtype | None = None,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
+        """Apply one native read and return counters from that same core call.
+
+        The v1 public return shape stays unchanged. V2 training uses this
+        additive method so the task ledger can include the core's real decode
+        or affine-reader counts without replaying an expensive forward pass.
+        """
+        self.validate_prepared(prepared)
+        controls = torch.as_tensor(physical_heat, device=prepared.scene_batch.module_features.device)
+        if not controls.is_floating_point():
+            controls = controls.to(self.field_std.dtype)
+        if controls.shape != prepared.scene_batch.module_mask.shape:
+            raise ValueError("Thermal physical heat controls must match the scene's padded module slots.")
+
+        if prepared.affine_query is not None:
+            output = self.core.apply_prepared_affine(
+                prepared.affine_query, controls, accumulation_dtype=accumulation_dtype,
+            )
+            temperature = output.thermal_temperature
+            flow = None if increment else output.nonlinear_field
+            core_work = output.work_counts
+        elif increment:
+            output = self.core.apply_increment(
+                prepared.organization,
+                prepared.query_batch,
+                controls,
+                accumulation_dtype=accumulation_dtype,
+                return_work_counts=True,
+            )
+            if not isinstance(output, tuple) or len(output) != 2:
+                raise RuntimeError("Thermal v2 core did not return affine-increment work counters.")
+            temperature, core_work = output
+            flow = None
+        else:
+            output = self.core.decode(
+                prepared.organization,
+                prepared.query_batch,
+                controls=controls,
+                accumulation_dtype=accumulation_dtype,
+            )
+            if output.thermal_temperature is None:
+                raise RuntimeError("Thermal v2 core omitted its affine temperature output.")
+            temperature = output.thermal_temperature
+            flow = output.nonlinear_field
+            core_work = output.work_counts
+
+        if temperature is None or not isinstance(core_work, Mapping):
+            raise RuntimeError("Thermal v2 core omitted native temperature or decode-work counters.")
+        result = self._extract_native_roles(
+            prepared, temperature, flow, accumulation_dtype=accumulation_dtype,
+        )
+        if increment:
+            result["pred_field"] = torch.cat(
+                (result["pred_field"][..., :4].zero_(), result["fluid_temperature"]), dim=-1,
+            )
+        counts: dict[str, int] = {}
+        for name, value in core_work.items():
+            if not isinstance(name, str) or type(value) is not int or value < 0:
+                raise RuntimeError("Thermal v2 core returned an invalid decode-work counter.")
+            counts[name] = value
+        return result, counts
+
+    def _query_union(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
+        """Keep native interpolation unchanged while versioning the query key."""
+        result = super()._query_union(*args, **kwargs)
+        query = result[0]
+        union = result[1]
+        ntheta = args[3] if len(args) > 3 else kwargs.get("ntheta")
+        query = replace(
+            query,
+            coordinate_frame_key=THERMAL_CONTENT_COORDINATE_FRAME_V2,
+            receiver_key=("thermal_native_union_v2", self.nx, self.ny, ntheta, tuple(union.grid_indices.shape)),
+        )
+        return (query, *result[1:])
+
+
 __all__ = [
     "THERMAL_CONTENT_ADAPTER_SCHEMA",
+    "THERMAL_CONTENT_ADAPTER_V2_SCHEMA",
     "THERMAL_CONTENT_COORDINATE_FRAME",
+    "THERMAL_CONTENT_COORDINATE_FRAME_V2",
     "THERMAL_CONTENT_ENVIRONMENT_SHAPE",
     "PreparedThermalContentHypergraph",
     "ThermalContentHypergraphAdapter",
+    "ThermalContentHypergraphAdapterV2",
 ]
