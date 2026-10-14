@@ -1,0 +1,23 @@
+{
+  "schema": "content_hypergraph_recipe_v1",
+  "dataset": "thermal",
+  "architecture": "A-H6",
+  "protocol": "full_train1000",
+  "seed": 0,
+  "primary_queries": 1024,
+  "microbatch_size": 24,
+  "effective_batch_size": 48,
+  "total_epochs": 5000,
+  "precision": "fp32",
+  "edge_access": "full",
+  "model": {
+    "context_dim": 128,
+    "num_heads": 4,
+    "context_depth": 2,
+    "num_hyperedges": 6,
+    "thermal_response_rank": 4,
+    "local_hidden_dim": 64,
+    "dropout": 0.0
+  },
+  "approved_stop_after": 1000
+}

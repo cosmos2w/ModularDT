@@ -438,6 +438,7 @@ def _fit_or_load_formal_transforms(
     seed: int,
     cache_dir: Path,
     profile_id: str = JOINT_WIND_FORMAL_PROFILE_ID,
+    allow_cache_write: bool = True,
 ) -> tuple[VelocityNormalizer, VerticalProfileBaseline, Mapping[str, Any]]:
     rows = np.asarray(train_rows, dtype=np.int64)
     key = {
@@ -468,17 +469,25 @@ def _fit_or_load_formal_transforms(
     }
     key_sha = _stable_json_sha256(key)
     cache_file = cache_dir / f"{profile_id}-transforms-{key_sha[:20]}.json"
-    with _role_scale_cache_lock(cache_file):
+    if not allow_cache_write:
         cached = _read_transform_cache(cache_file, key)
         if cached is None:
-            normalizer, profile = fit_velocity_statistics(
-                view.volume, rows, samples_per_row=int(key["samples_per_row"]), seed=int(seed),
-                profile_bins=int(key["profile_bins"]),
+            raise FileNotFoundError(
+                f"Exact Wind TRAIN transform cache is unavailable in read-only mode: {cache_file}"
             )
-            payload = _transform_cache_payload(key, normalizer, profile)
-            _atomic_write_json(cache_file, payload)
-        else:
-            normalizer, profile = cached
+        normalizer, profile = cached
+    else:
+        with _role_scale_cache_lock(cache_file):
+            cached = _read_transform_cache(cache_file, key)
+            if cached is None:
+                normalizer, profile = fit_velocity_statistics(
+                    view.volume, rows, samples_per_row=int(key["samples_per_row"]), seed=int(seed),
+                    profile_bins=int(key["profile_bins"]),
+                )
+                payload = _transform_cache_payload(key, normalizer, profile)
+                _atomic_write_json(cache_file, payload)
+            else:
+                normalizer, profile = cached
     binding = {
         "schema_version": JOINT_WIND_ROLE_SCALE_CACHE_SCHEMA,
         "transform_fit_id": key["transform_fit_id"],
@@ -508,6 +517,7 @@ def _fit_or_load_role_scales(
     catalogue_cache: NativeRoleCatalogueCache,
     cache_dir: Path,
     native_sampling_protocol: str | None = None,
+    allow_cache_write: bool = True,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     key = _role_scale_cache_key(
         view=view,
@@ -523,6 +533,19 @@ def _fit_or_load_role_scales(
     key_sha = _stable_json_sha256(key)
     safe_profile = str(key["dataset_profile"]).replace("/", "_")
     cache_file = cache_dir / f"{safe_profile}-{key_sha[:20]}.json"
+    if not allow_cache_write:
+        cached = _read_role_scale_cache(cache_file, key)
+        if cached is None:
+            raise FileNotFoundError(
+                f"Exact Wind TRAIN role-scale cache is unavailable in read-only mode: {cache_file}"
+            )
+        return cached, {
+            "schema_version": JOINT_WIND_ROLE_SCALE_CACHE_SCHEMA,
+            "cache_key_sha256": key_sha,
+            "dataset_fingerprint": key["dataset_fingerprint"],
+            "calibration_id": JOINT_WIND_ROLE_SCALE_CALIBRATION_ID,
+            "cache_file_sha256": _sha256(cache_file),
+        }
     with _role_scale_cache_lock(cache_file):
         cached = _read_role_scale_cache(cache_file, key)
         if cached is not None:

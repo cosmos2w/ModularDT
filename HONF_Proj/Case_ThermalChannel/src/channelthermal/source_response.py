@@ -19,6 +19,14 @@ from torch import nn
 from honf_forward_core.interface_fields.interaction_core import DependencySpec, _parameter_signature
 from honf_forward_core.interface_fields.source_response_operator import SourceResponseOperator
 
+from .native_observations import (
+    NativeStencil,
+    interpolate_native,
+    merge_native_grid_receiver_union,
+    native_cell_center_stencil,
+    thermal_context_tensors,
+)
+
 SOURCE_RESPONSE_ID = "thermal_source_response_v1"
 SOURCE_RESPONSE_CAPABILITY = "channelthermal_shared_grid_affine_source_v1"
 SOURCE_WIDTH, CONTEXT_WIDTH, ENVIRONMENT_WIDTH = 8, 14, 8
@@ -68,13 +76,6 @@ def _thermal_interaction_dependency(*, environment_flow_context):
         edges=tuple(edges),
         prepared_nodes=("flow_context", "thermal_context"),
     )
-
-
-@dataclass
-class NativeStencil:
-    indices: torch.Tensor
-    weights: torch.Tensor
-    valid: torch.Tensor
 
 
 @dataclass
@@ -173,95 +174,27 @@ class ThermalSourceResponse(nn.Module):
 
     def context_tensors(self, structure):
         """Build the actual input whitelist; never inspect a heat/target tensor."""
-        centers = structure["module_centers"].float()
-        for name in ("t_in", "t_wall"):
-            if name in structure:
-                boundary = torch.as_tensor(structure[name], device=centers.device)
-                if not bool(torch.isfinite(boundary).all()) or not bool((boundary == 0).all()):
-                    raise ValueError("This affine source capability requires zero inlet/wall temperature.")
-        present = structure["module_present"].to(centers)
-        if centers.ndim != 3 or centers.shape[-1] != 2 or present.shape != centers.shape[:2]:
-            raise ValueError("Thermal geometry requires [B,M,2] centers and [B,M] mask.")
-        material = structure["material_params"].to(centers)
-        if material.ndim == 1:
-            material = material[None].expand(centers.shape[0], -1)
-        if material.shape != (centers.shape[0], 6):
-            raise ValueError("Thermal material order is [nu,solid_alpha,fluid_alpha,solid_k,fluid_k,radius].")
-        if not bool(torch.isfinite(material).all()) or not bool((material > 0).all()):
-            raise ValueError("Native thermal coefficients and radius must be positive and finite.")
-        lengths = torch.cat(
-            (
-                self._column(structure, "domain_length_x", centers, 12.0),
-                self._column(structure, "domain_length_y", centers, 6.0),
-            ),
-            -1,
+        tensors = thermal_context_tensors(
+            structure,
+            environment_nx=self.environment_nx,
+            environment_ny=self.environment_ny,
+            preserve_dtype=False,
         )
-        if not bool(torch.isfinite(lengths).all()) or not bool((lengths > 0).all()):
-            raise ValueError("Domain lengths must be positive and finite.")
-        count = present.sum(1, keepdim=True)
-        radius = material[:, 5:6]
-        descriptors = material[:, 1:5] * centers.new_tensor([100.0, 100.0, 1.0, 1.0])
-        sources = torch.cat(
-            (
-                centers / lengths[:, None],
-                (radius / lengths)[:, None].expand(-1, centers.shape[1], -1),
-                descriptors[:, None].expand(-1, centers.shape[1], -1),
-            ),
-            -1,
-        )
-        context = torch.cat(
-            (
-                self._column(structure, "re", centers, 0.0) / 100.0,
-                self._column(structure, "u_in", centers, 0.0),
-                material[:, :5] * centers.new_tensor([100.0, 100.0, 100.0, 1.0, 1.0]),
-                radius,
-                lengths / centers.new_tensor([12.0, 6.0]),
-                count / 12.0,
-                count / lengths.prod(-1, keepdim=True),
-                centers.new_zeros(centers.shape[0], 2),
-            ),
-            -1,
-        )
-        axis_x = (
-            torch.arange(self.environment_nx, device=centers.device, dtype=centers.dtype) + 0.5
-        ) / self.environment_nx
-        axis_y = (
-            torch.arange(self.environment_ny, device=centers.device, dtype=centers.dtype) + 0.5
-        ) / self.environment_ny
-        yy, xx = torch.meshgrid(axis_y, axis_x, indexing="ij")
-        env_normal = torch.stack((xx, yy), -1).reshape(1, -1, 2).expand(centers.shape[0], -1, -1)
-        env_coords = env_normal * lengths[:, None]
-        distance = torch.linalg.vector_norm(env_coords[:, :, None] - centers[:, None], dim=-1)
-        live_distance = torch.where(present[:, None] > 0.5, distance, distance.new_full((), float("inf")))
-        nearest = live_distance.amin(-1, keepdim=True) / radius[:, None]
-        nearest = torch.where(torch.isfinite(nearest), nearest, nearest.new_full((), 10.0))
-        occupancy = (torch.exp(-distance.square() / radius[:, None].square()) * present[:, None]).sum(-1, keepdim=True)
-        boundary_distance = torch.cat((env_normal, 1.0 - env_normal), -1)
-        env_tokens = torch.cat((env_normal, nearest - 1.0, occupancy, boundary_distance), -1)
-        source_lengths = radius.expand(-1, centers.shape[1])
-        source_measures = torch.pi * source_lengths.square() * present
-        env_measures = lengths.prod(-1, keepdim=True).expand(-1, env_coords.shape[1]) / env_coords.shape[1]
+        # Preserve the historical response adapter's typed-ID boundary. The
+        # new content-hypergraph adapter uses auto-generated/masked tensor IDs;
+        # the reusable geometry transform must not change old wrapper metadata.
         source_ids = structure.get("module_source_ids")
-        if source_ids is not None and not torch.is_tensor(source_ids):
-            # Typed string IDs are kept in the adapter catalogue; the generic
-            # tensor operator receives its exact ordered slot index.
-            if len(source_ids) != centers.shape[1]:
+        if source_ids is None:
+            tensors["source_ids"] = None
+        elif not torch.is_tensor(source_ids):
+            if len(source_ids) != tensors["centers"].shape[1]:
                 raise ValueError("Source ID catalogue does not match active/padded slots.")
-            source_ids = torch.arange(centers.shape[1], device=centers.device)[None].expand(centers.shape[0], -1)
-        return {
-            "sources": sources,
-            "context": context,
-            "centers": centers,
-            "present": present,
-            "lengths": lengths,
-            "source_lengths": source_lengths,
-            "source_measures": source_measures,
-            "environment_tokens": env_tokens,
-            "environment_coords": env_coords,
-            "environment_present": present.new_ones(present.shape[0], env_coords.shape[1]),
-            "environment_measures": env_measures,
-            "source_ids": source_ids,
-        }
+            tensors["source_ids"] = torch.arange(
+                tensors["centers"].shape[1], device=tensors["centers"].device
+            )[None].expand(tensors["centers"].shape[0], -1)
+        else:
+            tensors["source_ids"] = source_ids
+        return tensors
 
     def prepare_context(self, structure, *, environment_flow_features=None,
                         routing_trace=False, native_route_intervention=None):
@@ -310,27 +243,9 @@ class ThermalSourceResponse(nn.Module):
 
     def native_stencil(self, xy, lengths):
         """Geometry-only equivalent of the generator's cell-center bilinear_sample."""
-        shape = xy.shape
-        flat = xy.reshape(shape[0], -1, 2)
-        if not bool(torch.isfinite(flat).all()):
+        if not bool(torch.isfinite(xy).all()):
             raise ValueError("Native receivers must be finite physical coordinates.")
-        grid = flat / (lengths[:, None] / flat.new_tensor([self.nx, self.ny])) - 0.5
-        # Exact native cell centers may move a few ulps during FP32 division.
-        # Snap only near integers, retaining the original coordinate VJP.
-        rounded = grid.round()
-        near = (grid - rounded).abs() <= 8 * torch.finfo(grid.dtype).eps * max(self.nx, self.ny)
-        grid = grid + torch.where(near, rounded - grid, grid.new_zeros(())).detach()
-        valid = ((grid >= 0) & (grid <= grid.new_tensor([self.nx - 1, self.ny - 1]))).all(-1)
-        clipped = torch.minimum(torch.maximum(grid, grid.new_zeros(())), grid.new_tensor([self.nx - 1, self.ny - 1]))
-        low = clipped.floor().long()
-        high = torch.minimum(low + 1, low.new_tensor([self.nx - 1, self.ny - 1]))
-        weight = clipped - low.to(clipped)
-        wx, wy = weight.unbind(-1)
-        ix, iy = low.unbind(-1)
-        jx, jy = high.unbind(-1)
-        indices = torch.stack((iy * self.nx + ix, iy * self.nx + jx, jy * self.nx + ix, jy * self.nx + jx), -1)
-        weights = torch.stack(((1 - wx) * (1 - wy), wx * (1 - wy), (1 - wx) * wy, wx * wy), -1)
-        return NativeStencil(indices, weights, valid)
+        return native_cell_center_stencil(xy, lengths, nx=self.nx, ny=self.ny)
 
     def prepare_native(self, structure, fluid_xy, *, local_query_points=None, ntheta=64, chunk_size=512,
                        environment_flow_features=None, receiver_read_options=None,
@@ -363,36 +278,21 @@ class ThermalSourceResponse(nn.Module):
         # Zero-weight neighbours are unnecessary for ordinary training, but
         # remain necessary when interpolation-weight derivatives are live.
         # Keeping all four in that scope preserves receiver/geometry VJPs.
-        unions = []
-        for batch_index in range(centers.shape[0]):
-            selected = []
-            for name, s in stencils.items():
-                needed = s.weights[batch_index] != 0
-                if s.weights.requires_grad:
-                    needed = torch.ones_like(needed)
-                if name != "fluid":
-                    active = present[batch_index, :, None].expand(*roles[name].shape[1:-1]).reshape(-1)
-                    needed = needed & active[:, None].bool()
-                needed = needed & s.valid[batch_index, :, None]
-                selected.append(s.indices[batch_index][needed])
-            union = torch.unique(torch.cat(selected), sorted=True)
-            if union.numel() == 0:
-                union = torch.zeros(1, dtype=torch.long, device=centers.device)
-            unions.append(union)
-            for s in stencils.values():
-                indices = s.indices[batch_index]
-                mapped = torch.searchsorted(union, indices)
-                exists = (mapped < union.numel()) & (union[mapped.clamp_max(union.numel() - 1)] == indices)
-                s.indices[batch_index] = torch.where(exists, mapped, torch.zeros_like(mapped))
-        width = max(u.numel() for u in unions)
-        union = torch.stack([torch.cat((u, u[:1].expand(width - u.numel()))) for u in unions])
-        xy = torch.stack((union % self.nx + 0.5, union // self.nx + 0.5), -1).to(centers)
-        grid_receivers = xy * (lengths[:, None] / lengths.new_tensor([self.nx, self.ny]))
+        union = merge_native_grid_receiver_union(
+            stencils,
+            roles,
+            present,
+            lengths,
+            nx=self.nx,
+            ny=self.ny,
+        )
+        stencils = union.stencils
+        grid_receivers = union.grid_coordinates
         read_options = {} if receiver_read_options is None else dict(receiver_read_options)
         if {'receiver_ids', 'chunk_size'} & read_options.keys():
             raise ValueError('Native receiver identities and chunking cannot be overridden by read options.')
         response = self.core.prepare_receivers(
-            context, grid_receivers, receiver_ids=union, chunk_size=chunk_size, **read_options)
+            context, grid_receivers, receiver_ids=union.grid_indices, chunk_size=chunk_size, **read_options)
         material = structure["material_params"].to(centers)
         if material.ndim == 1:
             material = material[None].expand(centers.shape[0], -1)
@@ -411,7 +311,7 @@ class ThermalSourceResponse(nn.Module):
             structure,
             snapshot,
             stencils,
-            union,
+            union.grid_indices,
             {k: v.shape[1:-1] for k, v in roles.items()},
             present,
             theta,
@@ -424,12 +324,7 @@ class ThermalSourceResponse(nn.Module):
 
     @staticmethod
     def _interpolate(values, stencil):
-        # values [B,N,O] or explicit kernel [B,N,M,O]
-        batch = torch.arange(values.shape[0], device=values.device)[:, None, None]
-        gathered = values[batch, stencil.indices]
-        weights = stencil.weights.to(values.dtype).reshape(*stencil.weights.shape, *([1] * (values.ndim - 2)))
-        valid = stencil.valid.reshape(*stencil.valid.shape, *([1] * (values.ndim - 2)))
-        return (gathered * weights).sum(2) * valid
+        return interpolate_native(values, stencil)
 
     def validate_prepared(self, prepared, structure=None):
         if not isinstance(prepared, PreparedNativeResponse) or prepared.owner != id(self):

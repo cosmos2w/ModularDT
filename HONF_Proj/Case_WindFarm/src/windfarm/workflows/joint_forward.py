@@ -138,6 +138,7 @@ class NativeRoleCatalogueCache:
         *,
         max_cached_bytes: int = DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
         persistent_dir: str | Path | None = None,
+        read_only_persistent: bool = False,
     ) -> None:
         if isinstance(max_cached_bytes, bool) or not isinstance(max_cached_bytes, int) or max_cached_bytes <= 0:
             raise ValueError("role catalogue cache byte limit must be a positive integer")
@@ -152,9 +153,13 @@ class NativeRoleCatalogueCache:
         self.eviction_count = 0
         self.oversize_bypass_count = 0
         self.persistent_dir = None if persistent_dir is None else Path(persistent_dir)
+        if type(read_only_persistent) is not bool:
+            raise TypeError("read_only_persistent must be a boolean")
+        self.read_only_persistent = read_only_persistent
         self._store: NativeRoleCatalogueStore | None = None
         self.disk_hit_count = 0
         self.disk_write_count = 0
+        self.catalogue_build_seconds = 0.0
 
     @staticmethod
     def _geometry_sha256(case: Any) -> str:
@@ -210,8 +215,38 @@ class NativeRoleCatalogueCache:
         self.miss_count += 1
 
         if self.persistent_dir is None:
+            build_started = time.perf_counter()
             catalogue = self._build_catalogue(case, geometry_sha256)
+            self.catalogue_build_seconds += time.perf_counter() - build_started
             self.build_count += 1
+        elif self.read_only_persistent:
+            # New model families may reuse verified geometry-only entries while
+            # keeping cold misses in the bounded RAM cache. Do not create lock
+            # files or publish persistent arrays on this path.
+            if self._store is None:
+                self._store = NativeRoleCatalogueStore(
+                    self.persistent_dir, _native_role_catalogue_recipe(), ROLE_NAMES,
+                )
+            loaded = self._store.load(layout_index, geometry_sha256, int(case.run.cell_count))
+            if loaded is None:
+                build_started = time.perf_counter()
+                catalogue = self._build_catalogue(case, geometry_sha256)
+                self.catalogue_build_seconds += time.perf_counter() - build_started
+                self.build_count += 1
+            else:
+                arrays, supports = loaded
+                catalogue = NativeRoleCatalogue(
+                    layout_index=layout_index,
+                    geometry_sha256=geometry_sha256,
+                    coordinates_D=arrays["coordinates"],
+                    role_indices=MappingProxyType({
+                        role: arrays[f"indices_{role}"] for role in ROLE_NAMES if role != "volume"
+                    }),
+                    role_cdf=MappingProxyType({role: arrays[f"cdf_{role}"] for role in ROLE_NAMES}),
+                    role_support_volume_m3=MappingProxyType(supports),
+                    cached_nbytes=sum(int(array.nbytes) for array in arrays.values()),
+                )
+                self.disk_hit_count += 1
         else:
             if self._store is None:
                 self._store = NativeRoleCatalogueStore(
@@ -220,7 +255,9 @@ class NativeRoleCatalogueCache:
             with self._store.locked(layout_index, geometry_sha256):
                 loaded = self._store.load(layout_index, geometry_sha256, int(case.run.cell_count))
                 if loaded is None:
+                    build_started = time.perf_counter()
                     catalogue = self._build_catalogue(case, geometry_sha256)
+                    self.catalogue_build_seconds += time.perf_counter() - build_started
                     self.build_count += 1
                     arrays = {"coordinates": catalogue.coordinates_D}
                     arrays.update({f"cdf_{role}": value for role, value in catalogue.role_cdf.items()})
@@ -260,6 +297,7 @@ class NativeRoleCatalogueCache:
         result = {
             "catalogue_count": len(self._catalogues),
             "catalogue_build_count": self.build_count,
+            "catalogue_build_seconds": float(self.catalogue_build_seconds),
             "cache_hit_count": self.hit_count,
             "cache_miss_count": self.miss_count,
             "cache_eviction_count": self.eviction_count,
@@ -283,6 +321,7 @@ class NativeRoleCatalogueCache:
                 "persistent_directory": str(self.persistent_dir.expanduser().resolve()),
                 "persistent_disk_hit_count": self.disk_hit_count,
                 "persistent_disk_write_count": self.disk_write_count,
+                "persistent_read_only": self.read_only_persistent,
                 "persistent_verification": "exact geometry, recipe, array shapes/dtypes and SHA256 payloads",
             })
         return result

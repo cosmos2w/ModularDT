@@ -173,6 +173,13 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelTher
     """Load model."""
 
     checkpoint = load_trusted_checkpoint(checkpoint_path, map_location="cpu")
+    if checkpoint.get("workflow") == "content_hypergraph_joint_v1":
+        from honf_runtime.content_hypergraph import load_content_hypergraph_checkpoint
+
+        model, _, checkpoint = load_content_hypergraph_checkpoint(checkpoint_path, device=device)
+        if checkpoint["experiment_identity"]["recipe"]["dataset"] != "thermal":
+            raise ValueError("The Thermal native loader requires a Thermal checkpoint.")
+        return model, checkpoint
     if checkpoint.get("source_response_identity") is not None:
         raise ValueError(
             "Source-response checkpoints require channelthermal.source_response.load_source_response_model; "

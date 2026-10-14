@@ -20,6 +20,12 @@ class ModelFamilySpec:
 
 
 MODEL_FAMILIES = {
+    "honf_content_hypergraph": ModelFamilySpec(
+        family_id="honf_content_hypergraph",
+        available=True,
+        workflows=("forward", "compare"),
+        description="Typed attention with content-bearing hypergraph decoding and native adapters",
+    ),
     "honf_forward": ModelFamilySpec(
         family_id="honf_forward",
         available=True,

@@ -3001,6 +3001,14 @@ class TrainingEngine:
                 model.train(True)
                 previous_phase = phase
                 self._set_schedules(optimizer, group_specs, epoch)
+                training_memory = None
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                    torch.cuda.reset_peak_memory_stats(self.device)
+                    training_memory = {
+                        "baseline_allocated_bytes": torch.cuda.memory_allocated(self.device),
+                        "baseline_reserved_bytes": torch.cuda.memory_reserved(self.device),
+                    }
                 epoch_started = time.perf_counter()
                 ordered_cases, sampling_dataset_id = self.epoch_case_order(provider, epoch)
                 if diagnostic_contract is not None and (
@@ -3075,6 +3083,11 @@ class TrainingEngine:
                     progress.close()
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
+                    training_memory.update({
+                        "peak_allocated_bytes": torch.cuda.max_memory_allocated(self.device),
+                        "peak_reserved_bytes": torch.cuda.max_memory_reserved(self.device),
+                        "scope": "complete epoch including data transfer, forward, backward and optimizer; excludes monitoring",
+                    })
                 train_seconds = time.perf_counter() - epoch_started
                 row: dict[str, Any] = {
                     "epoch": epoch,
@@ -3091,6 +3104,8 @@ class TrainingEngine:
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                     "case_order_sha256": order_hash,
                 }
+                if training_memory is not None:
+                    row["training_cuda_memory"] = training_memory
                 sample_hashes = [item["query_sampling_sha256"] for item in update_rows
                                  if item["query_sampling_sha256"] is not None]
                 if sample_hashes:
