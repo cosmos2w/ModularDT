@@ -20,5 +20,6 @@
     "dropout": 0.0
   },
   "approved_stop_after": 1000,
-  "catalogue_cache_ram_bytes": 137438953472
+  "catalogue_cache_ram_bytes": 137438953472,
+  "optimizer_bias_norm_exclusion": true
 }

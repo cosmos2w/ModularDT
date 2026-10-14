@@ -529,6 +529,44 @@ def test_catalogue_cache_capacity_is_recipe_bound_and_reuses_same_read_only_stor
     assert first.disk_write_count == 0
 
 
+@pytest.mark.parametrize("architecture", ["A-D", "A-H6"])
+def test_explicit_optimizer_exclusion_covers_joint_parameters_and_preserves_legacy_groups(architecture):
+    task = object.__new__(WindContentHypergraphTask)
+    config = _small_content_core().get_config()
+    config["architecture"] = architecture
+    config.pop("final_environment_update")
+    task.model = ContentHypergraphCore(**config)
+    task.total_epochs = 2500
+    task.recipe = {"protocol": "development", "optimizer_bias_norm_exclusion": True}
+    groups = task.optimizer_groups(task.model, architecture)
+    assert [group.name for group in groups] == ["wind_content_decay", "wind_content_no_decay"]
+    names = {name for name, parameter in task.model.named_parameters() if parameter.requires_grad}
+    decay, no_decay = (set(group.parameter_names) for group in groups)
+    assert decay and no_decay and not decay.intersection(no_decay)
+    assert decay.union(no_decay) == names
+    assert no_decay == {name for name in names if name.endswith(".bias") or "norm" in name.lower()}
+    assert [group.weight_decay for group in groups] == [1.0e-5, 0.0]
+    assert all(group.schedule == task._schedule() for group in groups)
+    assert all(group.betas == (0.9, 0.999) and group.eps == 1.0e-8 for group in groups)
+
+    # Old checkpoint recipes have no flag. Their group/identity contract must
+    # remain the recorded one so evaluation cannot rewrite experiment history.
+    task.recipe.pop("optimizer_bias_norm_exclusion")
+    legacy = task.optimizer_groups(task.model, architecture)
+    assert len(legacy) == 1 and legacy[0].name == "wind_content_hypergraph"
+    assert set(legacy[0].parameter_names) == names and legacy[0].weight_decay == 1.0e-5
+
+
+@pytest.mark.parametrize("flag", [1, 0, "true", None])
+def test_optimizer_exclusion_recipe_rejects_non_boolean(flag):
+    with pytest.raises(ValueError, match="optimizer_bias_norm_exclusion"):
+        _validate_recipe({
+            "schema": "content_hypergraph_recipe_v1", "dataset": "wind",
+            "architecture": "A-H6", "protocol": "development",
+            "optimizer_bias_norm_exclusion": flag,
+        })
+
+
 @pytest.mark.parametrize("limit", [0, -1, True, 128 * 1024**3 + 1, 1.5])
 def test_catalogue_cache_capacity_rejects_invalid_recipe_values(limit):
     recipe = {

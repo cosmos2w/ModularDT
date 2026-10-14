@@ -1,6 +1,7 @@
 """Execution limits of the new family do not alter historical recipe guards."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -43,3 +44,13 @@ def test_full_followup_requires_organized_model_and_explicit_stop():
     del data["approved_stop_after"]
     with pytest.raises(ValueError, match="1000 stop"):
         launcher.validate_recipe(data)
+
+
+def test_fresh_wind_legacy_recipe_rejects_missing_optimizer_declaration_before_build(tmp_path, monkeypatch):
+    data = {**recipe(), "dataset": "wind", "seed": 42, "primary_queries": 4096,
+            "effective_batch_size": 24}
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(launcher, "build", lambda *a, **k: pytest.fail("rejected recipe constructed data/model"))
+    with pytest.raises(ValueError, match="explicitly enable optimizer_bias_norm_exclusion"):
+        launcher.main(["--recipe", str(path), "--device", "cpu", "--dry-run"])

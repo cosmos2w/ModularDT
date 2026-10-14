@@ -292,6 +292,28 @@ def _arm_recipe(recipe: Mapping[str, Any], architecture: str) -> dict[str, Any]:
     return validate_recipe(result)
 
 
+def comparison_recipes(
+    ad: Mapping[str, Any], h6: Mapping[str, Any], *, thermal_reader128_revision: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compare recipes; only an explicit Thermal width-revision cost is exempt."""
+    normalized = [json.loads(json.dumps(dict(recipe))) for recipe in (ad, h6)]
+    for recipe in normalized:
+        recipe.pop("architecture", None)
+    if thermal_reader128_revision:
+        if (
+            ad.get("dataset") != "thermal" or h6.get("dataset") != "thermal"
+            or ad.get("protocol") != "development" or h6.get("protocol") != "development"
+            or ad.get("architecture") != "A-D" or h6.get("architecture") != "A-H6"
+            or ad.get("model", {}).get("local_hidden_dim") != 64
+            or h6.get("model", {}).get("local_hidden_dim") != 128
+        ):
+            raise ValueError("Reader128 revision costs require Thermal development A-D64 versus A-H6-128.")
+        normalized[1]["model"]["local_hidden_dim"] = 64
+    if normalized[0] != normalized[1]:
+        raise ValueError("A-D and A-H6 recipes differ beyond their declared architecture arm/revision.")
+    return normalized[0], normalized[1]
+
+
 def load_arms(
     *,
     dataset: str,
@@ -299,9 +321,12 @@ def load_arms(
     recipe_path: Path | None,
     checkpoint_ad: Path | None,
     checkpoint_ah6: Path | None,
+    thermal_reader128_revision: bool = False,
 ) -> tuple[dict[str, Arm], dict[str, Any], dict[str, Any]]:
     """Load and bind one same-dataset pair without touching checkpoint files."""
     if recipe_path is not None:
+        if thermal_reader128_revision:
+            raise ValueError("Reader128 revision costs require retained checkpoints, not fresh packing probes.")
         if checkpoint_ad is not None or checkpoint_ah6 is not None:
             raise ValueError("Use either --recipe or the two checkpoint paths, not both.")
         base_recipe = validate_recipe(json.loads(recipe_path.read_text()))
@@ -337,13 +362,16 @@ def load_arms(
             )
 
     ad, h6 = arms["A-D"], arms["A-H6"]
-    if {key: value for key, value in ad.recipe.items() if key != "architecture"} != {
-        key: value for key, value in h6.recipe.items() if key != "architecture"
-    }:
-        raise ValueError("A-D and A-H6 recipes differ beyond their declared architecture arm.")
+    comparison_recipes(ad.recipe, h6.recipe, thermal_reader128_revision=thermal_reader128_revision)
     ad_identity = dict(ad.provider.identity_payload())
     h6_identity = dict(h6.provider.identity_payload())
-    if _provider_identity_without_arm(ad_identity) != _provider_identity_without_arm(h6_identity):
+    bindings = [_provider_identity_without_arm(identity) for identity in (ad_identity, h6_identity)]
+    if thermal_reader128_revision and all("recipe" in binding for binding in bindings):
+        for binding, recipe in zip(bindings, comparison_recipes(
+            ad.recipe, h6.recipe, thermal_reader128_revision=True,
+        ), strict=True):
+            binding["recipe"] = recipe
+    if bindings[0] != bindings[1]:
         raise ValueError("A-D and A-H6 provider identities do not bind the same selected TRAIN data/transforms.")
     for arm in arms.values():
         arm.model.eval()
@@ -1265,6 +1293,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--skip-native", action="store_true")
     parser.add_argument("--skip-density", action="store_true")
+    parser.add_argument("--thermal-reader128-revision", action="store_true",
+                        help="Explicit retained Thermal A-D64/A-H6-128 revision cost; not a matched decoder ablation.")
     parser.add_argument("--training-packings", default="",
                         help="Optional comma-separated microbatch sizes; effective batch and Q stay fixed.")
     parser.add_argument("--training-epochs", type=int, default=5)
@@ -1287,6 +1317,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Training packings require positive --training-epochs and explicit update budget.")
     if packings and len(packings) > 3:
         parser.error("At most three microbatch packings may be tested in one invocation.")
+    if args.thermal_reader128_revision and (args.dataset != "thermal" or args.recipe is not None or packings):
+        parser.error("Reader128 revision mode requires Thermal retained checkpoints and zero training packings.")
     if not packings and args.optimizer_update_budget != 0:
         parser.error("An optimizer update budget is meaningful only with --training-packings.")
     if args.output.exists():
@@ -1305,6 +1337,7 @@ def main(argv: list[str] | None = None) -> int:
         arms, provider_identities, initialization = load_arms(
             dataset=args.dataset, device=args.device, recipe_path=args.recipe,
             checkpoint_ad=args.checkpoint_ad, checkpoint_ah6=args.checkpoint_ah6,
+            thermal_reader128_revision=args.thermal_reader128_revision,
         )
         initial_checkpoint_hashes = {
             architecture: arm.checkpoint_sha256 for architecture, arm in arms.items()
@@ -1351,6 +1384,8 @@ def main(argv: list[str] | None = None) -> int:
             "device": args.device,
             "cuda_visible_device_uuid": device_binding,
             "weight_source": "retained_checkpoint_pair" if args.recipe is None else "fresh_recipe_pair",
+            "comparison": "Thermal reader128 capacity revision" if args.thermal_reader128_revision else "matched decoder pair",
+            "matched_reader_capacity": not args.thermal_reader128_revision,
             "recipe": arms["A-D"].recipe,
             "checkpoint_sha256": initial_checkpoint_hashes,
             "provider_identity_sha256": {

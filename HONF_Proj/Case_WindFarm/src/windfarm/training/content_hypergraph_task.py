@@ -296,6 +296,10 @@ class WindContentHypergraphTask:
             result["test_row_indices_sha256"] = self.manifest["test_row_indices_sha256"]
             result["test_layout_indices"] = self.manifest["test_layout_indices"]
             result["unexposed_test_target_values_read"] = False
+        # Keep checkpoint-bound pre-correction identities replayable. New
+        # recipes explicitly declare the plan's bias/norm exclusion rule.
+        if "optimizer_bias_norm_exclusion" in self.recipe:
+            result["training"]["optimizer_bias_norm_exclusion"] = self.recipe["optimizer_bias_norm_exclusion"]
         return result
 
     def serialization_payload(self) -> Mapping[str, Any]:
@@ -911,6 +915,26 @@ class WindContentHypergraphTask:
         all_names = tuple(name for name, _ in model.named_parameters())
         if not names or names != all_names:
             raise ValueError("Every Wind shared-core parameter must train jointly from initialization.")
+        if self.recipe.get("optimizer_bias_norm_exclusion", False):
+            no_decay = tuple(name for name in names if name.endswith(".bias") or "norm" in name.lower())
+            excluded = set(no_decay)
+            decay = tuple(name for name in names if name not in excluded)
+            schedule = self._schedule()
+            groups = []
+            for group_name, parameter_names, weight_decay in (
+                ("wind_content_decay", decay, self._weight_decay()),
+                ("wind_content_no_decay", no_decay, 0.0),
+            ):
+                if parameter_names:
+                    groups.append(
+                        OptimizerGroupSpec(
+                            group_name, parameter_names, schedule,
+                            weight_decay=weight_decay, betas=(0.9, 0.999), eps=1.0e-8,
+                        )
+                    )
+            return tuple(groups)
+        # Absent/false is the original recorded optimizer contract. Do not
+        # silently relabel or repartition its named state during native replay.
         return (
             OptimizerGroupSpec(
                 "wind_content_hypergraph",
@@ -956,6 +980,8 @@ def _validate_recipe(recipe: Mapping[str, Any]) -> tuple[dict[str, Any], str, in
     protocol = str(value.get("protocol"))
     if protocol not in ("development", "full_train1000"):
         raise ValueError("Wind content-hypergraph requires development or full_train1000 protocol.")
+    if "optimizer_bias_norm_exclusion" in value and type(value["optimizer_bias_norm_exclusion"]) is not bool:
+        raise ValueError("Wind optimizer_bias_norm_exclusion must be an explicit boolean.")
     expected_epochs = 2500 if protocol == "development" else 5000
     catalogue_cache_ram_bytes = value.get("catalogue_cache_ram_bytes", WIND_CONTENT_ROLE_CACHE_RAM_BYTES)
     if (

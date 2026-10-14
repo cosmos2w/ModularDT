@@ -19,5 +19,6 @@
     "local_hidden_dim": 64,
     "dropout": 0.0
   },
-  "catalogue_cache_ram_bytes": 34359738368
+  "catalogue_cache_ram_bytes": 34359738368,
+  "optimizer_bias_norm_exclusion": true
 }

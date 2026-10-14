@@ -157,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     recipe = validate_recipe(json.loads(args.recipe.read_text()))
     validate_stop(recipe, args.stop_after)
+    if args.resume is None and recipe["dataset"] == "wind" and recipe.get("optimizer_bias_norm_exclusion") is not True:
+        raise ValueError("Fresh Wind recipes must explicitly enable optimizer_bias_norm_exclusion.")
     if args.dry_run and args.device != "cpu":
         raise ValueError("Dry-run must be CUDA-hidden CPU preparation.")
     if not args.dry_run:

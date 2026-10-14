@@ -20,6 +20,7 @@ from content_hypergraph_benchmark import (
     _provider_identity_without_arm,
     _stress_core_probe,
     _stress_request,
+    comparison_recipes,
     expected_optimizer_updates,
     initialization_receipt,
     is_oom_error,
@@ -54,6 +55,23 @@ def test_optimizer_budget_counts_both_arms_and_full_epochs() -> None:
     assert expected_optimizer_updates(150, 48, epochs=5, packings=1) == 40
     assert expected_optimizer_updates(72, 24, epochs=5, packings=3) == 90
     assert set(ARCHITECTURES) == {"A-D", "A-H6"}
+
+
+def test_reader128_cost_comparison_is_explicit_and_preserves_other_recipe_guards():
+    ad = {"dataset": "thermal", "protocol": "development", "architecture": "A-D",
+          "model": {"local_hidden_dim": 64, "thermal_response_rank": 4}, "seed": 0}
+    h6 = {**ad, "architecture": "A-H6", "model": {**ad["model"], "local_hidden_dim": 128}}
+    with pytest.raises(ValueError, match="recipes differ"):
+        comparison_recipes(ad, h6)
+    normalized = comparison_recipes(ad, h6, thermal_reader128_revision=True)
+    assert normalized[0] == normalized[1] and h6["model"]["local_hidden_dim"] == 128
+    for modified in ({**h6, "seed": 1},
+                     {**h6, "model": {**h6["model"], "thermal_response_rank": 8}}):
+        with pytest.raises(ValueError, match="recipes differ"):
+            comparison_recipes(ad, modified, thermal_reader128_revision=True)
+    with pytest.raises(ValueError, match="require Thermal development"):
+        comparison_recipes({**ad, "dataset": "wind"}, {**h6, "dataset": "wind"},
+                           thermal_reader128_revision=True)
 
 
 def test_microbatch_packings_are_unique_and_bounded_by_effective_batch() -> None:
