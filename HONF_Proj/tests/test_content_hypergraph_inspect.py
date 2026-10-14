@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import numpy as np
 import torch
 
 from honf_forward_core.content_hypergraph import ContentHypergraphCore, QueryBatch, SceneBatch
 from tools.content_hypergraph_inspect import (
     _condition_trace_arrays,
+    _fp64_identity_error,
+    _select_thermal_cases,
     local_branch_zero_hook,
     rank_thermal_edge,
     rank_wind_edge,
@@ -86,6 +91,71 @@ def test_wind_edge_rank_uses_weighted_messages_not_receiver_occupancy():
 
     assert selected == 1
     assert scores[1] > scores[0]
+
+
+def _thermal_dev_provider(case_ids: tuple[str, ...]) -> SimpleNamespace:
+    identity = {
+        "protocol": "development",
+        "validation_scope": "fixed25_v1_DEV22_exposed",
+        "dataset_profile": "fixed25_v1",
+        "validation_case_ids": list(case_ids),
+        "validation_case_ids_sha256": "ids-digest",
+        "subset_manifest_sha256": "fixed-manifest",
+        "base_fixed25_manifest_sha256": "fixed-manifest",
+        "source_binding": {
+            "dataset_id": "thermal_channel_global_v1",
+            "catalog_metadata_sha256": "catalog-digest",
+            "base_manifest_sha256": "fixed-manifest",
+            "protocol": "development",
+            "normalization_fit_scope": "selected original TRAIN150 only",
+            "original_test_targets_outside_declared_panel_read": False,
+        },
+    }
+    return SimpleNamespace(
+        protocol="development",
+        validation_case_ids=case_ids,
+        manifest={"manifest_sha256": "fixed-manifest"},
+        base_manifest_sha256="fixed-manifest",
+        identity_payload=lambda: identity,
+    )
+
+
+def test_thermal_inspection_selects_only_bound_exposed_dev_ids_without_source_split_heuristic():
+    case_ids = ("0291", "0687", *(f"dev-{index:02d}" for index in range(20)))
+    provider = _thermal_dev_provider(case_ids)
+    with (
+        patch("channelthermal.data.development_split.development_case_ids", return_value=case_ids),
+        patch("channelthermal.training.unified_task.FIXED25_FINGERPRINT", "fixed-manifest"),
+    ):
+        assert _select_thermal_cases(provider) == ("0291", "0687")
+
+
+def test_thermal_inspection_rejects_cases_outside_the_fixed_dev_panel():
+    case_ids = ("0291", *(f"dev-{index:02d}" for index in range(21)))
+    provider = _thermal_dev_provider(case_ids)
+    with (
+        patch("channelthermal.data.development_split.development_case_ids", return_value=case_ids),
+        patch("channelthermal.training.unified_task.FIXED25_FINGERPRINT", "fixed-manifest"),
+    ):
+        try:
+            _select_thermal_cases(provider)
+        except ValueError as error:
+            assert "0291 and 0687" in str(error)
+        else:
+            raise AssertionError("Missing fixed Thermal DEV case was accepted.")
+
+
+def test_fp64_native_identity_uses_frozen_software_tolerance_and_reports_raw_error():
+    actual = torch.tensor([1.0, -0.125], dtype=torch.float64)
+    expected = torch.tensor([1.0 + 2.0e-15, -0.125], dtype=torch.float64)
+
+    result = _fp64_identity_error(actual, expected)
+
+    assert result["comparison_dtype"] == "float64"
+    assert np.isclose(result["max_abs_error"], 2.0e-15, rtol=1.0e-3)
+    assert result["software_tolerance"] == {"atol": 1.0e-9, "rtol": 1.0e-7}
+    assert result["max_abs_software_tolerance"] >= 1.0e-9
+    assert result["passed"]
 
 
 def test_local_zero_keeps_pair_work_and_edge_access_but_removes_exact_local_heat():

@@ -39,7 +39,7 @@ CONDITIONS = (
     "largest_contributing_edge_removed",
     "local_branch_removed",
 )
-THERMAL_REPRESENTATIVE_IDS = ("0277", "0291", "0294", "0687")
+THERMAL_REPRESENTATIVE_IDS = ("0291", "0687")
 WIND_ROLE_INDEX = {
     "volume": 0,
     "hub_slab": 1,
@@ -380,23 +380,88 @@ def _thermal_case_batch(provider: Any, selected: tuple[str, ...]):
     ids = set(provider.validation_case_ids)
     if any(case_id not in ids for case_id in selected):
         raise ValueError("Thermal inspection case panel is outside fixed development membership.")
-    if any(provider.case_split_by_id.get(case_id) != "train" for case_id in selected):
-        raise ValueError("Thermal inspection refuses original TEST cases; fixed DEV must be sourced from TRAIN.")
     return list(provider.native_evaluation_batches(split="validation", case_keys=selected, microbatch_size=1))
 
 
+def _validate_thermal_development_binding(provider: Any) -> dict[str, Any]:
+    from channelthermal.data.development_split import development_case_ids
+    from channelthermal.training.unified_task import FIXED25_FINGERPRINT
+
+    identity = provider.identity_payload()
+    validation_ids = tuple(map(str, identity.get("validation_case_ids", ())))
+    source_binding = identity.get("source_binding", {})
+    manifest_validation_ids = tuple(map(str, development_case_ids(provider.manifest, "test")))
+    if (
+        identity.get("protocol") != "development"
+        or identity.get("validation_scope") != "fixed25_v1_DEV22_exposed"
+        or identity.get("dataset_profile") != "fixed25_v1"
+        or len(validation_ids) != 22
+        or validation_ids != tuple(map(str, provider.validation_case_ids))
+        or validation_ids != manifest_validation_ids
+        or identity.get("subset_manifest_sha256") != provider.manifest.get("manifest_sha256")
+        or provider.manifest.get("manifest_sha256") != FIXED25_FINGERPRINT
+        or identity.get("base_fixed25_manifest_sha256") != provider.base_manifest_sha256
+        or provider.base_manifest_sha256 != FIXED25_FINGERPRINT
+        or source_binding.get("base_manifest_sha256") != provider.base_manifest_sha256
+        or source_binding.get("protocol") != "development"
+        or source_binding.get("original_test_targets_outside_declared_panel_read") is not False
+    ):
+        raise ValueError("Thermal inspection provider is not bound to the exact exposed fixed25_v1 DEV22 panel.")
+    return {
+        "validation_case_ids": list(validation_ids),
+        "validation_case_ids_sha256": identity["validation_case_ids_sha256"],
+        "validation_scope": identity["validation_scope"],
+        "subset_manifest_sha256": identity["subset_manifest_sha256"],
+        "base_fixed25_manifest_sha256": identity["base_fixed25_manifest_sha256"],
+        "source_binding": {
+            key: source_binding[key]
+            for key in (
+                "dataset_id",
+                "catalog_metadata_sha256",
+                "base_manifest_sha256",
+                "protocol",
+                "normalization_fit_scope",
+                "original_test_targets_outside_declared_panel_read",
+            )
+            if key in source_binding
+        },
+        "only_declared_exposed_validation_targets_read": True,
+        "unexposed_original_test_targets_read": False,
+    }
+
+
 def _select_thermal_cases(provider: Any) -> tuple[str, ...]:
-    if provider.protocol != "development":
-        raise ValueError("The organizer inspection is restricted to fixed Thermal DEV, not full-TRAIN follow-up.")
+    _validate_thermal_development_binding(provider)
     validation = set(provider.validation_case_ids)
-    if any(provider.case_split_by_id.get(case_id) != "train" for case_id in validation):
-        raise ValueError("Thermal fixed DEV membership overlaps original TEST; inspection is locked.")
-    chosen = [case_id for case_id in THERMAL_REPRESENTATIVE_IDS if case_id in validation]
-    if len(chosen) < 2:
-        chosen.extend(case_id for case_id in provider.validation_case_ids if case_id not in chosen)
-    if len(chosen) < 2:
-        raise ValueError("Thermal fixed DEV has fewer than two input-eligible native cases.")
-    return tuple(chosen[:2])
+    if any(case_id not in validation for case_id in THERMAL_REPRESENTATIVE_IDS):
+        raise ValueError("Fixed Thermal inspection cases 0291 and 0687 are not both in the bound DEV22 panel.")
+    return THERMAL_REPRESENTATIVE_IDS
+
+
+def _fp64_identity_error(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+) -> dict[str, Any]:
+    actual64 = actual.to(torch.float64)
+    expected64 = expected.to(device=actual.device, dtype=torch.float64)
+    if actual64.shape != expected64.shape:
+        raise ValueError("Thermal native edge identity tensors have different shapes.")
+    error = (actual64 - expected64).abs()
+    tolerance = 1.0e-9 + 1.0e-7 * expected64.abs()
+    maximum_error = float(error.max().item()) if error.numel() else 0.0
+    maximum_ratio = (
+        float((error / tolerance.clamp_min(torch.finfo(torch.float64).tiny)).max().item())
+        if error.numel()
+        else 0.0
+    )
+    return {
+        "max_abs_error": maximum_error,
+        "max_abs_software_tolerance": float(tolerance.max().item()) if tolerance.numel() else 0.0,
+        "max_error_to_tolerance_ratio": maximum_ratio,
+        "passed": bool(torch.all(error <= tolerance)),
+        "comparison_dtype": "float64",
+        "software_tolerance": {"atol": 1.0e-9, "rtol": 1.0e-7},
+    }
 
 
 def _select_wind_rows(provider: Any) -> tuple[int, ...]:
@@ -454,6 +519,7 @@ def _thermal_condition(
                     prepared.query_batch,
                     controls=batch.receivers.heat,
                     return_trace=True,
+                    accumulation_dtype=torch.float64,
                     uniform_access=uniform,
                     edge_gates=gates,
                 )
@@ -463,13 +529,19 @@ def _thermal_condition(
                 prepared.query_batch,
                 controls=batch.receivers.heat,
                 return_trace=True,
+                accumulation_dtype=torch.float64,
                 uniform_access=uniform,
                 edge_gates=gates,
             )
     elapsed = time.perf_counter() - started
     if output.thermal_temperature is None:
         raise RuntimeError("Thermal A-H6 omitted its affine temperature output.")
-    native = model._extract_native_roles(prepared, output.thermal_temperature, output.nonlinear_field)
+    native = model._extract_native_roles(
+        prepared,
+        output.thermal_temperature,
+        output.nonlinear_field,
+        accumulation_dtype=torch.float64,
+    )
     from channelthermal.training.content_hypergraph_task import ThermalContentPredictions
 
     native_work = {
@@ -533,8 +605,6 @@ def _no_capture():
 
 def _run_thermal_case(model: Any, provider: Any, batch: Any) -> dict[str, Any]:
     case_id = str(batch.case_keys[0])
-    if provider.case_split_by_id.get(case_id) != "train":
-        raise ValueError("Thermal organizer inspection refuses original TEST data.")
     adapter = model
     core = model.core
     prepared = adapter.prepare_native(
@@ -581,7 +651,7 @@ def _run_thermal_case(model: Any, provider: Any, batch: Any) -> dict[str, Any]:
     _put_array(arrays, "probe__observation_indices", probe_observation_indices)
     _put_array(arrays, "probe__native_flat_ids", probe_observation_indices)
     _put_array(arrays, "probe__core_query_indices", probe_query_indices)
-    _put_array(arrays, "probe__coordinates", native_ids[0, probe_observation_indices])
+    _put_array(arrays, "probe__coordinates", native_ids[probe_observation_indices])
 
     baseline = _thermal_condition(
         model=model,
@@ -657,11 +727,15 @@ def _run_thermal_case(model: Any, provider: Any, batch: Any) -> dict[str, Any]:
             removed = current["output"]
             signed_removed = edge_contribution[:, edge_index].sum(dim=-1)
             factor_delta_normalized = baseline["output"].thermal_temperature[0, probe_query_indices] - removed.thermal_temperature[0, probe_query_indices]
-            probe_match = torch.allclose(factor_delta_normalized, signed_removed, rtol=5.0e-5, atol=5.0e-6)
             edge_grid_normalized = baseline["output"].trace[
                 "edge_temperature_contributions"
             ][:, :, edge_index, :].sum(dim=-1)
-            edge_native = model._extract_native_roles(prepared, edge_grid_normalized, None)
+            edge_native = model._extract_native_roles(
+                prepared,
+                edge_grid_normalized,
+                None,
+                accumulation_dtype=torch.float64,
+            )
             native_checks = {}
             for role, key, channel in (
                 ("fluid_temperature", "fluid_temperature", None),
@@ -677,10 +751,14 @@ def _run_thermal_case(model: Any, provider: Any, batch: Any) -> dict[str, Any]:
                     removed_value = removed_value[..., channel : channel + 1]
                     expected = expected[..., channel : channel + 1]
                 delta_value = base_value - removed_value
-                error = float((delta_value - expected).abs().max().item()) if delta_value.numel() else 0.0
-                native_checks[role] = {"max_abs_error": error, "passed": bool(torch.allclose(delta_value, expected, rtol=5.0e-5, atol=5.0e-6))}
+                comparison = _fp64_identity_error(delta_value, expected)
+                native_checks[role] = comparison
+                _put_array(arrays, f"edge_identity__native_error__{role}", delta_value - expected)
+            factor_delta_error = factor_delta_normalized - signed_removed
+            factor_identity = _fp64_identity_error(factor_delta_normalized, signed_removed)
+            _put_array(arrays, "edge_identity__probe_temperature_error_normalized", factor_delta_error)
             removed_effect_check = {
-                "probe_temperature_factor_identity_passed": bool(probe_match),
+                "probe_temperature_factor_identity": factor_identity,
                 "native_temperature_extraction": native_checks,
                 "original_base_access_preserved": bool(torch.equal(
                     current["output"].trace["edge_base_access"], baseline["output"].trace["edge_base_access"]
@@ -713,7 +791,7 @@ def _run_thermal_case(model: Any, provider: Any, batch: Any) -> dict[str, Any]:
             "native_observation_index": int(observation_index),
             "native_flat_id": int(observation_index),
             "core_query_index": int(query_index),
-            "coordinates": json_safe(native_ids[0, int(observation_index)]),
+            "coordinates": json_safe(native_ids[int(observation_index)]),
         })
     return {
         "case_key": case_id,
@@ -975,11 +1053,13 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir(parents=True, exist_ok=False)
 
     if dataset == "thermal":
+        thermal_binding = _validate_thermal_development_binding(provider)
         selected = _select_thermal_cases(provider)
         batches = _thermal_case_batch(provider, selected)
         with torch.no_grad():
             cases = [_run_thermal_case(model, provider, batch) for batch in batches]
     elif dataset == "wind":
+        thermal_binding = None
         selected_rows = _select_wind_rows(provider)
         batches = list(provider.native_evaluation_batches(
             split="validation", case_keys=selected_rows, microbatch_size=1
@@ -1015,18 +1095,26 @@ def main(argv: list[str] | None = None) -> int:
         "completed_epoch": int(payload["epoch"]),
         "provider_binding_sha256": canonical_sha256(payload["experiment_identity"]["provider_identity"]),
         "selection": "fixed DEV membership and input geometry/counts only; no model-error selection",
+        "thermal_development_binding": thermal_binding,
         "conditions": list(CONDITIONS),
         "cases": all_results,
         "array_files": array_files,
         "device": "cpu",
         "optimizer_updates": 0,
         "solver_attempts": 0,
-        "original_test_values_read": False,
+        "thermal_DEV22_targets": (
+            "exposed original TEST targets read only for the exact provider-bound DEV22 membership"
+            if dataset == "thermal"
+            else None
+        ),
+        "thermal_unexposed_original_test_targets_read": False if dataset == "thermal" else None,
         "WindTEST": "locked",
         "execution_note": (
             "All interventions retain the dense full-H6 edge reader. Edge gates zero contributions after message computation; "
             "the local-zero hook preserves the packed rows and reports their original executed counts. No sparse-work or "
-            "executor-savings claim is measured. Learned incidence and interventions describe conditional model use, not physical causality."
+            "executor-savings claim is measured. Thermal affine factor contraction and native extraction accumulate in FP64 "
+            "from the unchanged FP32 neural factors; no FP64 neural forward is used. Learned incidence and interventions "
+            "describe conditional model use, not physical causality."
         ),
         "elapsed_seconds_cpu": time.perf_counter() - started,
     }

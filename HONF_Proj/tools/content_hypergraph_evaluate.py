@@ -19,7 +19,7 @@ for directory in (PROJECT / "src", PROJECT / "tools", PROJECT / "Case_ThermalCha
 
 import numpy as np
 import torch
-from content_hypergraph_train import build, canonical_sha256, validate_recipe
+from content_hypergraph_train import build, canonical_sha256, engine_for, validate_recipe
 
 from honf_runtime.compat import load_trusted_checkpoint
 from honf_runtime.content_hypergraph import load_content_hypergraph_checkpoint
@@ -81,12 +81,47 @@ def load_evaluation_components(checkpoint: Path, device: str):
     return model, provider, payload
 
 
+def fixed_monitor_batches(provider, recipe: dict[str, Any], epoch: int, split: str):
+    """Replay declared monitoring queries at one fixed checkpoint, without updates."""
+    if split == "validation":
+        return provider.validation_batches(), None
+    engine = engine_for(recipe, str(provider.device))
+    ordered, dataset_id = engine.epoch_case_order(provider, epoch)
+
+    def batches():
+        for update_index, selection in enumerate(engine.epoch_update_slices(len(ordered))):
+            yield from engine.prepare_update_microbatches(
+                provider, arm=recipe["architecture"], phase="joint", epoch=epoch,
+                update_index=update_index, update_cases=ordered[selection], sampling_dataset_id=dataset_id)
+
+    return batches(), list(ordered)
+
+
+def label_monitor_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Replace native-endpoint labels with counts measured from monitor rows."""
+    result = dict(metrics)
+    result["evaluation_panel"] = "fixed_checkpoint_monitor"
+    if "query_count_per_row" in result:
+        counts = {
+            sum(int(role["query_count"]) for role in row["roles"].values())
+            for row in result["rows"]
+        }
+        if len(counts) != 1:
+            raise ValueError("Fixed Wind monitoring must have one observed query count per row.")
+        result["query_count_per_row"] = counts.pop()
+        result["monitor_rows"] = result.pop("endpoint_rows")
+        result.pop("endpoint_selection", None)
+        result["monitor_selection"] = "complete declared cohort; saved epoch sampling and original packing"
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--split", choices=("validation", "train"), default="validation")
+    parser.add_argument("--panel", choices=("native", "monitor"), default="native")
     parser.add_argument("--case-keys", help="Comma-separated physical case IDs or native Wind row IDs")
     parser.add_argument("--export-case", action="append", default=[])
     parser.add_argument("--microbatch-cases", type=int, help="Native evaluation packing; exports default to one case")
@@ -96,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("Native evaluation packing must be positive.")
     if args.export_case and packing != 1:
         raise ValueError("Detailed exports require packing one so only selected cases are materialized.")
+    if args.panel == "monitor" and (args.case_keys or args.export_case or args.microbatch_cases):
+        raise ValueError("Fixed monitoring replays the complete declared cohort and original packing; use native for details.")
     if args.output.exists():
         raise FileExistsError("Evaluation evidence is immutable; choose a fresh output directory.")
     started = time.perf_counter()
@@ -106,9 +143,12 @@ def main(argv: list[str] | None = None) -> int:
         selected = [int(x) for x in selected]
     args.output.mkdir(parents=True)
     records, work, exports = [], [], []
+    if args.panel == "monitor":
+        batches, selected = fixed_monitor_batches(provider, recipe, int(payload["epoch"]), args.split)
+    else:
+        batches = provider.native_evaluation_batches(split=args.split, case_keys=selected, microbatch_size=packing)
     with torch.no_grad():
-        for index, batch in enumerate(provider.native_evaluation_batches(
-                split=args.split, case_keys=selected, microbatch_size=packing)):
+        for index, batch in enumerate(batches):
             scene = provider.make_scene(batch.scene_inputs)
             prediction, auxiliary = provider.predict_native(
                 model, scene, batch.receivers, recipe["architecture"], "joint",
@@ -130,12 +170,17 @@ def main(argv: list[str] | None = None) -> int:
     reducer = getattr(provider, "reduce_native_evaluation_metrics", None)
     metrics = (reducer(records, split=args.split, case_keys=selected) if callable(reducer)
                else provider.reduce_native_metrics(records))
+    if args.panel == "monitor":
+        metrics = label_monitor_metrics(metrics)
     result = {
         "schema": "content_hypergraph_native_evaluation_v1", "status": "completed",
         "dataset": recipe["dataset"], "architecture": recipe["architecture"],
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_sha256": hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
         "completed_epoch": int(payload["epoch"]), "split": args.split,
+        "panel": args.panel,
+        "receiver_scope": ("full native endpoint support" if args.panel == "native" else
+                           "fixed checkpoint; declared primary monitoring queries and native auxiliary samples"),
         "evaluation_microbatch_cases": packing,
         "provider_binding_sha256": canonical_sha256(payload["experiment_identity"]["provider_identity"]),
         "metrics": metrics, "records": records, "work_counts": work, "exports": exports,
