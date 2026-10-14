@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,9 @@ from windfarm.training.content_hypergraph_task import (
     _validate_recipe_v2,
 )
 from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+import wind_native_reference_evaluate as native_evaluator
 
 
 class _TargetReadForbidden:
@@ -81,6 +85,48 @@ def _scene_inputs() -> WindContentSceneInputs:
     result = WindContentSceneInputs.from_case(case)
     assert result.module_centers_D.shape == (count, 3)
     return result
+
+
+@pytest.mark.parametrize("architecture", ["A2-D", "A2-H6"])
+def test_native_plane_tiles_validate_complete_request_once_and_match_full_decode(monkeypatch, architecture):
+    normalizer, profile = _transforms()
+    adapter = WindContentHypergraphAdapterV3(normalizer, profile)
+    inputs = _scene_inputs()
+    scene = adapter.make_scene_batch((inputs,))
+    model = ContentHypergraphCoreV2(
+        module_input_dim=2, environment_input_dim=7, coordinate_dim=3,
+        query_input_dim=7, operating_input_dim=11, output_dim=3,
+        architecture=architecture, context_dim=32, num_heads=4, context_depth=2,
+        thermal_response_rank=0, local_hidden_dim=32,
+    ).eval()
+    coordinates = np.array([[.1, .1, .875], [.8, .2, .9], [1.7, .3, 1.], [3., .1, .875]], dtype=np.float32)
+    flat = np.array([5, 8, 13, 21], dtype=np.int64)
+    support = SimpleNamespace(lower_D=inputs.support_lower_D, upper_D=inputs.support_upper_D,
+                              extent_D=inputs.support_extent_D)
+    receivers = native_evaluator._receivers_for_tile(adapter, inputs, support, coordinates, flat)
+    query = adapter.make_query_batch(scene, receivers)
+    with torch.no_grad():
+        organization = model.prepare(scene)
+        expected = adapter.physical_velocity(model.decode(organization, query).nonlinear_field, query.coordinates)[0][0].numpy()
+    validate = model.validate_prepared_state
+    checked = []
+
+    def counted_validate(prepared, request):
+        checked.append(request.num_queries)
+        return validate(prepared, request)
+
+    monkeypatch.setattr(model, "validate_prepared_state", counted_validate)
+    actual = native_evaluator.decode_content_query_tiles(
+        model, adapter, inputs, scene, organization, coordinates, flat, tile_size=2, support=support,
+    )
+    np.testing.assert_allclose(actual, expected, atol=3e-6, rtol=3e-5)
+    assert checked == [len(coordinates)]
+    with torch.no_grad():
+        next(model.parameters()).add_(.01)
+    with pytest.raises(ValueError, match="(?i)stale|weight|parameter"):
+        native_evaluator.decode_content_query_tiles(
+            model, adapter, inputs, scene, organization, coordinates, flat, tile_size=2, support=support,
+        )
 
 
 def test_v3_wind_scene_adds_diameter_and_e64_cell_lengths_without_changing_v1_inputs():

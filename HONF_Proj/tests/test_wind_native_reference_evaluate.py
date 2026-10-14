@@ -264,6 +264,25 @@ def test_full_validation_scope_guard_checks_all_partitions_without_targets() -> 
     )
 
 
+def test_full_validation_scope_binds_v2_recipe_to_organized_v2_architecture() -> None:
+    identity, manifest, train, validation, expected = _full_scope_fixture()
+    identity = dict(identity, architecture="A2-H6",
+                    recipe=dict(identity["recipe"], schema="content_hypergraph_recipe_v2"),
+                    model_config=dict(identity["model_config"], architecture="A2-H6"))
+    evaluator._validate_full_train1000_provider_payload(
+        identity, manifest, train, validation, expected_contract=expected
+    )
+    mismatched = dict(identity, model_config=dict(identity["model_config"], architecture="A-H6"))
+    try:
+        evaluator._validate_full_train1000_provider_payload(
+            mismatched, manifest, train, validation, expected_contract=expected
+        )
+    except ValueError as error:
+        assert "full_train1000 model" in str(error)
+    else:
+        raise AssertionError("A v2 recipe cannot qualify a v1 native model.")
+
+
 def test_full_provider_guard_passes_only_the_metadata_fixture(monkeypatch) -> None:
     identity, manifest, train, validation, expected = _full_scope_fixture()
     provider = SimpleNamespace(

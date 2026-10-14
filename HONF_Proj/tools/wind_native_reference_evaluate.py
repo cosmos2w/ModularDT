@@ -260,14 +260,28 @@ def decode_content_query_tiles(
     if tile_size < 1:
         raise ValueError("Native query tile size must be positive.")
     prediction = np.empty((len(coordinates), 3), dtype=np.float32)
+    from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
+
+    complete_query = None
+    if isinstance(model, ContentHypergraphCoreV2):
+        # One caller-owned native request: validate its complete identity and
+        # geometry before dispatching internally constructed query subsets.
+        receivers = _receivers_for_tile(adapter, scene_inputs, support, coordinates, flat)
+        complete_query = adapter.make_query_batch(scene, receivers)
+        model.validate_prepared_state(organization, complete_query)
     with torch.no_grad():
         for start in range(0, len(coordinates), tile_size):
             stop = min(start + tile_size, len(coordinates))
-            receivers = _receivers_for_tile(
-                adapter, scene_inputs, support, coordinates[start:stop], flat[start:stop]
-            )
-            query = adapter.make_query_batch(scene, receivers)
-            output = model.decode(organization, query)
+            if complete_query is not None:
+                from content_hypergraph_inspect import slice_query
+                query = slice_query(complete_query, np.arange(start, stop, dtype=np.int64))
+                output = model._decode_validated(organization, query)
+            else:
+                receivers = _receivers_for_tile(
+                    adapter, scene_inputs, support, coordinates[start:stop], flat[start:stop]
+                )
+                query = adapter.make_query_batch(scene, receivers)
+                output = model.decode(organization, query)
             physical, _, _ = adapter.physical_velocity(output.nonlinear_field, query.coordinates)
             prediction[start:stop] = physical[0].detach().cpu().numpy().astype(np.float32, copy=False)
     return prediction
@@ -1116,7 +1130,8 @@ def _validate_full_train1000_provider_payload(
     source = identity.get("normalizer_and_background_source", {})
     training = identity.get("training", {})
     organized_arm = {"content_hypergraph_recipe_v1": "A-H6",
-                     "content_hypergraph_recipe_v2": "A2-H6"}.get(recipe.get("schema"))
+                         "content_hypergraph_recipe_v2": "A2-H6"}.get(
+                             recipe.get("schema", "content_hypergraph_recipe_v1"))
     if (
         recipe.get("protocol") != "full_train1000"
         or recipe.get("approved_stop_after") != 1000
