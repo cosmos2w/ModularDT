@@ -86,3 +86,56 @@ def test_predeclared_native_and_actual_work_failures_reject(tmp_path, variant, a
     _write(path, gate)
     with pytest.raises(ValueError, match=match):
         validate_source_read_qualification(path, recipe, output_dir=tmp_path / "run")
+
+
+def _plan_v2_evidence(tmp_path):
+    recipe, path, gate = _evidence(tmp_path, "S-Utility")
+    gate["schema"] = "source_read_full1000_qualification_v2"
+    item = gate["evidence_files"]["native_accuracy"]
+    native = json.loads(Path(item["path"]).read_text())
+    metrics = native["qualification_metrics"]
+    metrics["primary_p90"] = {name: 1.0 for name in ("temperature_fluid", "v", "p")}
+    metrics["thermal_tail_review"] = {
+        "complete": True,
+        "interpretation": "Material p90 rises15percent; mean remains within10percent. Report the exposed-panel tradeoff.",
+        "ratios": {name: {"p90": 1.15, "worst": 1.12}
+                   for name in ("omega", "q_proxy", "temperature_material", "module_peak_endpoint")},
+    }
+    gate["evidence_files"]["native_accuracy"] = _write(Path(item["path"]), native)
+    _write(path, gate)
+    return recipe, path, gate, native
+
+
+def test_plan_v2_reports_nonprimary_tails_without_adding_an_unrequested_cap(tmp_path):
+    recipe, path, _, _ = _plan_v2_evidence(tmp_path)
+    assert validate_source_read_qualification(path, recipe, output_dir=tmp_path / "run")["schema"].endswith("v2")
+
+
+@pytest.mark.parametrize("problem", ["missing_review", "missing_ratio", "nonfinite_ratio", "primary_p90"])
+def test_plan_v2_requires_complete_tail_evidence_and_keeps_primary_cap(tmp_path, problem):
+    recipe, path, gate, native = _plan_v2_evidence(tmp_path)
+    metrics = native["qualification_metrics"]
+    if problem == "missing_review":
+        del metrics["thermal_tail_review"]
+    elif problem == "missing_ratio":
+        del metrics["thermal_tail_review"]["ratios"]["q_proxy"]["worst"]
+    elif problem == "nonfinite_ratio":
+        metrics["thermal_tail_review"]["ratios"]["omega"]["p90"] = float("inf")
+    else:
+        metrics["primary_p90"]["v"] = 1.1001
+    item = gate["evidence_files"]["native_accuracy"]
+    gate["evidence_files"]["native_accuracy"] = _write(Path(item["path"]), native)
+    _write(path, gate)
+    with pytest.raises(ValueError, match="tail|primary_p90"):
+        validate_source_read_qualification(path, recipe, output_dir=tmp_path / "run")
+
+
+def test_v1_historical_tail_gate_is_unchanged(tmp_path):
+    recipe, path, gate = _evidence(tmp_path)
+    item = gate["evidence_files"]["native_accuracy"]
+    native = json.loads(Path(item["path"]).read_text())
+    native["qualification_metrics"]["primary_p90"]["temperature_material"] = 1.15
+    gate["evidence_files"]["native_accuracy"] = _write(Path(item["path"]), native)
+    _write(path, gate)
+    with pytest.raises(ValueError, match="primary_p90"):
+        validate_source_read_qualification(path, recipe, output_dir=tmp_path / "run")

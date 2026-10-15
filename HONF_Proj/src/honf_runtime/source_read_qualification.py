@@ -13,6 +13,7 @@ from .source_read_protocol import SOURCE_READ_FULL, validate_source_read_recipe
 _THERMAL_PRIMARY = {"temperature_fluid", "v", "p"}
 _THERMAL_OTHER = {"u", "omega", "temperature_surface", "temperature_material", "q_proxy", "module_peak_endpoint"}
 _THERMAL_TAILS = _THERMAL_PRIMARY | {"temperature_material", "module_peak_endpoint"}
+_THERMAL_REVIEWED_TAILS = {"omega", "q_proxy", "temperature_material", "module_peak_endpoint"}
 _WIND_PRIMARY = {f"{role}/{component}" for role in ("near_turbine", "downstream_envelope")
                  for component in ("Ux", "Uy", "Uz", "vector")}
 _WIND_OTHER = {f"{role}/{component}" for role in ("volume", "hub_slab", "background")
@@ -37,6 +38,29 @@ def _ratios(value: Any, name: str, maximum: float, names: set[str]) -> None:
         raise ValueError(f"Source-read full1000 failed {name} guardrail.")
 
 
+def _thermal_tail_review(metrics: Mapping[str, Any]) -> None:
+    """Require the plan's explicit tail review without inventing a tail cap.
+
+    Section12 caps primary p90 at10percent. Material/peak/q/curl tails must be
+    inspected and reported, but the plan does not impose that same automatic
+    numerical cap on every nonprimary tail. The v1 gate remains replayable.
+    """
+    review = metrics.get("thermal_tail_review")
+    if (not isinstance(review, Mapping)
+            or set(review) != {"complete", "interpretation", "ratios"}
+            or review.get("complete") is not True
+            or not isinstance(review.get("interpretation"), str)
+            or not review["interpretation"].strip()
+            or not isinstance(review.get("ratios"), Mapping)
+            or set(review["ratios"]) != _THERMAL_REVIEWED_TAILS):
+        raise ValueError("Missing explicit Thermal native-tail review.")
+    for name, values in review["ratios"].items():
+        if not isinstance(values, Mapping) or set(values) != {"p90", "worst"}:
+            raise ValueError(f"Incomplete Thermal native-tail ratios for {name}.")
+        for statistic, value in values.items():
+            _number(value, f"thermal_tail_review/{name}/{statistic}")
+
+
 def validate_source_read_qualification(
     path: str | Path, recipe: Mapping[str, Any], *, output_dir: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -50,7 +74,8 @@ def validate_source_read_qualification(
     if recipe["protocol"] != SOURCE_READ_FULL:
         raise ValueError("Source-read qualification is only for its own full1000 protocol.")
     q = json.loads(Path(path).read_text())
-    if (q.get("schema") != "source_read_full1000_qualification_v1"
+    if (q.get("schema") not in {"source_read_full1000_qualification_v1",
+                                "source_read_full1000_qualification_v2"}
             or q.get("dataset") != recipe["dataset"]
             or q.get("source_reader_variant") != recipe["source_reader_variant"]
             or q.get("development_epoch") != 2500
@@ -98,9 +123,12 @@ def validate_source_read_qualification(
     thermal = recipe["dataset"] == "thermal"
     primary = _THERMAL_PRIMARY if thermal else _WIND_PRIMARY
     other = _THERMAL_OTHER if thermal else _WIND_OTHER
-    tails = _THERMAL_TAILS if thermal else _WIND_PRIMARY
+    plan_v2 = q["schema"] == "source_read_full1000_qualification_v2"
+    tails = (_THERMAL_PRIMARY if plan_v2 else _THERMAL_TAILS) if thermal else _WIND_PRIMARY
     _ratios(metrics.get("other_means"), "other_means", 1.10, other)
     _ratios(metrics.get("primary_p90"), "primary_p90", 1.10, tails)
+    if thermal and plan_v2:
+        _thermal_tail_review(metrics)
     cost = evidence["cost"]["qualification_metrics"]
     latency = _number(cost.get("complete_high_m_time_ratio"), "complete_high_m_time_ratio")
     variant = recipe["source_reader_variant"]
