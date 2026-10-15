@@ -368,14 +368,16 @@ All new GPU measurements use physical GPU0 (RTX6000 Ada, UUID233fcd85…), logic
 
 | Model | Actual timed age | Parameters | Complete ms low-M / high-M | Receiver execution |
 | --- | --- | --- | --- | --- |
-| Thermal A2-D | e4760 | 1,520,493 | 24.093 / 26.175 | Native reader128; full native request |
+| Thermal A2-D | e4760 | 1,520,493 | 24.093 / 26.175 | Whole native query request; 128-wide features |
 | Thermal 1804 | e4738 | 5,430,548 | 159.220 / 175.268 | Checkpoint core128; outer8192 |
 | Thermal 1404 | e4890 | 3,508,649 | 30.932 / 31.624 | Legacy full outer8192 |
-| Wind A2-D | e2465 | 1,525,675 | 15.642 / 17.486 | native core/default128 |
+| Wind A2-D | e2465 | 1,525,675 | 15.642 / 17.486 | Whole native query request; 128-wide features |
 | Wind 2103 | e2475 | 3,628,551 | 43.981 / 43.206 | checkpoint-native512 |
 | Wind 2102 | e2440 | 1,696,286 | 277.009 / 277.561 | native core/default128 |
 
 Wind receiver tiling changes the practical ranking. A separate same-weight paired 128-versus-8192 tile replay gives 2103 large-tile medians 29.936/34.257 ms and 2102 9.059/16.351 ms on M8/M30. Native outputs agree between those tiles at relative-L2 3.4–4.9e-8 and maximum absolute difference 1.9–5.2e-6 m/s. Dense2103’s checkpoint default is 512, whereas 2102’s legacy default is 128; the direct parity diagnostic compares 128 with 8192. Thus D is cheaper than dense2103 on these calls, but the 2102 with the larger tile can be faster than D. Tiling is not sparse execution. Its larger forward temporaries also differ from the default; no default timing is presented as universally optimal.
+
+October 15 source-audit correction: the original A2-D cost labels incorrectly called its 128-wide reader a 128-query tile. The timed D provider passed the whole native query union to `core.decode`; no internal query tiling was active. The table now describes that actual execution. Saved timings, arrays, historical source and cost receipts are unchanged; the correction receipt is `attention_round3_20261015T152913Z/receipts/d_query_tile_metadata_correction.json`. The separate Wind2102/2103 tiling diagnostic retains its actual 128/8192 query sizes.
 
 | Native train-mode B8 peak allocated GB | Q1024 | Q4096 | Q8192 |
 | --- | --- | --- | --- |

@@ -74,6 +74,7 @@ WIND_CONTENT_FAMILY_V2 = "honf_content_hypergraph_wind_v2"
 WIND_CONTENT_ROLE_CACHE_RAM_BYTES = 2 * 1024**3
 WIND_CONTENT_ROLE_CACHE_DEVELOPMENT_BYTES = 32 * 1024**3
 WIND_CONTENT_ROLE_CACHE_FULL_BYTES = 128 * 1024**3
+WIND_SOURCE_READ_ROLE_CACHE_RAM_BYTES = 64 * 1024**3
 _WIND_CONTENT_CATALOGUE_CACHES: dict[tuple[str | None, int], NativeRoleCatalogueCache] = {}
 _ROLE_INDEX = {name: index for index, name in enumerate(ROLE_NAMES)}
 
@@ -143,9 +144,9 @@ class WindContentHypergraphTask:
         train_rows: Sequence[int],
         validation_rows: Sequence[int],
         manifest: Mapping[str, Any],
-        role_component_scales: Mapping[str, Sequence[float]],
-        role_scale_calibration: Mapping[str, Any],
-        role_scale_cache_identity: Mapping[str, Any],
+        role_component_scales: Mapping[str, Sequence[float]] | None,
+        role_scale_calibration: Mapping[str, Any] | None,
+        role_scale_cache_identity: Mapping[str, Any] | None,
         normalizer_source: Mapping[str, Any],
         recipe: Mapping[str, Any],
         seed: int,
@@ -165,11 +166,23 @@ class WindContentHypergraphTask:
         self.manifest = dict(manifest)
         self.profile_id = str(self.manifest["subset_id"])
         self.training_fingerprint = str(self.manifest["manifest_sha256"])
-        self.role_component_scales = {
-            role: _readonly_array(role_component_scales[role], dtype=np.float64) for role in ROLE_NAMES
-        }
-        self.role_scale_calibration = dict(role_scale_calibration)
-        self.role_scale_cache_identity = dict(role_scale_cache_identity)
+        from honf_runtime.source_read_protocol import SOURCE_READ_PROTOCOLS
+
+        source_read = recipe["protocol"] in SOURCE_READ_PROTOCOLS
+        if source_read:
+            if any(value is not None for value in (role_component_scales, role_scale_calibration, role_scale_cache_identity)):
+                raise ValueError("Wind source-read formal two-region protocol must not depend on five-role calibration.")
+            self.role_component_scales = None
+            self.role_scale_calibration = None
+            self.role_scale_cache_identity = None
+        else:
+            if role_component_scales is None or role_scale_calibration is None or role_scale_cache_identity is None:
+                raise ValueError("Historical Wind five-role protocols require their exact TRAIN calibration and cache binding.")
+            self.role_component_scales = {
+                role: _readonly_array(role_component_scales[role], dtype=np.float64) for role in ROLE_NAMES
+            }
+            self.role_scale_calibration = dict(role_scale_calibration)
+            self.role_scale_cache_identity = dict(role_scale_cache_identity)
         self.normalizer_source = dict(normalizer_source)
         self.recipe = json.loads(json.dumps(dict(recipe), sort_keys=True, allow_nan=False))
         self.seed = int(seed)
@@ -217,9 +230,12 @@ class WindContentHypergraphTask:
                 raise ValueError("Wind content-hypergraph uses effective batch 24 and microbatches in [1,24].")
             if self.total_epochs not in (2500, 5000):
                 raise ValueError("Wind content-hypergraph requires a 2500 development or 5000 full-follow-up horizon.")
-        if set(self.role_component_scales) != set(ROLE_NAMES) or any(
-            value.shape != (3,) or not np.isfinite(value).all() or np.any(value <= 0.0)
-            for value in self.role_component_scales.values()
+        if self.role_component_scales is not None and (
+            set(self.role_component_scales) != set(ROLE_NAMES)
+            or any(
+                value.shape != (3,) or not np.isfinite(value).all() or np.any(value <= 0.0)
+                for value in self.role_component_scales.values()
+            )
         ):
             raise ValueError("Wind role/component scales must be positive finite three-channel m/s values.")
         if tuple(self.view.token_shape) != WIND_CONTENT_ENVIRONMENT_SHAPE:
@@ -269,21 +285,30 @@ class WindContentHypergraphTask:
                 "direction_source": "native row metadata and one-hot operating feature",
                 "second_rotation": False,
             },
-            "objective": {
-                "name": "five_role_component_balanced_native_velocity",
-                "role_names": list(ROLE_NAMES),
-                "role_query_counts": dict(self.role_query_counts),
-                "component_scales_mps": {
-                    role: values.astype(float).tolist() for role, values in self.role_component_scales.items()
-                },
-                "scale_calibration": self.role_scale_calibration,
-                "scale_cache_identity": self.role_scale_cache_identity,
-                "weight_per_role": 0.2,
-                "formula": "mean over q and xyz of squared physical m/s error divided by TRAIN role/component scale squared",
-                "field_score": "mean across five TRAIN-normalized role/component MSEs, then mean across native rows",
-                "height_profile_score": "same metric for the TRAIN-fitted height profile baseline",
-                "target_partition_access": "TRAIN targets for optimization; selected exposed DEV targets for metrics; WindTEST locked",
-            },
+            "objective": (
+                {
+                    "name": "five_role_component_balanced_native_velocity",
+                    "role_names": list(ROLE_NAMES),
+                    "role_query_counts": dict(self.role_query_counts),
+                    "component_scales_mps": {
+                        role: values.astype(float).tolist() for role, values in self.role_component_scales.items()
+                    },
+                    "scale_calibration": self.role_scale_calibration,
+                    "scale_cache_identity": self.role_scale_cache_identity,
+                    "weight_per_role": 0.2,
+                    "formula": "mean over q and xyz of squared physical m/s error divided by TRAIN role/component scale squared",
+                    "field_score": "mean across five TRAIN-normalized role/component MSEs, then mean across native rows",
+                    "height_profile_score": "same metric for the TRAIN-fitted height profile baseline",
+                    "target_partition_access": "TRAIN targets for optimization; selected exposed DEV targets for metrics; WindTEST locked",
+                }
+                if self.role_component_scales is not None
+                else {
+                    "name": "not_used_by_protocol",
+                    "role_component_scales_mps": None,
+                    "scale_calibration": None,
+                    "scale_cache_identity": None,
+                }
+            ),
             "training": {
                 "initialization_seed": self.seed,
                 "sampling_version": self.sampling_version,
@@ -318,12 +343,13 @@ class WindContentHypergraphTask:
     def serialization_payload(self) -> Mapping[str, Any]:
         """Small self-contained model/adapter state for native inference loading."""
         identity = self.identity_payload()
+        objective = identity["objective"]
         return {
             "schema": "wind_content_hypergraph_inference_v1",
             "model_config": identity["model_config"],
             "adapter_state": identity["adapter_state"],
-            "role_names": list(ROLE_NAMES),
-            "role_component_scales_mps": identity["objective"]["component_scales_mps"],
+            "role_names": list(objective.get("role_names", ())),
+            "role_component_scales_mps": objective.get("component_scales_mps"),
             "coordinate_frame": identity["coordinate_frame"],
             "environment_representation": identity["environment_representation"],
             "data_binding": {
@@ -331,7 +357,7 @@ class WindContentHypergraphTask:
                 "subset_manifest_sha256": identity["subset_manifest_sha256"],
                 "train_row_indices_sha256": identity["train_row_indices_sha256"],
                 "normalizer_source": identity["normalizer_and_background_source"],
-                "role_scale_cache_identity": identity["objective"]["scale_cache_identity"],
+                "role_scale_cache_identity": objective.get("scale_cache_identity"),
             },
         }
 
@@ -395,9 +421,11 @@ class WindContentHypergraphTask:
             "primary_queries_per_case": self.primary_queries,
             "role_query_counts": dict(self.role_query_counts),
             "environment_token_shape": list(WIND_CONTENT_ENVIRONMENT_SHAPE),
-            "role_scales_mps": {
-                role: values.astype(float).tolist() for role, values in self.role_component_scales.items()
-            },
+            "role_scales_mps": (
+                None
+                if self.role_component_scales is None
+                else {role: values.astype(float).tolist() for role, values in self.role_component_scales.items()}
+            ),
             "native_role_catalogue_cache": self.catalogue_cache.summary(),
             "optimizer_started": False,
             "solver_attempts": 0,
@@ -617,6 +645,8 @@ class WindContentHypergraphTask:
         return predictions, auxiliary
 
     def _loss_terms(self, predictions: WindContentPredictions, targets: WindContentTargets) -> Mapping[str, LossTerm]:
+        if self.role_component_scales is None:
+            raise RuntimeError("Five-role normalized training loss is unavailable in the Wind source-read protocol.")
         target = torch.tensor(
             targets.velocity_mps,
             device=predictions.main_mps.device,
@@ -776,6 +806,8 @@ class WindContentHypergraphTask:
         auxiliary_state: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         del auxiliary_state
+        if self.role_component_scales is None:
+            raise RuntimeError("Five-role normalized validation metrics are unavailable in the Wind source-read protocol.")
         predicted = predictions.main_mps.detach().cpu().numpy().astype(np.float64, copy=False)
         baseline = predictions.profile_mps.detach().cpu().numpy().astype(np.float64, copy=False)
         actual = np.asarray(targets.velocity_mps, dtype=np.float64)
@@ -1167,6 +1199,22 @@ def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapp
         "dropout": 0.0,
         "init_seed": recipe.get("seed"),
     }
+    backend = model_recipe.get("reader_execution_backend", "legacy")
+    conditioning = model_recipe.get("source_value_conditioning", "none")
+    if backend not in ("legacy", "reduced_projection"):
+        raise ValueError("Wind reader_execution_backend must be legacy or reduced_projection.")
+    if conditioning not in ("none", "source_scale"):
+        raise ValueError("Wind source_value_conditioning must be none or source_scale.")
+    if recipe.get("protocol") not in ("source_read_development_v1", "source_read_full1000") and (
+        "reader_execution_backend" in model_recipe or "source_value_conditioning" in model_recipe
+    ):
+        raise ValueError("Wind reader execution and value-conditioning options are source-read protocol fields.")
+    # The v2 core keeps historical defaults out of get_config(). Explicit
+    # legacy/none recipe values therefore bind to the same absent core fields.
+    if backend != "legacy":
+        expected_config["reader_execution_backend"] = backend
+    if conditioning != "none":
+        expected_config["source_value_conditioning"] = conditioning
     expected_keys = set(expected_config)
     if expected_mode is not None:
         expected_config["query_edge_geometry_mode"] = expected_mode
@@ -1282,6 +1330,32 @@ def _validate_formal_wind_a2d_recipe_v1(
     return value, "A2-D", int(value["microbatch_size"])
 
 
+def _validate_source_read_wind_recipe_v1(
+    recipe: Mapping[str, Any],
+) -> tuple[dict[str, Any], str, int]:
+    """Validate Wind's segmented or conditional-full source-read recipe."""
+    from honf_runtime.source_read_protocol import (
+        SOURCE_READ_DEVELOPMENT,
+        SOURCE_READ_FULL,
+        validate_source_read_recipe,
+    )
+
+    value = validate_source_read_recipe(recipe)
+    if value.get("dataset") != "wind":
+        raise ValueError("Wind source-read provider accepts only dataset='wind'.")
+    if value.get("protocol") not in (SOURCE_READ_DEVELOPMENT, SOURCE_READ_FULL):
+        raise ValueError("Wind source-read provider requires an explicit development or full1000 scope.")
+    if value.get("sampling_version") != SamplingKey.CASE_EPOCH_VERSION:
+        raise ValueError("Wind source-read sampling must use case_epoch_v1.")
+    if type(value.get("catalogue_cache_ram_bytes")) is not int or value["catalogue_cache_ram_bytes"] != WIND_SOURCE_READ_ROLE_CACHE_RAM_BYTES:
+        raise ValueError(
+            f"Wind source-read catalogue RAM must be explicitly capped at {WIND_SOURCE_READ_ROLE_CACHE_RAM_BYTES} bytes."
+        )
+    if value.get("source_reader_variant") not in ("D0", "D-scale", "S-Utility", "S-Complete"):
+        raise ValueError("Wind source-read recipes require an explicit supported source_reader_variant.")
+    return value, "A2-D", int(value["microbatch_size"])
+
+
 class WindContentHypergraphTaskV2(WindContentHypergraphTask):
     """Round2 provider with strict A2 dispatch and bounded core tracing."""
 
@@ -1293,14 +1367,21 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
         adapter: WindContentHypergraphAdapterV3,
         recipe: Mapping[str, Any],
         _allow_formal_protocol: bool = False,
+        _allow_source_read_protocol: bool = False,
         **kwargs: Any,
     ) -> None:
         from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
+        from honf_runtime.source_read_protocol import SOURCE_READ_PROTOCOLS
 
         if recipe.get("schema") != "content_hypergraph_recipe_v2":
             raise ValueError("Round2 Wind provider requires a content_hypergraph_recipe_v2.")
-        if _allow_formal_protocol is not (recipe.get("protocol") == "formal_d_full_train_v1"):
+        is_historical_formal = recipe.get("protocol") == "formal_d_full_train_v1"
+        is_source_read = recipe.get("protocol") in SOURCE_READ_PROTOCOLS
+        expected_formal_flag = is_historical_formal or (_allow_source_read_protocol and is_source_read)
+        if _allow_formal_protocol is not expected_formal_flag:
             raise ValueError("The formal Wind protocol is accepted only by WindFormalA2DTaskV1.")
+        if _allow_source_read_protocol is not is_source_read:
+            raise ValueError("Wind source-read scope is accepted only by WindSourceReadTaskV1.")
         if not isinstance(adapter, WindContentHypergraphAdapterV3):
             raise TypeError("Round2 Wind provider requires WindContentHypergraphAdapterV3.")
         if not isinstance(model, ContentHypergraphCoreV2):
@@ -1447,12 +1528,20 @@ class WindFormalA2DTaskV1(WindContentHypergraphTaskV2):
         }
         self.validation_query_count = self.VALIDATION_QUERY_COUNT
 
-    def identity_payload(self) -> Mapping[str, Any]:
+    def _two_region_identity_payload(self, *, source_read: bool) -> Mapping[str, Any]:
         result = dict(super().identity_payload())
-        result["formal_protocol"] = "formal_d_full_train_v1"
-        result["test_row_indices_sha256"] = self.manifest["test_row_indices_sha256"]
+        if source_read:
+            result["protocol"] = self.recipe["protocol"]
+            result["source_read_scope"] = self.recipe["protocol"]
+        else:
+            result["formal_protocol"] = "formal_d_full_train_v1"
+            result["test_row_indices_sha256"] = self.manifest["test_row_indices_sha256"]
         result["objective"] = {
-            "name": "historical_volume_hub_band_standardized_mse",
+            "name": (
+                "source_read_formal_two_region_standardized_mse"
+                if source_read
+                else "historical_volume_hub_band_standardized_mse"
+            ),
             "role_names": ["volume", "hub_band"],
             "role_query_counts": dict(self.role_query_counts),
             "validation_role_query_counts": dict(self.validation_role_query_counts),
@@ -1483,7 +1572,7 @@ class WindFormalA2DTaskV1(WindContentHypergraphTaskV2):
                 "microbatch_size": 8,
                 "primary_queries_per_case": 8192,
                 "validation_queries_per_case": self.VALIDATION_QUERY_COUNT,
-                "total_epochs": 2500,
+                "total_epochs": self.total_epochs,
                 "optimizer": "AdamW",
                 "optimizer_schedule": asdict(self._schedule()),
                 "optimizer_weight_decay": 1.0e-5,
@@ -1495,14 +1584,27 @@ class WindFormalA2DTaskV1(WindContentHypergraphTaskV2):
         )
         result["training"] = training
         result["native_role_catalogue_cache"]["roles"] = ["volume", "hub_band"]
-        result["native_role_catalogue_cache"]["usage"] = "not used by the historical two-region objective"
+        result["native_role_catalogue_cache"]["usage"] = (
+            "not used by the two-region training objective"
+            if source_read
+            else "not used by the historical two-region objective"
+        )
+        full = self.profile_id == JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID
+        fit_rows = (
+            "all 420 original TRAIN rows only"
+            if full
+            else "the fixed 72-row TRAIN cohort only"
+        )
         result["normalizer_and_background_source"] = {
             **dict(result["normalizer_and_background_source"]),
-            "fit_rows": "all 420 original TRAIN rows only",
+            "fit_rows": fit_rows,
             "fit_seed": self.sampling_seed,
             "test_target_values_read": False,
         }
         return result
+
+    def identity_payload(self) -> Mapping[str, Any]:
+        return self._two_region_identity_payload(source_read=False)
 
     def preparation_summary(self) -> Mapping[str, Any]:
         result = dict(super().preparation_summary())
@@ -1541,8 +1643,9 @@ class WindFormalA2DTaskV1(WindContentHypergraphTaskV2):
         if len(rows) != len(volume_samples) or len(rows) != len(band_samples):
             raise ValueError("Formal Wind query receipt rows and region samples differ in length.")
         epoch = 0 if validation else int(key.epoch)
+        protocol = getattr(self, "recipe", {}).get("protocol", "formal_d_full_train_v1")
         payload = {
-            "protocol": "formal_d_full_train_v1",
+            "protocol": protocol,
             "sampling_seed": self.sampling_seed,
             "epoch": epoch,
             "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
@@ -1897,6 +2000,101 @@ class WindFormalA2DTaskV1(WindContentHypergraphTaskV2):
         }
 
 
+class WindSourceReadTaskV1(WindFormalA2DTaskV1):
+    """Round3 Wind scope using the successful formal two-region training path."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        recipe = kwargs.get("recipe")
+        if not isinstance(recipe, Mapping):
+            raise TypeError("Wind source-read provider requires its bound recipe mapping.")
+        _validate_source_read_wind_recipe_v1(recipe)
+        # This scope shares formal-D's fixed sampler and batch constraints,
+        # while keeping its own explicit protocol identity and stop policy.
+        WindContentHypergraphTaskV2.__init__(
+            self,
+            *args,
+            _allow_formal_protocol=True,
+            _allow_source_read_protocol=True,
+            **kwargs,
+        )
+        self.initialization_seed = int(self.recipe["seed"])
+        self.sampling_seed = int(self.recipe["sampling_seed"])
+        if self.initialization_seed != 0 or self.sampling_seed != self.seed:
+            raise ValueError("Wind source-read initialization seed 0 and sampling seed 42 are separately bound.")
+        self.role_query_counts = {"volume": self.VOLUME_QUERIES, "hub_band": self.HUB_BAND_QUERIES}
+        self.validation_role_query_counts = {
+            "volume": self.VALIDATION_VOLUME_QUERIES,
+            "hub_band": self.VALIDATION_HUB_BAND_QUERIES,
+        }
+        self.validation_query_count = self.VALIDATION_QUERY_COUNT
+        self.source_reader_variant = str(self.recipe["source_reader_variant"])
+
+    def identity_payload(self) -> Mapping[str, Any]:
+        result = dict(self._two_region_identity_payload(source_read=True))
+        protocol = str(self.recipe["protocol"])
+        full = protocol == "source_read_full1000"
+        result["source_reader_variant"] = self.source_reader_variant
+        result["dense_host_variant"] = str(self.recipe.get("dense_host_variant", "D0"))
+        result["source_read_horizon"] = {
+            "declared_total_epochs": self.total_epochs,
+            "approved_stop_after": int(self.recipe["approved_stop_after"]),
+            "full_data_stop_is_hard": full,
+        }
+        training = dict(result["training"])
+        training["approved_stop_after"] = int(self.recipe["approved_stop_after"])
+        result["training"] = training
+        if not full:
+            train_selection = self.manifest.get("train_layout_selection", {})
+            result["development_cohort_coverage"] = {
+                "train_rows": int(self.train_rows.size),
+                "train_layouts": len(result["train_layout_indices"]),
+                "dev_rows": int(self.validation_rows.size),
+                "dev_layouts": len(result["validation_layout_indices"]),
+                "directions_per_layout": 3,
+                "uncovered_train_module_count_strata": list(
+                    train_selection.get("uncovered_turbine_count_strata_by_limited_selection", ())
+                ),
+                "membership_source": self.manifest.get("subset_id"),
+                "selected_from_targets": False,
+            }
+        return result
+
+    def serialization_payload(self) -> Mapping[str, Any]:
+        result = dict(WindContentHypergraphTaskV2.serialization_payload(self))
+        result["source_read_scope"] = self.recipe["protocol"]
+        result["source_reader_variant"] = self.source_reader_variant
+        result["dense_host_variant"] = self.recipe.get("dense_host_variant", "D0")
+        result["data_binding"] = {
+            **dict(result["data_binding"]),
+            "source_read_scope": self.recipe["protocol"],
+            "source_reader_variant": self.source_reader_variant,
+        }
+        return result
+
+    def preparation_summary(self) -> Mapping[str, Any]:
+        result = dict(WindContentHypergraphTask.preparation_summary(self))
+        result.update(
+            {
+                "source_read_scope": self.recipe["protocol"],
+                "source_reader_variant": self.source_reader_variant,
+                "initialization_seed": self.initialization_seed,
+                "sampling_seed": self.sampling_seed,
+                "role_query_counts": dict(self.role_query_counts),
+                "validation_role_query_counts": dict(self.validation_role_query_counts),
+                "validation_queries_per_case": self.VALIDATION_QUERY_COUNT,
+                "optimizer_updates_per_epoch": math.ceil(len(self.train_rows) / self.effective_batch_size),
+                "approved_stop_after": int(self.recipe["approved_stop_after"]),
+                "wind_test_target_values_read": False,
+            }
+        )
+        if self.recipe["protocol"] == "source_read_development_v1":
+            train_selection = self.manifest.get("train_layout_selection", {})
+            result["uncovered_train_module_count_strata"] = list(
+                train_selection.get("uncovered_turbine_count_strata_by_limited_selection", ())
+            )
+        return result
+
+
 def build_wind_content_task(
     recipe: Mapping[str, Any],
     device: torch.device | str = "cpu",
@@ -1924,6 +2122,17 @@ def build_wind_formal_content_task_v1(
     return model, provider
 
 
+def build_wind_source_read_task_v1(
+    recipe: Mapping[str, Any],
+    device: torch.device | str = "cpu",
+) -> tuple[nn.Module, WindSourceReadTaskV1]:
+    """Build the explicit Round3 segmented or hard-stop full1000 Wind scope."""
+    model, provider = _build_wind_content_task(recipe, device, schema_version=4)
+    if not isinstance(provider, WindSourceReadTaskV1):
+        raise RuntimeError("Wind source-read builder returned the wrong provider class.")
+    return model, provider
+
+
 def _build_wind_content_task(
     recipe: Mapping[str, Any],
     device: torch.device | str,
@@ -1936,11 +2145,15 @@ def _build_wind_content_task(
         value, architecture, microbatch = _validate_recipe_v2(recipe)
     elif schema_version == 3:
         value, architecture, microbatch = _validate_formal_wind_a2d_recipe_v1(recipe)
+    elif schema_version == 4:
+        value, architecture, microbatch = _validate_source_read_wind_recipe_v1(recipe)
     else:
-        raise ValueError("Wind content-hypergraph supports only explicit v1, v2, or formal v1 recipe dispatch.")
+        raise ValueError("Wind content-hypergraph supports only explicit v1, v2, formal, or source-read dispatch.")
     initialization_seed = int(value["seed"])
-    seed = int(value["sampling_seed"]) if schema_version == 3 else initialization_seed
+    seed = int(value["sampling_seed"]) if schema_version in (3, 4) else initialization_seed
     protocol = value["protocol"]
+    from honf_runtime.source_read_protocol import SOURCE_READ_DEVELOPMENT, SOURCE_READ_FULL
+
     total_epochs = int(value["total_epochs"])
     device = torch.device(device)
     data_root = Path(value.get("data_root", DEFAULT_DATA_ROOT)).expanduser().resolve()
@@ -1986,8 +2199,25 @@ def _build_wind_content_task(
         token_shape=WIND_CONTENT_ENVIRONMENT_SHAPE,
     )
     split = _load_original_split(view, derived_root)
-    if protocol == "development":
+    if protocol in ("development", SOURCE_READ_DEVELOPMENT):
         manifest, train_rows, validation_rows = _read_fixed_rows(view, split, manifest_path)
+        if schema_version == 4:
+            uncovered = list(
+                manifest.get("train_layout_selection", {}).get(
+                    "uncovered_turbine_count_strata_by_limited_selection", ()
+                )
+            )
+            if (
+                len(train_rows) != 72
+                or len(validation_rows) != 24
+                or len(manifest.get("train_layout_indices", ())) != 24
+                or len(manifest.get("validation_layout_indices", ())) != 8
+                or uncovered != [18]
+            ):
+                raise ValueError(
+                    "Wind source-read development requires the exact fixed TRAIN72/DEV24 manifest; "
+                    "its omitted TRAIN M18 stratum must remain disclosed."
+                )
         normalizer, profile = read_normalization_json(normalization_path)
         if profile is None:
             raise ValueError("Wind development requires the existing TRAIN-fitted height-profile transform.")
@@ -2012,7 +2242,7 @@ def _build_wind_content_task(
             "normalizer": normalizer.to_dict(),
             "background_profile": profile.to_dict(),
         }
-    else:
+    elif protocol in ("formal_d_full_train_v1", "full_train1000", SOURCE_READ_FULL):
         manifest, train_rows, validation_rows, test_rows = _full_train_followup_split_manifest(split, view)
         validate_full_train_followup_membership(
             train_rows,
@@ -2043,26 +2273,35 @@ def _build_wind_content_task(
             "background_profile": profile.to_dict(),
             "wind_test_target_values_read": False,
         }
+    else:
+        raise ValueError(f"Wind content-hypergraph has no data provider for protocol {protocol!r}.")
 
-    # Reuse the exact E64 five-role scale cache. If it is absent or stale, fail
-    # before any sampling or disk output; model arms must share this binding.
+    # Five-role calibration belongs only to the native role objective. The
+    # formal two-region source-read path standardizes with the bound velocity
+    # normalizer and must neither require nor serialize the unused role cache.
     catalogue_cache = _shared_read_only_catalogue_cache(int(value["catalogue_cache_ram_bytes"]))
-    calibration, cache_identity = _fit_or_load_role_scales(
-        view=view,
-        train_rows=np.asarray(train_rows, dtype=np.int64),
-        train_layouts=train_layouts,
-        profile=profile,
-        normalizer=normalizer,
-        manifest=manifest,
-        training_fingerprint=str(manifest["manifest_sha256"]),
-        catalogue_cache=catalogue_cache,
-        cache_dir=role_scale_cache_dir,
-        allow_cache_write=False,
-    )
+    if schema_version == 4:
+        calibration = None
+        cache_identity = None
+        component_scales = None
+    else:
+        calibration, cache_identity = _fit_or_load_role_scales(
+            view=view,
+            train_rows=np.asarray(train_rows, dtype=np.int64),
+            train_layouts=train_layouts,
+            profile=profile,
+            normalizer=normalizer,
+            manifest=manifest,
+            training_fingerprint=str(manifest["manifest_sha256"]),
+            catalogue_cache=catalogue_cache,
+            cache_dir=role_scale_cache_dir,
+            allow_cache_write=False,
+        )
+        component_scales = {
+            role: tuple(float(value) for value in calibration["component_role_scales_mps"][role])
+            for role in ROLE_NAMES
+        }
     normalizer_source["profile_sha256"] = _stable_json_sha256(profile.to_dict())
-    component_scales = {
-        role: tuple(float(value) for value in calibration["component_role_scales_mps"][role]) for role in ROLE_NAMES
-    }
     adapter_type = WindContentHypergraphAdapter if schema_version == 1 else WindContentHypergraphAdapterV3
     adapter = adapter_type(normalizer, profile, device=device)
     model_values = value["model"]
@@ -2085,6 +2324,12 @@ def _build_wind_content_task(
     }
     if "query_edge_geometry_mode" in model_values:
         model_config["query_edge_geometry_mode"] = model_values["query_edge_geometry_mode"]
+    reader_backend = model_values.get("reader_execution_backend", "legacy")
+    source_value_conditioning = model_values.get("source_value_conditioning", "none")
+    if reader_backend != "legacy":
+        model_config["reader_execution_backend"] = reader_backend
+    if source_value_conditioning != "none":
+        model_config["source_value_conditioning"] = source_value_conditioning
     expected_model = {
         "context_dim": 128,
         "num_heads": 4,
@@ -2114,6 +2359,8 @@ def _build_wind_content_task(
         if schema_version == 1
         else WindFormalA2DTaskV1
         if schema_version == 3
+        else WindSourceReadTaskV1
+        if schema_version == 4
         else WindContentHypergraphTaskV2
     )
     provider = provider_type(
@@ -2146,13 +2393,17 @@ __all__ = [
     "WIND_CONTENT_ROLE_CACHE_DEVELOPMENT_BYTES",
     "WIND_CONTENT_ROLE_CACHE_FULL_BYTES",
     "WIND_CONTENT_ROLE_CACHE_RAM_BYTES",
+    "WIND_SOURCE_READ_ROLE_CACHE_RAM_BYTES",
     "WindContentHypergraphTask",
     "WindContentHypergraphTaskV2",
     "WindFormalA2DTaskV1",
+    "WindSourceReadTaskV1",
     "WindContentPredictions",
     "WindContentTargets",
     "build_wind_formal_content_task_v1",
+    "build_wind_source_read_task_v1",
     "build_wind_content_task",
     "build_wind_content_task_v2",
     "_validate_recipe_v2",
+    "_validate_source_read_wind_recipe_v1",
 ]

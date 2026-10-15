@@ -194,6 +194,9 @@ class ContentHypergraphCoreV2(nn.Module):
         dropout: float = 0.0,
         init_seed: int = 0,
         query_edge_geometry_mode: str | None = None,
+        reader_execution_backend: str = "legacy",
+        source_value_conditioning: str = "none",
+        reader_query_chunk_size: int | None = None,
     ) -> None:
         super().__init__()
         architecture = str(architecture).strip().upper()
@@ -203,6 +206,18 @@ class ContentHypergraphCoreV2(nn.Module):
             raise ValueError("Unsupported query_edge_geometry_mode.")
         if query_edge_geometry_mode is not None and architecture != "A2-H6":
             raise ValueError("query_edge_geometry_mode='typed_w_centroids_v1' is supported only by A2-H6.")
+        if reader_execution_backend not in {"legacy", "reduced_projection"}:
+            raise ValueError("reader_execution_backend must be 'legacy' or 'reduced_projection'.")
+        if source_value_conditioning not in {"none", "source_scale"}:
+            raise ValueError("source_value_conditioning must be 'none' or 'source_scale'.")
+        if reader_execution_backend == "reduced_projection" and architecture != "A2-D":
+            raise ValueError("reader_execution_backend='reduced_projection' is currently supported only by A2-D.")
+        if source_value_conditioning != "none" and architecture != "A2-D":
+            raise ValueError("source_value_conditioning='source_scale' is supported only by A2-D.")
+        if reader_query_chunk_size is not None and (
+            type(reader_query_chunk_size) is not int or reader_query_chunk_size < 1 or architecture != "A2-D"
+        ):
+            raise ValueError("reader_query_chunk_size must be positive and is supported only by A2-D.")
         if min(
             module_input_dim,
             environment_input_dim,
@@ -241,6 +256,9 @@ class ContentHypergraphCoreV2(nn.Module):
         self.dropout_probability = float(dropout)
         self.init_seed = int(init_seed)
         self.query_edge_geometry_mode = query_edge_geometry_mode
+        self.reader_execution_backend = reader_execution_backend
+        self.source_value_conditioning = source_value_conditioning
+        self.reader_query_chunk_size = reader_query_chunk_size
         self._owner_token = id(self)
 
         module_encoder_input = self.module_input_dim + 8 * self.coordinate_dim
@@ -308,8 +326,14 @@ class ContentHypergraphCoreV2(nn.Module):
                     coordinate_dim,
                     heads=num_heads,
                     thermal=thermal_response_rank > 0,
+                    source_value_conditioning=source_value_conditioning,
                 )
         self._initialize_named_parameters()
+        if self.direct_reader is not None and self.direct_reader.source_scale_projection is not None:
+            # Keep the D-scale initial function equal to D0 after the shared
+            # name-based initializer has assigned every ordinary parameter.
+            with torch.no_grad():
+                self.direct_reader.source_scale_projection.weight.zero_()
 
     def _stable_seed(self, name: str) -> int:
         payload = f"{self.init_seed}:{name}".encode()
@@ -377,6 +401,12 @@ class ContentHypergraphCoreV2(nn.Module):
         }
         if self.query_edge_geometry_mode is not None:
             config["query_edge_geometry_mode"] = self.query_edge_geometry_mode
+        if self.reader_execution_backend != "legacy":
+            config["reader_execution_backend"] = self.reader_execution_backend
+        if self.source_value_conditioning != "none":
+            config["source_value_conditioning"] = self.source_value_conditioning
+        if self.reader_query_chunk_size is not None:
+            config["reader_query_chunk_size"] = self.reader_query_chunk_size
         return config
 
     @classmethod
@@ -1137,6 +1167,7 @@ class ContentHypergraphCoreV2(nn.Module):
             organization.frame_scale,
             self._module_measure_reference(organization.scene, query_states.dtype),
             local_gates=local_gates,
+            execution_backend=self.reader_execution_backend,
         )
         trace_available = list(_DECODE_TRACE_AVAILABLE)
         if organization.trace is not None:
@@ -1144,8 +1175,15 @@ class ContentHypergraphCoreV2(nn.Module):
         selected, trace_cap, query_indices, trace_explicit = _trace_request(
             return_trace, trace_request, _DECODE_TRACE_DEFAULTS, trace_available
         )
+        if query_indices is not None:
+            if query_indices.numel() and (
+                int(query_indices.min()) < 0 or int(query_indices.max()) >= query.num_queries
+            ):
+                raise ValueError("trace_request.query_indices are outside the query axis.")
+            query_indices = query_indices.to(device=query.coordinates.device)
         want_messages = "edge_messages" in selected or "direct_source_messages" in selected
         trace: dict[str, Tensor] = {}
+        direct_messages_preselected = False
         if self.architecture == "A2-H6":
             global_context, base_access, used_access, basis, messages = self.edge_reader(
                 query,
@@ -1178,6 +1216,12 @@ class ContentHypergraphCoreV2(nn.Module):
             if basis is not None and "thermal_basis" in selected:
                 trace["thermal_basis"] = basis
         else:
+            direct_message_indices = (
+                query_indices
+                if self.reader_execution_backend == "reduced_projection"
+                and "direct_source_messages" in selected
+                else None
+            )
             global_context, direct_access, direct_coefficients, messages = self.direct_reader(
                 organization.scene,
                 query,
@@ -1187,7 +1231,10 @@ class ContentHypergraphCoreV2(nn.Module):
                 organization.direct_source_keys,
                 organization.direct_source_values,
                 return_messages=want_messages,
+                execution_backend=self.reader_execution_backend,
+                message_query_indices=direct_message_indices,
             )
+            direct_messages_preselected = direct_message_indices is not None
             basis = None
             if "direct_source_access" in selected:
                 trace["direct_source_access"] = direct_access
@@ -1216,17 +1263,14 @@ class ContentHypergraphCoreV2(nn.Module):
                 selected.update(organization.trace)
 
         if query_indices is not None:
-            if query_indices.numel() and (
-                int(query_indices.min()) < 0 or int(query_indices.max()) >= query.num_queries
-            ):
-                raise ValueError("trace_request.query_indices are outside the query axis.")
-            query_indices = query_indices.to(device=query.coordinates.device)
             for name, value in tuple(trace.items()):
                 if name in {
                     "edge_access", "edge_base_access", "edge_used_access", "edge_messages",
                     "thermal_basis", "edge_temperature_contributions", "direct_source_access",
                     "direct_source_messages", "direct_temperature_coefficients",
-                } and value.ndim >= 2 and value.shape[1] == query.num_queries:
+                } and value.ndim >= 2 and value.shape[1] == query.num_queries and not (
+                    direct_messages_preselected and name == "direct_source_messages"
+                ):
                     trace[name] = value.index_select(1, query_indices)
             trace["trace_query_indices"] = query_indices
             selected.add("trace_query_indices")
@@ -1258,6 +1302,17 @@ class ContentHypergraphCoreV2(nn.Module):
     ) -> CoreOutput:
         """Decode receivers, with optional separately applicable linear controls."""
         self.validate_prepared_state(organization, query)
+        if self.reader_query_chunk_size is not None and not (return_trace or trace_request is not None):
+            from .query_chunks_v1 import decode_query_chunks_v1
+
+            return decode_query_chunks_v1(
+                query, self.reader_query_chunk_size,
+                lambda tile: self._decode_validated(
+                    organization, tile, controls, return_basis=return_basis,
+                    accumulation_dtype=accumulation_dtype, edge_gates=edge_gates,
+                    uniform_access=uniform_access, local_gates=local_gates,
+                ),
+            )
         return self._decode_validated(
             organization,
             query,
@@ -1303,8 +1358,8 @@ class ContentHypergraphCoreV2(nn.Module):
             "direct_source_rows": direct_rows,
             "direct_source_message_entries": int(direct_rows * self.local_hidden_dim),
             "direct_temperature_coefficient_entries": int(
-                direct_rows * self.thermal_response_rank
-            ) if self.architecture == "A2-D" else 0,
+                direct_rows
+            ) if self.architecture == "A2-D" and self.thermal_response_rank else 0,
             # A2-D constructs its signed [B,Q,M] source coefficients during
             # every reader call when thermal response is enabled, even when
             # the caller has not yet supplied controls.
@@ -1508,6 +1563,7 @@ class ContentHypergraphCoreV2(nn.Module):
             organization.frame_scale,
             self._module_measure_reference(organization.scene, query_states.dtype),
             local_gates=local_gates,
+            execution_backend=self.reader_execution_backend,
         )
         if self.architecture == "A2-H6":
             _, _, _, basis, _ = self.edge_reader(
@@ -1529,6 +1585,7 @@ class ContentHypergraphCoreV2(nn.Module):
             organization.direct_source_keys,
             organization.direct_source_values,
             return_messages=False,
+            execution_backend=self.reader_execution_backend,
         )
         return None, direct, local_pairs, local_coefficients
 

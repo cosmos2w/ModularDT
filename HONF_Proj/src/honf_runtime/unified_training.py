@@ -19,7 +19,7 @@ import random
 import sys
 import tempfile
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -2730,6 +2730,8 @@ class TrainingEngine:
         joint_core_revision: Mapping[str, Any] | None = None,
         diagnostic_age_branch: Mapping[str, Any] | None = None,
         architecture_child_initialization: Mapping[str, Any] | None = None,
+        source_read_child: Mapping[str, Any] | None = None,
+        source_read_child_auxiliary_fit: Callable[..., Mapping[str, Any]] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2777,6 +2779,7 @@ class TrainingEngine:
                 raise ValueError("Fresh matched recipe and identity must bind the consolidated validation policy.")
             _apply_fresh_native_validation_policy(model)
             if (branch_from_checkpoint is not None or architecture_child_initialization is not None
+                    or source_read_child is not None or source_read_child_auxiliary_fit is not None
                     or diagnostic_age_branch is not None or joint_core_revision is not None
                     or mathematical_route_branch is not None or allow_microbatch_change
                     or optimizer_seed is not None):
@@ -2798,6 +2801,7 @@ class TrainingEngine:
                 or optimizer_seed is not None or allow_microbatch_change
                 or mathematical_route_branch is not None or joint_core_revision is not None
                 or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                or source_read_child is not None or source_read_child_auxiliary_fit is not None
                 or fresh_initialization is not None or arm != "A-H6"):
             raise ValueError("A numerical pooling repair requires only the same run's exact latest-state continuation.")
         if output_policy_amendment is not None and (
@@ -2805,6 +2809,7 @@ class TrainingEngine:
                 or optimizer_seed is not None or allow_microbatch_change
                 or mathematical_route_branch is not None or joint_core_revision is not None
                 or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                or source_read_child is not None or source_read_child_auxiliary_fit is not None
                 or numerical_pooling_amendment is not None or fresh_initialization is not None
                 or arm != "A2-D"):
             raise ValueError("An output-only amendment requires only this formal D run's exact latest resume.")
@@ -2815,6 +2820,17 @@ class TrainingEngine:
                 or diagnostic_age_branch is not None or self.config.training_mode != "joint"
                 or arm != architecture_child_initialization.get("target_mode")):
             raise ValueError("Native routing attachment requires one fresh joint architecture child of its named P parent.")
+        if source_read_child is not None and (
+                branch_from_checkpoint is None or resume_checkpoint is not None
+                or optimizer_seed is not None or allow_microbatch_change
+                or mathematical_route_branch is not None or joint_core_revision is not None
+                or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                or numerical_pooling_amendment is not None or output_policy_amendment is not None
+                or fresh_initialization is not None or self.config.training_mode != "joint"
+                or arm != "A2-D"):
+            raise ValueError("A source-read child requires one fresh joint A2-D branch from its named dense parent.")
+        if source_read_child_auxiliary_fit is not None and source_read_child is None:
+            raise ValueError("A source-read auxiliary-fit callback is valid only during its declared child attachment.")
         if diagnostic_age_branch is not None and (
                 branch_from_checkpoint is None or resume_checkpoint is not None
                 or allow_microbatch_change or mathematical_route_branch is not None
@@ -2836,6 +2852,13 @@ class TrainingEngine:
             if branch_from_checkpoint is not None
             else None
         )
+        if source_read_child is not None and source_path is not None:
+            try:
+                source_path.resolve().relative_to(output)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("A source-read child must write to a distinct run directory from its dense parent.")
         source_payload: Mapping[str, Any] | None = None
         restored_rng: Mapping[str, Any] | None = None
         if source_path is not None:
@@ -2874,7 +2897,16 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if architecture_child_initialization is not None:
+            if source_read_child is not None:
+                from .source_read_child import prepare_source_read_child
+
+                amendment = prepare_source_read_child(
+                    model, source_payload, sealed_identity, source_read_child,
+                    source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    source_path=source_path,
+                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    stop_after=int(stop_after))
+            elif architecture_child_initialization is not None:
                 from .architecture_child import prepare_native_routing_child
 
                 amendment = prepare_native_routing_child(
@@ -2927,12 +2959,12 @@ class TrainingEngine:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
             elif (joint_core_revision is None and diagnostic_age_branch is None
-                  and architecture_child_initialization is None):
+                  and architecture_child_initialization is None and source_read_child is None):
                 if source_payload.get("arm") != "warmup":
                     raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
                 if int(source_payload.get("epoch", -1)) != self.config.warmup_epochs:
                     raise ValueError("Matched arms must branch at the declared common warmup boundary.")
-            if architecture_child_initialization is None:
+            if architecture_child_initialization is None and source_read_child is None:
                 model.load_state_dict(source_payload["model_state_dict"], strict=True)
                 if fresh_initialization is not None:
                     _apply_fresh_native_validation_policy(model)
@@ -2940,7 +2972,12 @@ class TrainingEngine:
             restored_rng = source_payload["rng_state"]
             restore_provider_state = getattr(provider, "load_training_state_dict", None)
             provider_state = source_payload.get("provider_training_state", {})
-            if architecture_child_initialization is not None:
+            if source_read_child is not None:
+                from .source_read_child import source_read_child_provider_state
+
+                provider_state = source_read_child_provider_state(provider, provider_state)
+                amendment["exact_native_provider_state_verified"] = True
+            elif architecture_child_initialization is not None:
                 from .architecture_child import architecture_child_provider_state
 
                 provider_state = architecture_child_provider_state(provider, provider_state, arm)
@@ -2951,7 +2988,15 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
-        if architecture_child_initialization is not None:
+        if source_read_child is not None:
+            from .source_read_child import verify_source_read_child_optimizer
+
+            verify_source_read_child_optimizer(
+                model, optimizer, source_payload["optimizer_state_by_name"],
+                source_read_child["added_parameter_names"])
+            amendment["exact_inherited_moments_verified"] = True
+            amendment["new_optimizer_states_at_attachment"] = 0
+        elif architecture_child_initialization is not None:
             from .architecture_child import verify_architecture_child_optimizer
 
             verify_architecture_child_optimizer(
@@ -2971,6 +3016,19 @@ class TrainingEngine:
                 raise ValueError("Exact resume optimizer group membership/order differs from its checkpoint.")
         if restored_rng is not None:
             restore_rng_state(restored_rng)
+        if source_read_child is not None:
+            from .source_read_child import run_source_read_child_auxiliary_fit
+
+            rng_devices = ()
+            if self.device.type == "cuda":
+                rng_devices = (torch.cuda.current_device() if self.device.index is None
+                               else self.device.index,)
+            amendment["auxiliary_fit_receipt"] = run_source_read_child_auxiliary_fit(
+                source_read_child_auxiliary_fit, model, provider, optimizer, source_payload,
+                amendment,
+                added_parameter_names=source_read_child["added_parameter_names"],
+                train_case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                rng_devices=rng_devices)
         history = list(source_payload.get("history", [])) if source_payload is not None else []
         if fresh_initialization is not None and source_payload is not None:
             first_epoch_row = next((row for row in history if int(row.get("epoch", -1)) == 1), None)
@@ -2994,6 +3052,7 @@ class TrainingEngine:
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
             amendment_name = ('architecture_child_initialization' if architecture_child_initialization is not None else
+                              'source_read_child' if source_read_child is not None else
                               'numerical_pooling_amendment' if numerical_pooling_amendment is not None else
                               'output_policy_amendment' if output_policy_amendment is not None else
                               'diagnostic_age_branch' if diagnostic_age_branch is not None else
@@ -3003,6 +3062,7 @@ class TrainingEngine:
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
                 category='logs' if (joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
+                                    or source_read_child is not None
                                     or numerical_pooling_amendment is not None
                                     or output_policy_amendment is not None) else None), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
@@ -3016,7 +3076,14 @@ class TrainingEngine:
                 "identity": source_payload.get("experiment_identity"),
                 "epoch": int(source_payload["epoch"]),
             }
-            if joint_core_revision is None:
+            if source_read_child is not None:
+                branch_parent.update(
+                    source_read_child=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
+                    inherited_history_scope="dense A2-D physical history through e500; child physical rows begin at e501",
+                )
+            elif joint_core_revision is None:
                 history = []
             else:
                 branch_parent.update(
@@ -3058,6 +3125,14 @@ class TrainingEngine:
                 stop_after not in architecture_contract["review_epochs"]
                 or stop_after > architecture_contract["final_epoch"]):
             raise ValueError("Architecture child continuation must stay within its sealed reviews and update horizon.")
+        source_read_child_contract = (
+            branch_parent.get("source_read_child")
+            if isinstance(branch_parent, Mapping) else None
+        )
+        if source_read_child_contract is not None:
+            from .source_read_child import verify_source_read_child_continuation
+
+            verify_source_read_child_continuation(source_read_child_contract, stop_after)
         active = {
             "status": "running", "arm": arm, "identity": sealed_identity, "device": str(self.device),
             "pid": os.getpid(),

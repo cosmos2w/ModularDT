@@ -10,6 +10,8 @@ from torch.nn import functional as F
 
 from .contracts import QueryBatch
 from .decoding import LocalPairPack, pack_local_pairs
+from .source_read_execution import compose_scalar_projection, reduce_headwise_linear, reduce_indexed_linear
+from .source_reader_variants import SourceScaleProjection
 from .spatial_features_v2 import coordinate_gamma, query_edge_features, query_source_features
 from .staged_attention_v2 import bounded_temperature, safe_masked_softmax
 
@@ -64,7 +66,9 @@ class QueryEncoderV2(nn.Module):
 class LocalDetailReaderV2(nn.Module):
     """Same compact support, with multiscale relative values and width 128."""
 
-    def __init__(self, width: int, coordinate_dim: int, hidden_width: int = 128, thermal: bool = True) -> None:
+    def __init__(
+        self, width: int, coordinate_dim: int, hidden_width: int = 128, thermal: bool = True
+    ) -> None:
         super().__init__()
         self.hidden_width = int(hidden_width)
         self.query_projection = nn.Linear(width, hidden_width, bias=False)
@@ -82,7 +86,10 @@ class LocalDetailReaderV2(nn.Module):
         frame_scale: Tensor,
         module_measure_reference: Tensor,
         local_gates: Tensor | None = None,
+        execution_backend: str = "legacy",
     ) -> tuple[Tensor, LocalPairPack, Tensor]:
+        if execution_backend not in {"legacy", "reduced_projection"}:
+            raise ValueError("execution_backend must be 'legacy' or 'reduced_projection'.")
         batch, query_count, _ = query.coordinates.shape
         pack = pack_local_pairs(scene, query, frame_scale)
         pack.support_weight = pack.support_weight.to(device=query_states.device, dtype=query_states.dtype)
@@ -90,12 +97,21 @@ class LocalDetailReaderV2(nn.Module):
         if pack.count == 0:
             return local_context.reshape(batch, query_count, self.hidden_width), pack, query_states.new_empty((0,))
         relative_geometry = _unit_gamma(pack.relative.to(query_states.dtype))
-        pair_hidden = F.silu(
-            self.query_projection(query_states[pack.batch_index, pack.query_index])
-            + self.module_projection(module_states[pack.batch_index, pack.module_index])
-            + self.relative_projection(relative_geometry)
-        )
-        flow_values = self.flow_output(pair_hidden)
+        if execution_backend == "reduced_projection":
+            query_projection = self.query_projection(query_states)
+            module_projection = self.module_projection(module_states)
+            pair_pre_activation = (
+                query_projection[pack.batch_index, pack.query_index]
+                + module_projection[pack.batch_index, pack.module_index]
+                + self.relative_projection(relative_geometry)
+            )
+        else:
+            pair_pre_activation = (
+                self.query_projection(query_states[pack.batch_index, pack.query_index])
+                + self.module_projection(module_states[pack.batch_index, pack.module_index])
+                + self.relative_projection(relative_geometry)
+            )
+        pair_hidden = F.silu(pair_pre_activation)
         module_measure = scene.module_measure[pack.batch_index, pack.module_index].to(query_states.dtype)
         measure_scale = module_measure_reference.to(device=query_states.device, dtype=query_states.dtype)
         gate = (
@@ -107,7 +123,17 @@ class LocalDetailReaderV2(nn.Module):
             torch.finfo(query_states.dtype).tiny
         )
         flat_query = pack.batch_index * query_count + pack.query_index
-        local_context = local_context.index_add(0, flat_query, flow_values * flow_weight[:, None])
+        if execution_backend == "reduced_projection":
+            local_context = reduce_indexed_linear(
+                pair_hidden,
+                flow_weight,
+                flat_query,
+                batch * query_count,
+                self.flow_output,
+            )
+        else:
+            flow_values = self.flow_output(pair_hidden)
+            local_context = local_context.index_add(0, flat_query, flow_values * flow_weight[:, None])
         if self.thermal_output is None:
             thermal_coefficients = query_states.new_empty((0,))
         else:
@@ -267,13 +293,24 @@ class HeadwiseEdgeReaderV2(nn.Module):
 class DirectSourceReaderV2(nn.Module):
     """A2-D information attention plus unnormalized signed source responses."""
 
-    def __init__(self, width: int, coordinate_dim: int, heads: int = 4, thermal: bool = True) -> None:
+    def __init__(
+        self,
+        width: int,
+        coordinate_dim: int,
+        heads: int = 4,
+        thermal: bool = True,
+        source_value_conditioning: str = "none",
+    ) -> None:
         super().__init__()
         if width % heads:
             raise ValueError("reader width must be divisible by feature-head count.")
         self.width = int(width)
+        self.coordinate_dim = int(coordinate_dim)
         self.heads = int(heads)
         self.head_width = self.width // self.heads
+        if source_value_conditioning not in {"none", "source_scale"}:
+            raise ValueError("source_value_conditioning must be 'none' or 'source_scale'.")
+        self.source_value_conditioning = source_value_conditioning
         self.query_norm = nn.LayerNorm(width)
         self.source_norm = nn.LayerNorm(width)
         self.query_key = nn.Linear(width, width, bias=False)
@@ -285,6 +322,11 @@ class DirectSourceReaderV2(nn.Module):
         self.query_value = nn.Linear(width, width, bias=False)
         self.source_value = nn.Linear(width, width, bias=False)
         self.relative_value = nn.Linear(7 * coordinate_dim, width, bias=False)
+        self.source_scale_projection = (
+            SourceScaleProjection(coordinate_dim, width)
+            if source_value_conditioning == "source_scale"
+            else None
+        )
         self.message_output = nn.Linear(width, width)
         self.thermal_output = nn.Linear(width, 1) if thermal else None
 
@@ -307,13 +349,25 @@ class DirectSourceReaderV2(nn.Module):
         prepared_values: Tensor | None,
         *,
         return_messages: bool = False,
+        execution_backend: str = "legacy",
+        message_query_indices: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
+        if execution_backend not in {"legacy", "reduced_projection"}:
+            raise ValueError("execution_backend must be 'legacy' or 'reduced_projection'.")
         batch, query_count, _ = query_states.shape
         module_count = scene.num_modules
         if module_count == 0 or query_count == 0:
             access = query_states.new_zeros(batch, query_count, module_count, self.heads)
             direct = query_states.new_zeros(batch, query_count, module_count) if self.thermal_output is not None else None
-            messages = query_states.new_zeros(batch, query_count, module_count, self.width) if return_messages else None
+            message_query_count = (
+                query_count
+                if execution_backend != "reduced_projection" or message_query_indices is None
+                else int(message_query_indices.numel())
+            )
+            messages = (
+                query_states.new_zeros(batch, message_query_count, module_count, self.width)
+                if return_messages else None
+            )
             return query_states.new_zeros(batch, query_count, self.width), access, direct, messages
         if prepared_keys is None or prepared_values is None:
             raise ValueError("Prepared A2-D source projections are missing.")
@@ -343,25 +397,48 @@ class DirectSourceReaderV2(nn.Module):
         weights = safe_masked_softmax(logits.permute(0, 1, 3, 2), allowed.permute(0, 1, 3, 2), dim=-1)
         weights = weights.permute(0, 1, 3, 2)
 
-        messages = self.message_output(
-            F.silu(
-                self.query_value(query_states)[:, :, None, :]
-                + prepared_values[:, None, :, :]
-                + self.relative_value(relative_gamma)
+        relative_value = self.relative_value(relative_gamma)
+        if self.source_scale_projection is not None:
+            # query_source_features already computed this asinh descriptor
+            # for scoring; reuse its final coordinate_dim channels for values.
+            source_scale = geometry[..., -self.coordinate_dim :]
+            relative_value = relative_value + self.source_scale_projection(source_scale)
+        hidden = F.silu(
+            self.query_value(query_states)[:, :, None, :]
+            + prepared_values[:, None, :, :]
+            + relative_value
+        )
+        if execution_backend == "reduced_projection":
+            context = reduce_headwise_linear(hidden, weights, self.message_output, self.heads)
+            messages = None
+        else:
+            messages = self.message_output(hidden)
+            blocks = messages.view(batch, query_count, module_count, self.heads, self.head_width)
+            context = torch.einsum("bqmr,bqmrd->bqrd", weights, blocks).reshape(
+                batch, query_count, self.width
             )
-        )
-        blocks = messages.view(batch, query_count, module_count, self.heads, self.head_width)
-        context = torch.einsum("bqmr,bqmrd->bqrd", weights, blocks).reshape(
-            batch, query_count, self.width
-        )
         # A2-D's thermal law is a physical signed source sum. This coefficient
         # is intentionally not multiplied by the information-attention weights.
         if self.thermal_output is None:
             direct_coefficients = None
         else:
-            direct_coefficients = self.thermal_output(messages).squeeze(-1)
+            if execution_backend == "reduced_projection":
+                composed_weight, composed_bias = compose_scalar_projection(
+                    self.message_output, self.thermal_output
+                )
+                direct_coefficients = F.linear(hidden, composed_weight, composed_bias).squeeze(-1)
+            else:
+                direct_coefficients = self.thermal_output(messages).squeeze(-1)
             direct_coefficients = direct_coefficients * scene.module_mask[:, None, :].to(direct_coefficients.dtype)
             direct_coefficients = direct_coefficients * _query_mask(query)[:, :, None].to(direct_coefficients.dtype)
+        if return_messages and messages is None:
+            if message_query_indices is not None:
+                selected_hidden = hidden.index_select(
+                    1, message_query_indices.to(device=hidden.device, dtype=torch.long)
+                )
+            else:
+                selected_hidden = hidden
+            messages = self.message_output(selected_hidden)
         return context, weights, direct_coefficients, messages if return_messages else None
 
 

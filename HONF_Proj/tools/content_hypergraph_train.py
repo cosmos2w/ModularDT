@@ -39,6 +39,11 @@ from honf_runtime.training_output_policy import (
     OUTPUT_POLICY_SCHEMA,
     validate_output_policy_amendment,
 )
+from honf_runtime.source_read_protocol import (
+    SOURCE_READ_FULL, SOURCE_READ_PROTOCOLS,
+    validate_source_read_recipe, validate_source_read_stop,
+)
+from honf_runtime.source_read_qualification import validate_source_read_qualification
 
 SCHEMA = "content_hypergraph_recipe_v1"
 WORKFLOW = "content_hypergraph_joint_v1"
@@ -47,6 +52,10 @@ WORKFLOW_V2 = "content_hypergraph_joint_v2"
 ALLOWED_UUIDS = {
     "GPU-233fcd85-5c6a-6212-3f44-655252afec70",
     "GPU-3ceda40c-fd5c-4b88-6c47-b3301711571e",
+}
+SOURCE_READ_ALLOWED_UUIDS = {
+    "GPU-233fcd85-5c6a-6212-3f44-655252afec70",
+    "GPU-f6a4ddbb-ad44-5ef5-0421-eecf7120df39",
 }
 
 
@@ -72,6 +81,8 @@ def loaded_source_binding() -> dict[str, Any]:
 def validate_recipe(value: dict[str, Any]) -> dict[str, Any]:
     """Keep this family's schema separate from sealed historical recipes."""
     recipe = dict(value)
+    if recipe.get("protocol") in SOURCE_READ_PROTOCOLS:
+        return validate_source_read_recipe(recipe)
     if recipe.get("protocol") == FORMAL_PROTOCOL:
         return validate_formal_d_recipe(recipe)
     version = {SCHEMA: 1, SCHEMA_V2: 2}.get(recipe.get("schema"))
@@ -125,6 +136,9 @@ def validate_recipe(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_stop(recipe: dict[str, Any], stop_after: int) -> None:
+    if recipe["protocol"] in SOURCE_READ_PROTOCOLS:
+        validate_source_read_stop(recipe, stop_after)
+        return
     if recipe["protocol"] == FORMAL_PROTOCOL:
         validate_formal_d_stop(recipe, stop_after)
         return
@@ -141,7 +155,14 @@ def build(recipe: dict[str, Any], *, device: str):
     torch.set_num_threads(int(os.getenv("OMP_NUM_THREADS", "4")))
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    if recipe["protocol"] == FORMAL_PROTOCOL:
+    if recipe["protocol"] in SOURCE_READ_PROTOCOLS:
+        if recipe["dataset"] == "thermal":
+            from channelthermal.training.content_hypergraph_task_v2 import build_thermal_source_read_task_v1
+            result = build_thermal_source_read_task_v1(recipe, device=device)
+        else:
+            from windfarm.training.content_hypergraph_task import build_wind_source_read_task_v1
+            result = build_wind_source_read_task_v1(recipe, device=device)
+    elif recipe["protocol"] == FORMAL_PROTOCOL:
         if recipe["dataset"] == "thermal":
             from channelthermal.training.content_hypergraph_task_v2 import build_thermal_formal_content_task_v1
             result = build_thermal_formal_content_task_v1(recipe, device=device)
@@ -163,7 +184,7 @@ def build(recipe: dict[str, Any], *, device: str):
 
 
 def engine_for(recipe: dict[str, Any], device: str) -> TrainingEngine:
-    if recipe["protocol"] == FORMAL_PROTOCOL:
+    if recipe["protocol"] == FORMAL_PROTOCOL or recipe["protocol"] in SOURCE_READ_PROTOCOLS:
         policy = recipe["execution"]
         config = EngineConfig(
             seed=recipe["sampling_seed"], microbatch_cases=recipe["microbatch_size"],
@@ -254,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.resume is None:
             raise ValueError("A numerical pooling amendment requires --resume.")
         numerical_pooling_amendment = load_numerical_pooling_amendment(args.numerical_pooling_amendment)
-    if (recipe["protocol"] != FORMAL_PROTOCOL and args.resume is None
+    if (recipe["protocol"] != FORMAL_PROTOCOL and recipe["protocol"] not in SOURCE_READ_PROTOCOLS
+            and args.resume is None
             and recipe["dataset"] == "wind" and recipe.get("optimizer_bias_norm_exclusion") is not True):
         raise ValueError("Fresh Wind recipes must explicitly enable optimizer_bias_norm_exclusion.")
     if recipe["protocol"] == FORMAL_PROTOCOL:
@@ -275,17 +297,32 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         if not args.yes or args.output is None:
             raise ValueError("A scientific start requires --yes and an explicit fresh output directory.")
+        allowed = SOURCE_READ_ALLOWED_UUIDS if recipe["protocol"] in SOURCE_READ_PROTOCOLS else ALLOWED_UUIDS
         if args.device.startswith("cuda") and (
-            args.device not in {"cuda", "cuda:0"} or os.getenv("CUDA_VISIBLE_DEVICES") not in ALLOWED_UUIDS
+            args.device not in {"cuda", "cuda:0"} or os.getenv("CUDA_VISIBLE_DEVICES") not in allowed
         ):
-            raise ValueError("Expose exactly physical GPU0 or GPU1 by UUID and use logical cuda:0.")
+            lanes = "GPU0 or GPU2" if recipe["protocol"] in SOURCE_READ_PROTOCOLS else "GPU0 or GPU1"
+            raise ValueError(f"Expose exactly physical {lanes} by UUID and use logical cuda:0.")
     qualification = None
     if recipe["protocol"] == "full_train1000" and not args.dry_run:
         if args.qualification is None:
             raise ValueError("A full-TRAIN start requires --qualification with measured Section13 evidence.")
         qualification = validate_qualification(args.qualification, recipe)
+    if recipe["protocol"] == SOURCE_READ_FULL and not args.dry_run:
+        if args.qualification is None:
+            raise ValueError("A source-read full1000 start requires its measured Round3 qualification.")
+        qualification = validate_source_read_qualification(args.qualification, recipe, output_dir=args.output)
     model, provider = build(recipe, device=args.device)
-    if qualification is not None and recipe["schema"] == SCHEMA_V2:
+    if qualification is not None and recipe["protocol"] == SOURCE_READ_FULL:
+        if canonical_sha256(model.get_config()) != qualification.get("full_model_config_sha256"):
+            raise ValueError("Full source-reader constructor differs from its qualified dry-run binding.")
+        if canonical_sha256(dict(provider.identity_payload())) != qualification.get("full_provider_identity_sha256"):
+            raise ValueError("Full source-reader data/transform/provider differs from its qualification.")
+        observed_sources = loaded_source_binding()["files"]
+        if observed_sources != qualification["full_loaded_source"]["files"]:
+            raise ValueError("Imported full runtime differs from the qualified source-reader binding.")
+    if (qualification is not None and recipe["schema"] == SCHEMA_V2
+            and recipe["protocol"] not in SOURCE_READ_PROTOCOLS):
         if canonical_sha256(model.get_config()) != qualification["architecture_config_sha256"]:
             raise ValueError("Full constructor differs from the qualified Round2 architecture.")
         current_sources = loaded_source_binding()["files"]
@@ -312,6 +349,15 @@ def main(argv: list[str] | None = None) -> int:
     }
     if recipe["schema"] == SCHEMA_V2:
         identity["round2_plan_sha256"] = "4138ca37dbf51fe9a28368e27a51b1e1d7fcc5f31ff327075f9d3e18d4b4234f"
+    if recipe["protocol"] in SOURCE_READ_PROTOCOLS:
+        plan = PROJECT / "UpgradePlan/HONF_A2D_Fidelity_and_Sparse_Execution_Round3_Plan.md"
+        identity["source_read_plan_sha256"] = hashlib.sha256(plan.read_bytes()).hexdigest()
+        identity["source_read_authorization"] = {
+            "protocol": recipe["protocol"], "variant": recipe["source_reader_variant"],
+            "hard_stop": recipe["approved_stop_after"],
+            "gpu_scope": "physical0/2, separately authorized Round3 study",
+            "full_data_launch_requires_measured_qualification": True,
+        }
     if recipe["protocol"] == FORMAL_PROTOCOL:
         identity["formal_d_authorization"] = {
             "scope": "fresh full-TRAIN A2-D, independent of the H6 full1000 protocol",

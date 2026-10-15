@@ -11,6 +11,12 @@ import torch
 from torch import nn
 
 from honf_runtime.content_hypergraph_formal import FORMAL_PROTOCOL, validate_formal_d_recipe
+from honf_runtime.source_read_protocol import (
+    SOURCE_READ_DEVELOPMENT,
+    SOURCE_READ_FULL,
+    SOURCE_READ_VARIANTS,
+    validate_source_read_recipe,
+)
 from honf_runtime.unified_training import OptimizerGroupSpec, ScheduleSpec
 
 from ..content_hypergraph import (
@@ -26,10 +32,11 @@ from .content_hypergraph_task import (
     THERMAL_CONTENT_FULL_TRAIN_PROTOCOL,
     THERMAL_CONTENT_PROVIDER_V2_SCHEMA,
     THERMAL_CONTENT_RECIPE_V2_SCHEMA,
+    ThermalContentHypergraphTask,
     ThermalContentPredictions,
     ThermalContentReceivers,
     ThermalContentSceneInputs,
-    ThermalContentHypergraphTask,
+    _ids_sha256,
     _stable_sha256,
 )
 from .joint_task import _load_data_binding, _read_selected_cases, validate_full_train_followup_membership
@@ -39,7 +46,6 @@ from .unified_task import (
     TRAIN_RESPONSE_IDS,
     _read_response_families,
 )
-
 
 _MODEL_FIELDS = {
     "module_input_dim": 8,
@@ -261,6 +267,134 @@ class ThermalFormalContentHypergraphTaskV1(ThermalContentHypergraphTaskV2):
         }
 
 
+class ThermalSourceReadTaskV1(ThermalContentHypergraphTaskV2):
+    """Thermal native task with Round3 cohorts and the successful formal optimizer."""
+
+    def __init__(
+        self,
+        *,
+        source_read_protocol: str,
+        source_reader_variant: str,
+        reader_execution_backend: str,
+        source_value_conditioning: str,
+        **kwargs: Any,
+    ) -> None:
+        if source_read_protocol not in (SOURCE_READ_DEVELOPMENT, SOURCE_READ_FULL):
+            raise ValueError("Thermal source-read task requires a declared Round3 protocol.")
+        if source_reader_variant not in SOURCE_READ_VARIANTS:
+            raise ValueError("Thermal source-read task has an unknown reader variant.")
+        expected_conditioning = "source_scale" if source_reader_variant == "D-scale" else "none"
+        if source_value_conditioning != expected_conditioning:
+            raise ValueError("Thermal source-read variant and value conditioning disagree.")
+        if reader_execution_backend not in ("legacy", "reduced_projection"):
+            raise ValueError("Thermal source-read task has an unknown execution backend.")
+        self.source_read_protocol = source_read_protocol
+        self.source_reader_variant = source_reader_variant
+        self.reader_execution_backend = reader_execution_backend
+        self.source_value_conditioning = source_value_conditioning
+        super().__init__(**kwargs)
+        expected_parent_protocol = "development" if source_read_protocol == SOURCE_READ_DEVELOPMENT else FORMAL_PROTOCOL
+        if self.protocol != expected_parent_protocol:
+            raise ValueError("Thermal source-read task was bound through the wrong native cohort path.")
+
+    def optimizer_groups(self, model: nn.Module, arm: str, stage: str):
+        del stage
+        if model is not self.model or arm != "A2-D" or model.architecture != "A2-D":
+            raise ValueError("Thermal source-read optimizer requires its bound A2-D model.")
+        names = tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
+        if not names:
+            raise ValueError("Thermal source-read A2-D has no trainable parameters.")
+        schedule = ScheduleSpec(
+            peak_lr=3.0e-4,
+            warmup_start_lr=3.0e-4,
+            warmup_epochs=0,
+            hold_through_epoch=self.total_epochs - 1,
+            total_epochs=self.total_epochs,
+            final_lr=3.0e-4,
+        )
+        return (OptimizerGroupSpec("source_read_joint", names, schedule, weight_decay=1.0e-5),)
+
+    def _source_read_profile(self) -> str:
+        return (
+            "fixed25_v1_TRAIN150_DEV22"
+            if self.source_read_protocol == SOURCE_READ_DEVELOPMENT
+            else "original_TRAIN600_canonical89"
+        )
+
+    def _source_read_scope_payload(self) -> dict[str, Any]:
+        full = self.source_read_protocol == SOURCE_READ_FULL
+        return {
+            "protocol": self.source_read_protocol,
+            "dataset_profile": self._source_read_profile(),
+            "source_reader_variant": self.source_reader_variant,
+            "reader_execution_backend": self.reader_execution_backend,
+            "source_value_conditioning": self.source_value_conditioning,
+            "normalization_scope": (
+                "all original TRAIN600 only" if full else "fixed25 selected TRAIN150 only"
+            ),
+            "future_horizon_epochs": self.total_epochs,
+            "approved_stop_after": 1000 if full else 2500,
+            "execution_cadence": copy.deepcopy(dict(self.recipe["execution"])),
+        }
+
+    def identity_payload(self) -> Mapping[str, Any]:
+        payload = dict(super().identity_payload())
+        payload["protocol"] = self.source_read_protocol
+        payload["dataset_profile"] = self._source_read_profile()
+        payload["source_reader_variant"] = self.source_reader_variant
+        payload["source_read_contract"] = self._source_read_scope_payload()
+        payload["source_binding"] = {
+            **dict(payload["source_binding"]),
+            "protocol": self.source_read_protocol,
+            "dataset_profile": self._source_read_profile(),
+        }
+        training = dict(payload["training"])
+        training.update({
+            "sampling_seed": 0,
+            "total_epochs": self.total_epochs,
+            "optimizer": "AdamW",
+            "optimizer_schedule": {
+                "kind": "constant",
+                "learning_rate": 3.0e-4,
+                "warmup_epochs": 0,
+                "hold_through_epoch": self.total_epochs - 1,
+                "total_epochs": self.total_epochs,
+                "final_learning_rate": 3.0e-4,
+            },
+            "weight_decay": 1.0e-5,
+            "bias_and_norm_weight_decay": 1.0e-5,
+            "betas": [0.9, 0.999],
+            "eps": 1.0e-8,
+            "gradient_clip": 1.0,
+            "all_parameters_train_from_start": True,
+            "source_reader_variant": self.source_reader_variant,
+            "reader_execution_backend": self.reader_execution_backend,
+            "source_value_conditioning": self.source_value_conditioning,
+        })
+        payload["training"] = training
+        payload["recipe"] = copy.deepcopy(self.recipe)
+        return payload
+
+    def preparation_summary(self) -> Mapping[str, Any]:
+        full = self.source_read_protocol == SOURCE_READ_FULL
+        summary = dict(super().preparation_summary())
+        summary.update({
+            "protocol": self.source_read_protocol,
+            "dataset_profile": self._source_read_profile(),
+            "source_reader_variant": self.source_reader_variant,
+            "reader_execution_backend": self.reader_execution_backend,
+            "source_value_conditioning": self.source_value_conditioning,
+            "future_horizon_epochs": self.total_epochs,
+            "approved_stop_after": 1000 if full else 2500,
+            "normalization_scope": (
+                "all original TRAIN600 only" if full else "fixed25 selected TRAIN150 only"
+            ),
+            "optimizer": "AdamW all parameters, constant 3e-4, weight decay 1e-5",
+            "gradient_clip": 1.0,
+        })
+        return summary
+
+
 def build_thermal_content_hypergraph_task_v2(
     recipe: Mapping[str, Any],
     *,
@@ -467,9 +601,176 @@ def build_thermal_formal_content_task_v1(
     return build_thermal_content_hypergraph_task_v2(recipe, device=device)
 
 
+def build_thermal_source_read_task_v1(
+    recipe: Mapping[str, Any],
+    *,
+    device: torch.device | str = "cpu",
+) -> tuple[ThermalContentHypergraphAdapterV2, ThermalSourceReadTaskV1, Mapping[str, Any]]:
+    """Build one explicit Round3 Thermal scope without changing historical builders."""
+    recipe = validate_source_read_recipe(recipe)
+    if recipe.get("dataset") != "thermal":
+        raise ValueError("Thermal source-read builder requires dataset=thermal.")
+    if recipe.get("model_family") != "honf_content_hypergraph":
+        raise ValueError("Thermal source-read recipe must retain model_family=honf_content_hypergraph.")
+    if recipe.get("adapter_schema") != "thermal_content_hypergraph_adapter_v2":
+        raise ValueError("Thermal source-read recipe must select the versioned Thermal adapter explicitly.")
+
+    source_read_protocol = str(recipe["protocol"])
+    full = source_read_protocol == SOURCE_READ_FULL
+    parent_protocol = FORMAL_PROTOCOL if full else "development"
+    total_epochs = int(recipe["total_epochs"])
+    model_fields = dict(recipe["model"])
+    reader_execution_backend = str(model_fields.get("reader_execution_backend", "legacy"))
+    source_value_conditioning = str(model_fields.get("source_value_conditioning", "none"))
+    core_config = {
+        "schema": "content_hypergraph_core_v2",
+        "architecture": "A2-D",
+        **model_fields,
+    }
+
+    resolved_manifest, data_path, manifest_path = _load_data_binding(
+        recipe.get("manifest"), recipe.get("data_path"),
+    )
+    base_manifest_sha256 = str(resolved_manifest["manifest_sha256"])
+    catalog_source, catalog = read_case_catalog(data_path)
+    case_split_by_id = {str(record["case_id"]): str(record["split"]).lower() for record in catalog}
+    catalog_ids = tuple(case_split_by_id)
+    if full:
+        train_ids = tuple(record["case_id"] for record in catalog if record["split"] == "train")
+        original_test_ids = tuple(record["case_id"] for record in catalog if record["split"] == "test")
+        if len(original_test_ids) != 90 or original_test_ids.count("0273") != 1:
+            raise ValueError("Thermal source_read_full1000 requires original test90 with duplicate 0273.")
+        validation_ids = tuple(case_id for case_id in original_test_ids if case_id != "0273")
+        cohort_identity = validate_full_train_followup_membership(train_ids, validation_ids)
+        cohort_scope = {
+            "protocol": SOURCE_READ_FULL,
+            "dataset_protocol": THERMAL_CONTENT_FULL_TRAIN_DATASET,
+            "base_manifest_sha256": base_manifest_sha256,
+            "training_case_ids": list(train_ids),
+            "training_membership_sha256": cohort_identity["training_membership_sha256"],
+            "validation_case_ids": list(validation_ids),
+            "validation_membership_sha256": cohort_identity["validation_membership_sha256"],
+            "excluded_validation_id": "0273",
+            "excluded_validation_reason": "historical duplicate; preserve canonical89",
+            "normalization_scope": "all original TRAIN600 only",
+            "future_horizon_epochs": total_epochs,
+            "approved_stop_after": int(recipe["approved_stop_after"]),
+        }
+    else:
+        train_ids = tuple(development_case_ids(resolved_manifest, "train"))
+        validation_ids = tuple(development_case_ids(resolved_manifest, "test"))
+        if (
+            len(train_ids) != 150
+            or len(validation_ids) != 22
+            or base_manifest_sha256 != FIXED25_FINGERPRINT
+        ):
+            raise ValueError("Thermal source_read_development_v1 requires exact fixed25_v1 TRAIN150/DEV22.")
+        cohort_identity = None
+        cohort_scope = {
+            "protocol": SOURCE_READ_DEVELOPMENT,
+            "dataset_protocol": "fixed25_v1",
+            "base_manifest_sha256": base_manifest_sha256,
+            "training_case_ids": list(train_ids),
+            "training_membership_sha256": _ids_sha256(train_ids),
+            "validation_case_ids": list(validation_ids),
+            "validation_membership_sha256": _ids_sha256(validation_ids),
+            "normalization_scope": "fixed25 selected TRAIN150 only",
+            "future_horizon_epochs": total_epochs,
+            "approved_stop_after": int(recipe["approved_stop_after"]),
+        }
+    effective_manifest = {
+        **resolved_manifest,
+        "source_read_scope": cohort_scope,
+        "manifest_sha256": _stable_sha256(cohort_scope),
+    }
+
+    normalizer = fit_global_normalizer(data_path, train_ids)
+    training_cases = _read_selected_cases(
+        data_path, train_ids, split="train", normalizer=normalizer, include_grid=False,
+    )
+    validation_cases = _read_selected_cases(
+        data_path, validation_ids, split="test", normalizer=normalizer, include_grid=False,
+    )
+    atlas_directory = Path(recipe.get("atlas_directory", DEFAULT_ATLAS_DIRECTORY)).expanduser().resolve()
+    train_families = _read_response_families(atlas_directory, TRAIN_RESPONSE_IDS)
+    tools_directory = Path(__file__).resolve().parents[4] / "tools"
+    import sys
+
+    if str(tools_directory) not in sys.path:
+        sys.path.insert(0, str(tools_directory))
+    from thermal_source_response_fit import response_scales
+
+    saved_response_scales = response_scales(train_families)
+    model = ThermalContentHypergraphAdapterV2(
+        normalizer.stats,
+        core_config=core_config,
+        nx=128,
+        ny=64,
+        environment_nx=24,
+        environment_ny=8,
+    ).to(device)
+    source_stat = data_path.stat()
+    source_binding = {
+        "dataset_path": str(data_path),
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_size_bytes": int(source_stat.st_size),
+        "dataset_mtime_ns": int(source_stat.st_mtime_ns),
+        "catalog_metadata_sha256": catalog_source["metadata_sha256"],
+        "manifest_path": None if manifest_path is None else str(manifest_path),
+        "base_manifest_sha256": base_manifest_sha256,
+        "protocol": source_read_protocol,
+        "dataset_profile": (
+            "original_TRAIN600_canonical89" if full else "fixed25_v1_TRAIN150_DEV22"
+        ),
+        "normalization_source": (
+            "TRAIN-only H5Normalizer fit_global_normalizer over original TRAIN600"
+            if full else "TRAIN-only H5Normalizer fit_global_normalizer over fixed25 TRAIN150"
+        ),
+        "source_reader_variant": str(recipe["source_reader_variant"]),
+        "reader_execution_backend": reader_execution_backend,
+        "source_value_conditioning": source_value_conditioning,
+        "response_family_sources": [
+            {"family_id": str(item["family_id"]), "sha256": str(item["source_sha256"])}
+            for item in train_families
+        ],
+        "full_followup_membership": cohort_identity,
+        "original_test_targets_outside_declared_panel_read": False,
+    }
+    provider = ThermalSourceReadTaskV1(
+        model=model,
+        training_cases=training_cases,
+        validation_cases=validation_cases,
+        manifest=effective_manifest,
+        base_manifest_sha256=base_manifest_sha256,
+        data_path=data_path,
+        source_binding=source_binding,
+        train_families=train_families,
+        response_scales=saved_response_scales,
+        recipe=recipe,
+        seed=int(recipe["seed"]),
+        primary_queries=int(recipe["primary_queries"]),
+        microbatch_size=int(recipe["microbatch_size"]),
+        effective_batch_size=int(recipe["effective_batch_size"]),
+        total_epochs=total_epochs,
+        device=device,
+        protocol=parent_protocol,
+        case_split_by_id=case_split_by_id,
+        catalog_case_ids=catalog_ids,
+        manifest_path=manifest_path,
+        atlas_directory=atlas_directory,
+        source_read_protocol=source_read_protocol,
+        source_reader_variant=str(recipe["source_reader_variant"]),
+        reader_execution_backend=reader_execution_backend,
+        source_value_conditioning=source_value_conditioning,
+    )
+    return model, provider, provider.preparation_summary()
+
+
 __all__ = [
     "ThermalContentHypergraphTaskV2",
     "ThermalFormalContentHypergraphTaskV1",
+    "ThermalSourceReadTaskV1",
     "build_thermal_content_hypergraph_task_v2",
     "build_thermal_formal_content_task_v1",
+    "build_thermal_source_read_task_v1",
 ]
