@@ -130,3 +130,46 @@ Wind uses its retained R1 checkpoint, `--dataset wind`, and physical GPU1 throug
 `receipts/final_protection_audit_v2.json` verifies 993 prior-round files, 264 primary files, four sealed inputs and 1919 inherited observations (1827 files, 18 resolved symlinks, 74 preserved absences). It preserves the failed scanner/schema guard attempts and records their corrected target-stat/cache/solver interpretations. Native source bindings and solver 326/326 metadata match; Wind cache 6337-file metadata fingerprint matches with zero writes. Its limitation is no historical regular-file content SHA baseline; the Thermal H5 original record also supplies stat binding rather than a baseline SHA. PID 248340 remains alive with its original command and was only inspected. No protected source data/checkpoints, solver arrays or unrelated jobs are modified.
 
 Final Markdown/source-link/browser QA and push/tip receipts remain local under `receipts/`. The existing user deletion stays unstaged. Generated evidence is intentionally not uploaded; the durable branch contains code, tests, recipes, guide and the two reports only.
+
+## Formal D comparison extension (October 15)
+
+The main report retains the completed development/H6 study and adds the independent full-TRAIN D results. New local root: `HONF_Proj/diagnostics/generated/attention_round2_formal_comparison_20261015` → `/data/wanglz/ModularDT/diagnostics/attention_round2_formal_comparison_20261015`. No new fit, solver call or TEST-target access is performed. Training sources remain the frozen10d27ec/bffa8bc runtimes; this round changes documentation only. The reviewed comparison contract distinguishes matched full TRAIN/basic settings from remaining native-law/objective/selection/representation differences; it supersedes generic preliminary helper wording about different populations/schedules.
+
+| Evidence | Local path relative to the new root |
+| --- | --- |
+| Budget, source/setting review | `receipts/budget.json`, `receipts/reviewed_comparison_contract.json` |
+| Formal completion/resume/checkpoint/cumulative work and complete-run costs | `cost/training_cost.json`, `receipts/completion_cost_audit*.json` |
+| Thermal final/selected all89 native boards and all12 verified representative exports | `thermal_corrected/summary_native_reviewed_v3.json`, `thermal_corrected/exports_final/` |
+| Qualified classic CPU input/output checks | `thermal_corrected/qualification1404_public_native_dev22/result.json`, public parity entries in the reviewed summary |
+| 1804 equal-weight container audit | `receipts/thermal1804_container_equivalence.json`; latest SHA9d0b83… is the native-board binding, while the root snapshot c6d369… has equal model tensors |
+| Wind all90 five-role Q8192 native board, all components/groups/tails | `wind/valid90_five_role_q8192_accuracy_v1/result.json`, `wind/valid90_five_role_q8192_accuracy_v1/valid90_q8192_predictions_and_targets.npz`, `wind/summary.json` |
+| Wind native field/cut arrays | `wind/valid90_five_role_q8192_accuracy_v1/representative_row_069.npz`, `wind/valid90_five_role_q8192_accuracy_v1/representative_row_426.npz` |
+| Authoritative complete native application cost | `cost/thermal_single_return/native_cost.json`, `cost/wind_single_return/native_cost.json`; selected T4760/4738/4890, W2465/2475/2440 |
+| Same-weight Wind receiver tiling diagnostic/parity | `cost/wind_tiling_diagnostic/result.json`, four small parity NPZs; tile128 versus8192, distinct from Dense default512 |
+| Authoritative fixed-B8 train-mode memory | `cost/thermal_training_mode/density.json`, `cost/wind_training_mode/density.json`; all18 points, saved activation recomputation retained |
+| Thermal actual context/source/local intervention evidence | `organization/thermal_organizer_cpu.json`, `organization/thermal_organizer_samples.npz`, `organization/thermal_classic_maps_retry2/` |
+| Wind actual context/source/local and classic E512 route evidence | `organization/wind_organizer_cpu_retry1/result.json`, `organization/wind_organizer_cpu_retry1/wind_organizer_samples.npz` |
+| Selected figures and source QA | `figures/`, `receipts/*figure*.json`, `receipts/report_source_QA.json`, `receipts/report_visual_QA.json`, `receipts/report_browser_QA.json` |
+| Cleanup and protected closeout | `receipts/thermal_cleanup_candidate_review_v3.json`, `receipts/final_cleanup_receipt.json`, `receipts/final_closeout.json` |
+
+The original `thermal/` stages/exports precede a required classic inverse-transform repair and are quarantined; the reviewed `thermal_corrected/` board is authoritative. Failed logs, invalid metric evidence and one wrong-scale1404 exemplar remain. Superseded duplicate arrays may be removed only through the exact cleanup receipt. Earlier timing variants remain labelled: the first D stress fixture was not staged to GPU, eval-mode gradient replay disabled classic recomputation, and the large-tile Wind trial is a diagnostic. None substitutes for the declared final native-default/one-return cost and train-mode memory paths. Successful SystemExit(0) wrapper traces are documented as harness bookkeeping errors, not model failures.
+
+Recorded execution commands use `/home/wanglz/miniconda3/envs/ModularDT/bin/python -B`, `PYTHONDONTWRITEBYTECODE=1`, `OMP_NUM_THREADS=4`, `MKL_NUM_THREADS=4`, and `OPENBLAS_NUM_THREADS=4`. One-time helpers stay local and ignored; they are not durable API additions. The command logs retain attempts and exact argv. The corrected Thermal stage pass completed its four fresh arms, then the finalizer resolved the archived material singleton axis and completed the board; no failed partial pass is claimed as a complete result. These one-time helpers contain fixed output paths. Existing outputs are immutable evidence: retarget a copy of the ignored helper to a new owned directory with a fresh disk budget before replay; do not execute the recorded paths over retained outputs.
+
+```bash
+ANALYSIS=/data/wanglz/ModularDT/diagnostics/attention_round2_formal_comparison_20261015
+PYTHON=/home/wanglz/miniconda3/envs/ModularDT/bin/python
+env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 "$PYTHON" -B "$ANALYSIS/source/thermal_native_compare_full89_corrected.py"
+# Completed per-arm stages; after singleton-axis correction, finalize their native board:
+env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 "$PYTHON" -B "$ANALYSIS/source/thermal_native_compare_full89_finalize.py"
+env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 "$PYTHON" -B "$ANALYSIS/source/wind_full_valid90_accuracy.py"
+env CUDA_VISIBLE_DEVICES=GPU-233fcd85-5c6a-6212-3f44-655252afec70 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 "$PYTHON" -B "$ANALYSIS/source/benchmark_native_single_return.py" --dataset thermal
+env CUDA_VISIBLE_DEVICES=GPU-233fcd85-5c6a-6212-3f44-655252afec70 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 "$PYTHON" -B "$ANALYSIS/source/benchmark_native_single_return.py" --dataset wind
+env CUDA_VISIBLE_DEVICES=GPU-233fcd85-5c6a-6212-3f44-655252afec70 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 "$PYTHON" -B "$ANALYSIS/source/benchmark_density_training_mode.py" --dataset thermal
+env CUDA_VISIBLE_DEVICES=GPU-233fcd85-5c6a-6212-3f44-655252afec70 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 "$PYTHON" -B "$ANALYSIS/source/benchmark_density_training_mode.py" --dataset wind
+env CUDA_VISIBLE_DEVICES=GPU-233fcd85-5c6a-6212-3f44-655252afec70 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 "$PYTHON" -B "$ANALYSIS/source/wind_receiver_tiling_diagnostic.py"
+```
+
+The scalar tables are descriptive single-fit native evidence. RMSE means, pooled errors and p90 statistics are separate reductions; Wind directions within a layout are correlated. Selected and literal ages remain distinct. New response-law checks and native route interventions demonstrate software use, not independent CFD validation, H6 compression, sparse execution savings or inverse readiness. The original H6 failure/stop decisions and every historical checkpoint remain unchanged.
+
+The exact final cleanup removes 28 files / 11,902,225 bytes, preserving 3923 protected files byte-for-byte before/after removal. `receipts/pre_cleanup_protected_manifest.json` and `receipts/final_cleanup_allowlist.json` retain hashes, inode/link/ownership and readable process FD/mapping checks. The corrected all12 Thermal exports and one invalid-scale example remain; no scientific checkpoint is removed. `receipts/report_source_QA.json` checks 145 native table values, all local links, one-line prose, preservation of the original body/15 images and seven PDF masters/ten new PNGs. `receipts/report_visual_QA.json` binds the inspected ten PDF pages and all new PNGs. The real-browser check validates all25 embedded images without overflow or errors; its cached-CLI fallback installs no package or browser.

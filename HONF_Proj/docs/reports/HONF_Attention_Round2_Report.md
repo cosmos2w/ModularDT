@@ -2,6 +2,8 @@
 
 This round makes geometry part of the information carried by tokens, completes ordered module/environment exchanges inside each attention cycle, and lets six learned contents gather typed donors directly. The new A2-D control and A2-H6 organized model share this preparation, native Thermal/Wind adapters and the existing TrainingEngine. One fresh revision per dataset additionally gives receiver queries the live module/environment centroids of each executed content gather. The complete mathematical and execution contract is the [Round2 plan](../../UpgradePlan/HONF_Attention_Round2_Geometry_and_Content_Development_Plan.md), read with the two Oct13 specifications.
 
+**October 15 formal update.** Both separately authorized full-TRAIN A2-D runs completed: Thermal 5000 and Wind 2500. Thermal improves six native mean errors over 1804, but fluid T, v/p and some tails remain worse; Wind improves four role means over 2102 while Dense2103 remains better in every role. D uses less measured gradient memory; receiver tiling changes the latency ranking. The [formal comparison below](#full-train-formal-d-comparison-october-15) adds the quantitative boards and inspected figures. The retained quarter-data/H6 study, guards and October 14 closeout below keep their original scope.
+
 **Predictor.** The direct controls improve strongly over the coherent first-round A-D on the same exposed development panels. Organized H6 remains substantially worse than equally trained A2-D. The centroid revision improves some aggregate/role errors but does not close that gap: literal epoch 2500 Thermal fluid-T RMSE is 1.85330 versus 0.949959 for A2-D; Wind near/downstream vector means are 0.686129/0.528404 m/s versus 0.273712/0.185800 m/s. All six fits reached 2500 with healthy finite optimization, but neither organized candidate qualifies for a fresh full-TRAIN 1000 run. The next predictor question is how the compressed far path can retain the source-specific information already useful to the direct decoder.
 
 **Organizer.** Geometry, typed W, content reads, four receiver feature heads and the bounded local path actually execute. Same-weight access/content/local interventions measurably change native outputs. Full six-edge access is retained; fixed-B8 backward memory is lower than the direct control at the measured densities. However, active or differentiated gathers do not establish useful physical grouping: content similarity remains high, field accuracy is worse, and some removals improve an error. The next organizer question is which content/readout restriction loses predictive information, rather than whether all six slots are occupied.
@@ -239,7 +241,7 @@ The complete qualified Thermal classic CPU board is reused on DEV22 at actual ma
 
 These Wind classics are replayed with their native E512 inputs, own full-TRAIN420 normalizers and public physical predictor on the exact DEV24 receiver panel; previous full-VALID90 receiver draws differ and are not substituted. At actual e1000 they have27,000 updates, batch 16, Q8192 split 6144 volume+ 2048 band, volume/band losses 0.75/0.25 and constant LR3e-4 over the declared 2500 horizon. Mature selected ages2440/2475 have 65,880/66,825 actual updates. Initialization seed 0 and sampler seed 42 are declared; no pretraining or frozen partner is declared. Case/query exposure derived from recipes is nominal, not an instrumented historical counter. These differ from new TRAIN72 / batch 24/Q4096/role-balanced/cosine fits. The large practical gap is real on this panel, but it does not isolate architecture from exposure and objective differences or establish a new full 1000 result.
 
-## Correctness, limitations and closeout
+## Original development correctness, limitations and closeout
 
 The absolute ModularDT Python3.12.13/Torch2.6.0+cu124 environment passes 321 combined targeted CPU tests in 21.12 s plus 8 nonoverlapping Wind R1 tests in 1.62 s: 329 unique tests across those commands. This covers explicit attention references, masking/empty rows, staged state freshness, measure refinement, native transforms, factorized response/adjoint and strict identity/resume boundaries. Actual R1 native GPU macro-objective checks give finite nonzero gradients to all 237 Thermal / 220 Wind trainable parameters without updates, and every parameter changes by 2500. Trusted checkpoint identities compare canonically across tuple/list serialization; all Adam moments, sampler states, paired hashes and imported source bindings are checked.
 
@@ -253,6 +255,192 @@ Final protected verification passes 993 prior-round files, 264 primary-before-R1
 
 The preferred predictor in this matched study is A2-D on both datasets. For organized research, R1 offers modest Thermal broad/q/tail and Wind broad/downstream gains over primary H6, with a small additional memory cost, but no consistent priority improvement or full-run qualification. Thermal’s remaining limitation is an organized far response that generalizes substantially worse than its uncompressed signed-source control despite trained factors and full numerical rank. Wind’s is a compressed content/readout path whose fixed-TRAIN fit improves while native near/downstream DEV fidelity remains poor and content similarity increases. A later bounded study should localize those losses before spending on full data; no extension or additional campaign is active.
 
+## Full-TRAIN formal D comparison (October 15)
+
+This extension evaluates the two separately authorized current A2-D formal runs after completion: Thermal through literal epoch 5000 and Wind through literal epoch 2500. It retains the original development/H6 study above. No new training, H6 qualification, solver call or inverse campaign is performed. The current model remains the shared geometry-carrying attention family with native adapters, direct source reads and compact local detail; it has no H6 content bank, frozen D-sep or Stage-A dependency. Historical classics are reconstructed through their unchanged native loaders.
+
+**Predictor gains, misses and next question.** Full-TRAIN Thermal D improves six of nine mean native errors over Run1804 at the same literal age, including u, curl, surface/material temperature, q proxy and module peaks. Its fluid-T mean is 2.91% worse, v is 2.05 times worse and pressure is 22.08% worse; material/peak tails also remain worse despite lower means. Wind D improves four vector-role means over Run2102 but slightly worsens near-turbine error; Dense2103 remains better in every role and all priority components. These are useful first-version research gains with explicit misses, not a classic-replacement pass. The next predictor work would target Thermal v/p and temperature tails, and Wind near/downstream fidelity; none is launched here.
+
+**Organizer gains, limits and next question.** Both formal models execute the two typed context cycles, direct donor reads and local path. Removing their values changes native outputs, and Thermal exposes signed source-indexed response coefficients with exact zero-heat behavior. Classic six-slot routing and dense environment reads remain distinct, measurable organizations. The current D runs establish reliance on information paths, not useful six-content compression, physical causality or sparse execution. The unresolved organized-model question from the development study remains information retention in H6; these successful D fits do not qualify H6 retroactively.
+
+**Inverse evidence and limits.** No new formal-checkpoint saved-response or inverse-design campaign is run. The new Thermal heat-zero/decomposition checks below verify its software law only. The earlier three-family response evidence remains attached to its original development checkpoints and saved analytic-wake/shared-grid references. It is not independent CFD or inverse readiness. Solver usage stays 326/326 with zero new attempts; Wind TEST remains locked.
+
+### Completion, exposure and comparison contract
+
+| Run | Completed / selected age | TRAIN / exposed validation | Case visits / optimizer updates | Primary queries |
+| --- | --- | --- | --- | --- |
+| Thermal A2-D | 5000 / 4760 | 600 / canonical89 | 3,000,000 / 65,000 | 3,072,000,000 |
+| Wind A2-D | 2500 / 2465 | 420 / VALID90 | 1,050,000 / 67,500 | 8,601,600,000 |
+
+Final/latest and declared milestone states, finite model/Adam tensors, sampler bindings and contiguous histories are checked. The authorized output-only continuation preserves Thermal epochs 1–216 and Wind 1–131, then resumes at 217/132 without reset or missing epochs. Thermal has 125,000 microbatches and 120,000 tail-case visits; Wind has 132,500 and 10,000. The histories record 13,008,744,984 primary Thermal neural receiver rows after native unions, plus 22,413,156 response-increment rows; these are additional scopes, not the nominal primary-query count. Wind records 8,601,600,000 decoder receiver rows. No new optimizer update is used for this analysis.
+
+The protocol is [formal_d_full_train_v1](../guides/Content_Hypergraph_Formal_D.md), independent of the H6 full1000 guard. Thermal1804 and Wind2103 are the primary anchors, with 1404 and 2102 additional references. All formal/reference systems use their original full TRAIN memberships, initialization seed 0, effective batches 48/16, primary queries 1024/8192, constant AdamW learning rate 3e-4 and weight decay 1e-5 on all parameters. Thermal ends at 5000; Wind and both Wind reference histories end at literal 2500. This is a protocol-anchored full-TRAIN system comparison. Architecture, native parameterization and declared remaining differences prevent an isolated architecture or equal-compute interpretation.
+
+| Setting | Thermal remaining differences | Wind remaining differences |
+| --- | --- | --- |
+| Physical law / objective | D has heat-independent u/v/p, derived native curl, T=K h and no T mean; it learns native fluid/surface/material T, q proxy and original-TRAIN responses. Classics keep nonlinear field/port/local heads and interface/consistency terms. | D uses profile(z) + nonlinear normalized residual × safe_std × U_ref, without an absolute normalizer mean or second frame rotation. Classics retain their own public absolute-velocity inverse transform. Compatible equal-channel 0.75 volume / 0.25 hub-band loss is restored. |
+| Transforms / geometry | D fits all 600 TRAIN only. The 12 archived classic arrays equal the HDF5 normalization group; that does not prove a TRAIN-only fit. Each checkpoint retains its own inverse. D E192 and native classic inputs are preserved. | D and both classics have numerically identical full-TRAIN normalizer/profile payloads. D has geometry-only E64/context width128; references retain E512/hidden256. |
+| Sampling / accumulation | D micro24 accumulates to48; classic B48, original point draws/bucketing and auxiliary sampling are not bitwise replayed. Native queries/masks are identical for comparison. | D micro8 accumulates to16; classic native B16 processing/order differs. Per-case seeds and two-region budgets are anchored. Native diagnostic queries are identical for comparison. |
+| Validation / selection | D monitors canonical89 every 10 with balanced native field score; classic original90 included duplicated0273 and selected individual epochs using other MSE/port variants. Comparison excludes0273 for every model. | D/reference selector uses fixed Q10240 (8192 volume +2048 hub band), volume MSE, every 5. The shared five-role Q8192 board below is a separate diagnostic. |
+
+Thermal native comparison uses every 128×64 grid, common fluid/solid masks, all 64 surface angles and stored material receivers on all 89 cases; groups M3/M5/M7/M10 contain 24/25/25/15 cases. Wind uses all 90 VALID rows from 30 layouts and their three native directions. Its retained Q8192 panel is regenerated and matches all flat IDs, role IDs, coordinates and physical targets exactly: volume/hub/downstream/near/background quotas are 1640/1640/1640/1640/1632. Panel SHA is ea04882030aec3993f302553f054ec7e8dc092300a3ed752051d4bb4c29253c0. No case or difficult group is removed. These are exposed validation panels, one training seed per run, not blind tests or uncertainty estimates across fits.
+
+### Native field accuracy: final and selected states
+
+All main tables below use arithmetic means of casewise Thermal or rowwise Wind RMSEs; p90 is a percentile of those case/row RMSEs. Pooled relative-L2 and complete medians/worst IDs are retained separately in the numerical boards. Thermal values are native packed-dataset units, with no established Kelvin/SI-flux conversion; q remains the native normal-flux proxy. Wind values are m/s. The checkpoint selectors are not replaced by whichever state looks best on this later board.
+
+| Thermal role · mean RMSE | D e5000 | 1804 e5000 | 1404 e5000 |
+| --- | --- | --- | --- |
+| u | 0.00466647 | 0.00650424 | 0.0113664 |
+| v | 0.000681343 | 0.000331887 | 0.000509127 |
+| p | 0.00274512 | 0.00224869 | 0.00342641 |
+| omega / native curl | 0.0127165 | 0.0244341 | 0.0257795 |
+| Fluid T | 0.244292 | 0.237375 | 0.293284 |
+| Surface T | 0.187833 | 0.429475 | 0.511137 |
+| Material T | 0.197525 | 0.329348 | 0.409408 |
+| Native q proxy | 0.857823 | 1.53376 | 2.12033 |
+| Module peak endpoint | 0.230427 | 0.317573 | 0.418661 |
+
+| Thermal selected · mean / p90 RMSE | D e4760 | 1804 e4738 | 1404 e4890 |
+| --- | --- | --- | --- |
+| u | 0.00457859 / 0.00975287 | 0.00572098 / 0.00701618 | 0.0105378 / 0.0129327 |
+| v | 0.000696948 / 0.00133751 | 0.000326203 / 0.000452368 | 0.000482316 / 0.000771816 |
+| p | 0.00277406 / 0.00643446 | 0.0022086 / 0.0035357 | 0.00333954 / 0.00507036 |
+| omega / native curl | 0.0129772 / 0.0255371 | 0.024447 / 0.0495654 | 0.0250485 / 0.0432382 |
+| Fluid T | 0.245423 / 0.445056 | 0.218656 / 0.369171 | 0.290592 / 0.451695 |
+| Surface T | 0.183204 / 0.555033 | 0.448389 / 0.602693 | 0.491752 / 0.708943 |
+| Material T | 0.193524 / 0.563665 | 0.340027 / 0.43283 | 0.395532 / 0.578355 |
+| Native q proxy | 0.863218 / 2.20308 | 1.58291 / 2.42205 | 2.11048 / 2.71028 |
+| Module peak endpoint | 0.220672 / 0.642626 | 0.346586 / 0.58687 | 0.410436 / 0.70898 |
+
+At literal 5000, D reduces u/curl/surface-T/material-T/q/peak mean RMSE by 28.3/48.0/56.3/40.0/44.1/27.4% versus 1804. Fluid T is 0.244292 versus 0.237375, with p90 0.432895 versus 0.389084. Material and peak p90 worsen by 26.0% and 20.1%, so lower means do not establish uniformly safer tails. At field-selected ages, D fluid-T mean/p90 is 0.245423/0.445056 versus 1804 0.218656/0.369171, a 12.2/20.6% miss. D worst fluid-T is case 0297 (0.819195 literal;0.813196 selected); 1804’s literal worst is 0298 (0.806300). Pooled fluid-T relative-L2 is 0.033632 versus 0.032441 at literal 5000. Native curl improves while v remains worse; shared training and derived curl do not imply every flow channel improves.
+
+| Wind vector · mean / p90 RMSE (m/s) | D e2500 | D e2465 | 2103 e2475 | 2102 e2440 |
+| --- | --- | --- | --- | --- |
+| Volume | 0.0276479 / 0.0358325 | 0.0275557 / 0.0356088 | 0.0186881 / 0.0236383 | 0.033271 / 0.0423361 |
+| Hub slab | 0.0486641 / 0.065163 | 0.0484892 / 0.0639168 | 0.0326066 / 0.0402991 | 0.0515861 / 0.0677086 |
+| Downstream envelope | 0.0603161 / 0.0787665 | 0.0602953 / 0.0826298 | 0.0389866 / 0.0487905 | 0.0635626 / 0.0821359 |
+| Near turbine | 0.0991353 / 0.120698 | 0.0992014 / 0.120883 | 0.073927 / 0.0855624 | 0.0954225 / 0.114575 |
+| Background | 0.0147066 / 0.0180475 | 0.014657 / 0.0175779 | 0.0111927 / 0.0131899 | 0.0237931 / 0.0293923 |
+
+| Wind priority component · mean RMSE (m/s) | D e2500 | D e2465 | 2103 e2475 | 2102 e2440 |
+| --- | --- | --- | --- | --- |
+| near_turbine/Ux | 0.0945166 | 0.0946935 | 0.0697563 | 0.0932728 |
+| near_turbine/Uy | 0.0232746 | 0.0229236 | 0.0190874 | 0.0166438 |
+| near_turbine/Uz | 0.0181974 | 0.0180943 | 0.0149504 | 0.0110488 |
+| downstream_envelope/Ux | 0.0586062 | 0.0586431 | 0.0374344 | 0.0626072 |
+| downstream_envelope/Uy | 0.010826 | 0.0106292 | 0.00809136 | 0.00904944 |
+| downstream_envelope/Uz | 0.00885439 | 0.00872857 | 0.00697653 | 0.00585536 |
+
+At literal 2500, Wind D near/downstream vector means are 0.099135/0.060316 m/s, versus 2103 0.073927/0.038987: 34.1/54.7% worse. Against 2102, D improves volume/hub/downstream/background means by 16.9/5.7/5.1/38.2%, but near error is 3.9% worse; its near Uy/Uz means remain 39.8/64.7% worse. D’s near p90/worst are 0.120698/0.153614 m/s versus 2103 0.085562/0.093689. Its four nonbackground role maxima share VALID row 546 (M24); background worst is row 388 (M28). Dense2103 remains better across the observed M bands 8–15/17–23/24–30; the saved per-M/layout rows retain the full distribution rather than only these summaries.
+
+![Selected formal native mean and p90 error ratios to classic dense references](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_native_accuracy_ratios.png)
+
+Figure F1. Selected checkpoint comparisons use exactly the common full validation panels and each native inverse transform. D’s Thermal means improve in several fields while v/p/fluid-T and some tails miss; Wind D remains worse than 2103 in every role. Dots are ratios of mean RMSEs and triangles ratios of p90 RMSEs, not confidence intervals. The tables preserve literal 5000/2500 results separately.
+
+![Thermal canonical89 case 0291 native T and v with signed selected D and classic1804 errors](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_thermal_case0291_fields.png)
+
+Figure F2a. Input-fixed canonical89 case 0291 (M5), selected D4760 and 1804 e4738 on 7,837 common fluid cells. D/1804 fluid-T RMSE is 0.1881/0.2484 and v RMSE approximately 0.000587/0.000335; both predictions share physical scales and their errors share a zero-centered scale per channel. This favorable local temperature example does not override D’s worse population fluid-T mean/tail.
+
+![Thermal canonical89 case 0687 native T and v with signed selected D and classic1804 errors](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_thermal_case0687_fields.png)
+
+Figure F2b. Input-fixed case 0687 (M10), same selected states and 7,463 common fluid cells. D/1804 fluid-T RMSE is 0.2198/0.2392 while v remains worse. Each displayed relative-L2 is computed on the same saved fluid mask; white solids are excluded. Units remain native, and the views use actual stored coordinates.
+
+![Thermal fixed source0 native surface temperature and flux proxy versus stored angle](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_thermal_surface_flux.png)
+
+Figure F2c. Physical source0 is fixed from input identity in both scenes; all 64 native angle rows remain. Selected D/1804 surface-T RMSE is 0.0704/0.268 for 0291 and 0.0631/0.188 for 0687; q-proxy RMSE is 0.516/1.12 and 0.389/0.689. Run1404’s selected curves remain visible as an additional reference. These surfaces illustrate the aggregate surface/q gains without implying better fluid-T or material/peak tails.
+
+![Wind VALID row 69 selected native velocity components and signed D versus 2103 errors](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_wind_row069_fields.png)
+
+Figure F3a. Fixed VALID row 69, M8, actual stored hub plane z70.869949 m (index16,174×302 native cells). The models use the identical full-TRAIN-fitted transform and aligned frame; D is the volume-selected e2465 alias,2103 is e2475. Directly printed component relative-L2/RMSE and shared component/error scales show the remaining transverse and wake errors. Literal e2500 is evaluated in the tables, not relabelled as this selected state.
+
+![Wind VALID row 426 selected native velocity components and signed D versus 2103 errors](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_wind_row426_fields.png)
+
+Figure F3b. Fixed VALID row 426, M30, same stored z and 285×350 cells. D/2103 plane relative-L2 is approximately 0.0071/0.0043 for Ux, 0.1088/0.0839 for Uy and 0.1378/0.1078 for Uz. These input-selected large-layout residuals agree with the all 90-row direction of the comparison; no new CFD slice or extra rotation is introduced.
+
+![Wind stored native downstream cuts showing all three components and both classic references](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_wind_native_cuts.png)
+
+Figure F3c. Truth and predictions are shown for all three velocity components and both classics. Solid/dashed curves denote M8/M30; native cut positions requested at 2D/4D/8D are actually 1.945/4.008/7.996D and 1.942/4.003/7.990D after the geometry-selected upstream source. Every curve uses stored y/x/z indices, without interpolation. Signed cut arrays are retained, while signed field residuals appear in F3a/F3b.
+
+### Computation: complete calls, memory and complete-run costs
+
+All new GPU measurements use physical GPU0 (RTX6000 Ada, UUID233fcd85…), logical cuda:0, ModularDT Python3.12.13/Torch2.6.0+cu124, FP32, TF32 off and four CPU threads. GPU1’s unrelated job is preserved; GPU2 is unused. CPU/GPU public-native parity passes for every timed model/scene before ranking (relative-L2 below 1e-4 and maximum absolute discrepancy below 0.01; actual maxima are retained). Complete-call timing fixes batch 1 and the requested receiver budget 8192 on each fixed low-/high-M scene. It includes prescribed host inputs, H2D, preparation, forward/native extraction and one physical-output return to CPU. Dataset/catalogue loading, checkpoint reconstruction and target reading are excluded and separately recorded. Two warmups and seven rotated measured repeats yield medians and observed ranges; the shared host/clock state is uncontrolled, so these are operational measurements rather than an architecture speed law.
+
+| Model | Actual timed age | Parameters | Complete ms low-M / high-M | Receiver execution |
+| --- | --- | --- | --- | --- |
+| Thermal A2-D | e4760 | 1,520,493 | 24.093 / 26.175 | Native reader128; full native request |
+| Thermal 1804 | e4738 | 5,430,548 | 159.220 / 175.268 | Checkpoint core128; outer8192 |
+| Thermal 1404 | e4890 | 3,508,649 | 30.932 / 31.624 | Legacy full outer8192 |
+| Wind A2-D | e2465 | 1,525,675 | 15.642 / 17.486 | native core/default128 |
+| Wind 2103 | e2475 | 3,628,551 | 43.981 / 43.206 | checkpoint-native512 |
+| Wind 2102 | e2440 | 1,696,286 | 277.009 / 277.561 | native core/default128 |
+
+Wind receiver tiling changes the practical ranking. A separate same-weight paired 128-versus-8192 tile replay gives 2103 large-tile medians 29.936/34.257 ms and 2102 9.059/16.351 ms on M8/M30. Native outputs agree between those tiles at relative-L2 3.4–4.9e-8 and maximum absolute difference 1.9–5.2e-6 m/s. Dense2103’s checkpoint default is 512, whereas 2102’s legacy default is 128; the direct parity diagnostic compares 128 with 8192. Thus D is cheaper than dense2103 on these calls, but the 2102 with the larger tile can be faster than D. Tiling is not sparse execution. Its larger forward temporaries also differ from the default; no default timing is presented as universally optimal.
+
+| Native train-mode B8 peak allocated GB | Q1024 | Q4096 | Q8192 |
+| --- | --- | --- | --- |
+| Thermal A2-D | 1.07787 | 1.79174 | 2.77185 |
+| Thermal 1804 | 3.99435 | 5.81512 | 8.4495 |
+| Thermal 1404 | 3.78279 | 7.20933 | 11.7774 |
+| Wind A2-D | 0.879383 | 2.84681 | 5.47623 |
+| Wind 2103 | 5.03043 | 8.67392 | 13.5334 |
+| Wind 2102 | 2.37809 | 9.04864 | 17.9431 |
+
+The memory matrix keeps B8 and input geometry fixed (Thermal0687/M10; Wind426/M30), varies only requested query density, runs native forward/backward with zero optimizer updates and retains each classic’s configured activation recomputation. All 18 training-mode points complete. At Q8192, D uses 2.772 GB versus 1804 8.450 and 1404 11.777; Wind uses 5.476 versus 2103 13.533 and 2102 17.943. Reserved memory and resident baselines remain in the figure/records. These are total allocated high-water marks for these target-free gradient objectives, not activation-only or complete optimizer-step memory. Thermal uses physical native outputs while classics’ target-free stress loss uses their checkpoint-standardized field/interface/material outputs; Wind uses physical velocity. Full native auxiliary support, padding/inner chunks and native unions differ, so this is neither pure-Q asymptotics nor equal-function compression. An initial eval-mode gradient replay disabled classic recomputation and hit Wind dense Q8192 OOM; that failure is retained and is not called train-mode infeasibility.
+
+![Full access native complete-call medians and train-mode fixed batch query-density memory with tiling diagnostic](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_native_cost_and_memory.png)
+
+Figure F4. Bars use the declared native execution defaults; whiskers show the seven observed timing ranges, including host jitter. Diamonds identify the separately qualified large-tile Wind diagnostic. Memory solid/dashed lines are allocated/reserved bytes in decimal GB, with saved activation checkpointing active and no optimizer state. Full access executes throughout; no sparse backend or six-edge compression is inferred from the lower D memory.
+
+| Whole run | Recorded TRAIN h | Recorded validation h | Exact process h | Evidence / limitation |
+| --- | --- | --- | --- | --- |
+| Thermal A2-D | 5.0392 | 0.0575688 | 7.00945 | Two nonoverlapping exact-run process segments |
+| Wind A2-D | 4.29886 | 0.174267 | 4.71705 | Two nonoverlapping exact-run process segments |
+| Thermal1804 | 23.0227 | 2.52991 | not reconstructed | 25.5526 h total from saved summary; finite CSV timings cover only epochs 1–500 |
+| Thermal1404 | 4.13813 summary;4.97749 CSV | 0.983716 summary;1.18166 CSV | not reconstructed | Summary 5.12184 h conflicts with CSV 6.15914 h; CSV repeats 851–854 |
+| Wind2103 | 26.9610 | 0.665865 | not reconstructed | All 2500 CSV rows:27.6268 h TRAIN+validation |
+| Wind2102 | 12.3373 | 0.291117 | not reconstructed | All 2500 CSV rows:12.6284 h TRAIN+validation |
+
+Formal process totals are 7.00945 h Thermal and 4.71705 h Wind, including setup, sampling outside the recorded loop, histories/checkpoints/plots/logging and other in-segment overhead. TRAIN and validation rows are nested scopes; do not add them to process time. The resumed summary alone omits the first segment: 955.326+24278.710 s Thermal and 966.870+16014.505 s Wind are used. Historical wall spans can include pauses, and exact historical process ledgers are unavailable. The CSV/summary figures above retain their measurement scopes and conflicts; they support a practical cost comparison, not a claim of a controlled 6× architectural training speedup. New cost attempts, failures and optional tiling receipts remain local; no diagnostic initializes training.
+
+### Organizer behavior: executed paths and separate meanings
+
+Formal D has no six latent contents: its executed edge-message rows are zero by construction, while direct-source rows are QM and the native local path remains active. Thermal direct coefficients are signed additive source responses; Wind source access is normalized information routing. Classic1404/2102 query-to-six-group probabilities and Dense1804/2103 environment attention have different donors and units. Their concentration/entropy can describe each graph, but neither a common edge width nor a cross-ontology entropy ranking is a physical-strength or sparsity metric.
+
+Thermal e5000 on 0291/0687 uses 128 evenly spaced input-valid native fluid queries for source-operator traces and full native outputs for interventions. Zero heat gives exactly zero temperature with bitwise unchanged nonlinear flow; direct-only plus local-only reconstructs full T within 1.91e-6/3.81e-6 native units. Restoring the ordinary path is bitwise exact. Direct coefficients have 213/640 and 306/1280 negative entries; these are learned signed sensitivities, not demonstrated physical cooling. Every MM/EM/EE/ME stage contributes measurably, and all sources still execute.
+
+| Thermal e5000 intervention · fluid-T RMSE | 0291/M5 | 0687/M10 |
+| --- | --- | --- |
+| Full direct + local | 0.183581 | 0.218073 |
+| Zero MM update, both cycles | 0.830904 | 0.844186 |
+| Zero EM update, both cycles | 0.667234 | 0.454452 |
+| Zero EE update, both cycles | 0.427681 | 0.33339 |
+| Zero ME update, both cycles | 1.21456 | 1.35672 |
+| Zero local thermal + flow path | 0.337826 | 0.740398 |
+| Zero direct signed T coefficients | 5.27101 | 11.5873 |
+
+Classic1404’s all 8192 receiver routing has mean entropy 1.3917/1.3802 nats over its six slots; its c_H norm is exactly zero while pair-context norm means are 15.044/14.055. Its route image therefore must not be described as six learned physical thermal contents. Dense1804 returns actual query-to-E192 attention with entropy 2.7271/2.7500 and nonzero local/main/coarse context diagnostics. The new D keeps source-indexed K alongside its E192 context. These native organizations are preserved rather than recast as one common hypergraph.
+
+Wind e2500 uses 128 input-selected queries from the same five-role native row (the retained archive records each flat ID and role). Sampled outputs match the all 90-row saved literal panel exactly, and each classic’s route-enabled decoder matches its public physical prediction exactly. A2-D mean source-access entropy is 1.211/2.008 nats for M8/M30; classic2102 six-slot routing is 1.506/1.435, while 2103 E512 attention is 5.534/5.562. These separate donor sets make direct entropy comparisons inappropriate. Same-weight zeroing of direct source context changes near/downstream vector output RMS by 1.009/0.623 m/s in M8 and 1.344/0.774 in M30; local zero gives 0.399/0.020 and 0.415/0.025. Zero ME updates in both cycles gives 1.013/0.489 and 3.318/1.499. These are output changes on sampled role queries, not RMSE gains or physical counterfactual labels. They establish executed use; no route is certified causal or useful merely because it has nonzero weight.
+
+![Thermal actual typed attention signed source operator and native classic routes with same-weight ablation errors](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_thermal_organization.png)
+
+Figure F5a. Literal e5000 Thermal traces retain actual module/query IDs, signed direct+local K, classic1404 group probabilities and Dense1804 environment reads. Each map has its own labelled meaning and scale. Native ablations operate on unchanged weights and are restored exactly; unchanged full-access work is not sparse savings. The samples explain model information use, not physical causality or H6 organization quality.
+
+![Wind actual typed attention and direct source reads beside six-slot and dense classic routes with ablation output changes](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_wind_organization.png)
+
+Figure F5b. Literal D e2500, classic2102 e2440 and 2103 e2475 use the same 128 geometry-fixed native receivers from VALID426/M30. Actual source/group/environment routes and measured near/downstream output changes are shown separately. Full E64/E512 contexts and their original local supports remain; no six-edge content compression, sparse training/executor or new physical response label is introduced.
+
+### Correctness, retained evidence and limits of this extension
+
+Strict native checkpoint/data identities, common receiver/target hashes, TRAIN-only D transforms, full-data memberships, stop epochs, named Adam steps and histories are checked. Wind normalizer payload SHA is 5a0ea531ab41a6ee8f474852831351b67a3f10683c3f86fceaad90cec9c2a590 for D/2102/2103. Thermal canonical-center mapping is unique within 2e-6 and preserves active physical modules in the original 12 padded slots before metrics. Qualified public classic input and repeated CPU output checks pass on 0291/0687; final exports recompute their saved metrics. A missed classic target inverse and a material singleton-axis comparison in preliminary local helpers were caught, quarantined and corrected; only the reviewed native board supports this extension. The two 1804 epoch 5000 containers have different file SHAs but all 310 model tensors are bitwise equal; this is not a different-model finding.
+
+The original runtime tests remain the recorded 329-test development suite and the formal preparation/output-policy suites at their original revisions; this analysis adds real checkpoint/panel/transform/physics/parity/ablation checks, not another training qualification. No repository runtime code changes, package upgrade, new dataset/catalogue store or source-tree edit during training is involved. Training remained frozen at 10d27ec for fresh initialization and bffa8bc for the audited output-only continuation; the doc revision for this extension does not alter those sources. Native accuracy misses, single-seed/exposed-panel selection, differing output laws, finite timing repetitions, hardware/host variability and incomplete/conflicting historical timing evidence remain limitations. No new independent TEST, CFD/solver response, inverse result or H6 promotion is claimed.
+
+This extension retains seven PDF masters and ten inline PNGs, all native accuracy/route/cost arrays, logs, metric/provenance manifests and local source helpers. Exact cleanup removes 28 owned disposable files / 11,902,225 bytes, including thirteen superseded wrong-scale/duplicate exports, bytecode and temporary PDF views; one wrong-scale exemplar and its failure evidence remain. Before/after hashing preserves all 3,923 protected run/source/reference/numerical/figure files. The analysis closeout snapshot retains 99,421,180 distinct-inode bytes (94.8 MiB) against its 6 GiB /data budget; /home has a separate 128 MiB new-byte ceiling. Available space is 101,107,232,768 bytes on /data and 42,727,673,856 on /home, above the 20 GiB headroom on each. The existing 6337-file / 72,616,475,668-byte Wind catalogue matches its recorded metadata fingerprint; this is not a complete historical per-file content-SHA claim. Unrelated GPU1 PID 623623 and the pre-existing user deletion are preserved. Exact manifests, dated capacities and cleanup receipts remain local.
+
+The complete numerical boards, checkpoint/source hashes, replay commands, work ledgers, failure evidence, figures and cleanup/capacity receipts are in the [extended evidence index](HONF_Attention_Round2_Evidence_Index.md#formal-d-comparison-extension-october-15). Selected new figure masters are indexed below. Historical checkpoints/histories, native reference loaders, shared caches, source datasets and both frozen runtimes remain protected. The pre-existing user report deletion remains unstaged.
+
 ## Selected figure masters and evidence
 
 | Family | Retained PDF master |
@@ -263,5 +451,12 @@ The preferred predictor in this matched study is A2-D on both datasets. For orga
 | 4 Contents and signed factors | [PDF](../../diagnostics/generated/attention_round2_20261014T135200Z/figures/content_final/content_and_native_interventions.pdf) |
 | 5 Complete costs/memory/work | [PDF](../../diagnostics/generated/attention_round2_20261014T135200Z/figures/cost_final/cost_scaling_family5.pdf) |
 | 6 Saved responses | [PDF](../../diagnostics/generated/attention_round2_20261014T135200Z/figures/responses_final_v3/figures/saved_responses_family6.pdf) |
+| F1 Formal native accuracy | [PDF](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_native_accuracy_ratios.pdf) |
+| F2 Thermal native fields | [PDF](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_thermal_native_fields.pdf) |
+| F2 Native surface/flux | [PDF](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_thermal_surface_flux.pdf) |
+| F3 Wind native planes | [PDF](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_wind_native_fields.pdf) |
+| F3 Native cuts | [PDF](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_wind_native_cuts.pdf) |
+| F4 Native costs/memory | [PDF](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_native_cost_and_memory.pdf) |
+| F5 Actual organization | [PDF](../../diagnostics/generated/attention_round2_formal_comparison_20261015/figures/formal_organization_and_interventions.pdf) |
 
-The 15 small inline PNGs above accompany these six PDF masters. Exact arrays, receiver/mask bindings, source/checkpoint hashes, all native rows and tested commands are in the [evidence index](HONF_Attention_Round2_Evidence_Index.md). Generated evidence and one-time renderers remain local and ignored; durable core/adapters/configs/tests/docs are committed on the non-default working branch.
+The original 15 inline PNGs accompany the original six PDF masters; the 10 new inline PNGs accompany the seven formal-comparison PDF masters. Exact arrays, receiver/mask bindings, source/checkpoint hashes, all native rows and tested commands are in the [evidence index](HONF_Attention_Round2_Evidence_Index.md). Generated evidence and one-time renderers remain local and ignored; durable core/adapters/configs/tests/docs are committed on the non-default working branch.
