@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from contextlib import contextmanager
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -59,6 +60,11 @@ _DECODE_TRACE_AVAILABLE = (
     "edge_temperature_contributions",
     "direct_source_access",
     "direct_source_messages",
+    "source_read_gates",
+    "source_read_support",
+    "source_read_selected_batch",
+    "source_read_selected_query",
+    "source_read_selected_source",
     "direct_temperature_coefficients",
     "local_pair_batch_indices",
     "local_pair_query_indices",
@@ -105,7 +111,13 @@ def _factor_versions(prepared) -> tuple[tuple[int, int, int], ...]:
         prepared.edge_gates,
         prepared.local_gates,
     )
-    return tuple(_tensor_version(value) for value in values if value is not None)
+    versions = []
+    for value in values:
+        if isinstance(value, Tensor):
+            versions.append(_tensor_version(value))
+        elif value is not None:
+            versions.extend(_tensor_version(item) for item in value.tensor_values().values())
+    return tuple(versions)
 
 
 @dataclass(frozen=True)
@@ -115,7 +127,7 @@ class PreparedAffineQueryV2:
     organization: PreparedOrganizationV2
     query: QueryBatch
     basis: Tensor | None
-    direct_coefficients: Tensor | None
+    direct_coefficients: Any
     local_pairs: LocalPairPack
     local_coefficients: Tensor
     nonlinear_field: Tensor
@@ -126,6 +138,7 @@ class PreparedAffineQueryV2:
     uniform_access: bool
     local_gates: Tensor | None
     architecture: str
+    source_read_work: Mapping[str, int] | None = None
 
 
 def _trace_request(
@@ -197,6 +210,10 @@ class ContentHypergraphCoreV2(nn.Module):
         reader_execution_backend: str = "legacy",
         source_value_conditioning: str = "none",
         reader_query_chunk_size: int | None = None,
+        source_read_policy: str = "full",
+        source_read_executor: str = "packed",
+        source_read_rank: int = 16,
+        source_read_scorer_width: int = 32,
     ) -> None:
         super().__init__()
         architecture = str(architecture).strip().upper()
@@ -218,6 +235,14 @@ class ContentHypergraphCoreV2(nn.Module):
             type(reader_query_chunk_size) is not int or reader_query_chunk_size < 1 or architecture != "A2-D"
         ):
             raise ValueError("reader_query_chunk_size must be positive and is supported only by A2-D.")
+        if source_read_policy not in ("full", "utility", "completion") or (
+            source_read_policy != "full" and architecture != "A2-D"
+        ):
+            raise ValueError("Selected source policies require A2-D.")
+        if source_read_executor not in ("packed", "packet", "dense_masked"):
+            raise ValueError("Unknown source_read_executor.")
+        if source_read_rank != 16 or source_read_scorer_width != 32:
+            raise ValueError("The bounded source reader uses rank16/scorer32.")
         if min(
             module_input_dim,
             environment_input_dim,
@@ -259,6 +284,13 @@ class ContentHypergraphCoreV2(nn.Module):
         self.reader_execution_backend = reader_execution_backend
         self.source_value_conditioning = source_value_conditioning
         self.reader_query_chunk_size = reader_query_chunk_size
+        self.source_read_policy = source_read_policy
+        self.source_read_executor = source_read_executor
+        self.source_read_rank = source_read_rank
+        self.source_read_scorer_width = source_read_scorer_width
+        self._source_read_override = None
+        self._source_read_router_generation = 0
+        self._source_read_dense_warmup = False
         self._owner_token = id(self)
 
         module_encoder_input = self.module_input_dim + 8 * self.coordinate_dim
@@ -327,6 +359,9 @@ class ContentHypergraphCoreV2(nn.Module):
                     heads=num_heads,
                     thermal=thermal_response_rank > 0,
                     source_value_conditioning=source_value_conditioning,
+                    source_read_policy=source_read_policy,
+                    source_read_rank=source_read_rank,
+                    source_read_scorer_width=source_read_scorer_width,
                 )
         self._initialize_named_parameters()
         if self.direct_reader is not None and self.direct_reader.source_scale_projection is not None:
@@ -407,6 +442,9 @@ class ContentHypergraphCoreV2(nn.Module):
             config["source_value_conditioning"] = self.source_value_conditioning
         if self.reader_query_chunk_size is not None:
             config["reader_query_chunk_size"] = self.reader_query_chunk_size
+        if self.source_read_policy != "full":
+            config.update(source_read_policy=self.source_read_policy, source_read_executor=self.source_read_executor,
+                          source_read_rank=self.source_read_rank, source_read_scorer_width=self.source_read_scorer_width)
         return config
 
     @classmethod
@@ -419,10 +457,74 @@ class ContentHypergraphCoreV2(nn.Module):
 
     def _config_key(self) -> tuple[Any, ...]:
         config = self.get_config()
+        if self.source_read_policy != "full" or self._source_read_override is not None or self._source_read_router_generation:
+            config["source_read_router_generation"] = self._source_read_router_generation
+            config["source_read_override"] = self._source_read_override
         return tuple((key, config[key]) for key in sorted(config))
 
     def _parameter_version_stamp(self) -> tuple[tuple[int, int], ...]:
         return tuple((id(parameter), int(parameter._version)) for parameter in self.parameters())
+
+    def set_source_read_training_epoch(self, epoch: int) -> None:
+        """Persist the absolute child age; epoch zero preserves a saved stage."""
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+            raise ValueError("Source-read training epoch must be a nonnegative integer.")
+        if not epoch or self.source_read_policy == "full":
+            return
+        controller = self.direct_reader.source_read
+        # 500 is the common dense checkpoint. 501 starts at lambda=0 and
+        # 600 reaches lambda=1; subsequent updates remain selected.
+        transition = 0. if epoch <= 501 else min(1., (epoch - 501) / 99.)
+        with torch.no_grad():
+            if int(controller.training_epoch) != epoch:
+                controller.training_epoch.fill_(epoch)
+                controller.transition_lambda.fill_(transition)
+
+    def _uses_source_selection(self) -> bool:
+        if self._source_read_override is not None:
+            return self._source_read_override[0] != "full"
+        if self.source_read_policy == "full":
+            return False
+        epoch = int(self.direct_reader.source_read.training_epoch)
+        return epoch < 0 or epoch > 500
+
+    def _validate_source_read_endpoint(self, controls: Tensor, present_mask: Tensor) -> None:
+        if self.source_read_policy == "full" or not self._uses_source_selection():
+            return
+        if (self._source_read_override is not None
+                and self._source_read_override[0] != "fitted"
+                and not self._source_read_override[0].endswith("_fitted")):
+            return
+        present = controls[present_mask]
+        envelope = self.direct_reader.source_read.heating_envelope.to(controls)
+        condition = torch.isfinite(controls).all() & (present.abs() <= envelope).all()
+        if condition.is_cuda:
+            torch._assert_async(condition, "Sparse endpoint heat exceeds the declared TRAIN envelope; use explicit full mode.")
+        elif not bool(condition):
+            raise ValueError("Sparse endpoint heat exceeds the declared TRAIN envelope; use explicit full mode.")
+
+    @contextmanager
+    def source_read_override_v1(self, mode: str, *, executor: str | None = None,
+                                operating_point: int | None = None):
+        """Explicit read-only policy/cost control with invalidating ownership."""
+        modes = {"full", "fitted", "attn95", "attn99", "nearest95", "nearest99",
+                 "directional95", "directional99", "shuffle95", "shuffle99",
+                 "nearest_fitted", "directional_fitted", "shuffle_fitted"}
+        chosen_executor = self.source_read_executor if executor is None else executor
+        if self.architecture != "A2-D" or mode not in modes:
+            raise ValueError("Source-read controls apply only to A2-D and declared policies.")
+        if chosen_executor not in ("packed", "packet", "dense_masked"):
+            raise ValueError("Unknown source-read executor.")
+        if operating_point is not None and operating_point not in (0, 1):
+            raise ValueError("Only the two preregistered operating points are available.")
+        previous = self._source_read_override
+        self._source_read_override = (mode, chosen_executor, operating_point)
+        self._source_read_router_generation += 1
+        try:
+            yield self
+        finally:
+            self._source_read_override = previous
+            self._source_read_router_generation += 1
 
     def _buffer_version_stamp(self) -> tuple[tuple[int, int], ...]:
         stamp = []
@@ -882,6 +984,15 @@ class ContentHypergraphCoreV2(nn.Module):
         prep_work["trace_payload_elements"] = int(
             sum(value.numel() for value in (bounded_trace or {}).values())
         )
+        source_read_projection = source_read_completion = None
+        if self.architecture == "A2-D" and self.direct_reader.source_read is not None:
+            controller = self.direct_reader.source_read
+            source_read_projection = controller.project_source_states(module_states)
+            if controller.completion_enabled:
+                source_read_completion = controller.project_completion_sources(module_states)
+            prep_work["source_read_score_projection_entries"] = source_read_projection.numel()
+            prep_work["source_read_completion_projection_entries"] = (
+                0 if source_read_completion is None else source_read_completion.numel())
         return PreparedOrganizationV2(
             scene=scene,
             module_states=module_states,
@@ -901,6 +1012,15 @@ class ContentHypergraphCoreV2(nn.Module):
             edge_values=edge_values,
             direct_source_keys=direct_source_keys,
             direct_source_values=direct_source_values,
+            source_read_source_projection=source_read_projection,
+            source_read_completion_source=source_read_completion,
+            source_read_projection_versions=tuple(_tensor_version(value) for value in
+                (source_read_projection, source_read_completion) if value is not None),
+            source_read_input_versions=(tuple(_tensor_version(value) for value in
+                (direct_source_keys, direct_source_values, module_states, frame_origin, frame_scale,
+                 operating_state) if value is not None)
+                if self.architecture == "A2-D" and (self.source_read_policy != "full"
+                    or self._source_read_override is not None) else ()),
             source_coefficients=source_coefficients,
             model_owner=self._owner_token,
             model_parameter_versions=self._parameter_version_stamp(),
@@ -971,6 +1091,16 @@ class ContentHypergraphCoreV2(nn.Module):
             organization.scene.coordinate_frame_key,
         ):
             raise ValueError("Scene identity or preprocessing keys changed after preparation.")
+        source_projections = (organization.source_read_source_projection,
+                              organization.source_read_completion_source)
+        if organization.source_read_projection_versions != tuple(
+                _tensor_version(value) for value in source_projections if value is not None):
+            raise ValueError("Prepared source-read projections changed; rebuild the organization.")
+        if organization.source_read_input_versions and organization.source_read_input_versions != tuple(
+                _tensor_version(value) for value in (organization.direct_source_keys,
+                organization.direct_source_values, organization.module_states, organization.frame_origin,
+                organization.frame_scale, organization.operating_state) if value is not None):
+            raise ValueError("Prepared source-read inputs changed; rebuild the organization.")
         if self.query_edge_geometry_mode == "typed_w_centroids_v1":
             content_geometry = (
                 organization.module_content_centroids,
@@ -1090,6 +1220,45 @@ class ContentHypergraphCoreV2(nn.Module):
             query, organization.operating_state, organization.frame_origin, organization.frame_scale
         )
 
+    def source_read_teacher_trace_v1(self, organization: PreparedOrganizationV2, query: QueryBatch) -> dict[str, Any]:
+        """Bounded direct-reader model targets, never physical source labels.
+
+        The caller owns TRAIN membership and the teacher-row budget. This
+        seam refuses a full-field query dump and does no local/native read.
+        It preserves the qualified legacy output projection for its labels.
+        """
+        if self.architecture != "A2-D" or query.num_queries > 256:
+            raise ValueError("Source-read teachers require A2-D and at most256 receiver rows.")
+        self.validate_prepared_state(organization, query)
+        from .source_read_sparse import _fine_hidden, original_source_scores_v1
+
+        query_states = self._query_states(organization, query)
+        scene, reader = organization.scene, self.direct_reader
+        descriptor, alpha = original_source_scores_v1(
+            reader, scene, query, query_states, organization.frame_scale,
+            self._module_measure_reference(scene, query_states.dtype), organization.direct_source_keys)
+        hidden = _fine_hidden(reader, descriptor, reader.query_value(query_states)[:, :, None],
+                              organization.direct_source_values[:, None])
+        messages = reader.message_output(hidden)
+        qmask = torch.ones(query.coordinates.shape[:2], dtype=torch.bool, device=query.coordinates.device)
+        if query.query_mask is not None:
+            qmask = query.query_mask
+        thermal_k = None
+        if reader.thermal_output is not None:
+            thermal_k = reader.thermal_output(messages).squeeze(-1)
+            thermal_k = thermal_k * scene.module_mask[:, None].to(thermal_k.dtype) * qmask[:, :, None]
+        delta = descriptor[..., :self.coordinate_dim] * organization.frame_scale[:, None, None]
+        return {
+            "query_states": query_states, "module_states": organization.module_states,
+            "descriptor": descriptor, "alpha": alpha, "fine_hidden": hidden,
+            "fine_messages": messages, "thermal_k": thermal_k,
+            "query_mask": qmask, "source_present_mask": scene.module_mask,
+            "local_radius": scene.local_radius,
+            "distance_to_sources": torch.linalg.vector_norm(delta, dim=-1),
+            "fine_executed_rows": query.batch_size * query.num_queries * scene.num_modules,
+            "fine_present_rows": int((qmask[:, :, None] & scene.module_mask[:, None]).sum().item()),
+        }
+
     @staticmethod
     def _accumulation_dtype(dtype: torch.dtype | None, fallback: torch.dtype) -> torch.dtype:
         if dtype is None:
@@ -1183,6 +1352,7 @@ class ContentHypergraphCoreV2(nn.Module):
             query_indices = query_indices.to(device=query.coordinates.device)
         want_messages = "edge_messages" in selected or "direct_source_messages" in selected
         trace: dict[str, Tensor] = {}
+        source_read_work = None
         direct_messages_preselected = False
         if self.architecture == "A2-H6":
             global_context, base_access, used_access, basis, messages = self.edge_reader(
@@ -1222,18 +1392,22 @@ class ContentHypergraphCoreV2(nn.Module):
                 and "direct_source_messages" in selected
                 else None
             )
-            global_context, direct_access, direct_coefficients, messages = self.direct_reader(
-                organization.scene,
-                query,
-                query_states,
-                organization.frame_scale,
-                self._module_measure_reference(organization.scene, query_states.dtype),
-                organization.direct_source_keys,
-                organization.direct_source_values,
-                return_messages=want_messages,
-                execution_backend=self.reader_execution_backend,
-                message_query_indices=direct_message_indices,
-            )
+            if self._uses_source_selection():
+                from .source_read_decoder_v1 import decode_selected_sources_v1
+                result = decode_selected_sources_v1(self, organization, query, query_states,
+                                                    return_messages=want_messages)
+                global_context, direct_access = result.context, result.alpha
+                direct_coefficients, messages = result.response, result.messages
+                source_read_work = result.counts
+                trace.update({name: value for name, value in result.trace.items() if name in selected})
+                direct_message_indices = None
+            else:
+                global_context, direct_access, direct_coefficients, messages = self.direct_reader(
+                    organization.scene, query, query_states, organization.frame_scale,
+                    self._module_measure_reference(organization.scene, query_states.dtype),
+                    organization.direct_source_keys, organization.direct_source_values,
+                    return_messages=want_messages, execution_backend=self.reader_execution_backend,
+                    message_query_indices=direct_message_indices)
             direct_messages_preselected = direct_message_indices is not None
             basis = None
             if "direct_source_access" in selected:
@@ -1241,7 +1415,10 @@ class ContentHypergraphCoreV2(nn.Module):
             if messages is not None and "direct_source_messages" in selected:
                 trace["direct_source_messages"] = messages
             if "direct_temperature_coefficients" in selected:
-                trace["direct_temperature_coefficients"] = direct_coefficients
+                trace["direct_temperature_coefficients"] = (
+                    direct_coefficients.explicit_dense_kernel()
+                    if direct_coefficients is not None and not isinstance(direct_coefficients, Tensor)
+                    else direct_coefficients)
 
         nonlinear_field = self.field_head(query_states, global_context, local_context)
         if query.query_mask is not None:
@@ -1268,6 +1445,7 @@ class ContentHypergraphCoreV2(nn.Module):
                     "edge_access", "edge_base_access", "edge_used_access", "edge_messages",
                     "thermal_basis", "edge_temperature_contributions", "direct_source_access",
                     "direct_source_messages", "direct_temperature_coefficients",
+                    "source_read_gates", "source_read_support",
                 } and value.ndim >= 2 and value.shape[1] == query.num_queries and not (
                     direct_messages_preselected and name == "direct_source_messages"
                 ):
@@ -1284,6 +1462,7 @@ class ContentHypergraphCoreV2(nn.Module):
             local_coefficients,
             local_pairs,
             bounded_trace or {},
+            source_read_work,
         )
 
     def decode(
@@ -1336,6 +1515,7 @@ class ContentHypergraphCoreV2(nn.Module):
         apply_controls: bool,
         trace: Mapping[str, Tensor] | None = None,
         trace_selected: set[str] | None = None,
+        source_read_work: Mapping[str, int] | None = None,
     ) -> dict[str, int]:
         """Count operations performed by one reader pass and its contraction."""
         batch, query_count = query.coordinates.shape[:2]
@@ -1407,6 +1587,19 @@ class ContentHypergraphCoreV2(nn.Module):
                     centroid_descriptor_rows * 7 * self.coordinate_dim
                 ),
             })
+        if source_read_work is not None:
+            fine_rows = int(source_read_work["fine_executed_rows"])
+            selected_rows = int(source_read_work["fine_selected_rows"])
+            full_fastpath = bool(source_read_work.get("source_full_fastpath", 0))
+            result.update({"direct_source_rows": fine_rows,
+                           "direct_source_message_entries": fine_rows * self.local_hidden_dim,
+                           "direct_dense_reference_entries": direct_rows if full_fastpath
+                               and self.thermal_response_rank else 0,
+                           "direct_temperature_coefficient_entries": (direct_rows if full_fastpath else selected_rows)
+                               if self.thermal_response_rank else 0,
+                           "direct_response_contraction_rows": (direct_rows if full_fastpath else selected_rows)
+                               if apply_controls else 0})
+            result.update({"source_read_" + name: int(value) for name, value in source_read_work.items()})
         return result
 
     def _decode_validated(
@@ -1435,6 +1628,7 @@ class ContentHypergraphCoreV2(nn.Module):
             local_coefficients,
             local_pairs,
             trace,
+            source_read_work,
         ) = self._decode_features(
             organization,
             query,
@@ -1453,6 +1647,7 @@ class ContentHypergraphCoreV2(nn.Module):
                 raise ValueError(f"controls must have shape {expected}.")
             if controls.device != organization.module_states.device:
                 raise ValueError("controls must be on the prepared organization's device.")
+            self._validate_source_read_endpoint(controls, organization.scene.module_mask)
             dtype = self._accumulation_dtype(accumulation_dtype, controls.dtype)
             if self.architecture == "A2-H6":
                 if basis is None or organization.source_coefficients is None:
@@ -1500,9 +1695,9 @@ class ContentHypergraphCoreV2(nn.Module):
             else:
                 if direct_coefficients is None:
                     raise ValueError("A2-D direct signed response coefficients are missing.")
-                direct = torch.einsum(
-                    "bqm,bm->bq", direct_coefficients.to(dtype), controls.to(dtype)
-                )
+                direct = (torch.einsum("bqm,bm->bq", direct_coefficients.to(dtype), controls.to(dtype))
+                          if isinstance(direct_coefficients, Tensor) else
+                          direct_coefficients.apply(controls, accumulation_dtype=dtype))
                 local = self._local_apply(
                     local_pairs,
                     local_coefficients,
@@ -1533,6 +1728,7 @@ class ContentHypergraphCoreV2(nn.Module):
             apply_controls=controls is not None,
             trace=trace,
             trace_selected=trace_selected,
+            source_read_work=source_read_work,
         )
         return CoreOutput(
             nonlinear_field=nonlinear_field,
@@ -1575,7 +1771,11 @@ class ContentHypergraphCoreV2(nn.Module):
                 uniform_access=uniform_access,
                 return_messages=False,
             )
-            return basis, None, local_pairs, local_coefficients
+            return basis, None, local_pairs, local_coefficients, None
+        if self._uses_source_selection():
+            from .source_read_decoder_v1 import decode_selected_sources_v1
+            result = decode_selected_sources_v1(self, organization, query, query_states)
+            return None, result.response, local_pairs, local_coefficients, result.counts
         _, _, direct, _ = self.direct_reader(
             organization.scene,
             query,
@@ -1587,7 +1787,7 @@ class ContentHypergraphCoreV2(nn.Module):
             return_messages=False,
             execution_backend=self.reader_execution_backend,
         )
-        return None, direct, local_pairs, local_coefficients
+        return None, direct, local_pairs, local_coefficients, None
 
     def apply_increment(
         self,
@@ -1608,7 +1808,7 @@ class ContentHypergraphCoreV2(nn.Module):
             raise ValueError("delta_controls must be on the prepared organization's device.")
         if not self.thermal_response_rank:
             raise ValueError("This v2 core was configured without affine thermal response.")
-        basis, direct, local_pairs, local_coefficients = self._read_for_response(
+        basis, direct, local_pairs, local_coefficients, source_read_work = self._read_for_response(
             organization,
             query,
             edge_gates=edge_gates,
@@ -1631,9 +1831,10 @@ class ContentHypergraphCoreV2(nn.Module):
             if direct is None:
                 raise ValueError("A2-D needs signed per-source thermal coefficients.")
             dtype = self._accumulation_dtype(accumulation_dtype, delta_controls.dtype)
-            increment = torch.einsum(
-                "bqm,bm->bq", direct.to(dtype), delta_controls.to(dtype)
-            ) + self._local_apply(
+            direct_increment = (torch.einsum("bqm,bm->bq", direct.to(dtype), delta_controls.to(dtype))
+                                if isinstance(direct, Tensor) else direct.apply(
+                                    delta_controls, accumulation_dtype=dtype, check_envelope=False))
+            increment = direct_increment + self._local_apply(
                 local_pairs,
                 local_coefficients,
                 delta_controls,
@@ -1649,6 +1850,7 @@ class ContentHypergraphCoreV2(nn.Module):
             local_pairs,
             field_head=False,
             apply_controls=True,
+            source_read_work=source_read_work,
         )
         return increment, work_counts
 
@@ -1690,7 +1892,7 @@ class ContentHypergraphCoreV2(nn.Module):
             raise ValueError("cotangent must be on the prepared organization's device.")
         if not self.thermal_response_rank:
             raise ValueError("This v2 core was configured without affine thermal response.")
-        basis, direct, local_pairs, local_coefficients = self._read_for_response(
+        basis, direct, local_pairs, local_coefficients, _source_read_work = self._read_for_response(
             organization,
             query,
             edge_gates=edge_gates,
@@ -1706,7 +1908,8 @@ class ContentHypergraphCoreV2(nn.Module):
         else:
             if direct is None:
                 raise ValueError("A2-D needs signed per-source thermal coefficients.")
-            gradient = torch.einsum("bq,bqm->bm", cotangent.to(dtype), direct.to(dtype))
+            gradient = (torch.einsum("bq,bqm->bm", cotangent.to(dtype), direct.to(dtype))
+                        if isinstance(direct, Tensor) else direct.transpose(cotangent, accumulation_dtype=dtype))
         if local_pairs.count:
             b, q, m = local_pairs.batch_index, local_pairs.query_index, local_pairs.module_index
             contribution = (
@@ -1733,7 +1936,7 @@ class ContentHypergraphCoreV2(nn.Module):
         self.validate_prepared_state(organization, query)
         self._validate_edge_intervention(organization, edge_gates, uniform_access)
         self._validate_local_intervention(organization, local_gates)
-        field, _, _, basis, direct, local_coefficients, local_pairs, _ = self._decode_features(
+        field, _, _, basis, direct, local_coefficients, local_pairs, _, source_read_work = self._decode_features(
             organization,
             query,
             return_trace=False,
@@ -1756,7 +1959,13 @@ class ContentHypergraphCoreV2(nn.Module):
             uniform_access=uniform_access,
             local_gates=local_gates,
             architecture=self.architecture,
+            source_read_work=source_read_work,
         )
+        if self._uses_source_selection():
+            tensors = (*_query_tensor_versions(query), *organization.scene.tensor_version_stamp(),
+                       *_factor_versions(prepared))
+            if any(stamp[-1] < 0 for stamp in tensors):
+                raise ValueError("Reusable source plans require versioned tensors; prepare under no_grad, not inference_mode.")
         return PreparedAffineQueryV2(**{**vars(prepared), "factor_versions": _factor_versions(prepared)})
 
     def _validate_affine_query(self, prepared: PreparedAffineQueryV2) -> None:
@@ -1780,6 +1989,7 @@ class ContentHypergraphCoreV2(nn.Module):
         controls: Tensor,
         *,
         accumulation_dtype: torch.dtype | None = None,
+        check_envelope: bool = True,
     ) -> CoreOutput:
         self._validate_affine_query(prepared_query)
         organization, query = prepared_query.organization, prepared_query.query
@@ -1787,6 +1997,8 @@ class ContentHypergraphCoreV2(nn.Module):
             raise ValueError("Affine controls must match the prepared physical source axis.")
         if controls.device != query.coordinates.device:
             raise ValueError("Affine controls must be on the prepared query device.")
+        if check_envelope:
+            self._validate_source_read_endpoint(controls, organization.scene.module_mask)
         dtype = self._accumulation_dtype(accumulation_dtype, controls.dtype)
         if prepared_query.basis is not None:
             temperature = self._factorized_apply(
@@ -1802,9 +2014,11 @@ class ContentHypergraphCoreV2(nn.Module):
         else:
             if prepared_query.direct_coefficients is None:
                 raise ValueError("A2-D affine cache is missing explicit direct coefficients.")
-            temperature = torch.einsum(
-                "bqm,bm->bq", prepared_query.direct_coefficients.to(dtype), controls.to(dtype)
-            )
+            direct_factors = prepared_query.direct_coefficients
+            temperature = (torch.einsum("bqm,bm->bq", direct_factors.to(dtype), controls.to(dtype))
+                           if isinstance(direct_factors, Tensor) else
+                           direct_factors.apply(controls, accumulation_dtype=dtype,
+                                                check_envelope=check_envelope))
             temperature = temperature + self._local_apply(
                 prepared_query.local_pairs,
                 prepared_query.local_coefficients,
@@ -1813,7 +2027,7 @@ class ContentHypergraphCoreV2(nn.Module):
                 query.num_queries,
                 dtype=dtype,
             )
-            direct_dense_entries = int(prepared_query.direct_coefficients.numel())
+            direct_dense_entries = int(direct_factors.numel()) if isinstance(direct_factors, Tensor) else 0
         if query.query_mask is not None:
             temperature = temperature * query.query_mask.to(dtype)
         return CoreOutput(
@@ -1853,7 +2067,10 @@ class ContentHypergraphCoreV2(nn.Module):
         else:
             if prepared_query.direct_coefficients is None:
                 raise ValueError("A2-D affine cache is missing explicit direct coefficients.")
-            gradient = torch.einsum("bq,bqm->bm", weights, prepared_query.direct_coefficients.to(dtype))
+            direct_factors = prepared_query.direct_coefficients
+            gradient = (torch.einsum("bq,bqm->bm", weights, direct_factors.to(dtype))
+                        if isinstance(direct_factors, Tensor) else
+                        direct_factors.transpose(weights, accumulation_dtype=dtype))
         pack = prepared_query.local_pairs
         if pack.count:
             b, q, m = pack.batch_index, pack.query_index, pack.module_index
@@ -1874,7 +2091,7 @@ class ContentHypergraphCoreV2(nn.Module):
         local_gates: Tensor | None = None,
     ) -> Tensor:
         """Explicitly materialize dense ``[B,Q,M]`` K for bounded diagnostics."""
-        basis, direct, local_pairs, local_coefficients = self._read_for_response(
+        basis, direct, local_pairs, local_coefficients, _source_read_work = self._read_for_response(
             organization,
             query,
             edge_gates=edge_gates,
@@ -1891,7 +2108,8 @@ class ContentHypergraphCoreV2(nn.Module):
         else:
             if direct is None:
                 raise ValueError("A2-D needs direct signed source coefficients to export kernels.")
-            kernels = direct.to(dtype)
+            kernels = (direct.to(dtype) if isinstance(direct, Tensor) else
+                       direct.explicit_dense_kernel(accumulation_dtype=dtype))
         if local_pairs.count:
             batch_size, query_count = query.coordinates.shape[:2]
             module_count = organization.scene.num_modules

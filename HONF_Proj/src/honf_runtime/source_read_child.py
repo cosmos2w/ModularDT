@@ -28,9 +28,24 @@ SOURCE_READ_CONFIG_FIELDS = frozenset((
     "source_read_policy", "source_read_executor", "source_read_rank", "source_read_scorer_width",
 ))
 MAX_AUXILIARY_UPDATES = 256
+AUXILIARY_OPTIMIZER_ALGORITHM = {
+    "name": "AdamW",
+    "scope": "inherited_joint_optimizer_new_source_read_parameters_only",
+    "learning_rate": 3.0e-4,
+    "weight_decay": 1.0e-5,
+    "betas": [0.9, 0.999],
+    "eps": 1.0e-8,
+    "gradient_clip": "global_norm",
+    "gradient_clip_norm": 1.0,
+    "gradient_clip_scope": "new_source_read_parameters",
+    "error_if_nonfinite": True,
+    "maximum_updates": MAX_AUXILIARY_UPDATES,
+}
 _SOURCE_PATH_ALLOWLIST = (
     "src/honf_forward_core/content_hypergraph/model_v2.py",
+    "src/honf_forward_core/content_hypergraph/contracts.py",
     "src/honf_forward_core/content_hypergraph/readers_v2.py",
+    "src/honf_forward_core/content_hypergraph/source_read_decoder_v1.py",
     "src/honf_forward_core/content_hypergraph/source_read_execution.py",
     "src/honf_forward_core/content_hypergraph/query_chunks_v1.py",
     "src/honf_forward_core/content_hypergraph/source_read_plans.py",
@@ -43,6 +58,7 @@ _SOURCE_PATH_ALLOWLIST = (
     "src/honf_runtime/source_read_qualification.py",
     "src/honf_runtime/unified_training.py",
     "tools/content_hypergraph_train.py",
+    "Case_ThermalChannel/src/channelthermal/content_hypergraph.py",
     "Case_ThermalChannel/src/channelthermal/training/content_hypergraph_task_v2.py",
     "Case_WindFarm/src/windfarm/training/content_hypergraph_task.py",
 )
@@ -57,6 +73,132 @@ def _state_digest(state: Mapping[str, torch.Tensor]) -> str:
         digest.update(str(tuple(array.shape)).encode())
         digest.update(array.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
+
+
+def _validate_train_fidelity_screen(value: Any) -> None:
+    fields = {
+        "schema", "partition", "scope", "pair_denominator", "thresholds",
+        "target_union_retention", "target_union_pair_counts", "union_pair_count",
+        "physical_pair_count", "query_count", "near_protected_union_pair_count",
+        "actual_union_pair_counts", "actual_physical_pair_counts", "actual_union_retention",
+        "actual_physical_pair_retention", "target_infeasible_due_to_near_protection",
+        "actual_target_overrun_pair_counts", "flow_direct_context_relative_rms",
+        "flow_direct_context_head_relative_rms", "thermal_positive_H_endpoint_relative_rms",
+        "thermal_kernel_relative_rms", "thermal_temperature_scale",
+        "thermal_target_scale_convention", "primary_operating_point", "selection_reason",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError("Source-read TRAIN fidelity screen fields/schema are not exact.")
+    if (value.get("schema") != "source_read_train_fidelity_screen_v1"
+            or value.get("partition") != "TRAIN"
+            or value.get("scope") != "bounded_dense_teacher_rows_at_most_256_per_train_case"
+            or value.get("pair_denominator") != "positive_or_near_protected_physical_pair_union"):
+        raise ValueError("Source-read TRAIN fidelity screen has the wrong declared scope.")
+
+    def integer(name: str, *, minimum: int = 0) -> int:
+        result = value.get(name)
+        if type(result) is not int or result < minimum:
+            raise ValueError(f"Source-read TRAIN fidelity screen {name} is malformed.")
+        return result
+
+    def numbers(name: str, count: int) -> list[float]:
+        result = value.get(name)
+        if (not isinstance(result, list) or len(result) != count
+                or any(type(item) not in (int, float) or not math.isfinite(item) or item < 0
+                       for item in result)):
+            raise ValueError(f"Source-read TRAIN fidelity screen {name} is malformed.")
+        return [float(item) for item in result]
+
+    thresholds = numbers("thresholds", 2)
+    targets = value.get("target_union_retention")
+    if targets != [0.75, 0.50]:
+        raise ValueError("Source-read TRAIN screen must report the two fixed 75%/50% targets.")
+    union_rows = integer("union_pair_count", minimum=1)
+    physical_rows = integer("physical_pair_count", minimum=1)
+    integer("query_count", minimum=1)
+    protected_rows = integer("near_protected_union_pair_count")
+    if protected_rows > union_rows or union_rows > physical_rows:
+        raise ValueError("Source-read TRAIN screen pair counts are inconsistent.")
+    target_counts = value.get("target_union_pair_counts")
+    expected_target_counts = [max(1, math.ceil(fraction * union_rows)) for fraction in (0.75, 0.50)]
+    if target_counts != expected_target_counts:
+        raise ValueError("Source-read TRAIN screen target row counts do not match its fixed cohort union.")
+    active_union = value.get("actual_union_pair_counts")
+    active_physical = value.get("actual_physical_pair_counts")
+    if (not isinstance(active_union, list) or len(active_union) != 2
+            or not isinstance(active_physical, list) or len(active_physical) != 2
+            or any(type(item) is not int or not 0 <= item <= union_rows for item in active_union)
+            or any(type(item) is not int or not 0 <= item <= physical_rows for item in active_physical)):
+        raise ValueError("Source-read TRAIN screen achieved pair counts are malformed.")
+    actual_union = numbers("actual_union_retention", 2)
+    actual_physical = numbers("actual_physical_pair_retention", 2)
+    if any(not math.isclose(actual_union[i], active_union[i] / union_rows, rel_tol=0.0, abs_tol=1e-15)
+           or not math.isclose(actual_physical[i], active_physical[i] / physical_rows,
+                               rel_tol=0.0, abs_tol=1e-15) for i in range(2)):
+        raise ValueError("Source-read TRAIN screen achieved retention differs from its counts.")
+    near_limited = value.get("target_infeasible_due_to_near_protection")
+    overruns = value.get("actual_target_overrun_pair_counts")
+    if (not isinstance(near_limited, list) or near_limited != [
+            protected_rows > target_counts[0], protected_rows > target_counts[1]]
+            or not isinstance(overruns, list) or len(overruns) != 2
+            or any(type(item) is not int or item != max(0, active_union[i] - target_counts[i])
+                   for i, item in enumerate(overruns))):
+        raise ValueError("Source-read TRAIN screen does not disclose near-protection target infeasibility.")
+
+    flow = numbers("flow_direct_context_relative_rms", 2)
+    by_head = value.get("flow_direct_context_head_relative_rms")
+    if (not isinstance(by_head, list) or len(by_head) != 2
+            or any(not isinstance(row, list) or not row for row in by_head)
+            or len(by_head[0]) != len(by_head[1])
+            or any(type(item) not in (int, float) or not math.isfinite(item) or item < 0
+                   for row in by_head for item in row)):
+        raise ValueError("Source-read TRAIN screen headwise context distortion is malformed.")
+    thermal_endpoint = value.get("thermal_positive_H_endpoint_relative_rms")
+    thermal_kernel = value.get("thermal_kernel_relative_rms")
+    if (thermal_endpoint is None) != (thermal_kernel is None):
+        raise ValueError("Source-read TRAIN screen Thermal distortion metrics must be paired.")
+    if thermal_endpoint is not None:
+        thermal_endpoint = numbers("thermal_positive_H_endpoint_relative_rms", 2)
+        thermal_kernel = numbers("thermal_kernel_relative_rms", 2)
+        if (value.get("thermal_temperature_scale") != 1.0
+                or value.get("thermal_target_scale_convention") !=
+                "native_core_K_is_TRAIN_standardized_temperature_per_heat; auxiliary_sT=1"):
+            raise ValueError("Thermal source-read utility targets must retain the native TRAIN temperature scale sT=1.")
+    elif (value.get("thermal_temperature_scale") is not None
+          or value.get("thermal_target_scale_convention") is not None):
+        raise ValueError("Nonthermal source-read screen cannot declare a Thermal target scale.")
+    primary = value.get("primary_operating_point")
+    reason = value.get("selection_reason")
+    if type(primary) is not int or primary not in (0, 1):
+        raise ValueError("Source-read TRAIN screen primary operating point is malformed.")
+    if primary == 0 and reason == "least_aggressive_useful_75":
+        if active_physical[0] >= physical_rows:
+            raise ValueError("TRAIN screen calls the 75% point useful without reducing physical reads.")
+    elif primary == 0 and reason == "no_useful_point_default75":
+        if active_physical[0] < physical_rows:
+            raise ValueError("TRAIN screen reports no useful point despite 75% support savings.")
+        metrics_75 = [flow[0], *by_head[0]]
+        metrics_50 = [flow[1], *by_head[1]]
+        if thermal_endpoint is not None:
+            metrics_75.extend((thermal_endpoint[0], thermal_kernel[0]))
+            metrics_50.extend((thermal_endpoint[1], thermal_kernel[1]))
+        if (active_physical[1] < active_physical[0]
+                and all(after <= before + 1.0e-12 for after, before in zip(metrics_50, metrics_75))):
+            raise ValueError("TRAIN screen ignored a cheaper 50% point with no worse measured distortion.")
+    elif primary == 1 and reason == "75_no_savings_use_50_without_worse_screen":
+        if active_physical[0] < physical_rows or active_physical[1] >= active_physical[0]:
+            raise ValueError("TRAIN screen selected 50% without a cost improvement over an unhelpful 75% point.")
+        metrics_75 = [flow[0], *by_head[0]]
+        metrics_50 = [flow[1], *by_head[1]]
+        if thermal_endpoint is not None:
+            metrics_75.extend((thermal_endpoint[0], thermal_kernel[0]))
+            metrics_50.extend((thermal_endpoint[1], thermal_kernel[1]))
+        if any(after > before + 1.0e-12 for after, before in zip(metrics_50, metrics_75)):
+            raise ValueError("TRAIN screen selected 50% despite worse bounded TRAIN fidelity.")
+    else:
+        raise ValueError("Source-read TRAIN screen selection reason and primary point disagree.")
+    if thresholds[0] <= 0 or thresholds[1] <= 0:
+        raise ValueError("Source-read TRAIN screen thresholds must be finite and positive.")
 
 
 def _inventory(state: Mapping[str, torch.Tensor]) -> dict[str, Any]:
@@ -743,8 +885,11 @@ def run_source_read_child_auxiliary_fit(
         "train_case_count", "auxiliary_fit_case_keys", "auxiliary_fit_case_count",
         "auxiliary_fit_case_share", "teacher_rows", "optimizer_updates",
         "updated_parameter_names", "changed_buffer_names", "optimizer_steps_by_parameter",
+        "optimizer_algorithm", "train_fidelity_screen", "gradient_calibration",
     }
-    if set(receipt) != required_receipt or receipt.get("schema") != AUXILIARY_FIT_SCHEMA:
+    if (not required_receipt.issubset(receipt)
+            or set(receipt) - (required_receipt | {"teacher_present_rows"})
+            or receipt.get("schema") != AUXILIARY_FIT_SCHEMA):
         raise ValueError("Source-read auxiliary callback receipt fields/schema are not exact.")
     train_ids = list(train_case_keys)
     train_case_count = receipt.get("train_case_count")
@@ -752,10 +897,50 @@ def run_source_read_child_auxiliary_fit(
     steps = receipt.get("optimizer_steps_by_parameter")
     updates = receipt.get("optimizer_updates")
     teacher_rows = receipt.get("teacher_rows")
+    teacher_present_rows = receipt.get("teacher_present_rows")
     fit_case_keys = receipt.get("auxiliary_fit_case_keys")
     fit_case_count = receipt.get("auxiliary_fit_case_count")
     fit_case_share = receipt.get("auxiliary_fit_case_share")
     changed_buffers = receipt.get("changed_buffer_names")
+    optimizer_algorithm = receipt.get("optimizer_algorithm")
+    gradient_calibration = receipt.get("gradient_calibration")
+    if (not isinstance(gradient_calibration, Mapping)
+            or gradient_calibration.get("schema") != "source_read_gradient_calibration_v1"
+            or gradient_calibration.get("partition") != "TRAIN"):
+        raise ValueError("Source-read auxiliary fit lacks its fixed TRAIN gradient-calibration receipt.")
+    try:
+        physical_gradient_norm = float(gradient_calibration["physical_all_inherited_parameter_gradient_l2_norm"])
+        auxiliary_gradient_norm = float(gradient_calibration["auxiliary_all_new_parameter_gradient_l2_norm"])
+        fixed_coefficient = float(gradient_calibration["fixed_auxiliary_coefficient"])
+        realized_gradient_share = float(
+            gradient_calibration["realized_weighted_auxiliary_to_physical_gradient_share"]
+        )
+        maximum_gradient_share = float(gradient_calibration["maximum_gradient_share"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Source-read auxiliary gradient-calibration receipt is incomplete.") from exc
+    expected_coefficient = (
+        min(1.0, 0.05 * physical_gradient_norm / auxiliary_gradient_norm)
+        if auxiliary_gradient_norm > 0 else float("nan")
+    )
+    expected_gradient_share = (
+        fixed_coefficient * auxiliary_gradient_norm / physical_gradient_norm
+        if physical_gradient_norm > 0 else 0.0
+    )
+    if (not all(math.isfinite(value) for value in (
+            physical_gradient_norm, auxiliary_gradient_norm, fixed_coefficient,
+            realized_gradient_share, maximum_gradient_share))
+            or physical_gradient_norm < 0 or auxiliary_gradient_norm <= 0
+            or not 0.0 <= fixed_coefficient <= 1.0
+            or maximum_gradient_share != 0.05
+            or fixed_coefficient != expected_coefficient
+            or realized_gradient_share != expected_gradient_share
+            or realized_gradient_share < 0.0
+            or realized_gradient_share > 0.05 + 1.0e-12):
+        raise ValueError("Source-read auxiliary gradient-calibration receipt violates the fixed 5% TRAIN rule.")
+    if (not isinstance(optimizer_algorithm, Mapping)
+            or dict(optimizer_algorithm) != AUXILIARY_OPTIMIZER_ALGORITHM):
+        raise ValueError("Source-read auxiliary optimizer algorithm differs from the fixed TRAIN procedure.")
+    _validate_train_fidelity_screen(receipt.get("train_fidelity_screen"))
     actual_changed_buffers = []
     for name, before in before_buffers.items():
         after = buffers[name].detach().cpu()
@@ -776,6 +961,9 @@ def run_source_read_child_auxiliary_fit(
             or not math.isclose(fit_case_share, fit_case_count / train_case_count,
                                 rel_tol=0.0, abs_tol=1e-15)
             or type(teacher_rows) is not int or teacher_rows <= 0
+            or (teacher_present_rows is not None
+                and (type(teacher_present_rows) is not int
+                     or not 0 <= teacher_present_rows <= teacher_rows))
             or type(updates) is not int or not 1 <= updates <= limit
             or not isinstance(updated, list) or not updated or updated != sorted(set(updated))
             or set(updated) - name_set
@@ -840,7 +1028,7 @@ def verify_source_read_child_continuation(contract: Mapping[str, Any], stop_afte
 
 
 __all__ = [
-    "AUXILIARY_FIT_SCHEMA", "MAX_AUXILIARY_UPDATES", "SCHEMA",
+    "AUXILIARY_FIT_SCHEMA", "AUXILIARY_OPTIMIZER_ALGORITHM", "MAX_AUXILIARY_UPDATES", "SCHEMA",
     "prepare_source_read_child", "run_source_read_child_auxiliary_fit",
     "source_read_child_provider_state", "verify_source_read_child_continuation",
     "verify_source_read_child_optimizer",

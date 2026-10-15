@@ -131,6 +131,21 @@ def test_near_gate_broadcasts_varied_per_source_radii_and_keeps_radius_gradients
         smooth_near_gate(distance.detach(), torch.tensor([[[1.0, 0.0, 4.0]]]))
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_smooth_gate_polynomials_preserve_strict_range_near_flat_endpoints(dtype):
+    # The quintic has cancellation near one in FP32; a strict plan must never
+    # reject a valid smooth gate because its rounded value slightly exceeds one.
+    values = torch.linspace(0.0, 2.0, 100_001, dtype=dtype, requires_grad=True)
+    utility = smooth_threshold_gate(values, 0.5)
+    near = smooth_near_gate(values, 1.0)
+    for gate in (utility, near, combine_source_gates(utility, near)):
+        assert torch.isfinite(gate).all()
+        assert ((gate >= 0.0) & (gate <= 1.0)).all()
+    gradient = torch.autograd.grad((utility + near).sum(), values)[0]
+    assert torch.isfinite(gradient).all()
+    assert gradient[0] == 0.0 and gradient[-1] == 0.0
+
+
 def test_plan_gate_validation_rejects_nonfinite_or_out_of_range_cpu_values():
     alpha = torch.zeros(1, 1, 2, 4)
     present = torch.ones(1, 2, dtype=torch.bool)

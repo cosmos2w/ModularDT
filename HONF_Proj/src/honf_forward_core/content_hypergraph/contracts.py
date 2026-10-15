@@ -367,6 +367,10 @@ class PreparedOrganizationV2:
     module_content_valid: Tensor | None = None
     environment_content_valid: Tensor | None = None
     content_geometry_versions: tuple[tuple[int, int, int], ...] = ()
+    source_read_source_projection: Tensor | None = None
+    source_read_completion_source: Tensor | None = None
+    source_read_projection_versions: tuple[tuple[int, int, int], ...] = ()
+    source_read_input_versions: tuple[tuple[int, int, int], ...] = ()
 
     @property
     def num_hyperedges(self) -> int:

@@ -300,6 +300,9 @@ class DirectSourceReaderV2(nn.Module):
         heads: int = 4,
         thermal: bool = True,
         source_value_conditioning: str = "none",
+        source_read_policy: str = "full",
+        source_read_rank: int = 16,
+        source_read_scorer_width: int = 32,
     ) -> None:
         super().__init__()
         if width % heads:
@@ -311,6 +314,17 @@ class DirectSourceReaderV2(nn.Module):
         if source_value_conditioning not in {"none", "source_scale"}:
             raise ValueError("source_value_conditioning must be 'none' or 'source_scale'.")
         self.source_value_conditioning = source_value_conditioning
+        if source_read_policy not in ("full", "utility", "completion"):
+            raise ValueError("Unsupported source_read_policy.")
+        self.source_read = None
+        if source_read_policy != "full":
+            from .source_read_plans import SourceReadControllerV1
+            self.source_read = SourceReadControllerV1(
+                width, coordinate_dim, heads=heads, thermal=thermal, rank=source_read_rank,
+                scorer_width=source_read_scorer_width, completion=source_read_policy == "completion")
+            self.source_read.register_buffer("primary_operating_point", torch.zeros((), dtype=torch.long))
+            self.source_read.register_buffer("transition_lambda", torch.ones(()))
+            self.source_read.register_buffer("training_epoch", torch.full((), -1, dtype=torch.long))
         self.query_norm = nn.LayerNorm(width)
         self.source_norm = nn.LayerNorm(width)
         self.query_key = nn.Linear(width, width, bias=False)

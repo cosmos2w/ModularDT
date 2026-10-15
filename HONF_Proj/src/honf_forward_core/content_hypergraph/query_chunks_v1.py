@@ -30,6 +30,34 @@ def slice_query_v1(query: QueryBatch, start: int, stop: int) -> QueryBatch:
     return replace(query, **values)
 
 
+def select_query_rows_v1(query: QueryBatch, indices: torch.Tensor) -> QueryBatch:
+    """Select explicit unique receiver rows, retaining IDs and live support.
+
+    Unlike a retained sparse-plan reorder, this creates a new query request
+    before planning. Native observations must still be formed on their full
+    query union; this bounded selection is intended for TRAIN teacher probes.
+    """
+    indices = torch.as_tensor(indices, dtype=torch.long, device=query.coordinates.device)
+    if indices.ndim != 1 or indices.unique().numel() != indices.numel():
+        raise ValueError("Query row selection must be one-dimensional and unique.")
+    in_bounds = ((indices >= 0) & (indices < query.num_queries)).all()
+    if in_bounds.is_cuda:
+        torch._assert_async(in_bounds, "Query row selection is outside the receiver axis.")
+    elif not bool(in_bounds):
+        raise ValueError("Query row selection is outside the receiver axis.")
+    values = {name: getattr(query, name).index_select(1, indices) if getattr(query, name) is not None else None
+              for name in ("coordinates", "features", "query_mask", "query_ids")}
+    if query.local_query_indices is not None:
+        mapping = indices.new_full((query.num_queries,), -1).index_copy(
+            0, indices, torch.arange(indices.numel(), device=indices.device))
+        selected_local = mapping[query.local_query_indices]
+        keep = selected_local >= 0
+        for name in ("local_batch_indices", "local_module_indices", "local_weights"):
+            values[name] = getattr(query, name)[keep]
+        values["local_query_indices"] = selected_local[keep]
+    return replace(query, **values)
+
+
 def decode_query_chunks_v1(
     query: QueryBatch, chunk_size: int, decode_validated: Callable[[QueryBatch], CoreOutput],
 ) -> CoreOutput:

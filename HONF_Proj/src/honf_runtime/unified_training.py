@@ -1377,6 +1377,46 @@ def _denominator(value: float | torch.Tensor) -> float:
     return result
 
 
+def _source_read_primary_fine_rows(work_counts: Mapping[str, Any]) -> int:
+    """Read actual fine source-pair work, allowing an empty selected union."""
+    if not isinstance(work_counts, Mapping):
+        raise TypeError("Source-read fine exposure requires the native work-count mapping.")
+    executed_keys = [
+        name for name in work_counts
+        if isinstance(name, str) and name.startswith("core_decode_")
+        and "response" not in name and name.endswith("_source_read_fine_executed_rows")
+    ]
+    # Dense D0/D-scale parents report their actual full direct-source pair rows.
+    selected = executed_keys or [
+        name for name in work_counts
+        if isinstance(name, str) and name.startswith("core_decode_")
+        and "response" not in name and name.endswith("_direct_source_rows")
+    ]
+    if not selected:
+        raise ValueError("Native A2-D work counts omitted actual primary fine source-pair rows.")
+    values = []
+    for name in selected:
+        value = work_counts[name]
+        if (type(value) not in (int, float) or not math.isfinite(float(value))
+                or value < 0 or not float(value).is_integer()):
+            raise ValueError(f"Native fine-work counter {name!r} must be a nonnegative integer count.")
+        values.append(int(value))
+    return sum(values)
+
+
+def _source_read_history_fine_rows(history: Sequence[Mapping[str, Any]]) -> int:
+    """Sum measured dense primary fine pairs from every inherited epoch."""
+    if not history:
+        raise ValueError("Sparse source-read attachment requires inherited physical history.")
+    total = 0
+    for row in history:
+        work = row.get("work_counts")
+        total += _source_read_primary_fine_rows(work if isinstance(work, Mapping) else {})
+    if total <= 0:
+        raise ValueError("Sparse source-read attachment requires positive measured inherited fine exposure.")
+    return total
+
+
 def _macro_update_slices(count: int, effective_cases: int) -> Iterable[slice]:
     for start in range(0, count, effective_cases):
         yield slice(start, min(start + effective_cases, count))
@@ -2514,6 +2554,8 @@ class TrainingEngine:
         epoch: int,
         update_index: int,
         loss_weight_overrides: Mapping[str, float] | None = None,
+        source_read_ordinary_update_index: int | None = None,
+        source_read_primary_fine_rows: int | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, float], str | None]:
         planned = {
             name: _denominator(value)
@@ -2528,6 +2570,19 @@ class TrainingEngine:
         work: dict[str, float] = {}
         sampling_records: list[str] = []
         optimizer.zero_grad(set_to_none=True)
+        source_read_manager = getattr(provider, "source_read_auxiliary_manager", None)
+        if source_read_manager is not None:
+            if (source_read_ordinary_update_index is None or source_read_primary_fine_rows is None
+                    or type(source_read_ordinary_update_index) is not int
+                    or type(source_read_primary_fine_rows) is not int):
+                raise ValueError("Sparse source-read updates require absolute auxiliary clocks and measured fine exposure.")
+            source_read_manager.before_update(
+                model,
+                provider,
+                absolute_epoch=int(epoch),
+                ordinary_update_index=source_read_ordinary_update_index,
+                primary_fine_rows=source_read_primary_fine_rows,
+            )
         for batch in microbatches:
             batch_auxiliary = batch.auxiliary if isinstance(batch.auxiliary, Mapping) else {}
             sample_hash = batch_auxiliary.get("query_sampling_sha256")
@@ -2575,12 +2630,64 @@ class TrainingEngine:
             actual = observed.get(name, 0.0)
             if not math.isclose(actual, expected, rel_tol=1.0e-6, abs_tol=1.0e-7):
                 raise ValueError(f"Actual denominator for {name!r} ({actual}) differs from prepass ({expected}).")
+        primary_fine_rows = None
+        if source_read_manager is not None:
+            primary_fine_rows = _source_read_primary_fine_rows(work)
+            named_model_parameters = dict(model.named_parameters())
+            auxiliary_parameters = {
+                name: named_model_parameters[name]
+                for name in named_model_parameters
+                if "direct_reader.source_read." in name
+            }
+            if not auxiliary_parameters:
+                raise ValueError("Sparse source-read model has no named controller parameters for gradient telemetry.")
+            native_squared_norm = 0.0
+            for group in optimizer.param_groups:
+                for parameter in group["params"]:
+                    if parameter.grad is not None:
+                        native_squared_norm += float(
+                            parameter.grad.detach().to(torch.float64).square().sum().item()
+                        )
+            native_norm = math.sqrt(native_squared_norm)
+            auxiliary_before = {
+                name: None if parameter.grad is None else parameter.grad.detach().clone()
+                for name, parameter in auxiliary_parameters.items()
+            }
+            auxiliary_loss = source_read_manager.auxiliary_loss(model)
+            if (not torch.is_tensor(auxiliary_loss) or auxiliary_loss.numel() != 1
+                    or not auxiliary_loss.requires_grad or not bool(torch.isfinite(auxiliary_loss.detach()))):
+                raise ValueError("Sparse source-read auxiliary loss must be a finite differentiable scalar.")
+            auxiliary_loss.backward()
+            auxiliary_squared_norm = 0.0
+            for name, parameter in auxiliary_parameters.items():
+                before = auxiliary_before[name]
+                after = parameter.grad
+                if after is None:
+                    continue
+                contribution = after.detach() if before is None else after.detach() - before
+                auxiliary_squared_norm += float(
+                    contribution.to(torch.float64).square().sum().item()
+                )
+            gradient_recorder = getattr(source_read_manager, "record_gradient_balance", None)
+            if not callable(gradient_recorder):
+                raise ValueError("Sparse source-read manager must record native/auxiliary gradient balance.")
+            gradient_recorder(
+                native_norm=native_norm,
+                weighted_auxiliary_norm=math.sqrt(auxiliary_squared_norm),
+            )
+            losses["source_read_auxiliary"] = float(auxiliary_loss.detach())
         parameters = [parameter for group in optimizer.param_groups for parameter in group["params"]
                       if parameter.grad is not None]
         norm = torch.nn.utils.clip_grad_norm_(parameters, self.config.gradient_clip)
         if not torch.isfinite(norm) or norm <= 0:
             raise FloatingPointError("Nonfinite or zero actual parameter gradient.")
         optimizer.step()
+        if source_read_manager is not None:
+            assert source_read_primary_fine_rows is not None and primary_fine_rows is not None
+            source_read_manager.record_primary_fine_rows(
+                source_read_primary_fine_rows + primary_fine_rows
+            )
+            work["source_read_primary_fine_rows"] = float(primary_fine_rows)
         work["gradient_norm"] = float(norm.detach())
         sampling_hash = hashlib.sha256(
             json.dumps(sampling_records, separators=(",", ":")).encode("utf-8")
@@ -2691,8 +2798,9 @@ class TrainingEngine:
         sampler_state: Mapping[str, Any],
         group_specs: Sequence[OptimizerGroupSpec],
         provider_training_state: Mapping[str, Any] | None = None,
+        source_read_auxiliary_state: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "checkpoint_schema_version": 1,
             "workflow": identity.get("workflow", "unified_interaction_refinement"),
             "experiment_identity": _cpu_tree(identity),
@@ -2710,6 +2818,9 @@ class TrainingEngine:
             "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in group_specs],
             "provider_training_state": _cpu_tree(provider_training_state or {}),
         }
+        if source_read_auxiliary_state is not None:
+            payload["source_read_auxiliary_state"] = _cpu_tree(source_read_auxiliary_state)
+        return payload
 
     @_exclusive_training_run
     def fit(
@@ -2762,6 +2873,18 @@ class TrainingEngine:
                 raise ValueError("Exact resume requires this run's current latest checkpoint; historical checkpoints cannot rewind history.")
         identity = dict(identity)
         provider_identity = dict(provider.identity_payload())
+        source_reader_variant = provider_identity.get("source_reader_variant")
+        is_source_read_sparse = source_reader_variant in ("S-Utility", "S-Complete")
+        source_read_scope = provider_identity.get("protocol")
+        if source_read_child is not None and not is_source_read_sparse:
+            raise ValueError("A source-read child requires an S-Utility or S-Complete provider identity.")
+        if is_source_read_sparse:
+            if source_read_scope != "source_read_development_v1":
+                raise ValueError("TRAIN-calibrated sparse attachment currently requires source-read development scope.")
+            if source_read_child is None and resume_checkpoint is None:
+                raise ValueError("Sparse source-read providers must attach from the declared dense e500 child checkpoint.")
+        elif source_read_child is not None or source_read_child_auxiliary_fit is not None:
+            raise ValueError("Source-read auxiliary fitting is reserved for calibrated sparse S-variant children.")
         fresh_initialization = identity.get("fresh_initialization")
         fresh_provider = provider_identity.get("fresh_matched_comparison") is True
         if (fresh_initialization is not None) != fresh_provider:
@@ -2831,6 +2954,10 @@ class TrainingEngine:
             raise ValueError("A source-read child requires one fresh joint A2-D branch from its named dense parent.")
         if source_read_child_auxiliary_fit is not None and source_read_child is None:
             raise ValueError("A source-read auxiliary-fit callback is valid only during its declared child attachment.")
+        if source_read_child is not None and (
+                source_read_child.get("auxiliary_fit_mode") != "calibrated"
+                or source_read_child_auxiliary_fit is None):
+            raise ValueError("Sparse source-read children require the declared bounded TRAIN calibration callback.")
         if diagnostic_age_branch is not None and (
                 branch_from_checkpoint is None or resume_checkpoint is not None
                 or allow_microbatch_change or mathematical_route_branch is not None
@@ -3029,6 +3156,50 @@ class TrainingEngine:
                 added_parameter_names=source_read_child["added_parameter_names"],
                 train_case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
                 rng_devices=rng_devices)
+        source_read_manager = getattr(provider, "source_read_auxiliary_manager", None)
+        if is_source_read_sparse:
+            from .source_read_auxiliary import make_source_read_auxiliary_manager
+
+            expected_train_keys = tuple(provider.epoch_cases(start_epoch, self.config.seed))
+            if source_read_child is not None:
+                if source_read_manager is None:
+                    raise ValueError("Calibrated sparse source-read attachment did not install its manager.")
+                if source_read_manager.parent_sha256 != source_read_child.get("source_checkpoint_sha256"):
+                    raise ValueError("Sparse source-read manager is bound to a different e500 parent checkpoint.")
+                inherited_history = source_payload.get("history", [])
+                inherited_updates = sum(int(row["optimizer_updates"]) for row in inherited_history)
+                inherited_fine_rows = _source_read_history_fine_rows(inherited_history)
+                source_read_manager.initialize_inherited_exposure(
+                    ordinary_update_index=inherited_updates,
+                    primary_fine_rows=inherited_fine_rows,
+                    absolute_epoch=500,
+                )
+            else:
+                saved_auxiliary_state = source_payload.get("source_read_auxiliary_state")
+                branch_binding = source_payload.get("branch_parent")
+                child_binding = (branch_binding.get("source_read_child")
+                                 if isinstance(branch_binding, Mapping) else None)
+                if not isinstance(saved_auxiliary_state, Mapping) or not isinstance(child_binding, Mapping):
+                    raise ValueError("Sparse exact resume is missing its separate manager state or dense-child binding.")
+                if child_binding.get("auxiliary_fit_mode") != "calibrated":
+                    raise ValueError("Sparse exact resume is not bound to a calibrated dense e500 child.")
+                source_read_manager = make_source_read_auxiliary_manager(
+                    model,
+                    provider,
+                    train_case_keys=expected_train_keys,
+                    parent_sha256=child_binding.get("source_checkpoint_sha256"),
+                )
+                source_read_manager.load_state_dict(saved_auxiliary_state)
+                saved_history = source_payload.get("history", [])
+                expected_updates = sum(int(row["optimizer_updates"]) for row in saved_history)
+                expected_fine_rows = _source_read_history_fine_rows(saved_history)
+                if (source_read_manager.last_ordinary_update_index != expected_updates
+                        or source_read_manager.last_absolute_epoch != int(source_payload["epoch"])
+                        or source_read_manager.last_primary_fine_rows != expected_fine_rows):
+                    raise ValueError("Sparse auxiliary clocks differ from the exact checkpoint history and work counts.")
+                setattr(provider, "source_read_auxiliary_manager", source_read_manager)
+        elif source_payload is not None and "source_read_auxiliary_state" in source_payload:
+            raise ValueError("A non-sparse lineage cannot restore source-read auxiliary manager state.")
         history = list(source_payload.get("history", [])) if source_payload is not None else []
         if fresh_initialization is not None and source_payload is not None:
             first_epoch_row = next((row for row in history if int(row.get("epoch", -1)) == 1), None)
@@ -3211,6 +3382,10 @@ class TrainingEngine:
                     }
                 epoch_started = time.perf_counter()
                 ordered_cases, sampling_dataset_id = self.epoch_case_order(provider, epoch)
+                source_read_epoch_fine_rows_before = (
+                    source_read_manager.last_primary_fine_rows
+                    if source_read_manager is not None else None
+                )
                 if diagnostic_contract is not None and (
                         len(set(ordered_cases)) != len(ordered_cases)
                         or set(ordered_cases) != set(diagnostic_contract["fit_case_keys"])
@@ -3242,8 +3417,28 @@ class TrainingEngine:
                             provider, arm=arm, phase=phase, epoch=epoch,
                             update_index=update_index, update_cases=update_cases,
                             sampling_dataset_id=sampling_dataset_id)
-                        losses, work, denominators, sampling_hash = self._run_update(model, provider, optimizer, microbatches,
-                            phase=phase, arm=arm, epoch=epoch, update_index=update_index)
+                        update_kwargs = {}
+                        if source_read_manager is not None:
+                            update_kwargs = {
+                                "source_read_ordinary_update_index": completed_updates + len(update_rows) + 1,
+                                "source_read_primary_fine_rows": source_read_manager.last_primary_fine_rows,
+                            }
+                        losses, work, denominators, sampling_hash = self._run_update(
+                            model, provider, optimizer, microbatches,
+                            phase=phase, arm=arm, epoch=epoch, update_index=update_index,
+                            **update_kwargs,
+                        )
+                        source_read_auxiliary_update = None
+                        if source_read_manager is not None:
+                            weighted_auxiliary_loss = losses.pop("source_read_auxiliary", None)
+                            if weighted_auxiliary_loss is None:
+                                raise ValueError("Sparse source-read update omitted its separate auxiliary loss.")
+                            source_read_auxiliary_update = {
+                                "weighted_loss": float(weighted_auxiliary_loss),
+                                "loss_components": dict(source_read_manager.last_loss_components),
+                                "gradient_balance": copy.deepcopy(source_read_manager.last_gradient_balance),
+                                "refresh": copy.deepcopy(source_read_manager.last_refresh),
+                            }
                         if capture_fresh_stream:
                             if sampling_hash is None:
                                 raise ValueError("Fresh matched epoch 1 requires observed receiver/query-ID hashes.")
@@ -3259,9 +3454,12 @@ class TrainingEngine:
                                 "update_index": update_index,
                                 "denominators": {name: float(value) for name, value in sorted(denominators.items())},
                             })
-                        update_rows.append({"losses": losses, "work": work, "case_count": len(update_cases),
-                                            "microbatch_count": len(microbatches),
-                                            "query_sampling_sha256": sampling_hash})
+                        update_row = {"losses": losses, "work": work, "case_count": len(update_cases),
+                                      "microbatch_count": len(microbatches),
+                                      "query_sampling_sha256": sampling_hash}
+                        if source_read_auxiliary_update is not None:
+                            update_row["source_read_auxiliary"] = source_read_auxiliary_update
+                        update_rows.append(update_row)
                         loss_value = sum(float(value) for value in losses.values())
                         lr_values = ",".join(
                             f"{group['group_name']}:{float(group['lr']):.1e}" for group in optimizer.param_groups
@@ -3304,6 +3502,63 @@ class TrainingEngine:
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                     "case_order_sha256": order_hash,
                 }
+                if source_read_manager is not None:
+                    auxiliary_updates = [
+                        item["source_read_auxiliary"] for item in update_rows
+                        if isinstance(item.get("source_read_auxiliary"), Mapping)
+                    ]
+                    if (not auxiliary_updates or source_read_epoch_fine_rows_before is None
+                            or source_read_manager.last_primary_fine_rows < source_read_epoch_fine_rows_before):
+                        raise ValueError("Sparse source-read epoch lacks separate auxiliary telemetry or monotone work counts.")
+                    component_rows = [entry["loss_components"] for entry in auxiliary_updates]
+                    refresh_events = [entry["refresh"] for entry in auxiliary_updates
+                                      if isinstance(entry.get("refresh"), Mapping)
+                                      and entry["refresh"].get("refreshed") is True]
+                    primary_rows = source_read_manager.last_primary_fine_rows
+                    row["source_read_auxiliary"] = {
+                        "weighted_loss_mean": float(np.mean([
+                            entry["weighted_loss"] for entry in auxiliary_updates
+                        ])),
+                        "unweighted_scorer_loss_mean": float(np.mean([
+                            float(components["scorer"]) for components in component_rows
+                        ])),
+                        "unweighted_completion_loss_mean": float(np.mean([
+                            float(components["completion"]) for components in component_rows
+                        ])),
+                        "coefficient": float(source_read_manager.auxiliary_coefficient or 0.0),
+                        "initial_teacher_executed_rows": int(source_read_manager.initial_teacher_rows),
+                        "initial_teacher_present_rows": int(source_read_manager.initial_teacher_present_rows),
+                        "refresh_teacher_executed_rows": int(source_read_manager.coadaptation_teacher_rows),
+                        "refresh_teacher_present_rows": int(source_read_manager.coadaptation_teacher_present_rows),
+                        "refresh_events_this_epoch": refresh_events,
+                        "primary_fine_rows_this_epoch": int(
+                            primary_rows - source_read_epoch_fine_rows_before
+                        ),
+                        "primary_fine_rows_cumulative": int(primary_rows),
+                        "refresh_teacher_row_share": float(
+                            source_read_manager.coadaptation_teacher_rows / primary_rows
+                        ) if primary_rows else 0.0,
+                        "gradient_balance_by_update": [
+                            copy.deepcopy(entry.get("gradient_balance")) for entry in auxiliary_updates
+                        ],
+                        "mean_native_gradient_l2_norm": float(np.mean([
+                            float(entry["gradient_balance"]["native_all_parameter_gradient_l2_norm"])
+                            for entry in auxiliary_updates
+                        ])),
+                        "mean_weighted_auxiliary_gradient_l2_norm": float(np.mean([
+                            float(entry["gradient_balance"]["weighted_auxiliary_new_parameter_gradient_l2_norm"])
+                            for entry in auxiliary_updates
+                        ])),
+                        "mean_weighted_auxiliary_to_native_gradient_share": (
+                            float(np.mean([
+                                float(entry["gradient_balance"]["weighted_auxiliary_to_native_gradient_share"])
+                                for entry in auxiliary_updates
+                                if entry["gradient_balance"]["weighted_auxiliary_to_native_gradient_share"] is not None
+                            ]))
+                            if any(entry["gradient_balance"]["weighted_auxiliary_to_native_gradient_share"] is not None
+                                   for entry in auxiliary_updates) else None
+                        ),
+                    }
                 if training_memory is not None:
                     row["training_cuda_memory"] = training_memory
                 sample_hashes = [item["query_sampling_sha256"] for item in update_rows
@@ -3450,7 +3705,10 @@ class TrainingEngine:
                     payload = self._checkpoint_payload(model, optimizer, identity=sealed_identity, arm=arm, epoch=epoch,
                         history=history, best_field=best_field, best_guarded=best_guarded, sampler_state=sampler_state,
                         group_specs=optimizer_specs,
-                        provider_training_state=getattr(provider, "training_state_dict", dict)())
+                        provider_training_state=getattr(provider, "training_state_dict", dict)(),
+                        source_read_auxiliary_state=(
+                            source_read_manager.state_dict() if source_read_manager is not None else None
+                        ))
                     if resume_amendments:
                         payload["resume_amendments"] = resume_amendments
                     if branch_parent is not None:

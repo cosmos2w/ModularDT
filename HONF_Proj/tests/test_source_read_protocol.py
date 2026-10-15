@@ -64,6 +64,15 @@ def test_scale_conditioning_and_sparse_declarations_are_not_silent_aliases():
         validate_source_read_recipe(changed)
 
 
+def test_wind_frozen_whole_query_execution_replays_only_its_inert8192_field():
+    value = recipe("wind")
+    value["model"]["reader_query_chunk_size"] = 8192
+    assert validate_source_read_recipe(value) == value
+    value["model"]["reader_query_chunk_size"] = 512
+    with pytest.raises(ValueError, match="whole-query"):
+        validate_source_read_recipe(value)
+
+
 @pytest.mark.parametrize("dataset", ["thermal", "wind"])
 def test_full1001_rejects_before_constructor_or_run_allocation(dataset, monkeypatch, tmp_path):
     import content_hypergraph_train as cli

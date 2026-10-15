@@ -23,6 +23,8 @@ from honf_runtime.unified_training import (
     SelectionPolicy,
     TaskBatch,
     TrainingEngine,
+    _source_read_history_fine_rows,
+    _source_read_primary_fine_rows,
 )
 
 
@@ -239,6 +241,119 @@ def test_macro_update_diagnosis_matches_engine_objective_without_mutating_state(
     assert result["combined_gradient"]["global_clip_factor"] == 1.0
     assert all(torch.equal(value, before[name]) for name, value in model.state_dict().items())
     assert all(parameter.grad is None for parameter in model.parameters())
+
+
+def test_empty_source_read_selection_keeps_physical_auxiliary_gradients_and_zero_exposure():
+    class SourceReadModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.local = nn.Parameter(torch.tensor(0.5))
+            self.core = nn.Module()
+            self.core.direct_reader = nn.Module()
+            self.core.direct_reader.source_read = nn.Module()
+            self.core.direct_reader.source_read.scorer = nn.Parameter(torch.tensor(0.25))
+
+        def forward(self, values):
+            return self.local * values
+
+    class Manager:
+        last_primary_fine_rows = 1000
+
+        def __init__(self):
+            self.before_args = None
+            self.last_gradient_balance = None
+
+        def before_update(self, model, provider, **kwargs):
+            del model, provider
+            self.before_args = kwargs
+            return {"refreshed": False}
+
+        def auxiliary_loss(self, model):
+            return model.core.direct_reader.source_read.scorer.square()
+
+        def record_gradient_balance(self, *, native_norm, weighted_auxiliary_norm):
+            self.last_gradient_balance = {
+                "native_all_parameter_gradient_l2_norm": native_norm,
+                "weighted_auxiliary_new_parameter_gradient_l2_norm": weighted_auxiliary_norm,
+                "weighted_auxiliary_to_native_gradient_share": (
+                    weighted_auxiliary_norm / native_norm if native_norm else None
+                ),
+            }
+
+        def record_primary_fine_rows(self, value):
+            self.last_primary_fine_rows = value
+
+    class Provider:
+        def __init__(self):
+            self.source_read_auxiliary_manager = Manager()
+
+        def loss_denominators(self, batches, phase, arm):
+            del batches, phase, arm
+            return {"native": 1.0}
+
+        def make_scene(self, values):
+            return values
+
+        def predict_native(self, model, scene, receivers, arm, phase, epoch, temperature):
+            del receivers, arm, phase, epoch, temperature
+            return model(scene), None
+
+        def loss_terms(self, predictions, targets, phase, auxiliary):
+            del phase, auxiliary
+            return {"native": LossTerm((predictions - targets).square().sum(), 1)}
+
+        def work_counts(self, batch, predictions, auxiliary):
+            del batch, predictions, auxiliary
+            return {
+                "core_decode_primary_source_read_fine_executed_rows": 0,
+                # This logical/legacy count must not override the actual fine rows.
+                "core_decode_primary_direct_source_rows": 777,
+            }
+
+    model = SourceReadModel()
+    provider = Provider()
+    batch = TaskBatch(torch.ones(1), None, torch.zeros(1), {}, (1,))
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    losses, work, _, _ = TrainingEngine(_config(), device="cpu")._run_update(
+        model,
+        provider,
+        optimizer,
+        (batch,),
+        phase="joint",
+        arm="S-Utility",
+        epoch=501,
+        update_index=0,
+        source_read_ordinary_update_index=2001,
+        source_read_primary_fine_rows=1000,
+    )
+
+    manager = provider.source_read_auxiliary_manager
+    assert _source_read_primary_fine_rows({
+        "core_decode_primary_source_read_fine_executed_rows": 0,
+        "core_decode_primary_direct_source_rows": 777,
+    }) == 0
+    assert manager.before_args == {
+        "absolute_epoch": 501,
+        "ordinary_update_index": 2001,
+        "primary_fine_rows": 1000,
+    }
+    assert manager.last_primary_fine_rows == 1000
+    assert work["source_read_primary_fine_rows"] == 0.0
+    assert losses["source_read_auxiliary"] > 0
+    assert manager.last_gradient_balance["native_all_parameter_gradient_l2_norm"] > 0
+    assert manager.last_gradient_balance["weighted_auxiliary_new_parameter_gradient_l2_norm"] > 0
+    assert model.local.grad is not None and model.local.grad.abs() > 0
+    assert model.core.direct_reader.source_read.scorer.grad is not None
+
+
+def test_sparse_exposure_history_requires_positive_inherited_prefix_but_allows_zero_updates():
+    assert _source_read_primary_fine_rows({
+        "core_decode_primary_source_read_fine_executed_rows": 0,
+    }) == 0
+    with pytest.raises(ValueError, match="positive measured inherited fine exposure"):
+        _source_read_history_fine_rows([{
+            "work_counts": {"core_decode_primary_source_read_fine_executed_rows": 0},
+        }])
 
 
 def test_disposable_clone_provider_binding_restores_after_failure_without_step(monkeypatch):

@@ -40,7 +40,7 @@ from honf_runtime.training_output_policy import (
     validate_output_policy_amendment,
 )
 from honf_runtime.source_read_protocol import (
-    SOURCE_READ_FULL, SOURCE_READ_PROTOCOLS,
+    SOURCE_READ_DEVELOPMENT, SOURCE_READ_FULL, SOURCE_READ_PROTOCOLS,
     validate_source_read_recipe, validate_source_read_stop,
 )
 from honf_runtime.source_read_qualification import validate_source_read_qualification
@@ -147,6 +147,165 @@ def validate_stop(recipe: dict[str, Any], stop_after: int) -> None:
         raise ValueError(f"Execution stop must lie in 1..{maximum}; the schedule is not launch authorization.")
 
 
+def _is_sparse_source_read_recipe(recipe: dict[str, Any]) -> bool:
+    return recipe.get("source_reader_variant") in ("S-Utility", "S-Complete")
+
+
+def _load_source_read_child_modules() -> None:
+    """Import the complete sparse runtime before sealing child source identity."""
+    import honf_forward_core.content_hypergraph.query_chunks_v1  # noqa: F401
+    import honf_forward_core.content_hypergraph.source_read_decoder_v1  # noqa: F401
+    import honf_forward_core.content_hypergraph.source_read_response  # noqa: F401
+    import honf_forward_core.content_hypergraph.source_read_sparse  # noqa: F401
+    import honf_runtime.source_read_auxiliary  # noqa: F401
+    import honf_runtime.source_read_child  # noqa: F401
+
+
+def _source_read_child_auxiliary_callback(variant: str):
+    if variant not in ("S-Utility", "S-Complete"):
+        raise ValueError("Auxiliary fitting is available only for S-Utility/S-Complete children.")
+    from honf_runtime.source_read_auxiliary import fit_source_read_child_auxiliary
+
+    def callback(model, provider, optimizer, **kwargs):
+        return fit_source_read_child_auxiliary(
+            model, provider, optimizer, variant=variant, **kwargs,
+        )
+
+    return callback
+
+
+def source_read_child_fit_options(
+    recipe: dict[str, Any],
+    declaration: Any,
+    parent_checkpoint: Path | None,
+    *,
+    resume_checkpoint: Path | None = None,
+    qualification: Path | None = None,
+    numerical_pooling_amendment: Path | None = None,
+    output_policy_amendment: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve only the audited development e500 sparse-child transition."""
+    sparse = _is_sparse_source_read_recipe(recipe)
+    if recipe.get("protocol") == SOURCE_READ_FULL and sparse:
+        raise ValueError(
+            "Full sparse source-read training is not wired; the only full1000 template is D-scale."
+        )
+    if declaration is None:
+        if parent_checkpoint is not None:
+            raise ValueError("--branch-from-checkpoint requires --source-read-child-declaration.")
+        if sparse and recipe.get("protocol") == SOURCE_READ_DEVELOPMENT and resume_checkpoint is None:
+            raise ValueError(
+                "A fresh sparse development run requires its audited dense e500 child declaration."
+            )
+        if sparse:
+            _load_source_read_child_modules()
+        return {}
+    if (recipe.get("protocol") != SOURCE_READ_DEVELOPMENT or not sparse
+            or resume_checkpoint is not None or parent_checkpoint is None
+            or qualification is not None or numerical_pooling_amendment is not None
+            or output_policy_amendment is not None):
+        raise ValueError(
+            "A source-read child declaration requires a fresh S-Utility/S-Complete development branch "
+            "with one explicit parent and no resume or unrelated amendment."
+        )
+    if not isinstance(declaration, dict):
+        raise TypeError("Source-read child declaration must be a JSON object.")
+    declared_path = declaration.get("source_checkpoint")
+    if not isinstance(declared_path, str) or not declared_path:
+        raise ValueError("Source-read child declaration must bind its exact source_checkpoint path.")
+    try:
+        parent_path = parent_checkpoint.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("Source-read dense parent checkpoint does not exist.") from exc
+    if not parent_path.is_file() or declared_path != str(parent_path):
+        raise ValueError(
+            "--branch-from-checkpoint must resolve to the exact canonical path in the child declaration."
+        )
+    if declaration.get("source_reader_variant") != recipe.get("source_reader_variant"):
+        raise ValueError("Source-read child declaration and recipe variants differ.")
+    _load_source_read_child_modules()
+    return {
+        "branch_from_checkpoint": parent_path,
+        "source_read_child": declaration,
+        "source_read_child_auxiliary_fit": _source_read_child_auxiliary_callback(
+            recipe["source_reader_variant"]
+        ),
+    }
+
+
+def preflight_source_read_child(
+    model,
+    provider,
+    engine: TrainingEngine,
+    *,
+    identity: dict[str, Any],
+    recipe: dict[str, Any],
+    declaration: dict[str, Any],
+    parent_checkpoint: Path,
+    output: Path | None,
+    stop_after: int,
+) -> dict[str, Any]:
+    """Validate and load the exact parent in memory before any output allocation."""
+    from honf_runtime.compat import load_trusted_checkpoint
+    from honf_runtime.run_layout import resolve_checkpoint
+    from honf_runtime.source_read_child import prepare_source_read_child
+    from honf_runtime.unified_training import (
+        _engine_config_payload, _optimizer_spec_payload, _sampling_dataset_id,
+    )
+
+    source_path = resolve_checkpoint(parent_checkpoint.parent, parent_checkpoint)
+    if not source_path.is_file():
+        raise ValueError("Source-read e500 parent checkpoint is not a file.")
+    if output is not None:
+        output_path = output.expanduser().resolve()
+        try:
+            source_path.resolve().relative_to(output_path)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("A source-read child must use an output directory outside its dense parent.")
+        if output_path.exists() and any(output_path.iterdir()):
+            raise ValueError("A source-read child requires a distinct empty output directory.")
+
+    source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    if declaration.get("source_checkpoint_sha256") != source_sha256:
+        raise ValueError("Dense e500 checkpoint SHA256 differs from the audited child declaration.")
+    source_payload = load_trusted_checkpoint(source_path, map_location="cpu")
+    provider_identity = dict(provider.identity_payload())
+    schedules = tuple(provider.optimizer_groups(model, recipe["architecture"], "joint"))
+    sealed_identity = {
+        **identity,
+        "provider_identity": provider_identity,
+        "engine_config": _engine_config_payload(engine.config),
+        "selection_policy": asdict(engine.selection),
+        "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in schedules],
+    }
+    if engine.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
+        sealed_identity["sampling_dataset_id"] = _sampling_dataset_id(provider_identity)
+    amendment = prepare_source_read_child(
+        model,
+        source_payload,
+        sealed_identity,
+        declaration,
+        source_sha256=source_sha256,
+        source_path=source_path,
+        case_keys=tuple(provider.epoch_cases(501, engine.config.seed)),
+        stop_after=stop_after,
+    )
+    return {
+        "status": "preflight_passed",
+        "source_checkpoint": str(source_path),
+        "source_checkpoint_sha256": source_sha256,
+        "source_epoch": 500,
+        "source_reader_variant": recipe["source_reader_variant"],
+        "train_case_count": len(provider.epoch_cases(501, engine.config.seed)),
+        "exact_parent_state_copied": amendment["exact_parent_state_copied"],
+        "exact_loaded_source_changes": amendment["source_changes"],
+        "auxiliary_fit_mode": declaration["auxiliary_fit_mode"],
+        "auxiliary_update_limit": declaration["auxiliary_update_limit"],
+    }
+
+
 def build(recipe: dict[str, Any], *, device: str):
     """Delegate physical construction to the dataset-owned provider."""
     random.seed(recipe["seed"])
@@ -245,6 +404,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--stop-after", type=int, default=100)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--source-read-child-declaration", type=Path,
+                        help="Audited Round3 sparse-child declaration for a dense development e500 parent.")
+    parser.add_argument("--branch-from-checkpoint", type=Path,
+                        help="Exact e500 checkpoint named by --source-read-child-declaration.")
     parser.add_argument("--qualification", type=Path)
     parser.add_argument("--numerical-pooling-amendment", type=Path)
     parser.add_argument("--output-policy-amendment", type=Path,
@@ -254,6 +417,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     recipe = validate_recipe(json.loads(args.recipe.read_text()))
     validate_stop(recipe, args.stop_after)
+    child_declaration = (
+        json.loads(args.source_read_child_declaration.read_text())
+        if args.source_read_child_declaration is not None else None
+    )
+    source_child_fit_options = source_read_child_fit_options(
+        recipe,
+        child_declaration,
+        args.branch_from_checkpoint,
+        resume_checkpoint=args.resume,
+        qualification=args.qualification,
+        numerical_pooling_amendment=args.numerical_pooling_amendment,
+        output_policy_amendment=args.output_policy_amendment,
+    )
     output_policy_amendment = None
     if args.output_policy_amendment is not None:
         if (recipe["protocol"] != FORMAL_PROTOCOL or args.resume is None or args.output is None
@@ -372,6 +548,18 @@ def main(argv: list[str] | None = None) -> int:
                "engine": vars(engine.config), "requested_stop": args.stop_after,
                "optimizer_updates": 0, "run_allocated": False,
                "loaded_source": identity["loaded_source"]}
+    if child_declaration is not None:
+        summary["source_read_child_preflight"] = preflight_source_read_child(
+            model,
+            provider,
+            engine,
+            identity=identity,
+            recipe=recipe,
+            declaration=child_declaration,
+            parent_checkpoint=source_child_fit_options["branch_from_checkpoint"],
+            output=args.output,
+            stop_after=args.stop_after,
+        )
     if args.dry_run and output_policy_amendment is not None:
         from honf_runtime.compat import load_trusted_checkpoint
         from honf_runtime.run_layout import resolve_checkpoint
@@ -420,6 +608,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         return 0
     fit_options = {"stop_after": args.stop_after, "resume_checkpoint": args.resume}
+    fit_options.update(source_child_fit_options)
     if output_policy_amendment is not None:
         fit_options["output_policy_amendment"] = output_policy_amendment
     if numerical_pooling_amendment is not None:

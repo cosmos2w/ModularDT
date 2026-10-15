@@ -118,3 +118,21 @@ def test_nonzero_saved_temperature_boundary_is_rejected_before_scene_build():
 
     with pytest.raises(ValueError, match="inlet and wall temperatures to be zero"):
         _typed_native_input(record, device=torch.device("cpu"))
+
+
+@pytest.mark.parametrize("options", (
+    {"source_read_policy": "refit"},
+    {"source_read_executor": "packet"},
+    {"source_read_operating_point": 0},
+    {"source_read_policy": "fitted", "source_read_operating_point": 2},
+))
+def test_response_policy_overrides_reject_invalid_contracts_before_loading(tmp_path, options):
+    with pytest.raises(ValueError):
+        evaluate_checkpoint(
+            checkpoint_path=tmp_path / "missing-checkpoint.pt",
+            request_path=tmp_path / "missing-request.json",
+            records_dir=tmp_path / "missing-records",
+            output_path=tmp_path / "result.json",
+            **options,
+        )
+    assert not tuple(tmp_path.iterdir())

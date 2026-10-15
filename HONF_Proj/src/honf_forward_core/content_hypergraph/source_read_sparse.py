@@ -14,6 +14,8 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from .source_read_plans import SourceReadPlanV1, build_degree_bucket_packet_layout
+from .decoding import _query_mask
+from .staged_attention_v2 import safe_masked_softmax
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,32 @@ def source_score_descriptor_v1(query: Tensor, source: Tensor, scale: Tensor, len
     normalized = delta / scale[:, None, None, :]
     distance = torch.linalg.vector_norm(normalized, dim=-1, keepdim=True)
     return torch.cat((normalized, distance, torch.asinh(delta / lengths[:, None, :, :])), dim=-1)
+
+
+def original_source_scores_v1(reader, scene, query, query_states, frame_scale, measure_reference, prepared_keys):
+    """Compute the original all-source attention before fine-value geometry."""
+    batch, count = query_states.shape[:2]
+    sources = scene.num_modules
+    descriptor = source_score_descriptor_v1(
+        query.coordinates.to(query_states.dtype), scene.module_coordinates.to(query_states.dtype),
+        frame_scale, scene.module_characteristic_lengths.to(query_states.dtype))
+    if not sources or not count:
+        return descriptor, query_states.new_zeros((batch, count, sources, reader.heads))
+    q = F.normalize(reader.query_key(reader.query_norm(query_states)).reshape(
+        batch, count, reader.heads, reader.head_width), dim=-1, eps=1e-6)
+    k = F.normalize(prepared_keys.reshape(batch, sources, reader.heads, reader.head_width), dim=-1, eps=1e-6)
+    logits = torch.einsum("bqrd,bmrd->bqmr", q, k) * reader.temperature[None, None, None, :]
+    logits = logits + reader.geometry_score(descriptor)
+    measure = scene.module_measure.to(query_states.dtype)
+    valid = scene.module_mask & (measure > 0)
+    safe_measure = torch.where(valid, measure, torch.ones_like(measure))
+    reference = measure_reference.to(query_states.dtype).reshape(batch, 1)
+    logits = logits + (torch.log(safe_measure) - torch.log(reference.clamp_min(
+        torch.finfo(query_states.dtype).tiny)))[:, None, :, None]
+    allowed = valid[:, None, :, None].expand(batch, count, sources, reader.heads)
+    allowed = allowed & _query_mask(query)[:, :, None, None]
+    alpha = safe_masked_softmax(logits.permute(0, 1, 3, 2), allowed.permute(0, 1, 3, 2), dim=-1)
+    return descriptor, alpha.permute(0, 1, 3, 2)
 
 
 def _fine_hidden(reader, descriptor: Tensor, query_value: Tensor, source_value: Tensor) -> Tensor:

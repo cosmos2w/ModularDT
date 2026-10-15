@@ -653,8 +653,11 @@ class ThermalContentHypergraphAdapter(nn.Module):
         if controls.shape != prepared.scene_batch.module_mask.shape:
             raise ValueError("Thermal physical heat controls must match the scene's padded module slots.")
         if prepared.affine_query is not None:
+            response_options = ({"check_envelope": not increment}
+                if getattr(self.core, "source_read_policy", "full") != "full" else {})
             output = self.core.apply_prepared_affine(
-                prepared.affine_query, controls, accumulation_dtype=accumulation_dtype)
+                prepared.affine_query, controls, accumulation_dtype=accumulation_dtype,
+                **response_options)
             temperature = output.thermal_temperature
             flow = None if increment else output.nonlinear_field
         elif increment:
@@ -1004,8 +1007,11 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             raise ValueError("Thermal physical heat controls must match the scene's padded module slots.")
 
         if prepared.affine_query is not None:
+            response_options = ({"check_envelope": not increment}
+                if getattr(self.core, "source_read_policy", "full") != "full" else {})
             output = self.core.apply_prepared_affine(
                 prepared.affine_query, controls, accumulation_dtype=accumulation_dtype,
+                **response_options,
             )
             temperature = output.thermal_temperature
             flow = None if increment else output.nonlinear_field

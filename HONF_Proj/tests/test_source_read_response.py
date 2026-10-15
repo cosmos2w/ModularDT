@@ -328,7 +328,6 @@ def test_factor_version_is_stable_and_tracks_in_place_changes() -> None:
 
 
 def test_invalid_selected_padding_and_incomplete_completion_are_rejected() -> None:
-    factors = _make_factors(completion=True)
     with pytest.raises(ValueError, match="present sources"):
         SourceReadAffineFactorsV1(
             batch_size=1,

@@ -9,6 +9,7 @@ transfers. It never runs a physical solver or an optimizer.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import sys
@@ -326,11 +327,23 @@ def evaluate_checkpoint(
     records_dir: Path = DEFAULT_RECORDS,
     output_path: Path,
     device_name: str = "cpu",
+    source_read_policy: str = "checkpoint",
+    source_read_executor: str | None = None,
+    source_read_operating_point: int | None = None,
 ) -> dict[str, Any]:
     from thermal_response_refinement_evaluation import load_counted_families, validate_heat_records
 
     from honf_runtime.content_hypergraph import load_content_hypergraph_checkpoint
 
+    if source_read_policy not in ("checkpoint", "full", "fitted", "attn95", "attn99"):
+        raise ValueError("Unknown read-only source policy for saved response replay.")
+    if source_read_executor not in (None, "packed", "packet", "dense_masked"):
+        raise ValueError("Unknown source executor for saved response replay.")
+    if source_read_operating_point is not None and source_read_operating_point not in (0, 1):
+        raise ValueError("Saved response operating point must be zero or one.")
+    if source_read_policy == "checkpoint" and (
+            source_read_executor is not None or source_read_operating_point is not None):
+        raise ValueError("An executor or operating-point override requires an explicit source policy.")
     checkpoint_path = checkpoint_path.resolve()
     request_path = request_path.resolve()
     records_dir = records_dir.resolve()
@@ -352,6 +365,14 @@ def evaluate_checkpoint(
     if adapter is not model or not hasattr(adapter, "prepare_affine_application"):
         raise TypeError("This replay accepts a self-contained Thermal content-hypergraph checkpoint only.")
     model.eval()
+    policy_context = nullcontext()
+    if source_read_policy != "checkpoint":
+        core = getattr(model, "core", model)
+        override = getattr(core, "source_read_override_v1", None)
+        if not callable(override):
+            raise ValueError("This checkpoint runtime has no versioned source-policy override.")
+        policy_context = override(source_read_policy, executor=source_read_executor,
+                                  operating_point=source_read_operating_point)
 
     families, source_dataset = load_counted_families(request_path, records_dir)
     request = json.loads(request_path.read_text())
@@ -368,7 +389,8 @@ def evaluate_checkpoint(
     cases_report: list[dict[str, Any]] = []
     new_solver_attempts = 0
     response_application_count = 0
-    with torch.no_grad():
+    response_storage = []
+    with torch.no_grad(), policy_context:
         for case_id in CASE_IDS:
             records = by_case[case_id]
             if tuple(records) != STATE_LABELS:
@@ -384,6 +406,18 @@ def evaluate_checkpoint(
                 scene_key=("saved_counted_response_v1", case_id),
             )
             prepared = adapter.prepare_affine_application(prepared)
+            direct = getattr(prepared.affine_query, "direct_coefficients", None)
+            response_storage.append({
+                "case_id": case_id,
+                "direct_representation": "dense_scalar_kernel" if isinstance(direct, torch.Tensor)
+                else "selected_affine_factors" if direct is not None else "other_factorization",
+                "dense_scalar_kernel_entries": direct.numel() if isinstance(direct, torch.Tensor) else 0,
+                "selected_coefficient_entries": int(direct.residual_coefficients.numel())
+                if direct is not None and hasattr(direct, "residual_coefficients") else 0,
+                "completion_factor_entries": sum(value.numel() for value in (
+                    getattr(direct, "completion_query", None), getattr(direct, "completion_source", None),
+                    getattr(direct, "thermal_rank_weight", None)) if isinstance(value, torch.Tensor)),
+            })
 
             request_states = {
                 state["state_id"]: state for state in request_cases[case_id]["states"]
@@ -688,7 +722,9 @@ def evaluate_checkpoint(
             "q_normal_interpretation": "saved receiver quantity is a heat-flux proxy; no new sign or calibration claim is made",
             "prepared_scene_and_affine_factors_per_case": 1,
             "factorized_response": True,
-            "dense_source_kernel_materialized": False,
+            "dense_source_kernel_materialized": any(row["dense_scalar_kernel_entries"] for row in response_storage),
+            "explicit_dense_source_kernel_export_requested": False,
+            "observed_response_storage": response_storage,
             "prepared_scene_count": len(CASE_IDS),
             "prepared_affine_factor_sets": len(CASE_IDS),
             "cached_response_application_calls": response_application_count,
@@ -712,6 +748,13 @@ def evaluate_checkpoint(
         "cases": cases_report,
         "numeric_arrays": str(output_path.with_suffix(".npz")),
     }
+    if source_read_policy != "checkpoint":
+        payload["read_only_source_policy"] = {
+            "mode": source_read_policy, "executor_override": source_read_executor,
+            "operating_point_override": source_read_operating_point,
+            "same_policy_for_baseline_and_endpoints": True,
+            "fit_or_threshold_change": False,
+        }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     npz_path = output_path.with_suffix(".npz")
     temporary_npz = npz_path.with_suffix(npz_path.suffix + ".tmp")
@@ -730,6 +773,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--records-dir", type=Path, default=DEFAULT_RECORDS)
     parser.add_argument("--output", type=Path, required=True, help="JSON receipt path; a neighboring NPZ stores selected arrays.")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--source-read-policy", default="checkpoint",
+                        choices=("checkpoint", "full", "fitted", "attn95", "attn99"))
+    parser.add_argument("--source-read-executor", choices=("packed", "packet", "dense_masked"))
+    parser.add_argument("--source-read-operating-point", type=int, choices=(0, 1))
     return parser
 
 
@@ -741,6 +788,9 @@ def main(argv: list[str] | None = None) -> int:
         records_dir=args.records_dir,
         output_path=args.output,
         device_name=args.device,
+        source_read_policy=args.source_read_policy,
+        source_read_executor=args.source_read_executor,
+        source_read_operating_point=args.source_read_operating_point,
     )
     print(json.dumps({
         "output": str(args.output.resolve()),

@@ -15,9 +15,11 @@ import torch
 from torch import nn
 
 import honf_runtime.unified_training as runtime
+import honf_runtime.source_read_auxiliary as source_read_auxiliary
 from honf_runtime.compat import load_trusted_checkpoint
 from honf_runtime.run_layout import resolve_checkpoint
 from honf_runtime.source_read_child import (
+    AUXILIARY_OPTIMIZER_ALGORITHM,
     AUXILIARY_FIT_SCHEMA,
     SCHEMA,
     prepare_source_read_child,
@@ -102,7 +104,7 @@ def _provider_identity(variant: str, *, host: str = "D0", changed_objective: boo
         "architecture": "A2-D",
         **recipe["model"],
     }
-    return {
+    receipt = {
         "schema": "thermal_content_hypergraph_provider_v2",
         "dataset": "ThermalChannel",
         "task": "ThermalChannel",
@@ -140,6 +142,7 @@ def _provider_identity(variant: str, *, host: str = "D0", changed_objective: boo
         },
         "recipe": recipe,
     }
+    return receipt
 
 
 def _external_identity(provider_identity: dict, loaded_source: dict) -> dict:
@@ -298,8 +301,11 @@ class _SourceReadProvider:
         return {"field_score": total / count}
 
     def work_counts(self, batch, predictions, auxiliary_state):
-        del batch, predictions, auxiliary_state
-        return {}
+        del predictions, auxiliary_state
+        rows_per_case = 2 if self.variant.startswith("S-") else 6
+        counter = ("core_decode_primary_source_read_fine_executed_rows" if self.variant.startswith("S-")
+                   else "core_decode_primary_direct_source_rows")
+        return {counter: len(batch.case_keys) * rows_per_case}
 
     def optimizer_groups(self, model, arm, stage):
         del arm, stage
@@ -309,6 +315,96 @@ class _SourceReadProvider:
             hold_through_epoch=2499, total_epochs=2500, final_lr=3.0e-4,
         )
         return (OptimizerGroupSpec("source_read_joint", names, schedule, weight_decay=1.0e-5),)
+
+
+class _FixtureSourceReadAuxiliaryManager:
+    """Small engine-hook fixture; mathematical calibration is tested separately."""
+
+    def __init__(self, model, provider, parent_sha256):
+        self.parent_sha256 = parent_sha256
+        self.last_ordinary_update_index = 0
+        self.last_absolute_epoch = 500
+        self.last_primary_fine_rows = 0
+        self.initial_teacher_rows = 8
+        self.initial_teacher_present_rows = 6
+        self.coadaptation_teacher_rows = 0
+        self.coadaptation_teacher_present_rows = 0
+        self.auxiliary_coefficient = 0.05
+        self.last_loss_components = {}
+        self.last_gradient_balance = None
+        self.last_refresh = {"refreshed": False, "reason": "fixture"}
+
+    def initialize_inherited_exposure(self, *, ordinary_update_index, primary_fine_rows,
+                                      absolute_epoch=500):
+        assert absolute_epoch == 500
+        self.last_ordinary_update_index = ordinary_update_index
+        self.last_primary_fine_rows = primary_fine_rows
+
+    def before_update(self, model, provider, *, absolute_epoch, ordinary_update_index,
+                      primary_fine_rows):
+        del model, provider
+        assert absolute_epoch >= 501
+        self.last_absolute_epoch = absolute_epoch
+        self.last_ordinary_update_index = ordinary_update_index
+        self.last_primary_fine_rows = primary_fine_rows
+        self.last_refresh = {"refreshed": False, "reason": "fixture"}
+        return dict(self.last_refresh)
+
+    def auxiliary_loss(self, model):
+        weight = model.core.direct_reader.source_read.linear.weight
+        loss = weight.square().mean()
+        self.last_loss_components = {
+            "scorer": float(loss.detach()), "completion": 0.0,
+            "total_unweighted": float(loss.detach()), "coefficient": self.auxiliary_coefficient,
+        }
+        return loss * self.auxiliary_coefficient
+
+    def record_primary_fine_rows(self, primary_fine_rows):
+        self.last_primary_fine_rows = primary_fine_rows
+
+    def record_gradient_balance(self, *, native_norm, weighted_auxiliary_norm):
+        self.last_gradient_balance = {
+            "native_all_parameter_gradient_l2_norm": native_norm,
+            "weighted_auxiliary_new_parameter_gradient_l2_norm": weighted_auxiliary_norm,
+            "weighted_auxiliary_to_native_gradient_share": (
+                weighted_auxiliary_norm / native_norm if native_norm > 0 else None
+            ),
+        }
+
+    def state_dict(self):
+        return {
+            "schema": "fixture_source_read_auxiliary_v1",
+            "parent_sha256": self.parent_sha256,
+            "last_ordinary_update_index": self.last_ordinary_update_index,
+            "last_absolute_epoch": self.last_absolute_epoch,
+            "last_primary_fine_rows": self.last_primary_fine_rows,
+            "initial_teacher_rows": self.initial_teacher_rows,
+            "initial_teacher_present_rows": self.initial_teacher_present_rows,
+            "coadaptation_teacher_rows": self.coadaptation_teacher_rows,
+            "coadaptation_teacher_present_rows": self.coadaptation_teacher_present_rows,
+            "auxiliary_coefficient": self.auxiliary_coefficient,
+            "last_loss_components": dict(self.last_loss_components),
+            "last_gradient_balance": copy.deepcopy(self.last_gradient_balance),
+            "last_refresh": dict(self.last_refresh),
+        }
+
+    def load_state_dict(self, state):
+        if (state.get("schema") != "fixture_source_read_auxiliary_v1"
+                or state.get("parent_sha256") != self.parent_sha256):
+            raise ValueError("Fixture source-read state has a wrong parent binding.")
+        for name in (
+            "last_ordinary_update_index", "last_absolute_epoch", "last_primary_fine_rows",
+            "initial_teacher_rows", "initial_teacher_present_rows", "coadaptation_teacher_rows",
+            "coadaptation_teacher_present_rows", "auxiliary_coefficient", "last_loss_components",
+            "last_gradient_balance", "last_refresh",
+        ):
+            setattr(self, name, copy.deepcopy(state[name]))
+
+
+def _fixture_manager_factory(model, provider, *, train_case_keys, parent_sha256=None):
+    assert tuple(train_case_keys) == tuple(range(150))
+    return _FixtureSourceReadAuxiliaryManager(model, provider, parent_sha256)
+
 
 def _config():
     return EngineConfig(
@@ -388,7 +484,7 @@ def _auxiliary_fit(model, provider, optimizer, *, added_parameter_names, train_c
         name: int(optimizer.state[dict(model.named_parameters())[name]]["step"].item())
         for name in added_parameter_names
     }
-    return {
+    receipt = {
         "schema": AUXILIARY_FIT_SCHEMA,
         "partition": "TRAIN",
         "source_checkpoint_sha256": parent_sha256,
@@ -399,11 +495,54 @@ def _auxiliary_fit(model, provider, optimizer, *, added_parameter_names, train_c
         "auxiliary_fit_case_count": 4,
         "auxiliary_fit_case_share": 4 / len(train_case_keys),
         "teacher_rows": 8,
+        "teacher_present_rows": 6,
         "optimizer_updates": 2,
         "updated_parameter_names": sorted(added_parameter_names),
         "changed_buffer_names": ["core.direct_reader.source_read.train_context_scale"],
         "optimizer_steps_by_parameter": steps,
+        "optimizer_algorithm": copy.deepcopy(AUXILIARY_OPTIMIZER_ALGORITHM),
+        "gradient_calibration": {
+            "schema": "source_read_gradient_calibration_v1",
+            "partition": "TRAIN",
+            "physical_all_inherited_parameter_gradient_l2_norm": 1.0,
+            "auxiliary_all_new_parameter_gradient_l2_norm": 2.0,
+            "fixed_auxiliary_coefficient": 0.025,
+            "realized_weighted_auxiliary_to_physical_gradient_share": 0.05,
+            "maximum_gradient_share": 0.05,
+        },
+        "train_fidelity_screen": {
+            "schema": "source_read_train_fidelity_screen_v1",
+            "partition": "TRAIN",
+            "scope": "bounded_dense_teacher_rows_at_most_256_per_train_case",
+            "pair_denominator": "positive_or_near_protected_physical_pair_union",
+            "thresholds": [0.5, 1.0],
+            "target_union_retention": [0.75, 0.50],
+            "target_union_pair_counts": [6, 4],
+            "union_pair_count": 8,
+            "physical_pair_count": 8,
+            "query_count": 4,
+            "near_protected_union_pair_count": 1,
+            "actual_union_pair_counts": [6, 4],
+            "actual_physical_pair_counts": [6, 4],
+            "actual_union_retention": [0.75, 0.50],
+            "actual_physical_pair_retention": [0.75, 0.50],
+            "target_infeasible_due_to_near_protection": [False, False],
+            "actual_target_overrun_pair_counts": [0, 0],
+            "flow_direct_context_relative_rms": [0.1, 0.2],
+            "flow_direct_context_head_relative_rms": [[0.1], [0.2]],
+            "thermal_positive_H_endpoint_relative_rms": [0.1, 0.2],
+            "thermal_kernel_relative_rms": [0.1, 0.2],
+            "thermal_temperature_scale": 1.0,
+            "thermal_target_scale_convention":
+                "native_core_K_is_TRAIN_standardized_temperature_per_heat; auxiliary_sT=1",
+            "primary_operating_point": 0,
+            "selection_reason": "least_aggressive_useful_75",
+        },
     }
+    provider.source_read_auxiliary_manager = _FixtureSourceReadAuxiliaryManager(
+        model, provider, parent_sha256,
+    )
+    return receipt
 
 
 def test_source_read_child_preserves_dense_e500_state_moments_rng_history_and_resume(
@@ -426,6 +565,7 @@ def test_source_read_child_preserves_dense_e500_state_moments_rng_history_and_re
 
     monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args, **kwargs: None)
     monkeypatch.setattr(runtime, "print", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(source_read_auxiliary, "make_source_read_auxiliary_manager", _fixture_manager_factory)
     monkeypatch.setattr(engine, "_make_optimizer", capture_optimizer)
     child_dir = root / "child-resumed"
     engine.fit(
@@ -455,6 +595,7 @@ def test_source_read_child_preserves_dense_e500_state_moments_rng_history_and_re
     )
     receipt = child["branch_parent"]["source_read_child"]["auxiliary_fit_receipt"]
     assert receipt["mode"] == "calibrated" and receipt["teacher_rows"] == 8
+    assert receipt["teacher_present_rows"] == 6
     assert receipt["train_case_keys"] == list(range(150))
     assert receipt["train_case_count"] == 150
     assert receipt["auxiliary_fit_case_count"] == 4
@@ -464,7 +605,10 @@ def test_source_read_child_preserves_dense_e500_state_moments_rng_history_and_re
     assert receipt["changed_buffer_names"] == ["core.direct_reader.source_read.train_context_scale"]
     changed_buffer = receipt["controller_buffer_changes"][receipt["changed_buffer_names"][0]]
     assert changed_buffer["before_sha256"] != changed_buffer["after_sha256"]
-    assert all("auxiliary" not in row for row in child["history"])
+    assert "source_read_auxiliary_state" in child
+    assert all("source_read_auxiliary" not in row["train_losses"] for row in child["history"])
+    assert "source_read_auxiliary" in child["history"][-1]
+    assert child["history"][-1]["source_read_auxiliary"]["primary_fine_rows_cumulative"] > 0
     added_names = declaration["added_parameter_names"]
     final_named = child["optimizer_state_by_name"]["state_by_name"]
     assert all(int(final_named[name]["step"]) == 402 for name in added_names)
@@ -518,7 +662,7 @@ def test_source_read_child_rejects_wrong_parent_protocol_identity_and_added_name
     dense_parent, tmp_path, failure,
 ):
     root, path, payload = dense_parent
-    model, provider, identity, declaration = _child_inputs(
+    model, provider, _identity, declaration = _child_inputs(
         root, path, payload, extra_parameter=failure == "unrelated_parameter",
     )
     if failure in ("parameter_shape_replacement", "parameter_removal", "unrelated_buffer"):
@@ -529,7 +673,6 @@ def test_source_read_child_rejects_wrong_parent_protocol_identity_and_added_name
             extra_buffer=failure == "unrelated_buffer",
         )
         provider = _SourceReadProvider(model, "S-Utility", capture_epoch=501)
-        identity = _external_identity(provider.identity_payload(), _loaded_source("b"))
         child_names = sorted(set(dict(model.named_parameters())) - set(payload["model_state_dict"]))
         declaration = _declaration(
             path, hashlib.sha256(path.read_bytes()).hexdigest(), child_names, root,
@@ -539,7 +682,6 @@ def test_source_read_child_rejects_wrong_parent_protocol_identity_and_added_name
         payload["epoch"] = 499
     elif failure == "identity":
         provider = _SourceReadProvider(model, "S-Utility", changed_objective=True)
-        identity = _external_identity(provider.identity_payload(), _loaded_source("b"))
     elif failure == "unrelated_parameter":
         declaration["added_parameter_names"] = sorted(
             set(dict(model.named_parameters())) - set(payload["model_state_dict"])
@@ -573,6 +715,27 @@ def test_source_read_child_rejects_unreported_controller_buffer_mutation(dense_p
             model, provider, root / "child-unreported-buffer", identity=identity,
             arm="A2-D", stop_after=600, branch_from_checkpoint=path,
             source_read_child=declaration, source_read_child_auxiliary_fit=falsified_buffer_receipt,
+        )
+
+
+def test_source_read_child_rejects_falsified_gradient_calibration_share(dense_parent, tmp_path, monkeypatch):
+    root, path, payload = dense_parent
+    model, provider, identity, declaration = _child_inputs(root, path, payload)
+
+    def falsified_gradient_receipt(*args, **kwargs):
+        receipt = _auxiliary_fit(*args, **kwargs)
+        receipt["gradient_calibration"][
+            "realized_weighted_auxiliary_to_physical_gradient_share"
+        ] = 0.051
+        return receipt
+
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime, "print", lambda *args, **kwargs: None, raising=False)
+    with pytest.raises(ValueError, match="gradient-calibration receipt violates the fixed 5% TRAIN rule"):
+        TrainingEngine(_config(), device="cpu").fit(
+            model, provider, tmp_path / "child-falsified-gradient-share", identity=identity,
+            arm="A2-D", stop_after=600, branch_from_checkpoint=path,
+            source_read_child=declaration, source_read_child_auxiliary_fit=falsified_gradient_receipt,
         )
 
 

@@ -58,7 +58,9 @@ def _expand_source_mask(mask: Tensor, batch: int, queries: int, sources: int, na
 
 def _smoothstep5(value: Tensor) -> Tensor:
     t = value.clamp(0.0, 1.0)
-    return t.pow(3) * (10.0 + t * (-15.0 + 6.0 * t))
+    # FP32 polynomial cancellation can overshoot one by about8e-7 near
+    # the flat endpoint. Preserve the declared bounded gate numerically.
+    return (t.pow(3) * (10.0 + t * (-15.0 + 6.0 * t))).clamp(0.0, 1.0)
 
 
 def smooth_threshold_gate(scores: Tensor, threshold: float | Tensor) -> Tensor:

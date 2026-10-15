@@ -94,6 +94,8 @@ def validate_source_read_recipe(value: Mapping[str, Any]) -> dict[str, Any]:
     chunk = model.get("reader_query_chunk_size")
     if chunk is not None and (type(chunk) is not int or chunk not in (128, 512, 2048, 8192)):
         raise ValueError("Source-read query tile must be one of the four bounded qualified choices.")
+    if not thermal and chunk not in (None, 8192):
+        raise ValueError("Wind source-read scopes preserve whole-query execution; omit the tile or replay the inert8192 metadata.")
     conditioning = model.get("source_value_conditioning", "none")
     host = recipe.get("dense_host_variant", "D0")
     expected_conditioning = "source_scale" if (variant == "D-scale" or (

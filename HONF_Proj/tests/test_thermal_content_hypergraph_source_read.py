@@ -100,6 +100,28 @@ def test_thermal_source_read_builder_routes_only_validated_recipes_to_data_bindi
         build_thermal_source_read_task_v1(forbidden)
 
 
+@pytest.mark.parametrize("variant", ("S-Utility", "S-Complete"))
+@pytest.mark.parametrize("host", ("D0", "D-scale"))
+def test_sparse_provider_binds_value_conditioning_to_its_dense_host(monkeypatch, variant, host):
+    # Isolate the dispatch contract from data materialization; real native
+    # e500 checkpoint qualification exercises the complete builder separately.
+    monkeypatch.setattr(ThermalContentHypergraphTaskV2, "__init__",
+                        lambda self, **kwargs: setattr(self, "protocol", "development"))
+    conditioning = "source_scale" if host == "D-scale" else "none"
+    options = dict(source_read_protocol=SOURCE_READ_DEVELOPMENT,
+                   source_reader_variant=variant, reader_execution_backend="legacy",
+                   recipe={"dense_host_variant": host})
+    provider = ThermalSourceReadTaskV1(**options, source_value_conditioning=conditioning)
+    assert provider.source_value_conditioning == conditioning
+    with pytest.raises(ValueError, match="conditioning disagree"):
+        ThermalSourceReadTaskV1(**options, source_value_conditioning=(
+            "none" if conditioning == "source_scale" else "source_scale"))
+    for recipe in ({}, {"dense_host_variant": "S-Complete"}):
+        with pytest.raises(ValueError, match="dense host variant"):
+            ThermalSourceReadTaskV1(**{**options, "recipe": recipe},
+                                    source_value_conditioning=conditioning)
+
+
 @pytest.mark.parametrize("total_epochs", [2500, 5000])
 def test_thermal_source_read_optimizer_is_constant_all_parameter_adamw(total_epochs):
     class TinyA2D(nn.Module):

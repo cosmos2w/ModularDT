@@ -1215,6 +1215,23 @@ def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapp
         expected_config["reader_execution_backend"] = backend
     if conditioning != "none":
         expected_config["source_value_conditioning"] = conditioning
+    source_read = recipe.get("protocol") in (
+        "source_read_development_v1", "source_read_full1000",
+    )
+    source_read_policy = model_recipe.get("source_read_policy", "full")
+    if source_read and source_read_policy != "full":
+        expected_config.update(
+            source_read_policy=source_read_policy,
+            source_read_executor=model_recipe.get("source_read_executor"),
+            source_read_rank=model_recipe.get("source_read_rank"),
+            source_read_scorer_width=model_recipe.get("source_read_scorer_width"),
+        )
+        if any(expected_config[name] is None for name in (
+            "source_read_policy", "source_read_executor", "source_read_rank", "source_read_scorer_width",
+        )):
+            raise ValueError("Sparse Wind source-read core identity requires explicit policy/executor/rank/scorer fields.")
+    if source_read and model_recipe.get("reader_query_chunk_size") not in (None, 8192):
+        raise ValueError("This Wind source-read lineage uses whole-query execution; only its inert8192 recipe field can replay.")
     expected_keys = set(expected_config)
     if expected_mode is not None:
         expected_config["query_edge_geometry_mode"] = expected_mode
@@ -1235,6 +1252,28 @@ def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapp
         or model_config.get("query_edge_geometry_mode") != expected_mode
     ):
         raise ValueError("Round2 Wind recipe and core typed centroid mode do not match the supported A2-H6 R1 contract.")
+
+
+def _apply_wind_source_read_core_options(
+    model_config: dict[str, Any],
+    model_values: Mapping[str, Any],
+    *,
+    schema_version: int,
+    source_reader_variant: str | None,
+) -> None:
+    """Apply only explicit sparse-policy fields to new source-read cores."""
+    if schema_version != 4 or source_reader_variant not in ("S-Utility", "S-Complete"):
+        return
+    for name in (
+        "source_read_policy", "source_read_executor", "source_read_rank", "source_read_scorer_width",
+    ):
+        if name not in model_values:
+            raise ValueError(f"Wind sparse source-read recipe must set model.{name} explicitly.")
+        model_config[name] = model_values[name]
+    # f40e18f's two dense controls execute the whole Wind request. Their
+    # historical recipe-only8192 field was never applied to the constructor.
+    # Children inherit that actual execution, including Q10240 monitoring;
+    # do not silently introduce a new tile at the e500 attachment boundary.
 
 
 def _validate_formal_wind_a2d_recipe_v1(
@@ -2029,6 +2068,158 @@ class WindSourceReadTaskV1(WindFormalA2DTaskV1):
         self.validation_query_count = self.VALIDATION_QUERY_COUNT
         self.source_reader_variant = str(self.recipe["source_reader_variant"])
 
+    def _set_source_read_training_epoch(self, model: nn.Module, epoch: int) -> None:
+        if model is not self.model:
+            raise ValueError("Wind source-read epoch dispatch requires its bound model.")
+        setter = getattr(model, "set_source_read_training_epoch", None)
+        if not callable(setter):
+            raise RuntimeError("Wind source-read core is missing its epoch-bound selection transition.")
+        setter(epoch)
+
+    def predict_native(
+        self,
+        model: nn.Module,
+        scene: SceneBatch,
+        receivers: WindContentReceivers,
+        execution_mode: str = "A2-D",
+        phase: str = "joint",
+        epoch: int = 0,
+        temperature: float | None = None,
+        trace_request: Any | None = None,
+    ) -> tuple[WindContentPredictions, Mapping[str, Any]]:
+        self._set_source_read_training_epoch(model, epoch)
+        return super().predict_native(
+            model, scene, receivers, execution_mode, phase,
+            epoch=epoch, temperature=temperature, trace_request=trace_request,
+        )
+
+    def source_read_positive_train_envelope(self, train_case_keys: Sequence[Any]) -> float:
+        """Wind has no heating control; retain the protocol's unused unit envelope."""
+        keys = tuple(int(value) for value in train_case_keys)
+        if keys != tuple(int(value) for value in self.train_rows):
+            raise ValueError("Wind source-read envelope requires its exact ordered TRAIN rows.")
+        return 1.0
+
+    def _source_read_target_free_receivers(
+        self,
+        case_key: Any,
+        key: SamplingKey,
+    ) -> tuple[WindContentSceneInputs, WindContentReceivers]:
+        """Draw the native role mixture from geometry catalogues without loading run.U."""
+        row = int(case_key)
+        if row not in self._train_row_set:
+            raise ValueError("Wind source-read teacher probes require a sealed TRAIN row.")
+        case = self.view.run(row)
+        scene_inputs = self.adapter.scene_inputs(case)
+        catalogue = self.catalogue_cache.get(case)
+        physical_id = _physical_case_direction_id(case)
+        stream = "wind_joint_native_role_query"
+        role_counts = _role_counts_for_query_count(self.primary_queries)
+        coordinates: list[np.ndarray] = []
+        flat_indices: list[np.ndarray] = []
+        for role in ROLE_NAMES:
+            cdf = catalogue.role_cdf[role]
+            positions = np.searchsorted(
+                cdf,
+                key.numpy_rng(stream, physical_id, role).random(role_counts[role]),
+                side="right",
+            )
+            positions = np.minimum(positions, cdf.size - 1)
+            valid = catalogue.role_indices.get(role)
+            selected = positions if valid is None else valid[positions]
+            coordinates.append(np.asarray(catalogue.coordinates_D[selected], dtype=np.float32))
+            flat_indices.append(np.asarray(selected, dtype=np.int64))
+        coords = np.concatenate(coordinates, axis=0)
+        flat = np.concatenate(flat_indices, axis=0)
+        features = self.adapter.query_features(coords, case.support)
+        local_query, local_module = self.adapter.packed_local_pair_indices(scene_inputs, coords)
+        receivers = WindContentReceivers(
+            coordinates_D=coords[None],
+            features=np.asarray(features, dtype=np.float32)[None],
+            flat_indices=flat[None],
+            role_ids=_role_ids(role_counts)[None],
+            scene_keys=(scene_inputs.scene_key,),
+            local_batch_indices=np.zeros(local_query.shape, dtype=np.int64),
+            local_query_indices=local_query,
+            local_module_indices=local_module,
+        )
+        return scene_inputs, receivers
+
+    def source_read_teacher_trace(
+        self,
+        model: nn.Module,
+        case_key: Any,
+        key: SamplingKey,
+        max_query_rows: int,
+    ) -> Mapping[str, torch.Tensor | None]:
+        """Build a bounded, target-free trace over the native Wind role mixture."""
+        initial_key = key.epoch == 500 and key.stage == "source_read_auxiliary_initial"
+        refresh_key = 501 <= key.epoch <= 2500 and key.stage == "source_read_auxiliary_refresh"
+        if (model is not self.model or not (initial_key or refresh_key)
+                or key.dataset_id != self.sampling_dataset_id):
+            raise ValueError(
+                "Wind source-read teacher keys must be an e500 initial fit or a bounded "
+                "501..2500 current-model TRAIN refresh bound to this core and dataset."
+            )
+        from honf_runtime.source_read_auxiliary import select_evenly_spaced_teacher_rows
+
+        scene_inputs, receivers = self._source_read_target_free_receivers(case_key, key)
+        scene = self.adapter.make_scene_batch((scene_inputs,))
+        self._set_source_read_training_epoch(model, key.epoch)
+        organization = model.prepare(scene)
+        query = self.adapter.make_query_batch(scene, receivers)
+        query = select_evenly_spaced_teacher_rows(query, max_query_rows)
+        trace_method = getattr(model, "source_read_teacher_trace_v1", None)
+        if not callable(trace_method):
+            raise RuntimeError("Wind A2-D core is missing the bounded Round3 teacher trace API.")
+        trace = trace_method(organization, query)
+        if not isinstance(trace, Mapping):
+            raise ValueError("Wind teacher trace must be a mapping.")
+        return trace
+
+    def source_read_physical_calibration_loss(
+        self,
+        model: nn.Module,
+        case_key: Any,
+        key: SamplingKey,
+    ) -> torch.Tensor:
+        """Evaluate the unchanged all-full native TRAIN objective for one row."""
+        if model is not self.model or key.epoch != 500 or key.dataset_id != self.sampling_dataset_id:
+            raise ValueError("Wind physical calibration keys must bind dense e500 TRAIN.")
+        from dataclasses import replace
+
+        counters = {
+            name: getattr(self, name)
+            for name in ("physical_training_samples", "physical_training_queries", "training_samples", "training_queries")
+            if hasattr(self, name)
+        }
+        try:
+            probe_key = replace(key, update_index=0, microbatch_index=1)
+            batch = self.make_batch((int(case_key),), probe_key)
+            scene = self.make_scene(batch.scene_inputs)
+            predictions, auxiliary = self.predict_native(
+                model, scene, batch.receivers, "A2-D", "joint", epoch=500,
+            )
+            terms = self.loss_terms(predictions, batch.targets, "joint", auxiliary)
+            objective: torch.Tensor | None = None
+            for name, term in terms.items():
+                denominator = float(term.denominator.detach().item()) if torch.is_tensor(term.denominator) else float(term.denominator)
+                weight = float(term.weight)
+                if denominator < 0 or not math.isfinite(denominator) or not math.isfinite(weight):
+                    raise ValueError(f"Wind physical calibration term {name!r} has invalid scaling.")
+                if denominator == 0:
+                    if float(term.numerator.detach()) != 0.0:
+                        raise ValueError(f"Wind physical calibration term {name!r} has no valid elements.")
+                    continue
+                piece = term.numerator.reshape(()) * (weight / denominator)
+                objective = piece if objective is None else objective + piece
+            if objective is None or not objective.requires_grad or not torch.isfinite(objective):
+                raise ValueError("Wind physical calibration did not produce a differentiable native loss.")
+            return objective
+        finally:
+            for name, value in counters.items():
+                setattr(self, name, value)
+
     def identity_payload(self) -> Mapping[str, Any]:
         result = dict(self._two_region_identity_payload(source_read=True))
         protocol = str(self.recipe["protocol"])
@@ -2330,6 +2521,10 @@ def _build_wind_content_task(
         model_config["reader_execution_backend"] = reader_backend
     if source_value_conditioning != "none":
         model_config["source_value_conditioning"] = source_value_conditioning
+    _apply_wind_source_read_core_options(
+        model_config, model_values, schema_version=schema_version,
+        source_reader_variant=value.get("source_reader_variant"),
+    )
     expected_model = {
         "context_dim": 128,
         "num_heads": 4,

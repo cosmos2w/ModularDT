@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from honf_runtime.source_read_protocol import (
     SOURCE_READ_VARIANTS,
     validate_source_read_recipe,
 )
-from honf_runtime.unified_training import OptimizerGroupSpec, ScheduleSpec
+from honf_runtime.unified_training import OptimizerGroupSpec, SamplingKey, ScheduleSpec
 
 from ..content_hypergraph import (
     THERMAL_CONTENT_COORDINATE_FRAME_V2,
@@ -283,7 +284,13 @@ class ThermalSourceReadTaskV1(ThermalContentHypergraphTaskV2):
             raise ValueError("Thermal source-read task requires a declared Round3 protocol.")
         if source_reader_variant not in SOURCE_READ_VARIANTS:
             raise ValueError("Thermal source-read task has an unknown reader variant.")
-        expected_conditioning = "source_scale" if source_reader_variant == "D-scale" else "none"
+        host_variant = source_reader_variant
+        if source_reader_variant in ("S-Utility", "S-Complete"):
+            recipe = kwargs.get("recipe")
+            host_variant = recipe.get("dense_host_variant") if isinstance(recipe, Mapping) else None
+            if host_variant not in ("D0", "D-scale"):
+                raise ValueError("Thermal sparse source-read task requires its declared dense host variant.")
+        expected_conditioning = "source_scale" if host_variant == "D-scale" else "none"
         if source_value_conditioning != expected_conditioning:
             raise ValueError("Thermal source-read variant and value conditioning disagree.")
         if reader_execution_backend not in ("legacy", "reduced_projection"):
@@ -296,6 +303,153 @@ class ThermalSourceReadTaskV1(ThermalContentHypergraphTaskV2):
         expected_parent_protocol = "development" if source_read_protocol == SOURCE_READ_DEVELOPMENT else FORMAL_PROTOCOL
         if self.protocol != expected_parent_protocol:
             raise ValueError("Thermal source-read task was bound through the wrong native cohort path.")
+
+    def _set_source_read_training_epoch(self, model: nn.Module, epoch: int) -> None:
+        if model is not self.model:
+            raise ValueError("Thermal source-read epoch dispatch requires its bound model.")
+        core = getattr(model, "core", None)
+        setter = getattr(core, "set_source_read_training_epoch", None)
+        if not callable(setter):
+            raise RuntimeError("Thermal source-read core is missing its epoch-bound selection transition.")
+        setter(epoch)
+
+    def predict_native(
+        self,
+        model: nn.Module,
+        scene: ThermalContentSceneInputs,
+        receivers: ThermalContentReceivers,
+        execution_mode: str,
+        phase: str,
+        epoch: int = 0,
+        temperature: float | None = None,
+    ) -> tuple[ThermalContentPredictions, Mapping[str, Any]]:
+        # Source-read scopes alone carry the persisted 500..600 selection
+        # transition. Epoch 0 remains a core-defined no-op on inherited state.
+        self._set_source_read_training_epoch(model, epoch)
+        return super().predict_native(
+            model, scene, receivers, execution_mode, phase,
+            epoch=epoch, temperature=temperature,
+        )
+
+    def _source_read_counter_snapshot(self) -> dict[str, Any]:
+        return {
+            name: copy.deepcopy(getattr(self, name))
+            for name in ("physical_training_samples", "physical_training_queries", "training_samples", "training_queries")
+            if hasattr(self, name)
+        }
+
+    def _restore_source_read_counters(self, snapshot: Mapping[str, Any]) -> None:
+        for name, value in snapshot.items():
+            setattr(self, name, copy.deepcopy(value))
+
+    def source_read_positive_train_envelope(self, train_case_keys: Sequence[Any]) -> float:
+        """Return the preregistered positive envelope from valid physical TRAIN heating."""
+        keys = tuple(str(value) for value in train_case_keys)
+        if keys != self.training_case_ids:
+            raise ValueError("Thermal source-read envelope requires the exact ordered sealed TRAIN cohort.")
+        maximum = 0.0
+        for case in self.training_cases:
+            structure = case.get("structure")
+            if not isinstance(structure, Mapping):
+                raise ValueError("Thermal TRAIN case is missing its native source structure.")
+            heat = torch.as_tensor(structure.get("heat_powers"), dtype=torch.float64)
+            present = torch.as_tensor(structure.get("module_present"), dtype=torch.bool)
+            if heat.ndim != 1 or present.shape != heat.shape:
+                raise ValueError("Thermal TRAIN heat and source-presence arrays must be aligned vectors.")
+            valid = heat[present]
+            if valid.numel() == 0 or not torch.isfinite(valid).all():
+                raise ValueError("Thermal TRAIN cohort has missing or nonfinite valid physical heating.")
+            maximum = max(maximum, float(valid.abs().max().item()))
+        envelope = 2.0 * maximum
+        if not math.isfinite(envelope) or envelope <= 0:
+            raise ValueError("Thermal TRAIN physical heating does not define a positive finite envelope.")
+        return envelope
+
+    def source_read_teacher_trace(
+        self,
+        model: nn.Module,
+        case_key: Any,
+        key: SamplingKey,
+        max_query_rows: int,
+    ) -> Mapping[str, torch.Tensor | None]:
+        """Build one bounded, target-free trace over a native Thermal query union."""
+        if model is not self.model or str(case_key) not in self._train_index_by_id:
+            raise ValueError("Thermal source-read teacher probes require this model and a sealed TRAIN case.")
+        initial_key = key.epoch == 500 and key.stage == "source_read_auxiliary_initial"
+        refresh_key = 501 <= key.epoch <= 2500 and key.stage == "source_read_auxiliary_refresh"
+        if (not (initial_key or refresh_key) or key.dataset_id != self.sampling_dataset_id):
+            raise ValueError(
+                "Thermal source-read teacher keys must be an e500 initial fit or a bounded "
+                "501..2500 current-model TRAIN refresh."
+            )
+        from dataclasses import replace
+        from honf_runtime.source_read_auxiliary import select_evenly_spaced_teacher_rows
+
+        counters = self._source_read_counter_snapshot()
+        try:
+            self._set_source_read_training_epoch(model, key.epoch)
+            # A nonzero microbatch index prevents make_batch from attaching the
+            # epoch's optional response-family addendum to this single-case probe.
+            probe_key = replace(key, microbatch_index=1)
+            batch = self.make_batch((str(case_key),), probe_key)
+            scene = self.make_scene(batch.scene_inputs)
+            prepared = model.prepare_native(
+                scene.structure,
+                batch.receivers.fluid_xy,
+                local_query_points=batch.receivers.local_query_points,
+                ntheta=batch.receivers.ntheta,
+                scene_key=scene.case_ids,
+            )
+            query = select_evenly_spaced_teacher_rows(prepared.query_batch, max_query_rows)
+            trace_method = getattr(model.core, "source_read_teacher_trace_v1", None)
+            if not callable(trace_method):
+                raise RuntimeError("Thermal A2-D core is missing the bounded Round3 teacher trace API.")
+            trace = trace_method(prepared.organization, query)
+            if not isinstance(trace, Mapping) or not torch.is_tensor(trace.get("thermal_k")):
+                raise ValueError("Thermal teacher trace must include the native signed thermal coefficients.")
+            return trace
+        finally:
+            self._restore_source_read_counters(counters)
+
+    def source_read_physical_calibration_loss(
+        self,
+        model: nn.Module,
+        case_key: Any,
+        key: SamplingKey,
+    ) -> torch.Tensor:
+        """Evaluate the unchanged all-full native TRAIN objective for one case."""
+        if model is not self.model or str(case_key) not in self._train_index_by_id:
+            raise ValueError("Thermal physical calibration requires this model and a sealed TRAIN case.")
+        if key.epoch != 500 or key.dataset_id != self.sampling_dataset_id:
+            raise ValueError("Thermal physical calibration keys must bind dense e500 TRAIN.")
+        from dataclasses import replace
+
+        counters = self._source_read_counter_snapshot()
+        try:
+            probe_key = replace(key, update_index=0, microbatch_index=1)
+            batch = self.make_batch((str(case_key),), probe_key)
+            scene = self.make_scene(batch.scene_inputs)
+            predictions, auxiliary = self.predict_native(
+                model, scene, batch.receivers, "A2-D", "joint", epoch=500,
+            )
+            terms = self.loss_terms(predictions, batch.targets, "joint", auxiliary)
+            objective: torch.Tensor | None = None
+            for name, term in terms.items():
+                denominator = float(term.denominator.detach().item()) if torch.is_tensor(term.denominator) else float(term.denominator)
+                weight = float(term.weight)
+                if denominator < 0 or not math.isfinite(denominator) or not math.isfinite(weight):
+                    raise ValueError(f"Thermal physical calibration term {name!r} has invalid scaling.")
+                if denominator == 0:
+                    if float(term.numerator.detach()) != 0.0:
+                        raise ValueError(f"Thermal physical calibration term {name!r} has no valid elements.")
+                    continue
+                piece = term.numerator.reshape(()) * (weight / denominator)
+                objective = piece if objective is None else objective + piece
+            if objective is None or not objective.requires_grad or not torch.isfinite(objective):
+                raise ValueError("Thermal physical calibration did not produce a differentiable native loss.")
+            return objective
+        finally:
+            self._restore_source_read_counters(counters)
 
     def optimizer_groups(self, model: nn.Module, arm: str, stage: str):
         del stage
