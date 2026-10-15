@@ -41,6 +41,7 @@ from honf_runtime.training_output_policy import (
 )
 from honf_runtime.source_read_protocol import (
     SOURCE_READ_DEVELOPMENT, SOURCE_READ_FULL, SOURCE_READ_PROTOCOLS,
+    configure_source_read_numerics,
     validate_source_read_recipe, validate_source_read_stop,
 )
 from honf_runtime.source_read_qualification import validate_source_read_qualification
@@ -308,6 +309,7 @@ def preflight_source_read_child(
 
 def build(recipe: dict[str, Any], *, device: str):
     """Delegate physical construction to the dataset-owned provider."""
+    configure_source_read_numerics(recipe)
     random.seed(recipe["seed"])
     np.random.seed(recipe["seed"])
     torch.manual_seed(recipe["seed"])

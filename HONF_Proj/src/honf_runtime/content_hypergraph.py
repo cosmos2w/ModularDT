@@ -11,6 +11,7 @@ import torch
 
 from .compat import load_trusted_checkpoint
 from .registry import require_model_family
+from .source_read_protocol import configure_source_read_numerics
 
 
 def load_content_hypergraph_checkpoint(
@@ -43,6 +44,7 @@ def load_content_hypergraph_checkpoint(
         raise ValueError("Checkpoint recipe checksum is inconsistent.")
     if recipe.get("architecture") != payload.get("arm"):
         raise ValueError("Checkpoint architecture differs from its recorded training arm.")
+    configure_source_read_numerics(recipe)
     provider = identity.get("provider_identity", {})
     if not isinstance(provider.get("model_config"), dict) or not isinstance(provider.get("adapter_state"), dict):
         raise TypeError("Checkpoint lacks its native model and TRAIN transform inventory.")

@@ -7,6 +7,7 @@ H6 qualification. Dataset construction remains owned by each native provider.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -14,6 +15,7 @@ SOURCE_READ_DEVELOPMENT = "source_read_development_v1"
 SOURCE_READ_FULL = "source_read_full1000"
 SOURCE_READ_PROTOCOLS = frozenset((SOURCE_READ_DEVELOPMENT, SOURCE_READ_FULL))
 SOURCE_READ_VARIANTS = frozenset(("D0", "D-scale", "S-Utility", "S-Complete"))
+SOURCE_READ_NUMERICS = "deterministic_cuda_v1"
 
 
 def _exact(mapping: Mapping[str, Any], name: str, expected: Any) -> None:
@@ -89,6 +91,13 @@ def validate_source_read_recipe(value: Mapping[str, Any]) -> dict[str, Any]:
                 "source_read_executor", "source_read_rank", "source_read_scorer_width", "reader_query_chunk_size"}
     if set(model) - set(fixed) - optional:
         raise ValueError("Source-read model contains undeclared architecture fields.")
+    if "source_read_numerics" in recipe:
+        if (recipe.get("protocol") not in SOURCE_READ_PROTOCOLS
+                or variant not in ("S-Utility", "S-Complete")
+                or recipe["source_read_numerics"] != SOURCE_READ_NUMERICS):
+            raise ValueError(
+                "source_read_numerics is available only to sparse children as deterministic_cuda_v1."
+            )
     if model.get("reader_execution_backend", "legacy") not in ("legacy", "reduced_projection"):
         raise ValueError("Unqualified source-reader execution backend.")
     chunk = model.get("reader_query_chunk_size")
@@ -139,5 +148,39 @@ def validate_source_read_stop(recipe: Mapping[str, Any], stop_after: int) -> Non
         raise ValueError(f"Source-read execution stop must lie in1..{maximum}; future horizon is not permission.")
 
 
+def configure_source_read_numerics(recipe: Mapping[str, Any]) -> bool:
+    """Apply the one opt-in deterministic CUDA contract for sparse readers.
+
+    Missing metadata deliberately leaves the process settings unchanged. The
+    workspace variable is established before any provider/model construction;
+    conflicting values fail before the caller can build a model.
+    """
+    if not isinstance(recipe, Mapping):
+        raise TypeError("Source-read numerical recipe must be a mapping.")
+    if "source_read_numerics" not in recipe:
+        return False
+    variant = recipe.get("source_reader_variant")
+    if (recipe.get("protocol") not in SOURCE_READ_PROTOCOLS
+            or recipe.get("architecture") != "A2-D"
+            or variant not in ("S-Utility", "S-Complete")):
+        raise ValueError("Deterministic CUDA numerics are limited to source-read A2-D S-Utility/S-Complete.")
+    if recipe.get("source_read_numerics") != SOURCE_READ_NUMERICS:
+        raise ValueError("Unsupported source_read_numerics declaration.")
+    current_workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if current_workspace not in (None, ":4096:8"):
+        raise ValueError("deterministic_cuda_v1 requires CUBLAS_WORKSPACE_CONFIG=:4096:8.")
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+    import torch
+
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    return True
+
+
 __all__ = ["SOURCE_READ_DEVELOPMENT", "SOURCE_READ_FULL", "SOURCE_READ_PROTOCOLS",
-           "SOURCE_READ_VARIANTS", "validate_source_read_recipe", "validate_source_read_stop"]
+           "SOURCE_READ_VARIANTS", "SOURCE_READ_NUMERICS", "configure_source_read_numerics",
+           "validate_source_read_recipe", "validate_source_read_stop"]

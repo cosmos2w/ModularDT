@@ -20,7 +20,11 @@ from typing import Any
 import torch
 from torch import nn
 
-from .source_read_protocol import SOURCE_READ_DEVELOPMENT, validate_source_read_recipe
+from .source_read_protocol import (
+    SOURCE_READ_DEVELOPMENT,
+    SOURCE_READ_NUMERICS,
+    validate_source_read_recipe,
+)
 
 SCHEMA = "source_read_development_child_v1"
 AUXILIARY_FIT_SCHEMA = "source_read_child_auxiliary_fit_v1"
@@ -56,6 +60,7 @@ _SOURCE_PATH_ALLOWLIST = (
     "src/honf_runtime/source_read_auxiliary.py",
     "src/honf_runtime/source_read_protocol.py",
     "src/honf_runtime/source_read_qualification.py",
+    "src/honf_runtime/content_hypergraph.py",
     "src/honf_runtime/unified_training.py",
     "tools/content_hypergraph_train.py",
     "Case_ThermalChannel/src/channelthermal/content_hypergraph.py",
@@ -317,6 +322,15 @@ def _canonicalize_recipe(
     result = copy.deepcopy(dict(child))
     if result.get("source_reader_variant") != target_variant:
         raise ValueError("Source-read child recipe variant differs from its declaration.")
+    numerics = result.get("source_read_numerics", _MISSING)
+    if numerics is not _MISSING:
+        if target_variant not in ("S-Utility", "S-Complete") or numerics != SOURCE_READ_NUMERICS:
+            raise ValueError("Source-read child may add only deterministic_cuda_v1 numerics metadata.")
+        parent_numerics = parent.get("source_read_numerics", _MISSING)
+        if parent_numerics is _MISSING:
+            result.pop("source_read_numerics")
+        elif parent_numerics != numerics:
+            raise ValueError("Source-read child changed inherited numerical execution metadata.")
     result["source_reader_variant"] = parent_variant
     host = result.get("dense_host_variant", parent_variant)
     if host != parent_variant:

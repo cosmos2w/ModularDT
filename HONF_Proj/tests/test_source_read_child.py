@@ -22,6 +22,7 @@ from honf_runtime.source_read_child import (
     AUXILIARY_OPTIMIZER_ALGORITHM,
     AUXILIARY_FIT_SCHEMA,
     SCHEMA,
+    _canonicalize_recipe,
     prepare_source_read_child,
 )
 from honf_runtime.unified_training import (
@@ -652,6 +653,24 @@ def test_source_read_child_preserves_dense_e500_state_moments_rng_history_and_re
     assert without_wall_times(resumed["history"]) == without_wall_times(uninterrupted["history"])
     assert resumed["epoch"] == 700
     assert len(resumed["history"]) == 700
+
+
+def test_child_identity_canonicalization_allows_only_declared_deterministic_cuda_addition():
+    parent = _recipe("D0")
+    child = _recipe("S-Utility")
+    child["source_read_numerics"] = "deterministic_cuda_v1"
+    assert _canonicalize_recipe(parent, child, "D0", "S-Utility") == parent
+
+    for invalid in ("deterministic_cuda_v2", "unknown", None):
+        changed = copy.deepcopy(child)
+        changed["source_read_numerics"] = invalid
+        with pytest.raises(ValueError, match="may add only deterministic_cuda_v1"):
+            _canonicalize_recipe(parent, changed, "D0", "S-Utility")
+
+    dense_child = _recipe("D0")
+    dense_child["source_read_numerics"] = "deterministic_cuda_v1"
+    with pytest.raises(ValueError, match="may add only deterministic_cuda_v1"):
+        _canonicalize_recipe(parent, dense_child, "D0", "D0")
 
 
 @pytest.mark.parametrize("failure", [
