@@ -541,6 +541,51 @@ def test_nonthermal_train_screen_uses_null_thermal_metrics_accepted_by_child_val
     _validate_train_fidelity_screen(screen)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA calibration regression")
+@pytest.mark.parametrize("variant", ["S-Utility", "S-Complete"])
+@pytest.mark.parametrize("thermal", [False, True])
+def test_cuda_train_screen_accumulates_host_totals_without_optimizer_updates(variant, thermal):
+    model = _Model(variant=variant, seed=67)
+    reader = model.core.direct_reader
+    if not thermal:
+        reader.source_read = SourceReadControllerV1(
+            width=8, coordinate_dim=1, heads=2, thermal=False, rank=3,
+            scorer_width=6, completion=variant == "S-Complete",
+        )
+    controller = reader.source_read
+    trace = dict(_trace_factory(
+        _Provider(), model, 11,
+        SamplingKey(0, 500, 0, 0, "cuda-screen", variant,
+                    SamplingKey.CASE_EPOCH_VERSION, "source-read-fixture-train"),
+        256,
+    ))
+    if not thermal:
+        trace["thermal_k"] = None
+    case = _normalize_teacher_case(11, trace, controller, max_query_rows=256)
+    scales = _context_scales([case], controller)
+    cpu_thresholds, cpu_screen = _calibrate_thresholds(
+        model, controller, reader, [case], device=torch.device("cpu"), dtype=torch.float32,
+        context_scales=scales, heating_envelope=2.5,
+    )
+    before = copy.deepcopy(model.state_dict())
+    model.to("cuda")
+    thresholds, screen = _calibrate_thresholds(
+        model, controller, reader, [case], device=torch.device("cuda"), dtype=torch.float32,
+        context_scales=scales, heating_envelope=2.5,
+    )
+    _validate_train_fidelity_screen(screen)
+    torch.testing.assert_close(torch.tensor(thresholds), torch.tensor(cpu_thresholds),
+                               atol=3e-6, rtol=3e-5)
+    torch.testing.assert_close(
+        torch.tensor(screen["flow_direct_context_relative_rms"]),
+        torch.tensor(cpu_screen["flow_direct_context_relative_rms"]),
+        atol=3e-6, rtol=3e-5,
+    )
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value.cpu(), before[name], atol=0, rtol=0)
+    assert all(parameter.grad is None for parameter in model.parameters())
+
+
 def test_teacher_trace_requires_actual_dense_bqm_count_and_separate_present_count():
     model = _Model(variant="S-Utility")
     controller = model.core.direct_reader.source_read

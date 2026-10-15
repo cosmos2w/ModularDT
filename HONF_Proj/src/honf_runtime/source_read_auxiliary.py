@@ -816,8 +816,10 @@ def _calibrate_thresholds(
                 context_reference = dense_context.to(torch.float64)
                 masked_error = context_error * valid_queries
                 masked_reference = context_reference * valid_queries
-                flow_diff_sq[point] += masked_error.square().sum(dim=(0, 1, 3))
-                flow_reference_sq[point] += masked_reference.square().sum(dim=(0, 1, 3))
+                # The screen keeps only tiny FP64 totals on the host, even
+                # when the controller and teacher reductions execute on CUDA.
+                flow_diff_sq[point] += masked_error.square().sum(dim=(0, 1, 3)).cpu()
+                flow_reference_sq[point] += masked_reference.square().sum(dim=(0, 1, 3)).cpu()
 
                 if controller.thermal:
                     assert fine_k is not None
