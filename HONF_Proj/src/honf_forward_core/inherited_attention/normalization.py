@@ -136,9 +136,12 @@ def measure_relative_entmax15(
 ) -> Tensor:
     """Vectorized sorted-prefix solution of the measure-relative 1.5 law.
 
-    Scores are shifted by each row maximum before the prefix-root solve. The
-    selected root remains in the autograd graph, including its dependence on
-    normalized positive measures. There is no loop over anchors or queries.
+    Prefix moments and thresholds use FP64: FP32 cancellation can leave a gap
+    between adjacent candidate intervals at a donor's support boundary. Select
+    the last prefix whose final donor is above its threshold, as in the usual
+    entmax support test; a second rounded interval comparison is unnecessary.
+    The root retains score and measure gradients. Outputs retain the input
+    dtype, and there is no loop over anchors or queries.
     """
     scores, normalized_measure, _valid_donor, allowed, _ = _normalized_inputs(
         logits, donor_measure, donor_valid, destination_valid
@@ -146,13 +149,15 @@ def measure_relative_entmax15(
     batch, heads, anchors, donors = scores.shape
     if donors == 0:
         return torch.zeros_like(logits)
+    scores = scores.to(torch.float64)
+    root_measure = normalized_measure.to(torch.float64)
     row_has_donor = allowed.any(dim=-1, keepdim=True)
     masked_scores = scores.masked_fill(~allowed, -torch.inf)
     row_max = masked_scores.amax(dim=-1, keepdim=True)
     row_max = torch.where(row_has_donor, row_max, torch.zeros_like(row_max))
     shifted_scores = torch.where(allowed, scores - row_max, -torch.inf)
     sorted_scores, order = torch.sort(shifted_scores, dim=-1, descending=True, stable=True)
-    measure_rows = normalized_measure[:, None, None, :].expand(batch, heads, anchors, donors)
+    measure_rows = root_measure[:, None, None, :].expand(batch, heads, anchors, donors)
     sorted_measure = torch.gather(measure_rows, -1, order)
     live_scores = torch.where(torch.isfinite(sorted_scores), sorted_scores, torch.zeros_like(sorted_scores))
     prefix_a = torch.cumsum(sorted_measure, dim=-1)
@@ -167,21 +172,18 @@ def measure_relative_entmax15(
     sqrt_discriminant = torch.sqrt(safe_discriminant)
     safe_a = torch.where(prefix_a > 0, prefix_a, torch.ones_like(prefix_a))
     candidate_tau = (prefix_b - sqrt_discriminant) / safe_a
-    next_score = torch.cat(
-        (sorted_scores[..., 1:], torch.full_like(sorted_scores[..., :1], -torch.inf)), dim=-1
-    )
-    candidate_ok = (sorted_scores > candidate_tau) & (candidate_tau >= next_score)
-    candidate_ok = candidate_ok & prefix_eligible & positive_discriminant
+    candidate_ok = (sorted_scores > candidate_tau) & prefix_eligible & positive_discriminant
     has_root = candidate_ok.any(dim=-1, keepdim=True)
     root_or_empty = has_root | ~row_has_donor
     if logits.device.type == "cuda":
         torch._assert_async(root_or_empty.all(), "The measure-relative entmax15 prefix root was not found.")
     elif not bool(root_or_empty.all()):
         raise RuntimeError("The measure-relative entmax15 prefix root was not found.")
-    root_index = candidate_ok.to(torch.int64).argmax(dim=-1, keepdim=True)
+    prefix_index = torch.arange(donors, device=logits.device)
+    root_index = torch.where(candidate_ok, prefix_index, 0).amax(dim=-1, keepdim=True)
     tau = torch.gather(candidate_tau, -1, root_index)
     tau = torch.where(row_has_donor, tau, torch.zeros_like(tau))
-    probabilities = normalized_measure[:, None, None, :] * torch.relu(
+    probabilities = root_measure[:, None, None, :] * torch.relu(
         (scores - row_max - tau) * 0.5
     ).square()
     probabilities = probabilities * allowed.to(probabilities.dtype)

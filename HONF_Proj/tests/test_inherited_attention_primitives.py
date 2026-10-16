@@ -143,6 +143,25 @@ def test_measure_relative_entmax15_composed_score_and_measure_gradients():
     assert torch.isfinite(p).all()
 
 
+def test_entmax15_fp32_support_boundary_has_a_normalized_root_and_finite_gradients():
+    # The second donor is at the support threshold. Rounded FP32 prefix
+    # intervals used to leave a gap: neither of the two roots was accepted.
+    first = torch.cat((torch.tensor([0.0014990998897701502]), torch.linspace(0.001, 0.999, 257)))
+    measure = torch.stack((first, 1 - first), dim=-1).requires_grad_()
+    scores = torch.stack((torch.zeros_like(first), -2 / first.sqrt()), dim=-1)
+    scores = scores[:, None, None, :].requires_grad_()
+    valid = torch.ones_like(measure, dtype=torch.bool)
+    destinations = torch.ones(len(first), 1, dtype=torch.bool)
+    actual = measure_relative_entmax15(scores, measure, valid, destinations)
+    assert actual.dtype == torch.float32 and torch.isfinite(actual).all()
+    torch.testing.assert_close(actual.sum(-1), torch.ones_like(actual[..., 0]), atol=2e-7, rtol=0)
+    for index in (0, 1, 64, 128, 257):
+        expected = measure_relative_entmax15_reference(scores[index, 0, 0], measure[index])
+        torch.testing.assert_close(actual[index, 0, 0].double(), expected, atol=2e-7, rtol=0)
+    gradients = torch.autograd.grad((actual * torch.tensor([0.3, -0.7])).sum(), (scores, measure))
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
 def test_measure_relative_entmax15_wide_scores_empty_rows_and_present_measure_validation():
     scores = torch.tensor([[[[1000.0, -1000.0, -2500.0, -4000.0]]]], dtype=torch.float64, requires_grad=True)
     measure = torch.tensor([[0.01, 0.19, 0.30, 0.50]], dtype=torch.float64, requires_grad=True)

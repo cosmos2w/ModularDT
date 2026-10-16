@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -13,12 +14,67 @@ import torch
 from .inherited_attention_protocol import (
     IAG_ARCHITECTURE_REPRESENTATION,
     IAG_C_ARCHITECTURE,
+    IAG_PROTOCOL,
     IAG_Q_ARCHITECTURE,
     IAG_Q_REPRESENTATION_REVIEW_DECISION,
     IAG_REPRESENTATION_REVIEW_SCHEMA,
 )
 
 IAG_SPARSE_CHILD_SCHEMA = "inherited_attention_sparse_child_v1"
+IAG_NORMALIZATION_CORRECTION_SCHEMA = "inherited_attention_normalization_correction_v1"
+IAG_NORMALIZATION_CORRECTION_BINDING_SCHEMA = "inherited_attention_normalization_correction_binding_v1"
+IAG_NORMALIZATION_CORRECTION_SCOPE = "entmax15_fp64_prefix_boundary_correctness_v1"
+IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE = (
+    "entmax15_fp64_prefix_boundary_with_c_compatibility_v1"
+)
+IAG_NORMALIZATION_CORRECTION_TARGET_SHA256 = "e2cc51145388c90463a346b745f8007c290c447116c4ebbf18fa233ce6127223"
+IAG_NORMALIZATION_CORRECTION_PATH = "src/honf_forward_core/inherited_attention/normalization.py"
+IAG_NORMALIZATION_CORRECTION_Q_PATHS = frozenset({
+    IAG_NORMALIZATION_CORRECTION_PATH,
+    "src/honf_runtime/inherited_attention_child.py",
+    "tools/inherited_attention_train.py",
+})
+IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS = frozenset({
+    "src/honf_forward_core/inherited_attention/__init__.py",
+    "src/honf_forward_core/inherited_attention/model.py",
+    IAG_NORMALIZATION_CORRECTION_PATH,
+    "src/honf_forward_core/inherited_attention/query_reader.py",
+    "src/honf_runtime/inherited_attention_child.py",
+    "src/honf_runtime/inherited_attention_protocol.py",
+    "tools/inherited_attention_train.py",
+})
+IAG_NORMALIZATION_CORRECTION_ADDED_THERMAL_PATH = "src/honf_forward_core/inherited_attention/query_reader.py"
+IAG_NORMALIZATION_CORRECTION_ALLOWED_PATHS = (
+    IAG_NORMALIZATION_CORRECTION_Q_PATHS | IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS
+)
+IAG_NORMALIZATION_CORRECTION_FIELDS = frozenset({
+    "schema",
+    "scope",
+    "dataset",
+    "architecture",
+    "representation",
+    "source_checkpoint",
+    "source_checkpoint_sha256",
+    "source_epoch",
+    "source_recipe_sha256",
+    "target_recipe_sha256",
+    "source_loaded_source_sha256",
+    "target_loaded_source_sha256",
+    "source_files",
+    "target_files",
+    "file_changes",
+    "reason",
+})
+IAG_NORMALIZATION_CORRECTION_THERMAL_FIELDS = (
+    IAG_NORMALIZATION_CORRECTION_FIELDS | {"thermal_runtime_equivalence"}
+)
+IAG_NORMALIZATION_CORRECTION_BINDING_FIELDS = frozenset({
+    "schema",
+    "path",
+    "receipt_file_sha256",
+    "receipt_sha256",
+    "receipt_json",
+})
 
 
 def _sha256(path: Path) -> str:
@@ -27,6 +83,334 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _json_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value))
+
+
+def _source_files(identity: Mapping[str, Any], *, label: str) -> dict[str, str]:
+    loaded = identity.get("loaded_source")
+    if not isinstance(loaded, Mapping) or set(loaded) != {"files", "sha256"}:
+        raise ValueError(f"Normalization correction requires a complete {label} loaded-source inventory.")
+    files = loaded.get("files")
+    if not isinstance(files, Mapping) or not files:
+        raise ValueError(f"Normalization correction requires nonempty {label} loaded-source files.")
+    copied: dict[str, str] = {}
+    for name, digest in files.items():
+        if (not isinstance(name, str) or not name or Path(name).is_absolute()
+                or Path(name).as_posix() != name or ".." in Path(name).parts
+                or not _is_sha256(digest)):
+            raise ValueError(f"Normalization correction has a malformed {label} loaded-source entry.")
+        copied[name] = digest
+    copied = dict(sorted(copied.items()))
+    if loaded.get("sha256") != _json_sha256(copied):
+        raise ValueError(f"Normalization correction {label} loaded-source digest is not canonical.")
+    return copied
+
+
+def _validate_thermal_runtime_equivalence(receipt: Mapping[str, Any]) -> None:
+    evidence_binding = receipt.get("thermal_runtime_equivalence")
+    if not isinstance(evidence_binding, Mapping) or set(evidence_binding) != {"path", "sha256"}:
+        raise ValueError("Thermal IAG-C correction requires its exact runtime-equivalence evidence binding.")
+    path_text = evidence_binding.get("path")
+    digest = evidence_binding.get("sha256")
+    if (not isinstance(path_text, str) or not Path(path_text).is_absolute()
+            or str(Path(path_text).resolve()) != path_text or not _is_sha256(digest)):
+        raise ValueError("Thermal IAG-C runtime-equivalence evidence path or SHA is noncanonical.")
+    evidence_path = Path(path_text).resolve(strict=True)
+    if _sha256(evidence_path) != digest:
+        raise ValueError("Thermal IAG-C runtime-equivalence evidence differs from its bound SHA256.")
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Thermal IAG-C runtime-equivalence evidence must be UTF-8 JSON.") from exc
+    expected_keys = {
+        "schema", "checkpoint_sha256", "source_loaded_source_sha256",
+        "target_loaded_source_sha256", "case_keys", "rows", "passed",
+    }
+    if not isinstance(evidence, Mapping) or set(evidence) != expected_keys:
+        raise ValueError("Thermal IAG-C runtime-equivalence evidence fields differ from the fixed schema.")
+    if (evidence.get("schema") != "round4_thermal_soft_runtime_equivalence_v1"
+            or evidence.get("checkpoint_sha256") != receipt.get("source_checkpoint_sha256")
+            or evidence.get("source_loaded_source_sha256") != receipt.get("source_loaded_source_sha256")
+            or evidence.get("target_loaded_source_sha256") != receipt.get("target_loaded_source_sha256")
+            or evidence.get("case_keys") != ["0006", "0097", "0342", "0631"]
+            or evidence.get("passed") is not True):
+        raise ValueError("Thermal IAG-C runtime-equivalence evidence does not match this parent and runtime transition.")
+    rows = evidence.get("rows")
+    row_keys = {
+        "case_key", "module_count", "source_input_sha256", "target_input_sha256",
+        "source_output_sha256", "target_output_sha256", "source_named_gradient_sha256",
+        "target_named_gradient_sha256",
+    }
+    if not isinstance(rows, list) or len(rows) != 4:
+        raise ValueError("Thermal IAG-C runtime-equivalence evidence must contain the four fixed TRAIN rows.")
+    for row, case_key, module_count in zip(rows, ("0006", "0097", "0342", "0631"), (1, 4, 7, 12)):
+        if (not isinstance(row, Mapping) or set(row) != row_keys
+                or row.get("case_key") != case_key or row.get("module_count") != module_count):
+            raise ValueError("Thermal IAG-C runtime-equivalence rows differ from the frozen TRAIN panel.")
+        for kind in ("input", "output", "named_gradient"):
+            source_hash = row.get(f"source_{kind}_sha256")
+            target_hash = row.get(f"target_{kind}_sha256")
+            if not _is_sha256(source_hash) or not _is_sha256(target_hash) or source_hash != target_hash:
+                raise ValueError("Thermal IAG-C soft runtime equivalence did not match bitwise on the fixed TRAIN panel.")
+
+
+def _validate_normalization_correction_receipt(
+    receipt: Mapping[str, Any],
+    source: Mapping[str, Any],
+    target: Mapping[str, Any],
+    *,
+    source_path: Path | None = None,
+) -> dict[str, str]:
+    """Validate the one fixed entmax numerical correction against both identities."""
+    if receipt.get("schema") != IAG_NORMALIZATION_CORRECTION_SCHEMA:
+        raise ValueError("Unsupported normalization-correction receipt schema.")
+    source_recipe = source.get("recipe")
+    target_recipe = target.get("recipe")
+    if not isinstance(source_recipe, Mapping) or not isinstance(target_recipe, Mapping):
+        raise TypeError("Normalization correction requires sealed source and target recipes.")
+    architecture = target_recipe.get("architecture")
+    representation = IAG_ARCHITECTURE_REPRESENTATION.get(architecture)
+    dataset = target_recipe.get("dataset")
+    if (representation is None or source_recipe.get("architecture", IAG_C_ARCHITECTURE) != architecture
+            or source_recipe.get("representation", representation) != representation
+            or target_recipe.get("representation", representation) != representation
+            or (architecture, dataset) not in ((IAG_C_ARCHITECTURE, "thermal"), (IAG_Q_ARCHITECTURE, "wind"))
+            or source_recipe.get("dataset") != dataset):
+        raise ValueError("Normalization correction must preserve the parent dataset and IAG architecture/representation.")
+    if architecture == IAG_Q_ARCHITECTURE:
+        expected_scope = IAG_NORMALIZATION_CORRECTION_SCOPE
+        expected_fields = IAG_NORMALIZATION_CORRECTION_FIELDS
+        allowed_paths = IAG_NORMALIZATION_CORRECTION_Q_PATHS
+    else:
+        expected_scope = IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE
+        expected_fields = IAG_NORMALIZATION_CORRECTION_THERMAL_FIELDS
+        allowed_paths = IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS
+    if set(receipt) != expected_fields:
+        raise ValueError("Normalization-correction receipt fields differ from the fixed architecture scope.")
+    if (receipt.get("scope") != expected_scope
+            or type(receipt.get("source_epoch")) is not int
+            or receipt.get("source_epoch") != 500):
+        raise ValueError("Unsupported normalization-correction scope or source epoch.")
+    if (receipt.get("dataset") != dataset or receipt.get("architecture") != architecture
+            or receipt.get("representation") != representation):
+        raise ValueError("Normalization-correction receipt targets a different dataset or IAG representation.")
+    if (source_recipe.get("protocol") != IAG_PROTOCOL
+            or target_recipe.get("protocol") != IAG_PROTOCOL
+            or source_recipe.get("normalization") != "soft"
+            or source_recipe.get("trajectory") != "fresh_soft"
+            or target_recipe.get("normalization") != "measure_entmax15"
+            or target_recipe.get("trajectory") != "e500_sparse_child"):
+        raise ValueError("Normalization correction is only valid for a soft e500 to sparse development child.")
+    source_recipe_sha = source.get("recipe_sha256")
+    target_recipe_sha = target.get("recipe_sha256")
+    if (not _is_sha256(source_recipe_sha) or not _is_sha256(target_recipe_sha)
+            or receipt.get("source_recipe_sha256") != source_recipe_sha
+            or receipt.get("target_recipe_sha256") != target_recipe_sha):
+        raise ValueError("Normalization-correction receipt does not bind the exact parent and child recipe hashes.")
+    checkpoint = receipt.get("source_checkpoint")
+    if (not isinstance(checkpoint, str) or not Path(checkpoint).is_absolute()
+            or str(Path(checkpoint).resolve()) != checkpoint
+            or not _is_sha256(receipt.get("source_checkpoint_sha256"))):
+        raise ValueError("Normalization-correction receipt has a noncanonical parent checkpoint binding.")
+    if source_path is not None:
+        resolved_source = source_path.expanduser().resolve(strict=True)
+        if (str(resolved_source) != checkpoint
+                or _sha256(resolved_source) != receipt.get("source_checkpoint_sha256")):
+            raise ValueError("Normalization-correction receipt does not match the exact e500 parent checkpoint.")
+
+    source_files = receipt.get("source_files")
+    target_files = receipt.get("target_files")
+    changes = receipt.get("file_changes")
+    if not isinstance(source_files, Mapping) or not isinstance(target_files, Mapping) or not isinstance(changes, Mapping):
+        raise TypeError("Normalization-correction receipt must include exact source and target file maps.")
+    normalized_source = dict(sorted(source_files.items()))
+    normalized_target = dict(sorted(target_files.items()))
+    actual_source = _source_files(source, label="parent")
+    actual_target = _source_files(target, label="child")
+    if normalized_source != actual_source or normalized_target != actual_target:
+        raise ValueError("Normalization-correction receipt file maps do not match the sealed loaded-source identities.")
+    source_digest = source.get("loaded_source", {}).get("sha256")
+    target_digest = target.get("loaded_source", {}).get("sha256")
+    if (receipt.get("source_loaded_source_sha256") != source_digest
+            or receipt.get("target_loaded_source_sha256") != target_digest):
+        raise ValueError("Normalization-correction receipt does not bind the exact loaded-source aggregate hashes.")
+    source_names = set(normalized_source)
+    target_names = set(normalized_target)
+    added = target_names - source_names
+    removed = source_names - target_names
+    if architecture == IAG_Q_ARCHITECTURE and (added or removed):
+        raise ValueError("IAG-Q normalization correction cannot add or remove loaded source files.")
+    if architecture == IAG_C_ARCHITECTURE and (
+        added != {IAG_NORMALIZATION_CORRECTION_ADDED_THERMAL_PATH} or removed
+    ):
+        raise ValueError("Thermal IAG-C correction permits only the reviewed query_reader.py source addition.")
+    actual_changes = {
+        name: {
+            "source_sha256": normalized_source.get(name),
+            "target_sha256": normalized_target.get(name),
+        }
+        for name in source_names | target_names
+        if normalized_source.get(name) != normalized_target.get(name)
+    }
+    if dict(sorted(changes.items())) != dict(sorted(actual_changes.items())):
+        raise ValueError("Normalization-correction file delta differs from the exact old/new loaded-source maps.")
+    if set(actual_changes) != allowed_paths:
+        raise ValueError("Normalization correction file delta differs from its exact fixed scope allowlist.")
+    if IAG_NORMALIZATION_CORRECTION_PATH not in actual_changes:
+        raise ValueError("Normalization correction must include the measure-entmax normalization implementation.")
+    if actual_changes[IAG_NORMALIZATION_CORRECTION_PATH]["target_sha256"] != IAG_NORMALIZATION_CORRECTION_TARGET_SHA256:
+        raise ValueError("Normalization correction target does not match the reviewed FP64-prefix implementation.")
+    if architecture == IAG_C_ARCHITECTURE:
+        _validate_thermal_runtime_equivalence(receipt)
+    reason = receipt.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("Normalization-correction receipt requires a concise recorded reason.")
+    return actual_changes
+
+
+def bind_inherited_attention_normalization_correction(
+    receipt_path: Path,
+    source: Mapping[str, Any],
+    target: Mapping[str, Any],
+    *,
+    source_path: Path,
+) -> dict[str, Any]:
+    """Read and validate the explicit numerical-correction receipt for attachment."""
+    path = receipt_path.expanduser().resolve(strict=True)
+    raw = path.read_bytes()
+    try:
+        raw_text = raw.decode("utf-8")
+        receipt = json.loads(raw_text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Normalization-correction receipt must be valid UTF-8 JSON.") from exc
+    if not isinstance(receipt, Mapping):
+        raise TypeError("Normalization-correction receipt must be a JSON object.")
+    _validate_normalization_correction_receipt(receipt, source, target, source_path=source_path)
+    return {
+        "schema": IAG_NORMALIZATION_CORRECTION_BINDING_SCHEMA,
+        "path": str(path),
+        "receipt_file_sha256": hashlib.sha256(raw).hexdigest(),
+        "receipt_sha256": _json_sha256(receipt),
+        "receipt_json": raw_text,
+    }
+
+
+def validate_inherited_attention_normalization_correction_resume(
+    binding: Mapping[str, Any],
+    identity: Mapping[str, Any],
+) -> None:
+    """Check a stored correction binding against the exact current child identity."""
+    if set(binding) != IAG_NORMALIZATION_CORRECTION_BINDING_FIELDS:
+        raise ValueError("Stored normalization-correction binding fields are malformed.")
+    path = binding.get("path")
+    raw_text = binding.get("receipt_json")
+    if (binding.get("schema") != IAG_NORMALIZATION_CORRECTION_BINDING_SCHEMA
+            or not isinstance(path, str) or not Path(path).is_absolute()
+            or str(Path(path).resolve()) != path or not isinstance(raw_text, str)
+            or not _is_sha256(binding.get("receipt_file_sha256"))
+            or not _is_sha256(binding.get("receipt_sha256"))):
+        raise ValueError("Stored normalization-correction binding is not canonical.")
+    raw = raw_text.encode("utf-8")
+    if hashlib.sha256(raw).hexdigest() != binding["receipt_file_sha256"]:
+        raise ValueError("Stored normalization-correction receipt bytes fail their sealed hash.")
+    try:
+        receipt = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Stored normalization-correction receipt is invalid JSON.") from exc
+    if (not isinstance(receipt, Mapping)
+            or _json_sha256(receipt) != binding["receipt_sha256"]):
+        raise ValueError("Stored normalization-correction receipt fails its canonical hash.")
+    source_recipe = {
+        "dataset": receipt.get("dataset"),
+        "architecture": receipt.get("architecture"),
+        "representation": receipt.get("representation"),
+        "protocol": IAG_PROTOCOL,
+        "normalization": "soft",
+        "trajectory": "fresh_soft",
+    }
+    target_recipe = {
+        **source_recipe,
+        "normalization": "measure_entmax15",
+        "trajectory": "e500_sparse_child",
+    }
+    source_identity = {
+        "recipe": source_recipe,
+        "recipe_sha256": receipt.get("source_recipe_sha256"),
+        "loaded_source": {
+            "files": receipt.get("source_files"),
+            "sha256": receipt.get("source_loaded_source_sha256"),
+        },
+    }
+    target_receipt_identity = {
+        "recipe": target_recipe,
+        "recipe_sha256": receipt.get("target_recipe_sha256"),
+        "loaded_source": {
+            "files": receipt.get("target_files"),
+            "sha256": receipt.get("target_loaded_source_sha256"),
+        },
+    }
+    _validate_normalization_correction_receipt(receipt, source_identity, target_receipt_identity)
+    target_recipe = identity.get("recipe")
+    if not isinstance(target_recipe, Mapping):
+        raise TypeError("Corrected resume requires its sealed target recipe.")
+    if (receipt.get("target_recipe_sha256") != identity.get("recipe_sha256")
+            or receipt.get("dataset") != target_recipe.get("dataset")
+            or receipt.get("architecture") != target_recipe.get("architecture")
+            or receipt.get("representation") != target_recipe.get("representation")):
+        raise ValueError("Stored normalization correction targets a different resume recipe.")
+    actual_target = _source_files(identity, label="resume")
+    if (dict(sorted(receipt.get("target_files", {}).items())) != actual_target
+            or receipt.get("target_loaded_source_sha256") != identity.get("loaded_source", {}).get("sha256")):
+        raise ValueError("Corrected resume loaded-source inventory differs from its bound target runtime.")
+
+
+def _validated_normalization_correction(
+    source: Mapping[str, Any],
+    target: Mapping[str, Any],
+    binding: Any,
+    *,
+    source_path: Path | None = None,
+) -> dict[str, str]:
+    if not isinstance(binding, Mapping) or set(binding) != IAG_NORMALIZATION_CORRECTION_BINDING_FIELDS:
+        raise ValueError("Sparse-child normalization correction is missing its sealed receipt binding.")
+    path = binding.get("path")
+    raw_text = binding.get("receipt_json")
+    if (binding.get("schema") != IAG_NORMALIZATION_CORRECTION_BINDING_SCHEMA
+            or not isinstance(path, str) or not Path(path).is_absolute()
+            or str(Path(path).resolve()) != path or not isinstance(raw_text, str)
+            or not _is_sha256(binding.get("receipt_file_sha256"))
+            or not _is_sha256(binding.get("receipt_sha256"))):
+        raise ValueError("Sparse-child normalization-correction binding is noncanonical.")
+    raw = raw_text.encode("utf-8")
+    if hashlib.sha256(raw).hexdigest() != binding["receipt_file_sha256"]:
+        raise ValueError("Sparse-child normalization-correction receipt bytes fail their sealed hash.")
+    try:
+        receipt = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Sparse-child normalization-correction receipt is invalid JSON.") from exc
+    if not isinstance(receipt, Mapping) or _json_sha256(receipt) != binding["receipt_sha256"]:
+        raise ValueError("Sparse-child normalization-correction receipt fails its canonical hash.")
+    return _validate_normalization_correction_receipt(receipt, source, target, source_path=source_path)
+
+
+def _mask_verified_source_delta(identity: Any, changed_paths: Mapping[str, Any]) -> Any:
+    result = copy.deepcopy(identity)
+    loaded = result.get("loaded_source")
+    files = loaded["files"]
+    for path in changed_paths:
+        files[path] = "<receipt-approved-source-correction>"
+    loaded["sha256"] = "<receipt-approved-source-correction>"
+    result.pop("normalization_correction", None)
+    return result
 
 
 def _soft_identity(value: Any, *, allow_c_scene_change: bool) -> Any:
@@ -72,7 +456,12 @@ def _identity_values(value: Any, key_name: str) -> list[Any]:
     return []
 
 
-def _require_same_soft_identity(source: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, str]:
+def _require_same_soft_identity(
+    source: Mapping[str, Any],
+    target: Mapping[str, Any],
+    *,
+    source_path: Path | None = None,
+) -> dict[str, str]:
     source_recipe = source.get("recipe")
     target_recipe = target.get("recipe")
     if not isinstance(source_recipe, Mapping) or not isinstance(target_recipe, Mapping):
@@ -107,8 +496,19 @@ def _require_same_soft_identity(source: Mapping[str, Any], target: Mapping[str, 
         raise ValueError(f"{architecture} sparse-child query executor identity is unsupported.")
     if architecture == IAG_Q_ARCHITECTURE and source_query != target_query:
         raise ValueError("IAG-Q e500 attachment preserves the query executor exactly.")
+    if "normalization_correction" in source:
+        raise ValueError("A sparse correction cannot attach from an already corrected sparse parent.")
+    correction_binding = target.get("normalization_correction")
+    changed_paths = None
+    if correction_binding is not None:
+        changed_paths = _validated_normalization_correction(
+            source, target, correction_binding, source_path=source_path,
+        )
     left = _soft_identity(source, allow_c_scene_change=architecture == IAG_C_ARCHITECTURE)
     right = _soft_identity(target, allow_c_scene_change=architecture == IAG_C_ARCHITECTURE)
+    if changed_paths is not None:
+        left = _mask_verified_source_delta(left, changed_paths)
+        right = _mask_verified_source_delta(right, changed_paths)
     if left != right:
         raise ValueError(f"{architecture} sparse child changes a field beyond normalization and its absolute transition.")
     return {
@@ -236,7 +636,9 @@ def prepare_inherited_attention_sparse_child(
         raise ValueError("Sparse-child declaration does not bind the parent's exact soft recipe digest.")
     if declaration.get("target_recipe_sha256") != sealed_identity.get("recipe_sha256"):
         raise ValueError("Sparse-child declaration does not bind the child's exact sparse recipe digest.")
-    executor_transition = _require_same_soft_identity(parent_identity, sealed_identity)
+    executor_transition = _require_same_soft_identity(
+        parent_identity, sealed_identity, source_path=source_path,
+    )
     _require_state_layout(model, source_payload.get("model_state_dict"))
     source_optimizer = source_payload.get("optimizer_state_by_name")
     if not isinstance(source_optimizer, Mapping) or not isinstance(source_optimizer.get("state_by_name"), Mapping):
@@ -281,6 +683,14 @@ def prepare_inherited_attention_sparse_child(
     }
     if architecture == IAG_Q_ARCHITECTURE:
         result["representation_review_sha256"] = declaration["representation_review_sha256"]
+    correction_binding = sealed_identity.get("normalization_correction")
+    if correction_binding is not None:
+        correction_receipt = json.loads(correction_binding["receipt_json"])
+        result["normalization_correction"] = {
+            "scope": correction_receipt["scope"],
+            "receipt_sha256": correction_binding["receipt_sha256"],
+            "target_loaded_source_sha256": correction_receipt["target_loaded_source_sha256"],
+        }
     return result
 
 
@@ -328,13 +738,33 @@ def verify_inherited_attention_sparse_child_continuation(
                 or contract.get("target_representation") != "iag_q"
                 or not isinstance(contract.get("representation_review_sha256"), str))):
         raise ValueError("IAG-Q sparse resume lacks its same-architecture review-bound branch identity.")
+    correction = contract.get("normalization_correction")
+    if correction is not None and (
+        not isinstance(correction, Mapping)
+        or set(correction) != {"scope", "receipt_sha256", "target_loaded_source_sha256"}
+        or correction.get("scope") != {
+            IAG_C_ARCHITECTURE: IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE,
+            IAG_Q_ARCHITECTURE: IAG_NORMALIZATION_CORRECTION_SCOPE,
+        }.get(contract.get("target_architecture"))
+        or not _is_sha256(correction.get("receipt_sha256"))
+        or not _is_sha256(correction.get("target_loaded_source_sha256"))
+    ):
+        raise ValueError("Sparse resume has a malformed entmax numerical-correction binding.")
     if type(completed_epoch) is not int or not 501 <= completed_epoch < stop_after <= 2500:
         raise ValueError("IAG-C sparse same-run resume must advance inside the absolute 501..2500 horizon.")
 
 
 __all__ = [
+    "IAG_NORMALIZATION_CORRECTION_ALLOWED_PATHS",
+    "IAG_NORMALIZATION_CORRECTION_BINDING_SCHEMA",
+    "IAG_NORMALIZATION_CORRECTION_PATH",
+    "IAG_NORMALIZATION_CORRECTION_SCHEMA",
+    "IAG_NORMALIZATION_CORRECTION_SCOPE",
+    "IAG_NORMALIZATION_CORRECTION_TARGET_SHA256",
     "IAG_SPARSE_CHILD_SCHEMA",
+    "bind_inherited_attention_normalization_correction",
     "prepare_inherited_attention_sparse_child",
+    "validate_inherited_attention_normalization_correction_resume",
     "verify_inherited_attention_sparse_child_continuation",
     "verify_inherited_attention_sparse_child_optimizer",
 ]

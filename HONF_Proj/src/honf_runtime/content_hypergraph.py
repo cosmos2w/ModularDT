@@ -50,6 +50,21 @@ def _load_inherited_attention_checkpoint(
                                       allow_nan=False).encode()).hexdigest()
     if digest != identity.get("recipe_sha256"):
         raise ValueError("Inherited-attention checkpoint recipe checksum is inconsistent.")
+    normalization_correction = identity.get("normalization_correction")
+    correction_receipt = None
+    correction_summary = None
+    if normalization_correction is not None:
+        from .inherited_attention_child import validate_inherited_attention_normalization_correction_resume
+
+        validate_inherited_attention_normalization_correction_resume(
+            normalization_correction, identity,
+        )
+        correction_receipt = json.loads(normalization_correction["receipt_json"])
+        correction_summary = {
+            "scope": correction_receipt["scope"],
+            "receipt_sha256": normalization_correction["receipt_sha256"],
+            "target_loaded_source_sha256": correction_receipt["target_loaded_source_sha256"],
+        }
     provider = identity.get("provider_identity")
     if not isinstance(provider, dict) or not isinstance(provider.get("model_config"), dict):
         raise TypeError("Inherited-attention checkpoint lacks its native model and transform inventory.")
@@ -117,6 +132,15 @@ def _load_inherited_attention_checkpoint(
         )
         if not isinstance(child_contract, dict):
             raise ValueError("Sparse development IAG checkpoints must retain their exact soft e500 branch contract.")
+        if (correction_summary is not None
+                and child_contract.get("normalization_correction") != correction_summary):
+            raise ValueError(
+                "Sparse child branch correction summary differs from its receipt-bound checkpoint identity."
+            )
+        if (correction_receipt is not None
+                and (correction_receipt.get("source_checkpoint") != branch.get("path")
+                     or correction_receipt.get("source_checkpoint_sha256") != branch.get("sha256"))):
+            raise ValueError("Normalization-correction receipt differs from its exact e500 checkpoint branch parent.")
         executor_transition = child_contract.get("scene_executor_transition")
         source_executor = executor_transition.get("source") if isinstance(executor_transition, dict) else None
         target_executor = executor_transition.get("target") if isinstance(executor_transition, dict) else None
@@ -139,6 +163,21 @@ def _load_inherited_attention_checkpoint(
                 or checkpoint_epoch < 501
             ):
                 raise ValueError("Sparse development IAG-C checkpoint no longer proves its sealed e500 transition law.")
+            if correction_receipt is not None:
+                branch = payload.get("branch_parent")
+                parent_identity = branch.get("identity") if isinstance(branch, dict) else None
+                if not isinstance(parent_identity, dict):
+                    raise ValueError("Corrected sparse IAG-C checkpoint is missing its sealed soft e500 parent identity.")
+                from .inherited_attention_child import _require_same_soft_identity
+
+                try:
+                    observed_transition = _require_same_soft_identity(parent_identity, identity)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Corrected sparse IAG-C parent and child identities differ beyond their sealed transition."
+                    ) from exc
+                if observed_transition != executor_transition:
+                    raise ValueError("IAG-C branch transition differs from its exact parent and child identities.")
         else:
             parent = branch if isinstance(branch, dict) else {}
             parent_identity = parent.get("identity")

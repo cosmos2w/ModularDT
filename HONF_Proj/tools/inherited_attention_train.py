@@ -397,6 +397,51 @@ def _preflight_sparse_child(
     }
 
 
+def _restore_normalization_correction_identity(
+    saved_identity: dict[str, Any],
+    current_identity: dict[str, Any],
+) -> dict[str, Any] | None:
+    binding = saved_identity.get("normalization_correction")
+    if binding is None:
+        return None
+    from honf_runtime.inherited_attention_child import (
+        validate_inherited_attention_normalization_correction_resume,
+    )
+
+    validate_inherited_attention_normalization_correction_resume(binding, current_identity)
+    current_identity["normalization_correction"] = binding
+    return binding
+
+
+def _validate_normalization_correction_branch_binding(
+    identity: dict[str, Any],
+    checkpoint_payload: dict[str, Any],
+) -> None:
+    binding = identity.get("normalization_correction")
+    branch = checkpoint_payload.get("branch_parent")
+    child_contract = branch.get("inherited_attention_sparse_child") if isinstance(branch, dict) else None
+    observed = child_contract.get("normalization_correction") if isinstance(child_contract, dict) else None
+    expected = None
+    if binding is not None:
+        receipt = json.loads(binding["receipt_json"])
+        parent_identity = branch.get("identity") if isinstance(branch, dict) else None
+        if not isinstance(parent_identity, dict):
+            raise ValueError("Corrected sparse checkpoint is missing its sealed soft e500 parent identity.")
+        if (receipt.get("source_checkpoint") != branch.get("path")
+                or receipt.get("source_checkpoint_sha256") != branch.get("sha256")):
+            raise ValueError("Normalization-correction receipt differs from its checkpoint branch parent binding.")
+        from honf_runtime.inherited_attention_child import _require_same_soft_identity
+
+        _require_same_soft_identity(parent_identity, identity)
+        expected = {
+            "scope": receipt["scope"],
+            "receipt_sha256": binding["receipt_sha256"],
+            "target_loaded_source_sha256": receipt["target_loaded_source_sha256"],
+        }
+    if observed != expected:
+        raise ValueError("Sparse child checkpoint branch contract differs from its normalization-correction identity binding.")
+
+
 def _preflight_same_run_resume(
     model: torch.nn.Module,
     provider: Any,
@@ -413,6 +458,7 @@ def _preflight_same_run_resume(
     )
 
     payload = load_trusted_checkpoint(path, map_location="cpu")
+    _validate_normalization_correction_branch_binding(identity, payload)
     architecture = identity["recipe"]["architecture"]
     if payload.get("workflow") != WORKFLOW or payload.get("arm") != architecture:
         raise ValueError("Resume checkpoint belongs to a different workflow or architecture.")
@@ -481,6 +527,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Exact same-architecture soft epoch500 parent for a segmented sparse-development child.")
     parser.add_argument("--sparse-child-declaration", type=Path,
                         help="Declaration binding the exact soft epoch500 checkpoint and sparse recipe.")
+    parser.add_argument("--normalization-correction", type=Path,
+                        help="Exact receipt for the audited entmax prefix-boundary numerical correction at e500 attachment.")
     parser.add_argument("--representation-review", type=Path,
                         help="Measured representation-review receipt required by Wind IAG-Q.")
     parser.add_argument("--qualification", type=Path,
@@ -532,13 +580,16 @@ def main(argv: list[str] | None = None) -> int:
     sparse_options = _validate_sparse_declaration(
         recipe, declaration, args.branch_from_checkpoint, args.resume, representation_identity,
     )
+    if args.normalization_correction is not None and args.branch_from_checkpoint is None:
+        raise ValueError("--normalization-correction is reserved for a fresh sparse e500 child attachment.")
     output, source_path = _validate_run_paths(
         output=args.output, resume=args.resume, branch=sparse_options.get("branch_from_checkpoint"),
         dry_run=args.dry_run,
     )
     _validate_review_output_binding(recipe, representation_receipt, output)
+    parent_payload = None
     if sparse_options.get("branch_from_checkpoint") is not None:
-        _load_parent_payload(
+        parent_payload = _load_parent_payload(
             sparse_options["branch_from_checkpoint"], declaration, recipe, representation_identity,
         )
     device_receipt = _check_device_scope(args.device, budget)
@@ -575,6 +626,26 @@ def main(argv: list[str] | None = None) -> int:
     }
     if representation_identity is not None:
         identity["representation_review"] = representation_identity
+    normalization_correction = None
+    if args.normalization_correction is not None:
+        from honf_runtime.inherited_attention_child import bind_inherited_attention_normalization_correction
+
+        if parent_payload is None or source_path is None:
+            raise ValueError("Normalization correction requires the loaded exact soft e500 parent.")
+        normalization_correction = bind_inherited_attention_normalization_correction(
+            args.normalization_correction,
+            parent_payload.get("experiment_identity", {}),
+            identity,
+            source_path=source_path,
+        )
+        identity["normalization_correction"] = normalization_correction
+    if args.resume is not None:
+        from honf_runtime.compat import load_trusted_checkpoint
+
+        resume_payload = load_trusted_checkpoint(source_path, map_location="cpu")
+        saved_identity = resume_payload.get("experiment_identity", {})
+        _restore_normalization_correction_identity(saved_identity, identity)
+        _validate_normalization_correction_branch_binding(identity, resume_payload)
     if qualification is not None and budget is not None:
         identity["full_train1000_authorization"] = {
             "qualification": qualification,
@@ -604,6 +675,17 @@ def main(argv: list[str] | None = None) -> int:
     }
     if representation_identity is not None:
         summary["representation_review"] = representation_identity
+    if normalization_correction is not None:
+        summary["normalization_correction"] = {
+            "scope": json.loads(normalization_correction["receipt_json"])["scope"],
+            "receipt_sha256": normalization_correction["receipt_sha256"],
+        }
+    elif "normalization_correction" in identity:
+        summary["normalization_correction"] = {
+            "scope": json.loads(identity["normalization_correction"]["receipt_json"])["scope"],
+            "receipt_sha256": identity["normalization_correction"]["receipt_sha256"],
+            "restored_from_checkpoint_identity": True,
+        }
     if source_path is not None and sparse_options.get("declaration") is not None:
         summary["sparse_child_preflight"] = _preflight_sparse_child(
             model, provider, engine, identity, recipe, declaration,
