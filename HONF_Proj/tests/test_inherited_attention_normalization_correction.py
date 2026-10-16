@@ -309,6 +309,8 @@ def test_correction_contract_has_distinct_fixed_q_and_thermal_path_sets():
 
 def test_cli_resume_contract_matches_the_checkpoint_bound_receipt(tmp_path: Path):
     source, target, source_path, receipt_path, _ = _identity_pair(tmp_path)
+    source["data_locks"] = {"WindTEST": "locked"}
+    target["data_locks"] = {"WindTEST": "locked"}
     binding = bind_inherited_attention_normalization_correction(
         receipt_path, source, target, source_path=source_path,
     )
@@ -320,6 +322,7 @@ def test_cli_resume_contract_matches_the_checkpoint_bound_receipt(tmp_path: Path
         "target_loaded_source_sha256": receipt["target_loaded_source_sha256"],
     }
     payload = {
+        "experiment_identity": copy.deepcopy(target),
         "branch_parent": {
             "path": str(source_path.resolve()),
             "sha256": receipt["source_checkpoint_sha256"],
@@ -327,10 +330,101 @@ def test_cli_resume_contract_matches_the_checkpoint_bound_receipt(tmp_path: Path
             "inherited_attention_sparse_child": {"normalization_correction": expected},
         },
     }
-    inherited_attention_train._validate_normalization_correction_branch_binding(target, payload)
+    early_current_identity = {
+        key: copy.deepcopy(target[key])
+        for key in (
+            "workflow", "model_family", "recipe", "recipe_sha256", "loaded_source",
+            "data_locks", "normalization_correction",
+        )
+    }
+    inherited_attention_train._validate_normalization_correction_branch_binding(
+        early_current_identity, payload,
+    )
     payload["branch_parent"]["inherited_attention_sparse_child"]["normalization_correction"]["receipt_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="differs from its normalization-correction identity"):
-        inherited_attention_train._validate_normalization_correction_branch_binding(target, payload)
+        inherited_attention_train._validate_normalization_correction_branch_binding(
+            early_current_identity, payload,
+        )
+
+
+@pytest.mark.parametrize("drift", ["recipe", "loaded_source", "provider_identity", "unknown"])
+def test_cli_branch_binding_rejects_current_identity_drift(
+    tmp_path: Path, drift: str,
+):
+    source, target, source_path, receipt_path, receipt = _identity_pair(tmp_path)
+    source["data_locks"] = {"WindTEST": "locked"}
+    target["data_locks"] = {"WindTEST": "locked"}
+    binding = bind_inherited_attention_normalization_correction(
+        receipt_path, source, target, source_path=source_path,
+    )
+    target["normalization_correction"] = binding
+    expected = {
+        "scope": receipt["scope"],
+        "receipt_sha256": binding["receipt_sha256"],
+        "target_loaded_source_sha256": receipt["target_loaded_source_sha256"],
+    }
+    payload = {
+        "experiment_identity": copy.deepcopy(target),
+        "branch_parent": {
+            "path": str(source_path.resolve()),
+            "sha256": receipt["source_checkpoint_sha256"],
+            "identity": copy.deepcopy(source),
+            "inherited_attention_sparse_child": {"normalization_correction": expected},
+        },
+    }
+    current = {
+        key: copy.deepcopy(target[key])
+        for key in (
+            "workflow", "model_family", "recipe", "recipe_sha256", "loaded_source",
+            "data_locks", "normalization_correction",
+        )
+    }
+    if drift == "recipe":
+        current["recipe"]["dataset"] = "wind"
+    elif drift == "loaded_source":
+        current["loaded_source"]["sha256"] = "0" * 64
+    elif drift == "provider_identity":
+        current["provider_identity"] = {"model_config": {"scene_executor": "selected"}}
+    else:
+        current["unrecognized_current_field"] = True
+    with pytest.raises(ValueError, match="Current sparse-child identity differs"):
+        inherited_attention_train._validate_normalization_correction_branch_binding(current, payload)
+
+
+def test_cli_branch_binding_requires_sealed_child_identity_and_exact_parent_lineage(tmp_path: Path):
+    source, target, source_path, receipt_path, receipt = _identity_pair(tmp_path)
+    binding = bind_inherited_attention_normalization_correction(
+        receipt_path, source, target, source_path=source_path,
+    )
+    target["normalization_correction"] = binding
+    expected = {
+        "scope": receipt["scope"],
+        "receipt_sha256": binding["receipt_sha256"],
+        "target_loaded_source_sha256": receipt["target_loaded_source_sha256"],
+    }
+    payload = {
+        "experiment_identity": copy.deepcopy(target),
+        "branch_parent": {
+            "path": str(source_path.resolve()),
+            "sha256": receipt["source_checkpoint_sha256"],
+            "identity": copy.deepcopy(source),
+            "inherited_attention_sparse_child": {"normalization_correction": expected},
+        },
+    }
+    current = copy.deepcopy(target)
+    payload_without_sealed_identity = copy.deepcopy(payload)
+    payload_without_sealed_identity.pop("experiment_identity")
+    with pytest.raises(ValueError, match="missing its sealed child experiment identity"):
+        inherited_attention_train._validate_normalization_correction_branch_binding(
+            current, payload_without_sealed_identity,
+        )
+
+    replaced_parent = copy.deepcopy(payload)
+    replaced_parent["branch_parent"]["identity"]["workflow"] = "replaced-parent"
+    with pytest.raises(ValueError, match="changes a field beyond normalization"):
+        inherited_attention_train._validate_normalization_correction_branch_binding(
+            current, replaced_parent,
+        )
 
 
 def test_loader_rejects_corrected_checkpoint_with_drifted_branch_summary(

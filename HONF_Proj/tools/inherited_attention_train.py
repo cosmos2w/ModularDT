@@ -424,6 +424,13 @@ def _validate_normalization_correction_branch_binding(
     expected = None
     if binding is not None:
         receipt = json.loads(binding["receipt_json"])
+        saved_identity = checkpoint_payload.get("experiment_identity")
+        if not isinstance(saved_identity, dict):
+            raise ValueError("Corrected sparse checkpoint is missing its sealed child experiment identity.")
+        if not isinstance(identity, dict):
+            raise TypeError("Current corrected sparse-child identity must be a dictionary.")
+        if any(key not in saved_identity or saved_identity[key] != value for key, value in identity.items()):
+            raise ValueError("Current sparse-child identity differs from its sealed checkpoint identity.")
         parent_identity = branch.get("identity") if isinstance(branch, dict) else None
         if not isinstance(parent_identity, dict):
             raise ValueError("Corrected sparse checkpoint is missing its sealed soft e500 parent identity.")
@@ -432,7 +439,7 @@ def _validate_normalization_correction_branch_binding(
             raise ValueError("Normalization-correction receipt differs from its checkpoint branch parent binding.")
         from honf_runtime.inherited_attention_child import _require_same_soft_identity
 
-        _require_same_soft_identity(parent_identity, identity)
+        _require_same_soft_identity(parent_identity, saved_identity)
         expected = {
             "scope": receipt["scope"],
             "receipt_sha256": binding["receipt_sha256"],
