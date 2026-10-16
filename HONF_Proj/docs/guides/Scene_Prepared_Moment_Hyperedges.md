@@ -63,3 +63,57 @@ Round5 C0/M/H runs branch from each dataset's own Round4 C-soft e500 checkpoint;
 Thermal retains TRAIN150/DEV22, sampling seed 0, effective batch 48 with microbatch 24, primary Q1024, native auxiliaries and the scheduled response addendum. Wind retains TRAIN72/DEV24, initialization seed 0, sampling seed 42, effective batch 16 with microbatch 8, and Q8192 split into 6144 volume and 2048 hub queries. Its Q10240 monitor and separate five-role native evaluation board retain their distinct definitions. Both use all-parameter AdamW at constant 3e-4, weight decay 1e-5, betas (0.9,0.999), epsilon 1e-8 and clip 1, including final partial macro-batches.
 
 Loss curves refresh every 10 epochs with tqdm progress. Full validation history, latest/best states and declared checkpoint milestones are retained; separate validation files are written only at milestones and final/clean-stop reviews. A conditional cached first-order reconstruction requires its own TRAIN diagnosis, resource gate and child identity; it does not modify a running H control. Fresh full-TRAIN probes require the separate qualification decision and stop at e1000. Existing full-TRAIN D and H6 protocols, historical replay, TEST locks and solver usage 326/326 remain separate contracts.
+
+## Standalone construction and loading
+
+Use the ModularDT interpreter with `HONF_Proj/src`, `HONF_Proj/Case_ThermalChannel/src` and `HONF_Proj/Case_WindFarm/src` on `PYTHONPATH`. These functions reconstruct the saved native model and TRAIN transform without constructing a training provider, opening a dataset, creating an optimizer or launching training. Call them with a trusted Thermal or Wind Round5 checkpoint. CPU construction does not require a GPU allocation.
+
+```python
+from honf_runtime.content_hypergraph import load_content_hypergraph_checkpoint
+
+
+def load_thermal(checkpoint):
+    model, physical_adapter, payload = load_content_hypergraph_checkpoint(
+        checkpoint, device="cpu"
+    )
+    assert payload["experiment_identity"]["recipe"]["dataset"] == "thermal"
+    assert physical_adapter is model
+    return model, payload
+
+
+def load_wind(checkpoint):
+    core, physical_adapter, payload = load_content_hypergraph_checkpoint(
+        checkpoint, device="cpu"
+    )
+    assert payload["experiment_identity"]["recipe"]["dataset"] == "wind"
+    return core, physical_adapter, payload
+```
+
+The saved native metadata also supports explicit construction before loading tensor weights. Thermal's adapter contains its shared core; Wind keeps the shared core and physical conversion adapter separate. This example uses the exact constructor metadata from already validated payloads and does not fit new normalization statistics.
+
+```python
+from channelthermal.content_hypergraph import ThermalInheritedAttentionAdapterV1
+from honf_forward_core.inherited_attention.moment_model import MomentHyperedgeCoreV1
+from windfarm.content_hypergraph import WindInheritedAttentionAdapterV1
+
+
+def construct_thermal(payload):
+    native = payload["experiment_identity"]["provider_identity"]
+    model = ThermalInheritedAttentionAdapterV1.from_state_payload(
+        native["adapter_state"], device="cpu"
+    )
+    model.load_state_dict(payload["model_state_dict"], strict=True)
+    return model.eval()
+
+
+def construct_wind(payload):
+    native = payload["experiment_identity"]["provider_identity"]
+    core = MomentHyperedgeCoreV1.from_config(native["model_config"])
+    core.load_state_dict(payload["model_state_dict"], strict=True)
+    adapter = WindInheritedAttentionAdapterV1.from_state_payload(
+        native["adapter_state"], device="cpu"
+    )
+    return core.eval(), adapter
+```
+
+For a resumed scientific run, use the maintained `moment_hyperedge_train.py train --resume latest` route with its sealed recipe and original output directory. Standalone inference loading does not restore an optimizer or authorize changing dataset identity. The family loader rejects incompatible schemas, modified native bindings and a different parent lineage.
