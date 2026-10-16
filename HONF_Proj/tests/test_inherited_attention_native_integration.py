@@ -47,9 +47,11 @@ def _recipe(name: str) -> dict:
 def test_all_opt_in_iag_recipes_resolve_without_legacy_controls(path: Path):
     recipe = validate_inherited_attention_recipe(json.loads(path.read_text(encoding="utf-8")))
     assert recipe["family"] == "inherited_attention_v1"
-    assert recipe["architecture"] == "IAG-C"
+    assert recipe["architecture"] in ("IAG-C", "IAG-Q")
+    assert recipe["representation"] == {"IAG-C": "iag_c", "IAG-Q": "iag_q"}[recipe["architecture"]]
     assert recipe["model"]["signed_carrier_width"] == 8
-    assert recipe["model"]["query_executor"] == "indexed"
+    expected_query_executor = "indexed" if recipe["architecture"] == "IAG-C" else "cell_selected"
+    assert recipe["model"]["query_executor"] == expected_query_executor
     assert recipe["numerical_policy"] == IAG_NUMERICAL_POLICY
     assert "thermal_response_rank" not in recipe["model"]
     assert "num_hyperedges" not in recipe["model"]

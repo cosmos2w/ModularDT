@@ -31,9 +31,13 @@ _EXPORTS = {
     "gather_source_response_indexed": "readers",
     "prepare_anchor_values": "readers",
     "prepare_source_indexed_anchor_response": "readers",
+    "CellQueryPlan": "query_reader",
+    "build_cell_query_plan": "query_reader",
+    "query_conditioned_gather": "query_reader",
 }
 
 __all__ = (
+    "CellQueryPlan",
     "InheritedAttentionCoreV1",
     "InheritedQueryBatch",
     "InheritedSceneBatch",
@@ -45,6 +49,7 @@ __all__ = (
     "RouteScoreSnapshot",
     "TypedAssociationAtlas",
     "TypedTokenValues",
+    "build_cell_query_plan",
     "build_typed_atlas",
     "gather_cover_dense_reference",
     "gather_cover_indexed",
@@ -56,6 +61,7 @@ __all__ = (
     "normalize_donor_measure",
     "prepare_anchor_values",
     "prepare_source_indexed_anchor_response",
+    "query_conditioned_gather",
     "route_raw_logits",
     "smoothstep_grid_receiver_cover",
     "validate_cover_anchor_identity",

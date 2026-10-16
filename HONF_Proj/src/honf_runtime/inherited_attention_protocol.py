@@ -11,12 +11,19 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import torch
 
 IAG_FAMILY = "inherited_attention_v1"
 IAG_REPRESENTATION = "iag_c"
+IAG_C_ARCHITECTURE = "IAG-C"
+IAG_Q_ARCHITECTURE = "IAG-Q"
+IAG_ARCHITECTURE_REPRESENTATION = {
+    IAG_C_ARCHITECTURE: "iag_c",
+    IAG_Q_ARCHITECTURE: "iag_q",
+}
 IAG_SCHEMA = "inherited_attention_recipe_v1"
 IAG_PROTOCOL = "inherited_attention_development_v1"
 IAG_FULL_PROTOCOL = "inherited_attention_full_train1000_v1"
@@ -38,6 +45,8 @@ IAG_FULL_SPARSE_TRANSITION = {
 }
 
 IAG_FULL_BUDGET_SCHEMA = "inherited_attention_full_train1000_budget_v1"
+IAG_REPRESENTATION_REVIEW_SCHEMA = "inherited_attention_representation_review_v1"
+IAG_Q_REPRESENTATION_REVIEW_DECISION = "replace_iag_c_with_iag_q"
 IAG_AUTHORIZED_PHYSICAL_GPUS = {
     1: "GPU-3ceda40c-fd5c-4b88-6c47-b3301711571e",
     2: "GPU-f6a4ddbb-ad44-5ef5-0421-eecf7120df39",
@@ -133,7 +142,7 @@ def configure_inherited_attention_numerics(policy: str = IAG_NUMERICAL_POLICY) -
                 or torch.backends.cudnn.allow_tf32
                 or not torch.backends.cudnn.deterministic
                 or torch.backends.cudnn.benchmark):
-            raise RuntimeError("IAG-C numerics must be configured before CUDA initialization.")
+            raise RuntimeError("Inherited-attention numerics must be configured before CUDA initialization.")
         return
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = workspace
     torch.use_deterministic_algorithms(True, warn_only=False)
@@ -144,11 +153,11 @@ def configure_inherited_attention_numerics(policy: str = IAG_NUMERICAL_POLICY) -
 
 
 def validate_inherited_attention_recipe(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate one segmented IAG-C soft trajectory or its sparse child.
+    """Validate one segmented IAG-C/IAG-Q trajectory or guarded full probe.
 
     Data paths and dataset-bound manifest identities remain provider-owned.
     A sparse recipe only seals the absolute normalization transition; the
-    training command must separately require the exact matching IAG-C soft
+    training command must separately require the exact same-architecture soft
     epoch-500 checkpoint declaration before it may branch.
     """
 
@@ -160,11 +169,18 @@ def validate_inherited_attention_recipe(value: Mapping[str, Any]) -> dict[str, A
         raise ValueError("Inherited-attention protocol must be segmented development or guarded full_train1000.")
     full = protocol == IAG_FULL_PROTOCOL
     horizon = IAG_FULL_TOTAL_EPOCHS if full else IAG_TOTAL_EPOCHS
+    architecture = recipe.get("architecture")
+    representation = (
+        IAG_ARCHITECTURE_REPRESENTATION.get(architecture)
+        if isinstance(architecture, str) else None
+    )
+    if representation is None:
+        raise ValueError("Inherited-attention architecture must be IAG-C or IAG-Q.")
     for name, expected in (
         ("schema", IAG_SCHEMA),
         ("family", IAG_FAMILY),
-        ("representation", IAG_REPRESENTATION),
-        ("architecture", "IAG-C"),
+        ("representation", representation),
+        ("architecture", architecture),
         ("model_family", IAG_FAMILY),
         ("total_epochs", horizon),
         ("approved_stop_after", horizon),
@@ -178,6 +194,8 @@ def validate_inherited_attention_recipe(value: Mapping[str, Any]) -> dict[str, A
     dataset = recipe.get("dataset")
     if not isinstance(dataset, str) or dataset not in _DATASET_CONTRACTS:
         raise ValueError("Inherited-attention dataset must be thermal or wind.")
+    if architecture == IAG_Q_ARCHITECTURE and dataset != "wind":
+        raise ValueError("IAG-Q is authorized only for the Wind dataset in this Round4 revision.")
     contract = _DATASET_CONTRACTS[dataset]
     for name, expected in contract.items():
         if name in ("objective_contract", "dimensions", "field_metric"):
@@ -208,16 +226,16 @@ def validate_inherited_attention_recipe(value: Mapping[str, Any]) -> dict[str, A
         transition = recipe.get("sparse_transition")
         expected_transition = IAG_FULL_SPARSE_TRANSITION if full else IAG_SPARSE_TRANSITION
         if not isinstance(transition, Mapping) or set(transition) != set(expected_transition):
-            raise ValueError("Sparse IAG-C requires the fixed absolute-epoch 501–800 transition.")
+            raise ValueError("Sparse inherited-attention recipes require the fixed absolute-epoch 501–800 transition.")
         for name, expected in expected_transition.items():
             _require_exact(transition, name, expected)
         expected_trajectory = "fresh_full_sparse_schedule" if full else "e500_sparse_child"
         if recipe.get("trajectory") != expected_trajectory:
-            raise ValueError("Sparse IAG-C trajectory must match its segmented child or fresh full-TRAIN schedule.")
+            raise ValueError("Sparse inherited-attention trajectory must match its segmented child or fresh full-TRAIN schedule.")
     else:
         expected_trajectory = "fresh_full_soft" if full else "fresh_soft"
         if "sparse_transition" in recipe or recipe.get("trajectory") != expected_trajectory:
-            raise ValueError("Soft IAG-C must be a fresh trajectory without a sparse transition.")
+            raise ValueError("Soft inherited-attention must be a fresh trajectory without a sparse transition.")
 
     optimizer = recipe.get("optimizer")
     if not isinstance(optimizer, Mapping) or set(optimizer) != set(_OPTIMIZER):
@@ -253,10 +271,16 @@ def validate_inherited_attention_recipe(value: Mapping[str, Any]) -> dict[str, A
         _require_exact(model, name, expected)
     if model.get("normalization") != normalization:
         raise ValueError("Inherited-attention core normalization must match the sealed recipe normalization.")
-    if model.get("scene_executor") not in ("dense", "selected"):
-        raise ValueError("Inherited-attention scene_executor must be dense or selected.")
-    if model.get("query_executor") not in ("indexed", "dense_reference"):
-        raise ValueError("Inherited-attention query_executor must be indexed or dense_reference.")
+    if architecture == IAG_C_ARCHITECTURE:
+        if model.get("scene_executor") not in ("dense", "selected"):
+            raise ValueError("IAG-C scene_executor must be dense or selected.")
+        if model.get("query_executor") not in ("indexed", "dense_reference"):
+            raise ValueError("IAG-C query_executor must be indexed or dense_reference.")
+    else:
+        if model.get("scene_executor") != "cached_tokens":
+            raise ValueError("IAG-Q scene_executor must be cached_tokens; it does not prepare P@V.")
+        if model.get("query_executor") not in ("cell_selected", "dense_reference"):
+            raise ValueError("IAG-Q query_executor must be cell_selected or dense_reference.")
     if any(name in model for name in (
         "num_hyperedges",
         "thermal_response_rank",
@@ -270,11 +294,51 @@ def validate_inherited_attention_recipe(value: Mapping[str, Any]) -> dict[str, A
     )):
         raise ValueError("Inherited-attention model config cannot carry legacy H6/direct/source-read controls.")
 
-    if "architecture" in recipe and recipe["architecture"] != "IAG-C":
-        raise ValueError("Inherited-attention architecture identity must be IAG-C.")
     if "source_reader_variant" in recipe or "dense_host_variant" in recipe:
         raise ValueError("Inherited-attention recipes cannot declare a Round3 source-read arm.")
     return recipe
+
+
+def validate_inherited_attention_representation_review(
+    recipe: Mapping[str, Any], receipt: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate the compact prior-evidence binding required for Wind IAG-Q."""
+    validated = validate_inherited_attention_recipe(recipe)
+    if validated["architecture"] != IAG_Q_ARCHITECTURE:
+        if receipt is not None:
+            raise ValueError("Representation-review receipts are reserved for IAG-Q.")
+        return None
+    if receipt is None:
+        raise ValueError("Wind IAG-Q requires its measured representation-review receipt.")
+    if not isinstance(receipt, Mapping):
+        raise TypeError("Wind IAG-Q representation review must be a mapping.")
+    for name, expected in (
+        ("schema", IAG_REPRESENTATION_REVIEW_SCHEMA),
+        ("dataset", "wind"),
+        ("decision", IAG_Q_REPRESENTATION_REVIEW_DECISION),
+        ("source_architecture", IAG_C_ARCHITECTURE),
+        ("target_architecture", IAG_Q_ARCHITECTURE),
+        ("review_epoch", 500),
+        ("substantive_revisions_used_for_dataset", 1),
+        ("maximum_revisions_for_dataset", 1),
+    ):
+        _require_exact(receipt, name, expected)
+    for name in (
+        "source_checkpoint", "capacity_diagnosis", "fresh_run_dir", "future_sparse_child_run_dir",
+    ):
+        value = receipt.get(name)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"IAG-Q representation review must bind {name}.")
+    for name in ("source_checkpoint_sha256", "capacity_diagnosis_sha256"):
+        value = receipt.get(name)
+        if (not isinstance(value, str) or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)):
+            raise ValueError(f"IAG-Q representation review must bind a lowercase {name}.")
+    if Path(receipt["fresh_run_dir"]).expanduser().resolve() == Path(
+        receipt["future_sparse_child_run_dir"]
+    ).expanduser().resolve():
+        raise ValueError("IAG-Q soft and sparse-child runs must have distinct output directories.")
+    return dict(receipt)
 
 
 def validate_inherited_attention_full_train_authorization(
@@ -285,19 +349,20 @@ def validate_inherited_attention_full_train_authorization(
     """Require a selected e2500 qualification and current bounded budget.
 
     The receipt is intentionally compact and caller-owned. This guard checks
-    that the selected same-dataset IAG-C checkpoint passed the native and
+    that the selected same-dataset checkpoint passed the native and
     priority/cost gates, then binds one physical GPU UUID and a resource
     allowance. It does not query devices or create authorization itself.
     """
     validated = validate_inherited_attention_recipe(recipe)
     if validated["protocol"] != IAG_FULL_PROTOCOL:
-        raise ValueError("Full-TRAIN authorization applies only to the fresh IAG-C e1000 protocol.")
+        raise ValueError("Full-TRAIN authorization applies only to the fresh inherited-attention e1000 protocol.")
     if not isinstance(qualification, Mapping) or qualification.get("schema") != IAG_FULL_QUALIFICATION_SCHEMA:
-        raise ValueError("A qualified same-dataset IAG-C e2500 receipt is required before full-TRAIN dispatch.")
+        raise ValueError("A qualified same-dataset e2500 receipt is required before full-TRAIN dispatch.")
     if qualification.get("dataset") != validated["dataset"]:
         raise ValueError("Full-TRAIN qualification receipt belongs to a different dataset.")
-    if qualification.get("architecture") != "IAG-C" or qualification.get("selected_epoch") != IAG_TOTAL_EPOCHS:
-        raise ValueError("Full-TRAIN qualification must select this IAG-C candidate at literal epoch2500.")
+    if (qualification.get("architecture") != validated["architecture"]
+            or qualification.get("selected_epoch") != IAG_TOTAL_EPOCHS):
+        raise ValueError("Full-TRAIN qualification must select this architecture at literal epoch2500.")
     if qualification.get("qualified") is not True:
         raise ValueError("Full-TRAIN candidate qualification did not pass.")
     gates = qualification.get("gates")
@@ -344,11 +409,13 @@ def validate_inherited_attention_stop(recipe: Mapping[str, Any], stop_after: int
             and validated["normalization"] == "measure_entmax15" and stop_after <= IAG_SPARSE_TRANSITION[
         "soft_parent_epoch"
     ]):
-        raise ValueError("Sparse IAG-C child stop cannot precede its inherited absolute epoch500 prefix.")
+        raise ValueError("Sparse inherited-attention child stop cannot precede its absolute epoch500 prefix.")
 
 
 __all__ = [
+    "IAG_ARCHITECTURE_REPRESENTATION",
     "IAG_AUTHORIZED_PHYSICAL_GPUS",
+    "IAG_C_ARCHITECTURE",
     "IAG_FAMILY",
     "IAG_FULL_BUDGET_SCHEMA",
     "IAG_FULL_PROTOCOL",
@@ -356,11 +423,15 @@ __all__ = [
     "IAG_FULL_TOTAL_EPOCHS",
     "IAG_NORMALIZATIONS",
     "IAG_PROTOCOL",
+    "IAG_Q_ARCHITECTURE",
+    "IAG_Q_REPRESENTATION_REVIEW_DECISION",
     "IAG_REPRESENTATION",
+    "IAG_REPRESENTATION_REVIEW_SCHEMA",
     "IAG_SCHEMA",
     "IAG_SPARSE_TRANSITION",
     "IAG_TOTAL_EPOCHS",
     "validate_inherited_attention_full_train_authorization",
     "validate_inherited_attention_recipe",
+    "validate_inherited_attention_representation_review",
     "validate_inherited_attention_stop",
 ]

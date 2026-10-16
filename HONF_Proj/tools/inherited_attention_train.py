@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the opt-in dataset-native IAG-C family with the shared TrainingEngine.
+"""Train the opt-in dataset-native inherited-attention family.
 
 This entry point intentionally has no Round2 or Round3 recipe dispatch. Full
 TRAIN1000 runs require both a measured e2500 qualification receipt and a
@@ -31,9 +31,11 @@ from honf_runtime.inherited_attention_protocol import (
     IAG_FAMILY,
     IAG_FULL_PROTOCOL,
     IAG_PROTOCOL,
+    IAG_Q_ARCHITECTURE,
     configure_inherited_attention_numerics,
     validate_inherited_attention_full_train_authorization,
     validate_inherited_attention_recipe,
+    validate_inherited_attention_representation_review,
     validate_inherited_attention_stop,
 )
 from honf_runtime.unified_training import (
@@ -78,7 +80,7 @@ def loaded_source_binding() -> dict[str, Any]:
 
 
 def build(recipe: dict[str, Any], *, device: str):
-    """Build only the declared Thermal or Wind native IAG-C provider."""
+    """Build only the declared Thermal or Wind native IAG provider."""
     recipe = validate_inherited_attention_recipe(recipe)
     configure_inherited_attention_numerics(recipe["numerical_policy"])
     random.seed(int(recipe["seed"]))
@@ -139,7 +141,57 @@ def _validate_qualified_checkpoint(qualification: dict[str, Any]) -> None:
     checkpoint = qualification["selected_checkpoint"]
     path = Path(checkpoint["path"]).expanduser().resolve(strict=True)
     if not path.is_file() or _checkpoint_digest(path) != checkpoint["sha256"]:
-        raise ValueError("Qualified IAG-C e2500 checkpoint is missing or differs from its receipt SHA256.")
+        raise ValueError("Qualified inherited-attention e2500 checkpoint is missing or differs from its receipt SHA256.")
+
+
+def _representation_review_binding(
+    recipe: dict[str, Any], receipt_path: Path | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Verify the supplied Q review receipt and produce its compact identity binding."""
+    if recipe["architecture"] != IAG_Q_ARCHITECTURE:
+        if receipt_path is not None:
+            validate_inherited_attention_representation_review(recipe, {})
+        return None, None
+    if receipt_path is None:
+        raise ValueError("IAG-Q requires --representation-review on every CLI invocation.")
+    path = receipt_path.expanduser().resolve(strict=True)
+    receipt = validate_inherited_attention_representation_review(
+        recipe, _read_json_object(path, "IAG-Q representation-review receipt"),
+    )
+    assert receipt is not None
+    for path_key, digest_key in (
+        ("source_checkpoint", "source_checkpoint_sha256"),
+        ("capacity_diagnosis", "capacity_diagnosis_sha256"),
+    ):
+        evidence_path = Path(receipt[path_key]).expanduser().resolve(strict=True)
+        if not evidence_path.is_file() or _checkpoint_digest(evidence_path) != receipt[digest_key]:
+            raise ValueError(f"IAG-Q review evidence {path_key} is missing or differs from its receipt SHA256.")
+    identity = {
+        "schema": receipt["schema"],
+        "path": str(path),
+        "sha256": _checkpoint_digest(path),
+        "dataset": receipt["dataset"],
+        "decision": receipt["decision"],
+        "fresh_run_dir": str(Path(receipt["fresh_run_dir"]).expanduser().resolve()),
+    }
+    return receipt, identity
+
+
+def _validate_review_output_binding(
+    recipe: dict[str, Any], receipt: dict[str, Any] | None, output: Path | None,
+) -> None:
+    if recipe["architecture"] != IAG_Q_ARCHITECTURE or receipt is None or output is None:
+        return
+    if recipe["protocol"] == IAG_FULL_PROTOCOL:
+        return
+    key = (
+        "future_sparse_child_run_dir"
+        if recipe["normalization"] == "measure_entmax15" else "fresh_run_dir"
+    )
+    expected = Path(receipt[key]).expanduser().resolve()
+    observed = output.expanduser().resolve()
+    if observed != expected:
+        raise ValueError(f"IAG-Q output must match the review-bound {key}.")
 
 
 def _verify_cuda_uuid_mapping(expected_uuid: str) -> int:
@@ -163,11 +215,11 @@ def _verify_cuda_uuid_mapping(expected_uuid: str) -> int:
     if len(matches) != 1 or mapping.get(str(matches[0])) != expected_uuid:
         raise ValueError("Authorized GPU UUID does not map to exactly one current physical device.")
     if matches[0] not in IAG_AUTHORIZED_PHYSICAL_GPUS:
-        raise ValueError("IAG-C GPU dispatch is limited to the authorized physical GPU1/GPU2 lanes.")
+        raise ValueError("Inherited-attention GPU dispatch is limited to the authorized physical GPU1/GPU2 lanes.")
     if IAG_AUTHORIZED_PHYSICAL_GPUS[matches[0]] != expected_uuid:
         raise ValueError("Current GPU index and UUID do not match the frozen Round4 lane binding.")
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise ValueError("IAG-C dispatch requires exactly one visible CUDA device.")
+        raise ValueError("Inherited-attention dispatch requires exactly one visible CUDA device.")
     return matches[0]
 
 
@@ -192,50 +244,66 @@ def _check_device_scope(device: str, budget: dict[str, Any] | None) -> dict[str,
 
 def _validate_sparse_declaration(
     recipe: dict[str, Any], declaration: dict[str, Any] | None, checkpoint: Path | None,
-    resume: Path | None,
+    resume: Path | None, representation_review: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    architecture = recipe["architecture"]
     sparse = recipe["protocol"] == IAG_PROTOCOL and recipe["normalization"] == "measure_entmax15"
     if not sparse:
         if declaration is not None or checkpoint is not None:
-            raise ValueError("The e500 child declaration is reserved for segmented sparse development IAG-C.")
+            raise ValueError("The e500 child declaration is reserved for segmented sparse development.")
         return {}
     if resume is not None:
         if declaration is not None or checkpoint is not None:
             raise ValueError("A same-run sparse resume cannot attach another e500 parent.")
         return {}
     if declaration is None or checkpoint is None:
-        raise ValueError("Sparse development IAG-C requires an exact soft e500 parent declaration and checkpoint.")
-    required = {
+        raise ValueError(f"Sparse development {architecture} requires an exact soft e500 parent declaration and checkpoint.")
+    base_required = {
         "schema", "source_checkpoint", "source_checkpoint_sha256", "source_recipe_sha256",
         "target_recipe_sha256", "source_epoch",
     }
+    required = base_required | (
+        {"representation_review_sha256"} if architecture == IAG_Q_ARCHITECTURE else set()
+    )
     if set(declaration) != required or declaration.get("schema") != SPARSE_CHILD_SCHEMA:
-        raise ValueError("Unsupported or incomplete IAG-C sparse-child declaration.")
+        raise ValueError(f"Unsupported or incomplete {architecture} sparse-child declaration.")
     path = checkpoint.expanduser().resolve(strict=True)
     if not path.is_file() or declaration.get("source_checkpoint") != str(path):
         raise ValueError("Sparse-child checkpoint must be the exact canonical file named by the declaration.")
     if declaration.get("source_checkpoint_sha256") != _checkpoint_digest(path):
         raise ValueError("Sparse-child parent checkpoint differs from the declared SHA256.")
     if declaration.get("source_epoch") != 500:
-        raise ValueError("Sparse development IAG-C attaches only at absolute epoch500.")
+        raise ValueError(f"Sparse development {architecture} attaches only at absolute epoch500.")
     if declaration.get("target_recipe_sha256") != canonical_sha256(recipe):
-        raise ValueError("Sparse-child declaration targets a different IAG-C recipe.")
+        raise ValueError("Sparse-child declaration targets a different recipe.")
+    if (architecture == IAG_Q_ARCHITECTURE
+            and (representation_review is None or declaration.get("representation_review_sha256") != representation_review.get("sha256"))):
+        raise ValueError("IAG-Q sparse-child declaration must bind the supplied representation-review receipt SHA.")
     return {"branch_from_checkpoint": path, "declaration": declaration}
 
 
-def _load_parent_payload(path: Path, declaration: dict[str, Any]) -> dict[str, Any]:
+def _load_parent_payload(
+    path: Path, declaration: dict[str, Any], recipe: dict[str, Any],
+    representation_review: dict[str, Any] | None,
+) -> dict[str, Any]:
     from honf_runtime.compat import load_trusted_checkpoint
 
     payload = load_trusted_checkpoint(path, map_location="cpu")
     identity = payload.get("experiment_identity", {})
     parent_recipe = identity.get("recipe", {})
-    if (payload.get("workflow") != WORKFLOW or payload.get("arm") != "IAG-C"
+    architecture = recipe["architecture"]
+    if (payload.get("workflow") != WORKFLOW or payload.get("arm") != architecture
             or payload.get("epoch") != 500 or identity.get("model_family") != IAG_FAMILY
-            or parent_recipe.get("dataset") not in ("thermal", "wind")
+            or parent_recipe.get("dataset") != recipe.get("dataset")
+            or parent_recipe.get("architecture") != architecture
+            or parent_recipe.get("representation") != recipe.get("representation")
             or parent_recipe.get("protocol") != IAG_PROTOCOL
             or parent_recipe.get("normalization") != "soft"
             or parent_recipe.get("trajectory") != "fresh_soft"):
-        raise ValueError("Sparse IAG-C parent must be a literal soft-family e500 checkpoint.")
+        raise ValueError(f"Sparse {architecture} parent must be its literal same-architecture soft e500 checkpoint.")
+    if (architecture == IAG_Q_ARCHITECTURE
+            and (parent_recipe.get("dataset") != "wind" or identity.get("representation_review") != representation_review)):
+        raise ValueError("IAG-Q parent must preserve the exact Wind representation-review identity binding.")
     if declaration.get("source_recipe_sha256") != identity.get("recipe_sha256"):
         raise ValueError("Sparse-child declaration does not bind the parent's recipe checksum.")
     return payload
@@ -254,7 +322,7 @@ def _validate_run_paths(
     output = output.expanduser().resolve()
     source = None
     if resume is not None and branch is not None:
-        raise ValueError("An IAG-C invocation cannot resume and branch at once.")
+        raise ValueError("An inherited-attention invocation cannot resume and branch at once.")
     if resume is not None:
         from honf_runtime.run_layout import resolve_checkpoint
 
@@ -262,7 +330,7 @@ def _validate_run_paths(
             raise ValueError("Same-run resume requires the existing run output directory.")
         source = resolve_checkpoint(output, resume)
         if source != resolve_checkpoint(output, "latest"):
-            raise ValueError("Exact IAG-C resume requires this run's current latest checkpoint.")
+            raise ValueError("Exact resume requires this run's current latest checkpoint.")
     elif branch is not None:
         source = branch.expanduser().resolve(strict=True)
         try:
@@ -270,11 +338,11 @@ def _validate_run_paths(
         except ValueError:
             pass
         else:
-            raise ValueError("A sparse IAG-C child must write outside its soft parent's run directory.")
+            raise ValueError("A sparse child must write outside its soft parent's run directory.")
         if output.exists() and any(output.iterdir()):
-            raise ValueError("A sparse IAG-C child requires a distinct empty output directory.")
+            raise ValueError("A sparse child requires a distinct empty output directory.")
     elif not dry_run and output.exists() and any(output.iterdir()):
-        raise ValueError("A fresh IAG-C fit requires an empty new run directory.")
+        raise ValueError("A fresh fit requires an empty new run directory.")
     return output, source
 
 
@@ -294,7 +362,8 @@ def _preflight_sparse_child(
     source_hash = _checkpoint_digest(parent_path)
     source_payload = load_trusted_checkpoint(parent_path, map_location="cpu")
     provider_identity = dict(provider.identity_payload())
-    groups = tuple(provider.optimizer_groups(model, "IAG-C", "joint"))
+    architecture = recipe["architecture"]
+    groups = tuple(provider.optimizer_groups(model, architecture, "joint"))
     sealed_identity = {
         **identity,
         "provider_identity": provider_identity,
@@ -304,7 +373,7 @@ def _preflight_sparse_child(
         "sampling_dataset_id": _sampling_dataset_id(provider_identity),
     }
     if declaration.get("source_checkpoint_sha256") != source_hash:
-        raise ValueError("IAG-C sparse-child parent SHA changed during preflight.")
+        raise ValueError("Sparse-child parent SHA changed during preflight.")
     amendment = prepare_inherited_attention_sparse_child(
         model,
         source_payload,
@@ -344,12 +413,13 @@ def _preflight_same_run_resume(
     )
 
     payload = load_trusted_checkpoint(path, map_location="cpu")
-    if payload.get("workflow") != WORKFLOW or payload.get("arm") != "IAG-C":
-        raise ValueError("IAG-C resume checkpoint belongs to a different workflow or arm.")
+    architecture = identity["recipe"]["architecture"]
+    if payload.get("workflow") != WORKFLOW or payload.get("arm") != architecture:
+        raise ValueError("Resume checkpoint belongs to a different workflow or architecture.")
     completed_epoch = payload.get("epoch")
     if type(completed_epoch) is not int or completed_epoch >= stop_after:
-        raise ValueError("IAG-C exact resume stop must advance the current saved epoch.")
-    groups = tuple(provider.optimizer_groups(model, "IAG-C", "joint"))
+        raise ValueError("Exact resume stop must advance the current saved epoch.")
+    groups = tuple(provider.optimizer_groups(model, architecture, "joint"))
     provider_identity = dict(provider.identity_payload())
     sealed_identity = {
         **identity,
@@ -374,12 +444,12 @@ def _preflight_same_run_resume(
         )
     model.load_state_dict(payload["model_state_dict"], strict=True)
     optimizer, _ = engine._make_optimizer(
-        model, provider, "IAG-C", completed_epoch + 1,
+        model, provider, architecture, completed_epoch + 1,
         payload.get("optimizer_state_by_name"), group_specs=groups,
     )
     restored = named_optimizer_state(model, optimizer)
     if canonical_sha256(_tree_jsonable(restored)) != canonical_sha256(_tree_jsonable(payload["optimizer_state_by_name"])):
-        raise ValueError("IAG-C exact resume failed the named AdamW state round-trip.")
+        raise ValueError("Exact resume failed the named AdamW state round-trip.")
     return {
         "status": "preflight_passed",
         "source_checkpoint": str(path),
@@ -408,31 +478,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stop-after", type=int, choices=ALLOWED_STOPS, default=100)
     parser.add_argument("--resume", type=Path, help="Resume this run's exact current latest checkpoint.")
     parser.add_argument("--branch-from-checkpoint", type=Path,
-                        help="Exact IAG-C soft epoch500 parent for a segmented sparse-development child.")
+                        help="Exact same-architecture soft epoch500 parent for a segmented sparse-development child.")
     parser.add_argument("--sparse-child-declaration", type=Path,
                         help="Declaration binding the exact soft epoch500 checkpoint and sparse recipe.")
+    parser.add_argument("--representation-review", type=Path,
+                        help="Measured representation-review receipt required by Wind IAG-Q.")
     parser.add_argument("--qualification", type=Path,
-                        help="Measured IAG-C e2500 qualification receipt for full_train1000.")
+                        help="Measured same-architecture e2500 qualification receipt for full_train1000.")
     parser.add_argument("--budget-approval", type=Path,
                         help="Current GPU/time budget receipt bound to the selected qualification checkpoint.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")
     args = parser.parse_args(argv)
 
-    recipe = validate_inherited_attention_recipe(_read_json_object(args.recipe, "IAG-C recipe"))
+    recipe = validate_inherited_attention_recipe(_read_json_object(args.recipe, "inherited-attention recipe"))
+    representation_receipt, representation_identity = _representation_review_binding(
+        recipe, args.representation_review,
+    )
     configure_inherited_attention_numerics(recipe["numerical_policy"])
     validate_inherited_attention_stop(recipe, args.stop_after)
     if args.dry_run and (args.device != "cpu" or args.yes):
-        raise ValueError("IAG-C dry-run is CUDA-hidden CPU preparation and does not accept --yes.")
+        raise ValueError("Inherited-attention dry-run is CUDA-hidden CPU preparation and does not accept --yes.")
     if not args.dry_run and (not args.yes or args.output is None):
         raise ValueError("A scientific start requires --yes and a distinct explicit output directory.")
 
     full = recipe["protocol"] == IAG_FULL_PROTOCOL
     if full:
         if args.qualification is None or args.budget_approval is None:
-            raise ValueError("Full IAG-C requires both a qualified e2500 receipt and a separate current budget receipt before data construction.")
-        qualification = _read_json_object(args.qualification, "IAG-C qualification receipt")
-        budget_receipt = _read_json_object(args.budget_approval, "IAG-C full-TRAIN budget receipt")
+            raise ValueError("Full-TRAIN requires both a qualified e2500 receipt and a separate current budget receipt before data construction.")
+        qualification = _read_json_object(args.qualification, "inherited-attention qualification receipt")
+        budget_receipt = _read_json_object(args.budget_approval, "full-TRAIN budget receipt")
         qualification, budget = validate_inherited_attention_full_train_authorization(
             recipe, qualification, budget_receipt,
         )
@@ -446,23 +521,26 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run and not args.device.startswith("cuda"):
         raise ValueError("Round4 scientific training dispatch requires an explicitly authorized GPU1/GPU2 lane.")
     if args.resume is not None and args.branch_from_checkpoint is not None:
-        raise ValueError("IAG-C cannot resume and branch in one invocation.")
+        raise ValueError("Inherited-attention cannot resume and branch in one invocation.")
     if full and args.branch_from_checkpoint is not None:
-        raise ValueError("Full-TRAIN IAG-C always starts fresh; it cannot branch from a development checkpoint.")
+        raise ValueError("Full-TRAIN always starts fresh; it cannot branch from a development checkpoint.")
 
     declaration = (
-        _read_json_object(args.sparse_child_declaration, "IAG-C sparse-child declaration")
+        _read_json_object(args.sparse_child_declaration, "sparse-child declaration")
         if args.sparse_child_declaration is not None else None
     )
     sparse_options = _validate_sparse_declaration(
-        recipe, declaration, args.branch_from_checkpoint, args.resume,
+        recipe, declaration, args.branch_from_checkpoint, args.resume, representation_identity,
     )
     output, source_path = _validate_run_paths(
         output=args.output, resume=args.resume, branch=sparse_options.get("branch_from_checkpoint"),
         dry_run=args.dry_run,
     )
+    _validate_review_output_binding(recipe, representation_receipt, output)
     if sparse_options.get("branch_from_checkpoint") is not None:
-        _load_parent_payload(sparse_options["branch_from_checkpoint"], declaration)
+        _load_parent_payload(
+            sparse_options["branch_from_checkpoint"], declaration, recipe, representation_identity,
+        )
     device_receipt = _check_device_scope(args.device, budget)
     # Import the common exact-branch validator on both soft and sparse arms so
     # their sealed loaded-source inventories match across the e500 boundary.
@@ -476,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
     if (sampling_dataset_id != expected_sampling_id
             or getattr(provider, "sampling_dataset_id", None) != sampling_dataset_id):
         raise ValueError(
-            "IAG-C case_epoch_v1 namespace differs from the frozen Round3 segmented or established full-TRAIN reference."
+            "case_epoch_v1 namespace differs from the frozen segmented or established full-TRAIN reference."
         )
     plan_digest = _checkpoint_digest(ROUND4_PLAN) if ROUND4_PLAN.is_file() else None
     if plan_digest is None:
@@ -495,6 +573,8 @@ def main(argv: list[str] | None = None) -> int:
         "loaded_source": loaded_source_binding(),
         "data_locks": {"WindTEST": "locked", "solver_usage": "326/326", "new_solver_attempts": 0},
     }
+    if representation_identity is not None:
+        identity["representation_review"] = representation_identity
     if qualification is not None and budget is not None:
         identity["full_train1000_authorization"] = {
             "qualification": qualification,
@@ -522,6 +602,8 @@ def main(argv: list[str] | None = None) -> int:
         "WindTEST": "locked",
         "new_solver_attempts": 0,
     }
+    if representation_identity is not None:
+        summary["representation_review"] = representation_identity
     if source_path is not None and sparse_options.get("declaration") is not None:
         summary["sparse_child_preflight"] = _preflight_sparse_child(
             model, provider, engine, identity, recipe, declaration,
@@ -546,7 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         provider,
         output,
         identity=identity,
-        arm="IAG-C",
+        arm=recipe["architecture"],
         **fit_options,
     )
     print(json.dumps(result, sort_keys=True, default=str, allow_nan=False), flush=True)

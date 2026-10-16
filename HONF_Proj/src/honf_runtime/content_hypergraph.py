@@ -17,37 +17,54 @@ from .source_read_protocol import configure_source_read_numerics
 def _load_inherited_attention_checkpoint(
     payload: dict[str, Any], *, device: torch.device | str,
 ) -> tuple[torch.nn.Module, Any, dict[str, Any]]:
-    """Reconstruct the opt-in IAG-C model and native transforms without datasets."""
+    """Reconstruct an opt-in IAG model and native transforms without datasets."""
     from .inherited_attention_protocol import (
+        IAG_ARCHITECTURE_REPRESENTATION,
+        IAG_C_ARCHITECTURE,
         IAG_FAMILY,
+        IAG_PROTOCOL,
+        IAG_Q_ARCHITECTURE,
         configure_inherited_attention_numerics,
         validate_inherited_attention_recipe,
     )
 
     identity = payload.get("experiment_identity", {})
     if payload.get("workflow") != "inherited_attention_joint_v1" or identity.get("workflow") != "inherited_attention_joint_v1":
-        raise ValueError("IAG-C checkpoint workflow identity is missing or inconsistent.")
-    if identity.get("model_family") != IAG_FAMILY or payload.get("arm") != "IAG-C":
-        raise ValueError("IAG-C checkpoint family or training-arm identity is missing or inconsistent.")
+        raise ValueError("Inherited-attention checkpoint workflow identity is missing or inconsistent.")
     require_model_family(IAG_FAMILY, "inherited_attention_evaluate")
     recipe = identity.get("recipe")
     if not isinstance(recipe, dict):
-        raise TypeError("IAG-C checkpoint lacks its self-contained recipe.")
+        raise TypeError("Inherited-attention checkpoint lacks its self-contained recipe.")
     recipe = validate_inherited_attention_recipe(recipe)
     configure_inherited_attention_numerics(recipe["numerical_policy"])
+    architecture = recipe.get("architecture")
+    representation = recipe.get("representation")
+    expected_representations = IAG_ARCHITECTURE_REPRESENTATION
+    if (architecture not in expected_representations
+            or representation != expected_representations[architecture]
+            or (architecture == IAG_Q_ARCHITECTURE and recipe.get("dataset") != "wind")):
+        raise ValueError("Inherited-attention checkpoint has an unsupported dataset/representation pairing.")
+    if identity.get("model_family") != IAG_FAMILY or payload.get("arm") != architecture:
+        raise ValueError("Inherited-attention checkpoint family or training-arm identity is missing or inconsistent.")
     digest = hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(",", ":"),
                                       allow_nan=False).encode()).hexdigest()
     if digest != identity.get("recipe_sha256"):
-        raise ValueError("IAG-C checkpoint recipe checksum is inconsistent.")
+        raise ValueError("Inherited-attention checkpoint recipe checksum is inconsistent.")
     provider = identity.get("provider_identity")
     if not isinstance(provider, dict) or not isinstance(provider.get("model_config"), dict):
-        raise TypeError("IAG-C checkpoint lacks its native model and transform inventory.")
+        raise TypeError("Inherited-attention checkpoint lacks its native model and transform inventory.")
+    if architecture == IAG_Q_ARCHITECTURE:
+        if provider.get("architecture") != architecture or provider.get("representation") != representation:
+            raise ValueError("IAG-Q provider identity differs from its recipe representation.")
+        if (recipe["dataset"] == "wind"
+                and provider.get("schema") != "wind_inherited_attention_provider_v1"):
+            raise ValueError("Wind IAG-Q provider schema differs from its native v1 contract.")
     adapter_state = provider.get("adapter_state")
     if not isinstance(adapter_state, dict):
-        raise TypeError("IAG-C checkpoint lacks its dataset-native adapter state.")
+        raise TypeError("Inherited-attention checkpoint lacks its dataset-native adapter state.")
     expected_core_config = {
         "schema": "inherited_attention_core_v1",
-        "architecture": "IAG-C",
+        "architecture": architecture,
         **dict(recipe["model"]),
     }
     if recipe["dataset"] == "thermal":
@@ -55,39 +72,143 @@ def _load_inherited_attention_checkpoint(
     else:
         saved_core_config = provider.get("model_config")
     if not isinstance(saved_core_config, dict) or saved_core_config != expected_core_config:
-        raise ValueError("IAG-C checkpoint core law/executor differs from the exact validated recipe model config.")
+        raise ValueError("Inherited-attention core law/executor differs from the exact validated recipe model config.")
 
-    if (recipe["protocol"] == "inherited_attention_development_v1"
+    representation_review = None
+    if architecture == IAG_Q_ARCHITECTURE:
+        representation_review = identity.get("representation_review")
+        if not isinstance(representation_review, dict):
+            raise TypeError("IAG-Q checkpoint lacks its sealed representation-review binding.")
+        expected_review_keys = {
+            "schema", "path", "sha256", "dataset", "decision", "fresh_run_dir",
+        }
+        review_path = representation_review.get("path")
+        fresh_run_dir = representation_review.get("fresh_run_dir")
+        review_sha256 = representation_review.get("sha256")
+        if (
+            set(representation_review) != expected_review_keys
+            or representation_review.get("schema") != "inherited_attention_representation_review_v1"
+            or representation_review.get("dataset") != "wind"
+            or representation_review.get("decision") != "replace_iag_c_with_iag_q"
+            or not isinstance(review_path, str)
+            or not Path(review_path).is_absolute()
+            or str(Path(review_path).resolve()) != review_path
+            or not isinstance(fresh_run_dir, str)
+            or not Path(fresh_run_dir).is_absolute()
+            or str(Path(fresh_run_dir).resolve()) != fresh_run_dir
+            or not isinstance(review_sha256, str)
+            or len(review_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in review_sha256)
+        ):
+            raise ValueError("IAG-Q representation-review identity is incomplete or noncanonical.")
+
+    if (recipe["protocol"] == IAG_PROTOCOL
             and recipe["normalization"] == "measure_entmax15"):
-        if expected_core_config["query_executor"] != "indexed":
+        if architecture == IAG_C_ARCHITECTURE and expected_core_config["query_executor"] != "indexed":
             raise ValueError("Sparse development IAG-C checkpoints must preserve the indexed query executor.")
+        if architecture == IAG_Q_ARCHITECTURE and (
+            expected_core_config.get("scene_executor") != "cached_tokens"
+            or expected_core_config.get("query_executor") != "cell_selected"
+        ):
+            raise ValueError("Sparse development IAG-Q checkpoints must preserve cached-token/cell-selected execution.")
         branch = payload.get("branch_parent")
         child_contract = (
             branch.get("inherited_attention_sparse_child") if isinstance(branch, dict) else None
         )
         if not isinstance(child_contract, dict):
-            raise ValueError("Sparse development IAG-C checkpoints must retain their exact soft e500 branch contract.")
+            raise ValueError("Sparse development IAG checkpoints must retain their exact soft e500 branch contract.")
         executor_transition = child_contract.get("scene_executor_transition")
         source_executor = executor_transition.get("source") if isinstance(executor_transition, dict) else None
         target_executor = executor_transition.get("target") if isinstance(executor_transition, dict) else None
-        valid_executor_transition = (
-            source_executor in ("dense", "selected")
-            and target_executor in ("dense", "selected")
-            and not (source_executor == "selected" and target_executor == "dense")
-            and executor_transition.get("same_probability_function") is True
-        )
         checkpoint_epoch = payload.get("epoch")
-        if (
-            child_contract.get("schema") != "inherited_attention_sparse_child_v1"
-            or child_contract.get("trajectory") != "soft_e1_500_then_absolute_sparse_transition_e501_800"
-            or child_contract.get("source_epoch") != 500
-            or child_contract.get("target_recipe_sha256") != identity.get("recipe_sha256")
-            or target_executor != expected_core_config["scene_executor"]
-            or not valid_executor_transition
-            or type(checkpoint_epoch) is not int
-            or checkpoint_epoch < 501
-        ):
-            raise ValueError("Sparse development IAG-C checkpoint no longer proves its sealed e500 transition law.")
+        if architecture == IAG_C_ARCHITECTURE:
+            valid_executor_transition = (
+                source_executor in ("dense", "selected")
+                and target_executor in ("dense", "selected")
+                and not (source_executor == "selected" and target_executor == "dense")
+                and executor_transition.get("same_probability_function") is True
+            )
+            if (
+                child_contract.get("schema") != "inherited_attention_sparse_child_v1"
+                or child_contract.get("trajectory") != "soft_e1_500_then_absolute_sparse_transition_e501_800"
+                or child_contract.get("source_epoch") != 500
+                or child_contract.get("target_recipe_sha256") != identity.get("recipe_sha256")
+                or target_executor != expected_core_config["scene_executor"]
+                or not valid_executor_transition
+                or type(checkpoint_epoch) is not int
+                or checkpoint_epoch < 501
+            ):
+                raise ValueError("Sparse development IAG-C checkpoint no longer proves its sealed e500 transition law.")
+        else:
+            parent = branch if isinstance(branch, dict) else {}
+            parent_identity = parent.get("identity")
+            parent_identity = parent_identity if isinstance(parent_identity, dict) else {}
+            parent_recipe = parent_identity.get("recipe")
+            parent_recipe = parent_recipe if isinstance(parent_recipe, dict) else {}
+            parent_model = parent_recipe.get("model")
+            parent_model = parent_model if isinstance(parent_model, dict) else {}
+            parent_provider = parent_identity.get("provider_identity")
+            parent_provider = parent_provider if isinstance(parent_provider, dict) else {}
+            parent_review = parent_identity.get("representation_review")
+            source_saved_config = parent_provider.get("model_config")
+            source_saved_config = source_saved_config if isinstance(source_saved_config, dict) else {}
+            required_q_binding = {
+                "source_architecture": IAG_Q_ARCHITECTURE,
+                "source_representation": "iag_q",
+                "target_architecture": IAG_Q_ARCHITECTURE,
+                "target_representation": "iag_q",
+            }
+            valid_q_transition = (
+                isinstance(executor_transition, dict)
+                and executor_transition.get("source") == "cached_tokens"
+                and executor_transition.get("target") == "cached_tokens"
+                and executor_transition.get("same_probability_function") is True
+            )
+            if (
+                recipe.get("dataset") != "wind"
+                or recipe.get("normalization") != "measure_entmax15"
+                or recipe.get("trajectory") != "e500_sparse_child"
+                or child_contract.get("schema") != "inherited_attention_sparse_child_v1"
+                or child_contract.get("trajectory") != "soft_e1_500_then_absolute_sparse_transition_e501_800"
+                or any(child_contract.get(key) != value for key, value in required_q_binding.items())
+                or child_contract.get("source_epoch") != 500
+                or child_contract.get("target_recipe_sha256") != identity.get("recipe_sha256")
+                or child_contract.get("source_recipe_sha256") != parent_identity.get("recipe_sha256")
+                or child_contract.get("representation_review_sha256") != representation_review.get("sha256")
+                or child_contract.get("source_checkpoint_sha256") != parent.get("sha256")
+                or child_contract.get("source_checkpoint") != parent.get("path")
+                or parent.get("epoch") != 500
+                or parent_identity.get("workflow") != "inherited_attention_joint_v1"
+                or parent_identity.get("model_family") != IAG_FAMILY
+                or parent_recipe.get("dataset") != "wind"
+                or parent_recipe.get("protocol") != IAG_PROTOCOL
+                or parent_recipe.get("architecture") != IAG_Q_ARCHITECTURE
+                or parent_recipe.get("representation") != "iag_q"
+                or parent_recipe.get("normalization") != "soft"
+                or parent_recipe.get("trajectory") != "fresh_soft"
+                or parent_model.get("normalization") != "soft"
+                or parent_provider.get("schema") != "wind_inherited_attention_provider_v1"
+                or parent_provider.get("architecture") != IAG_Q_ARCHITECTURE
+                or parent_provider.get("representation") != "iag_q"
+                or source_saved_config.get("architecture") != IAG_Q_ARCHITECTURE
+                or source_saved_config.get("normalization") != "soft"
+                or source_saved_config.get("scene_executor") != "cached_tokens"
+                or source_saved_config.get("query_executor") != "cell_selected"
+                or parent_review != representation_review
+                or child_contract.get("exact_parameter_layout_verified") is not True
+                or not valid_q_transition
+                or type(checkpoint_epoch) is not int
+                or checkpoint_epoch < 501
+            ):
+                raise ValueError("Sparse IAG-Q checkpoint does not prove its exact reviewed IAG-Q e500 parent branch.")
+            from .inherited_attention_child import _require_same_soft_identity
+
+            try:
+                observed_transition = _require_same_soft_identity(parent_identity, identity)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Sparse IAG-Q parent and child identities differ beyond their sealed transition.") from exc
+            if observed_transition != executor_transition:
+                raise ValueError("Sparse IAG-Q branch transition differs from its exact parent and child identities.")
 
     if recipe["dataset"] == "thermal":
         from channelthermal.content_hypergraph import ThermalInheritedAttentionAdapterV1
@@ -102,12 +223,12 @@ def _load_inherited_attention_checkpoint(
         model = InheritedAttentionCoreV1.from_config(provider["model_config"]).to(device)
         adapter = WindInheritedAttentionAdapterV1.from_state_payload(adapter_state, device=device)
     else:  # The recipe validator already rejects this, keep the branch closed.
-        raise ValueError("Unsupported physical dataset in IAG-C checkpoint.")
+        raise ValueError("Unsupported physical dataset in inherited-attention checkpoint.")
     if model.get_config() != provider["model_config"]:
-        raise ValueError("Reconstructed IAG-C core differs from checkpoint constructor metadata.")
+        raise ValueError("Reconstructed inherited-attention core differs from checkpoint constructor metadata.")
     state = payload.get("model_state_dict")
     if not isinstance(state, dict):
-        raise TypeError("IAG-C checkpoint has no model tensor state.")
+        raise TypeError("Inherited-attention checkpoint has no model tensor state.")
     model.load_state_dict(state, strict=True)
     model.eval()
     return model, adapter, payload

@@ -1,4 +1,4 @@
-# Inherited attention: IAG-C
+# Inherited attention: IAG-C and conditional IAG-Q
 
 IAG-C replaces the distant query/source pair-value decoder with reusable values at the existing environment anchors. It retains the ordered MM → EM → EE → ME contextualizer, width 128, four heads, two cycles, raw/scene reinjection, native physical extraction and the bounded local reader. It is a separate `inherited_attention_core_v1` family; historical A2-D, H6 and source-read checkpoint constructors keep their own schemas.
 
@@ -15,6 +15,16 @@ Thermal keeps heat-independent u/v/p and source carriers `[B,H,M,8]`. Its respon
 Soft normalization is proportional to physical measure times exponentiated inherited score. The sparse child uses the measure-relative 1.5 law `p_i = m_i * relu((s_i - tau)/2)^2`, with unit row mass, typed masks and exact empty zeros. Its vectorized sorted-prefix solve retains score and normalized-measure derivatives; an independent FP64 bisection provides the reference. There is no utility scorer, completion branch, teacher refresh, sparsity penalty, fixed six-content bank or hidden distant correction.
 
 `scene_executor=dense|selected` compares a dense contraction with actual positive-edge indexed contraction of the same probabilities. `query_executor=indexed|dense_reference` compares indexed cover reads with a literal dense cover of the same function. Every positive blend entry executes; zeros alone are not evidence of acceleration. Contextualizer work remains full access. Work counters distinguish eligible associations, positive support, executed scene edges, cover slots, local rows and native receiver unions.
+
+## Diagnosed query-conditioned replacement
+
+IAG-Q is the single permitted Wind replacement after a documented fixed-weight TRAIN diagnosis shows loss of within-region wake detail. The current implementation enables it for Wind only; Thermal retains IAG-C and its source-indexed affine interface. A scientific Q start requires the measured representation-review receipt, fresh weights and an empty optimizer. It cannot resume IAG-C weights under a new label or branch from a C parent. Width, depth, environment catalogue, objectives, native queries and initialization/sampling conventions stay unchanged.
+
+For each type, Q retains the inherited atlas and final token values but replaces the cached `P @ V` aggregate with `w(q) @ V`, where `beta(q) = Lambda(q) @ P` and `w_i(q) = beta_i(q) exp(score_i(q)) / sum_j beta_j(q) exp(score_j(q))`. The query encoding and final token states pass through the same live final EM/EE query/key LayerNorms, projections, L2 normalization and bounded head temperatures used by the contextualizer. These modules are registered once; there are no additional learned parameters or pairwise geometry/value networks. Exact-zero beta stays excluded, including under sparse normalization, and empty typed rows return zero.
+
+`scene_executor=cached_tokens` records that Q projects final token K/V once and does not compute scene `P @ V`. `query_executor=cell_selected` groups queries by their complete input-only cover-anchor signature, builds one positive donor union per structural cell across heads, and gathers K/V once per cell. Batched scalar-attention matrix products then share those operands across the cell's receivers. There is no query/donor/128-wide message tensor. One geometry grouping/sort is charged per request, and all padded query/candidate products are reported; this grouping never pools query features or uses targets. `dense_reference` evaluates the identical beta-weighted scalar attention over the complete donor axis as a correctness and cost control. Both typed contexts feed the existing fusion, local reader and field head.
+
+The Q child inherits only its own literal soft e500 state and representation-review identity. Its cached-token/cell executor stays fixed while decoder normalization follows the same e501–800 transition. Its full-TRAIN recipe is still inert until literal e2500 qualification and a current resource budget permit one fresh hard-e1000 probe. Q may recover discrimination at extra query work; its actual latency, padding and memory determine whether that tradeoff is useful.
 
 ## Protocol and lineage
 
