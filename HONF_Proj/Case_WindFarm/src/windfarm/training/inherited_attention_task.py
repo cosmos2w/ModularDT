@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from honf_forward_core.content_hypergraph.contracts import SceneBatch
 from honf_forward_core.inherited_attention.model import InheritedAttentionCoreV1
 from honf_runtime.inherited_attention_protocol import (
     IAG_FAMILY,
@@ -25,7 +26,6 @@ from ..content_hypergraph import (
     WIND_CONTENT_ENVIRONMENT_COUNT,
     WIND_CONTENT_ENVIRONMENT_SHAPE,
     WindContentReceivers,
-    WindContentSceneInputs,
     WindInheritedAttentionAdapterV1,
 )
 from ..data import WindFarmNativeView
@@ -275,7 +275,7 @@ class WindInheritedAttentionTaskV1(WindFormalA2DTaskV1):
     def predict_native(
         self,
         model: nn.Module,
-        scene: Sequence[WindContentSceneInputs],
+        scene: SceneBatch,
         receivers: WindContentReceivers,
         execution_mode: str = "IAG-C",
         phase: str = "joint",
@@ -292,9 +292,10 @@ class WindInheritedAttentionTaskV1(WindFormalA2DTaskV1):
         if not callable(setter):
             raise TypeError("Wind IAG-C core lacks absolute-epoch normalization dispatch.")
         setter(int(epoch))
-        scene_batch = self.adapter.make_scene_batch(scene)
-        query = self.adapter.make_query_batch(scene_batch, receivers)
-        organization = model.prepare(scene_batch)
+        if not isinstance(scene, SceneBatch):
+            raise TypeError("Wind IAG-C prediction requires the SceneBatch returned by provider.make_scene.")
+        query = self.adapter.make_query_batch(scene, receivers)
+        organization = model.prepare(scene)
         output = model.decode(organization, query)
         if not torch.is_tensor(output.nonlinear_field) or output.nonlinear_field.shape != query.coordinates.shape[:2] + (3,):
             raise ValueError("Wind IAG-C must return a normalized residual field with shape [B,Q,3].")

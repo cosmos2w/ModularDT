@@ -28,6 +28,70 @@ def _empty_provider() -> iag_wind.WindInheritedAttentionTaskV1:
     return object.__new__(iag_wind.WindInheritedAttentionTaskV1)
 
 
+def test_prediction_consumes_the_scene_prepared_by_the_training_engine():
+    from honf_forward_core.content_hypergraph.contracts import QueryBatch, SceneBatch
+    from honf_forward_core.inherited_attention import (
+        InheritedAttentionCoreV1,
+        smoothstep_grid_receiver_cover,
+        with_receiver_cover,
+    )
+
+    provider = _empty_provider()
+    anchors = torch.cartesian_prod(*(torch.tensor([0.0, 1.0]) for _ in range(3)))[None]
+    scene = SceneBatch(
+        module_features=torch.ones(1, 2, 2), environment_features=torch.ones(1, 8, 7),
+        module_coordinates=torch.tensor([[[0.2, 0.2, 0.2], [0.8, 0.8, 0.8]]]),
+        environment_coordinates=anchors,
+        module_mask=torch.ones(1, 2, dtype=torch.bool), environment_mask=torch.ones(1, 8, dtype=torch.bool),
+        module_measure=torch.ones(1, 2), environment_measure=torch.ones(1, 8),
+        module_ids=torch.tensor([[13, 29]]), environment_ids=torch.arange(8)[None],
+        local_radius=torch.ones(1, 2), operating_features=torch.ones(1, 11),
+        coordinate_origin=torch.zeros(1, 3), coordinate_scale=torch.ones(1, 3),
+        module_measure_reference=torch.ones(1), environment_measure_reference=torch.ones(1),
+        scene_key="wind-engine-contract", normalizer_key="test", coordinate_frame_key="native",
+        module_characteristic_lengths=torch.full((1, 2, 3), 0.2),
+        environment_characteristic_lengths=torch.ones(1, 8, 3),
+    )
+    base = QueryBatch(
+        coordinates=torch.tensor([[[0.3, 0.4, 0.5], [0.7, 0.6, 0.5]]]),
+        features=torch.ones(1, 2, 7), query_mask=torch.ones(1, 2, dtype=torch.bool),
+        query_ids=torch.tensor([[41, 43]]), scene_key=scene.scene_key,
+        coordinate_frame_key=scene.coordinate_frame_key, receiver_key="test-query",
+    )
+    cover = smoothstep_grid_receiver_cover(
+        base.coordinates, anchors, scene.environment_ids, scene.environment_mask, base.query_ids,
+        frame_key=scene.coordinate_frame_key, query_mask=base.query_mask,
+        legal_bounds=torch.tensor([[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]]),
+    )
+    query = with_receiver_cover(base, cover)
+    scene_calls = []
+
+    def make_scene_batch(inputs):
+        scene_calls.append(inputs)
+        assert len(scene_calls) == 1
+        return scene
+
+    provider.adapter = SimpleNamespace(
+        make_scene_batch=make_scene_batch,
+        make_query_batch=lambda prepared_scene, receivers: query,
+        physical_velocity=lambda residual, coordinates: (residual, torch.zeros_like(residual), residual),
+    )
+    core = InheritedAttentionCoreV1(
+        module_input_dim=2, environment_input_dim=7, coordinate_dim=3, query_input_dim=7,
+        operating_input_dim=11, context_dim=8, num_heads=2, context_depth=1, local_hidden_dim=8,
+    ).eval()
+    provider.model = core
+    prepared_scene = provider.make_scene(("native-input",))
+    with torch.no_grad():
+        predictions, auxiliary = provider.predict_native(
+            core, prepared_scene, SimpleNamespace(role_ids=np.zeros((1, 2), dtype=np.int8)),
+        )
+    assert len(scene_calls) == 1
+    assert auxiliary["organization"].scene is prepared_scene
+    assert predictions.main_mps.shape == (1, 2, 3)
+    assert torch.isfinite(predictions.main_mps).all()
+
+
 def test_native_role_batches_use_fixed_q8192_and_preserve_formal_monitor_api(monkeypatch: pytest.MonkeyPatch):
     provider = _empty_provider()
     monkeypatch.setattr(provider, "native_evaluation_rows", lambda split, case_keys: (17, 23))
