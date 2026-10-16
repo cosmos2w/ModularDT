@@ -26,6 +26,12 @@ MODEL_FAMILIES = {
         workflows=("inherited_attention_train", "inherited_attention_evaluate"),
         description="Dataset-native IAG-C inherited-gathering operator with geometry-derived receiver covers",
     ),
+    "moment_hyperedges_round5": ModelFamilySpec(
+        family_id="moment_hyperedges_round5",
+        available=True,
+        workflows=("moment_hyperedges_train", "moment_hyperedges_evaluate"),
+        description="Round5 scene-prepared signed-moment hyperedge continuation on native IAG-C providers",
+    ),
     "honf_content_hypergraph": ModelFamilySpec(
         family_id="honf_content_hypergraph",
         available=True,

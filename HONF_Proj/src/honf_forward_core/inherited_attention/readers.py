@@ -136,12 +136,37 @@ def _gather_cover_values(values: Tensor, cover: ReceiverCover) -> Tensor:
     expand/gather graph can materialize the full route-shaped gradient even
     when the forward operation reads only a few anchors.
     """
-    cover.validate_unchanged()
     batch = cover.batch_size
     anchor_indices = cover.anchor_indices.to(torch.long)
     batch_indices = torch.arange(batch, device=values.device)[:, None, None].expand_as(anchor_indices)
     by_anchor = values.permute(0, 2, 1, 3)
     return by_anchor[batch_indices, anchor_indices]
+
+
+def _validate_cover_for_gather(
+    cover: ReceiverCover,
+    anchor_count: int,
+    anchor_ids: Tensor | None,
+    *,
+    validate_identity: bool,
+) -> None:
+    """Run strict version guards and only repeat semantic checks when unsealed."""
+    if validate_identity:
+        if anchor_ids is None:
+            raise ValueError("anchor_ids are required for a validated receiver gather.")
+        validate_cover_anchor_identity(cover, anchor_ids)
+        if anchor_count != anchor_ids.shape[1] and cover.anchor_indices.numel() and (
+            (cover.anchor_indices < 0).any() or (cover.anchor_indices >= anchor_count).any()
+        ):
+            raise ValueError("Receiver cover contains an invalid anchor offset.")
+        return
+    cover.validate_unchanged()
+    if cover._has_validation_seal(anchor_count=anchor_count, unchanged_checked=True):
+        return
+    if cover.anchor_indices.numel() and (
+        (cover.anchor_indices < 0).any() or (cover.anchor_indices >= anchor_count).any()
+    ):
+        raise ValueError("Receiver cover contains an invalid anchor offset.")
 
 
 def gather_cover_indexed(
@@ -160,14 +185,7 @@ def gather_cover_indexed(
     if values.ndim != 4 or values.shape[0] != cover.batch_size:
         raise ValueError("anchor_values must have shape [B,H,E,D] and match the cover batch.")
     _batch, _heads, anchors, _width = values.shape
-    if cover.anchor_indices.numel() and (
-        (cover.anchor_indices < 0).any() or (cover.anchor_indices >= anchors).any()
-    ):
-        raise ValueError("Receiver cover contains an invalid anchor offset.")
-    if validate_identity:
-        if anchor_ids is None:
-            raise ValueError("anchor_ids are required for a validated receiver gather.")
-        validate_cover_anchor_identity(cover, anchor_ids)
+    _validate_cover_for_gather(cover, anchors, anchor_ids, validate_identity=validate_identity)
     selected = _gather_cover_values(values, cover)
     weights = cover.weights[:, :, :, None, None]
     weights = weights * cover.validity[:, :, :, None, None].to(weights.dtype)
@@ -190,14 +208,7 @@ def gather_cover_dense_reference(
     if values.ndim != 4 or values.shape[0] != cover.batch_size:
         raise ValueError("anchor_values must have shape [B,H,E,D] and match the cover batch.")
     batch, _heads, anchors, _width = values.shape
-    if validate_identity:
-        if anchor_ids is None:
-            raise ValueError("anchor_ids are required for a validated receiver gather.")
-        validate_cover_anchor_identity(cover, anchor_ids)
-    if cover.anchor_indices.numel() and (
-        (cover.anchor_indices < 0).any() or (cover.anchor_indices >= anchors).any()
-    ):
-        raise ValueError("Receiver cover contains an invalid anchor offset.")
+    _validate_cover_for_gather(cover, anchors, anchor_ids, validate_identity=validate_identity)
     effective_weights = cover.weights * cover.validity.to(cover.weights.dtype)
     dense_cover = values.new_zeros(batch, cover.query_count, anchors).scatter_add(
         dim=-1,
@@ -267,14 +278,7 @@ def gather_source_response_indexed(
     batch, heads, anchors, rank = values.shape
     if phi.shape != (batch, cover.query_count, heads, rank):
         raise ValueError("phi must have shape [B,Q,H,R] matching the response and cover.")
-    if validate_identity:
-        if anchor_ids is None:
-            raise ValueError("anchor_ids are required for a validated response gather.")
-        validate_cover_anchor_identity(cover, anchor_ids)
-    if cover.anchor_indices.numel() and (
-        (cover.anchor_indices < 0).any() or (cover.anchor_indices >= anchors).any()
-    ):
-        raise ValueError("Receiver cover contains an invalid anchor offset.")
+    _validate_cover_for_gather(cover, anchors, anchor_ids, validate_identity=validate_identity)
     selected = _gather_cover_values(values, cover)
     weights = cover.weights[:, :, :, None, None]
     weights = weights * cover.validity[:, :, :, None, None].to(weights.dtype)

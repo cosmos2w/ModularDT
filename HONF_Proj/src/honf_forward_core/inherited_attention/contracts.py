@@ -16,6 +16,18 @@ TokenKind = Literal["module", "environment"]
 NormalizationKind = Literal["softmax", "entmax15", "softmax_entmax15_blend", "diagnostic_intervention"]
 
 
+def _tensor_identity_versions(tensors: tuple[tuple[str, Tensor], ...]) -> tuple[tuple[str, int, int, int], ...]:
+    """Capture tensor identity, storage pointer and in-place version safely."""
+    versions = []
+    for name, tensor in tensors:
+        try:
+            version = int(tensor._version)
+        except RuntimeError:  # Inference tensors do not expose a version counter.
+            version = -1
+        versions.append((name, id(tensor), int(tensor.data_ptr()), version))
+    return tuple(versions)
+
+
 @dataclass(frozen=True)
 class RouteScoreSnapshot:
     """Last-cycle EM or EE score data plus source/destination correspondence.
@@ -151,6 +163,130 @@ class PreparedAnchorValues:
 
 
 @dataclass(frozen=True)
+class PreparedGridTopology:
+    """Scene-owned discrete regular-grid mapping with live coordinate axes.
+
+    ``axis_source_indices`` records representative environment-token offsets
+    for each sorted unique axis coordinate. Query covers gather those values
+    from the live ``anchor_coordinates`` tensor, so each cover keeps its own
+    fresh geometry-gradient path. ``grid_anchor_indices`` maps row-major
+    lattice offsets back to the actual environment-token order.
+    """
+
+    axis_source_indices: tuple[Tensor, ...]  # integer [B,A_d], into E axis
+    grid_anchor_indices: Tensor  # integer [B,A0,...,AD-1]
+    anchor_coordinates: Tensor  # live source tensor [B,E,D]
+    environment_ids: Tensor  # integer [B,E]
+    environment_mask: Tensor  # bool [B,E]
+    legal_bounds: Tensor | None  # optional live [B,2,D]
+    frame_key: Any
+    scene_version: Any
+    owner_token: Any
+    normalizer_key: Any = None
+    scene_key: Any = None
+    _tensor_versions: tuple[tuple[str, int, int, int], ...] = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        if len(self.axis_source_indices) not in (2, 3):
+            raise ValueError("A prepared receiver topology must contain two or three coordinate axes.")
+        if self.anchor_coordinates.ndim != 3:
+            raise ValueError("Prepared anchor_coordinates must have shape [B,E,D].")
+        batch, anchors, coordinate_dim = self.anchor_coordinates.shape
+        if coordinate_dim != len(self.axis_source_indices):
+            raise ValueError("Prepared topology axis count must match anchor coordinate dimension.")
+        if self.environment_ids.shape != (batch, anchors) or self.environment_ids.dtype not in (
+            torch.int32, torch.int64
+        ):
+            raise ValueError("Prepared environment IDs must be integer [B,E].")
+        if self.environment_mask.shape != (batch, anchors) or self.environment_mask.dtype != torch.bool:
+            raise ValueError("Prepared environment mask must be boolean [B,E].")
+        if self.legal_bounds is not None and self.legal_bounds.shape != (batch, 2, coordinate_dim):
+            raise ValueError("Prepared legal bounds must have shape [B,2,D].")
+        if self.grid_anchor_indices.ndim != coordinate_dim + 1 or self.grid_anchor_indices.shape[0] != batch:
+            raise ValueError("Prepared lattice mapping must have shape [B,A0,...,AD-1].")
+        if self.grid_anchor_indices.dtype not in (torch.int32, torch.int64):
+            raise TypeError("Prepared lattice offsets must use an integer dtype.")
+        if any(
+            axis.ndim != 2
+            or axis.shape != (batch, self.grid_anchor_indices.shape[1 + index])
+            or axis.dtype not in (torch.int32, torch.int64)
+            for index, axis in enumerate(self.axis_source_indices)
+        ):
+            raise ValueError("Prepared axis source indices must match the lattice-map dimensions.")
+        tensors = self.tensors()
+        if any(tensor.device != self.anchor_coordinates.device for tensor in tensors):
+            raise ValueError("Prepared topology tensors must share one device.")
+        object.__setattr__(self, "_tensor_versions", _tensor_identity_versions(tuple(
+            (name, tensor) for name, tensor in zip(self.tensor_names(), tensors)
+        )))
+
+    def tensor_names(self) -> tuple[str, ...]:
+        return (
+            "anchor_coordinates", "environment_ids", "environment_mask",
+            *(f"axis_source_indices_{index}" for index in range(len(self.axis_source_indices))),
+            *( ("legal_bounds",) if self.legal_bounds is not None else () ),
+            "grid_anchor_indices",
+        )
+
+    def tensors(self) -> tuple[Tensor, ...]:
+        """Return every scene, mapping and live-axis tensor held by the cache."""
+        bounds = () if self.legal_bounds is None else (self.legal_bounds,)
+        return (self.anchor_coordinates, self.environment_ids, self.environment_mask,
+                *self.axis_source_indices, *bounds, self.grid_anchor_indices)
+
+    def validate_unchanged(self) -> None:
+        """Reject topology reuse after source geometry or cached mapping edits."""
+        current = _tensor_identity_versions(tuple(zip(self.tensor_names(), self.tensors())))
+        if current != self._tensor_versions:
+            raise RuntimeError("Prepared grid topology changed after construction; rebuild it for the current scene.")
+
+    def validate_binding(
+        self,
+        *,
+        frame_key: Any = None,
+        scene_version: Any = None,
+        owner_token: Any = None,
+        normalizer_key: Any = None,
+        scene_key: Any = None,
+        anchor_coordinates: Tensor | None = None,
+        environment_ids: Tensor | None = None,
+        environment_mask: Tensor | None = None,
+    ) -> None:
+        """Check the scene/frame cache binding supplied by a prepared model."""
+        self.validate_unchanged()
+        if frame_key is not None and frame_key != self.frame_key:
+            raise ValueError("Prepared grid topology uses a different coordinate frame.")
+        if scene_version is not None and scene_version != self.scene_version:
+            raise ValueError("Prepared grid topology is stale for the current scene version.")
+        if owner_token is not None and owner_token is not self.owner_token:
+            raise ValueError("Prepared grid topology belongs to a different scene cache owner.")
+        if normalizer_key is not None and normalizer_key != self.normalizer_key:
+            raise ValueError("Prepared grid topology belongs to a different normalizer.")
+        if scene_key is not None and scene_key != self.scene_key:
+            raise ValueError("Prepared grid topology belongs to a different scene identity.")
+        for name, expected, actual in (
+            ("anchor coordinates", anchor_coordinates, self.anchor_coordinates),
+            ("environment IDs", environment_ids, self.environment_ids),
+            ("environment mask", environment_mask, self.environment_mask),
+        ):
+            if expected is not None and expected is not actual:
+                raise ValueError(f"Prepared grid topology uses different {name} tensors.")
+
+
+@dataclass(frozen=True)
+class _ReceiverCoverValidationSeal:
+    """Private proof that one topology-backed cover passed full construction checks."""
+
+    topology: PreparedGridTopology
+    anchor_ids: Tensor
+    cover_tensor_versions: tuple[tuple[str, int, int], ...]
+    topology_tensor_versions: tuple[tuple[str, int, int, int], ...]
+    partition_tolerance: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class ReceiverCover:
     """Sparse continuous query-to-anchor partition with explicit ID mapping.
 
@@ -167,7 +303,13 @@ class ReceiverCover:
     query_ids: Tensor  # integer [B,Q]
     frame_key: Any
     query_mask: Tensor | None = None  # bool [B,Q]
+    topology: PreparedGridTopology | None = field(default=None, repr=False, compare=False)
+    scene_version: Any = field(default=None, repr=False, compare=False)
+    owner_token: Any = field(default=None, repr=False, compare=False)
     _tensor_identity_versions: tuple[tuple[str, int, int], ...] = field(
+        init=False, repr=False, compare=False
+    )
+    _validation_seal: _ReceiverCoverValidationSeal | None = field(
         init=False, repr=False, compare=False
     )
 
@@ -195,7 +337,17 @@ class ReceiverCover:
             self.query_mask.shape != (batch, queries) or self.query_mask.dtype != torch.bool
         ):
             raise ValueError("query_mask must be boolean [B,Q].")
+        if self.topology is not None:
+            if self.topology.frame_key != self.frame_key:
+                raise ValueError("Receiver cover and prepared topology require the same coordinate frame.")
+            if self.scene_version is not None and self.scene_version != self.topology.scene_version:
+                raise ValueError("Receiver cover scene version differs from its prepared topology.")
+            if self.owner_token is not None and self.owner_token is not self.topology.owner_token:
+                raise ValueError("Receiver cover owner differs from its prepared topology.")
+            object.__setattr__(self, "scene_version", self.topology.scene_version)
+            object.__setattr__(self, "owner_token", self.topology.owner_token)
         object.__setattr__(self, "_tensor_identity_versions", self._capture_tensor_versions())
+        object.__setattr__(self, "_validation_seal", None)
 
     def _capture_tensor_versions(self) -> tuple[tuple[str, int, int], ...]:
         tensors = (
@@ -222,6 +374,93 @@ class ReceiverCover:
         current = self._capture_tensor_versions()
         if current != self._tensor_identity_versions:
             raise RuntimeError("Receiver-cover tensors changed after cover construction.")
+        if self.topology is not None:
+            self.topology.validate_binding(
+                frame_key=self.frame_key,
+                scene_version=self.scene_version,
+                owner_token=self.owner_token,
+            )
+
+    def _has_validation_seal(
+        self,
+        anchor_ids: Tensor | None = None,
+        anchor_count: int | None = None,
+        *,
+        atol: float = 2.0e-6,
+        rtol: float = 2.0e-6,
+        unchanged_checked: bool = False,
+    ) -> bool:
+        """Check a private factory proof after running live version guards."""
+        seal = self._validation_seal
+        if seal is None or seal.topology is not self.topology:
+            return False
+        if anchor_ids is not None and anchor_ids is not seal.anchor_ids:
+            return False
+        if anchor_count is not None and anchor_count != seal.anchor_ids.shape[1]:
+            return False
+        if (float(atol), float(rtol)) != seal.partition_tolerance:
+            return False
+        if not unchanged_checked:
+            self.validate_unchanged()
+        if self._capture_tensor_versions() != seal.cover_tensor_versions:
+            return False
+        if seal.topology._tensor_versions != seal.topology_tensor_versions:
+            return False
+        return True
+
+    def _seal_topology_validation(self, anchor_ids: Tensor, *, atol: float, rtol: float) -> None:
+        """Record factory validation only for ordinary versioned tensors."""
+        topology = self.topology
+        if topology is None or topology.environment_ids is not anchor_ids:
+            return
+        cover_versions = self._capture_tensor_versions()
+        topology_versions = topology._tensor_versions
+        if any(version < 0 for _name, _identity, version in cover_versions):
+            return
+        if any(version < 0 for _name, _identity, _pointer, version in topology_versions):
+            return
+        object.__setattr__(
+            self,
+            "_validation_seal",
+            _ReceiverCoverValidationSeal(
+                topology=topology,
+                anchor_ids=anchor_ids,
+                cover_tensor_versions=cover_versions,
+                topology_tensor_versions=topology_versions,
+                partition_tolerance=(float(atol), float(rtol)),
+            ),
+        )
+
+    def validate_topology(
+        self,
+        *,
+        frame_key: Any = None,
+        scene_version: Any = None,
+        owner_token: Any = None,
+        normalizer_key: Any = None,
+        scene_key: Any = None,
+        anchor_coordinates: Tensor | None = None,
+        environment_ids: Tensor | None = None,
+        environment_mask: Tensor | None = None,
+    ) -> None:
+        """Validate a cached cover's geometry owner against a prepared scene."""
+        self.validate_unchanged()
+        if self.topology is None:
+            if scene_version is not None or owner_token is not None:
+                raise ValueError("A scene-bound receiver cover requires its prepared grid topology.")
+            if frame_key is not None and frame_key != self.frame_key:
+                raise ValueError("Receiver cover uses a different coordinate frame.")
+            return
+        self.topology.validate_binding(
+            frame_key=frame_key if frame_key is not None else self.frame_key,
+            scene_version=scene_version,
+            owner_token=owner_token,
+            normalizer_key=normalizer_key,
+            scene_key=scene_key,
+            anchor_coordinates=anchor_coordinates,
+            environment_ids=environment_ids,
+            environment_mask=environment_mask,
+        )
 
     @property
     def batch_size(self) -> int:
@@ -238,6 +477,8 @@ class ReceiverCover:
     def validate_partition(self, *, atol: float = 2.0e-6, rtol: float = 2.0e-6) -> None:
         """Validate finite nonnegative weights and unit mass on live queries."""
         self.validate_unchanged()
+        if self._has_validation_seal(atol=atol, rtol=rtol, unchanged_checked=True):
+            return
         if not torch.isfinite(self.weights).all():
             raise ValueError("Receiver-cover weights must be finite.")
         if (self.weights < 0).any():
@@ -253,6 +494,60 @@ class ReceiverCover:
             raise ValueError("Every live receiver cover must have unit mass.")
         if (mass[~live] != 0).any():
             raise ValueError("Padded queries must have zero receiver-cover mass.")
+
+
+@dataclass(frozen=True)
+class PreparedProjectedAnchorValues:
+    """One fused, projected context payload cached at environment anchors."""
+
+    values: Tensor  # [B,E,C]
+    anchor_ids: Tensor  # integer [B,E]
+    frame_key: Any
+    scene_version: Any
+    owner_token: Any
+    _tensor_versions: tuple[tuple[str, int, int, int], ...] = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        if self.values.ndim != 3:
+            raise ValueError("Projected anchor values must have shape [B,E,C].")
+        if self.anchor_ids.shape != self.values.shape[:2] or self.anchor_ids.dtype not in (
+            torch.int32, torch.int64
+        ):
+            raise ValueError("Projected anchor IDs must be integer [B,E] matching the payload.")
+        if self.values.device != self.anchor_ids.device:
+            raise ValueError("Projected anchor values and IDs must share one device.")
+        object.__setattr__(self, "_tensor_versions", _tensor_identity_versions(tuple(
+            zip(self.tensor_names(), self.tensors())
+        )))
+
+    @staticmethod
+    def tensor_names() -> tuple[str, str]:
+        return ("values", "anchor_ids")
+
+    def tensors(self) -> tuple[Tensor, Tensor]:
+        """Return the payload tensors for prepared-graph lifetime tracking."""
+        return self.values, self.anchor_ids
+
+    def validate_unchanged(self) -> None:
+        if _tensor_identity_versions(tuple(zip(self.tensor_names(), self.tensors()))) != self._tensor_versions:
+            raise RuntimeError("Projected anchor payload changed after construction.")
+
+    def validate_binding(
+        self,
+        *,
+        frame_key: Any = None,
+        scene_version: Any = None,
+        owner_token: Any = None,
+    ) -> None:
+        self.validate_unchanged()
+        if frame_key is not None and frame_key != self.frame_key:
+            raise ValueError("Projected anchor payload uses a different coordinate frame.")
+        if scene_version is not None and scene_version != self.scene_version:
+            raise ValueError("Projected anchor payload is stale for the current scene version.")
+        if owner_token is not None and owner_token is not self.owner_token:
+            raise ValueError("Projected anchor payload belongs to a different scene cache owner.")
 
 
 @dataclass(frozen=True)
@@ -291,9 +586,11 @@ class InheritedSceneBatch(SceneBatch):
     """Native scene contract with optional authoritative receiver bounds."""
 
     receiver_legal_bounds: Tensor | None = None  # [B,2,D], lower then upper
+    receiver_grid_topology: PreparedGridTopology | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._validate_receiver_legal_bounds()
+        self._validate_receiver_grid_topology()
 
     def _validate_receiver_legal_bounds(self) -> None:
         bounds = self.receiver_legal_bounds
@@ -314,6 +611,28 @@ class InheritedSceneBatch(SceneBatch):
             "receiver_legal_bounds must be finite and ordered lower-to-upper.",
         )
 
+    def _validate_receiver_grid_topology(self) -> None:
+        topology = self.receiver_grid_topology
+        if topology is None:
+            return
+        topology.validate_binding(
+            frame_key=self.coordinate_frame_key,
+            scene_version=self.tensor_version_stamp(),
+            owner_token=topology.owner_token,
+            normalizer_key=self.normalizer_key,
+            scene_key=self.scene_key,
+            anchor_coordinates=self.environment_coordinates,
+            environment_ids=self.environment_ids,
+            environment_mask=self.environment_mask,
+        )
+        if self.receiver_legal_bounds is not None:
+            if topology.legal_bounds is None:
+                raise ValueError("Prepared receiver topology omitted the scene's legal query bounds.")
+            if topology.legal_bounds is not self.receiver_legal_bounds and not torch.equal(
+                topology.legal_bounds, self.receiver_legal_bounds
+            ):
+                raise ValueError("Prepared receiver topology uses different legal query bounds.")
+
     def validate(
         self,
         *,
@@ -329,17 +648,18 @@ class InheritedSceneBatch(SceneBatch):
             operating_input_dim=operating_input_dim,
         )
         self._validate_receiver_legal_bounds()
+        self._validate_receiver_grid_topology()
 
     def tensor_version_stamp(self) -> tuple[tuple[int, int, int], ...]:
         stamp = super().tensor_version_stamp()
         bounds = self.receiver_legal_bounds
-        if bounds is None:
-            return stamp
-        try:
-            version = int(bounds._version)
-        except RuntimeError:  # Inference tensors do not expose a version counter.
-            version = -1
-        return (*stamp, (id(bounds), int(bounds.data_ptr()), version))
+        if bounds is not None:
+            try:
+                version = int(bounds._version)
+            except RuntimeError:  # Inference tensors do not expose a version counter.
+                version = -1
+            stamp = (*stamp, (id(bounds), int(bounds.data_ptr()), version))
+        return stamp
 
 
 @dataclass(frozen=True)

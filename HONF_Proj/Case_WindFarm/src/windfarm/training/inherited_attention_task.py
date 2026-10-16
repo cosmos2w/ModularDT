@@ -65,7 +65,16 @@ from .native_role_evaluation import (
 IAG_WIND_PROVIDER_SCHEMA = "wind_inherited_attention_provider_v1"
 IAG_WIND_FULL_PROFILE = "wind_original420_train_fullVALID90_followup1000_v1"
 IAG_WIND_LOSS_NAME = "inherited_attention_wind/native_velocity_mse"
+ROUND5_MOMENT_CORE_SCHEMA = "scene_prepared_moment_hyperedge_core_v1"
 _WIND_REPRESENTATIONS = IAG_ARCHITECTURE_REPRESENTATION
+
+
+def _core_from_config(config: Mapping[str, Any]) -> InheritedAttentionCoreV1:
+    if config.get("schema") == ROUND5_MOMENT_CORE_SCHEMA:
+        from honf_forward_core.inherited_attention.moment_model import MomentHyperedgeCoreV1
+
+        return MomentHyperedgeCoreV1.from_config(dict(config))
+    return InheritedAttentionCoreV1.from_config(dict(config))
 
 
 def _wind_representation(recipe: Mapping[str, Any]) -> tuple[str, str]:
@@ -597,7 +606,7 @@ def build_wind_inherited_attention_task_v1(
         torch.manual_seed(initialization_seed)
         if devices:
             torch.cuda.manual_seed_all(initialization_seed)
-        model = InheritedAttentionCoreV1.from_config(model_config).to(selected_device)
+        model = _core_from_config(model_config).to(selected_device)
     provider = WindInheritedAttentionTaskV1(
         view,
         model=model,

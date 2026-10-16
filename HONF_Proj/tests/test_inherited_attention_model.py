@@ -335,6 +335,148 @@ def test_dense_reference_and_indexed_query_read_match_outputs_parameter_and_geom
         torch.testing.assert_close(actual, expected, rtol=1.0e-4, atol=1.0e-5)
 
 
+def test_projected_anchor_read_matches_indexed_outputs_and_gradients():
+    scene_indexed, scene_projected = _scene(batch=1), _scene(batch=1)
+    for scene in (scene_indexed, scene_projected):
+        scene.module_coordinates.requires_grad_()
+        scene.environment_coordinates.requires_grad_()
+    query_indexed = _query(scene_indexed, requires_grad=True)
+    query_projected = _query(scene_projected, requires_grad=True)
+    indexed = _core(query_executor="indexed").eval()
+    projected = _core(query_executor="indexed_projected").eval()
+    with torch.no_grad():
+        indexed.gather_output.bias.copy_(torch.linspace(-0.2, 0.25, indexed.context_dim))
+    projected.load_state_dict(indexed.state_dict())
+    organization_indexed = indexed.prepare(scene_indexed)
+    organization_projected = projected.prepare(scene_projected)
+    controls_indexed = torch.tensor([[0.2, -0.3, 0.5]], requires_grad=True)
+    controls_projected = controls_indexed.detach().clone().requires_grad_()
+
+    output_indexed = indexed.decode(organization_indexed, query_indexed, controls_indexed)
+    output_projected = projected.decode(organization_projected, query_projected, controls_projected)
+    torch.testing.assert_close(
+        output_projected.nonlinear_field, output_indexed.nonlinear_field, rtol=4.0e-5, atol=4.0e-6
+    )
+    torch.testing.assert_close(
+        output_projected.thermal_temperature, output_indexed.thermal_temperature, rtol=4.0e-5, atol=4.0e-6
+    )
+    assert organization_projected.prepared_readout_values is not None
+    assert organization_projected.prepared_readout_values.values.shape == (1, 4, 8)
+    module_anchor = organization_projected.module_anchor_values.values.permute(0, 2, 1, 3).reshape(1, 4, 8)
+    environment_anchor = organization_projected.environment_anchor_values.values.permute(0, 2, 1, 3).reshape(1, 4, 8)
+    expected_anchor = torch.nn.functional.linear(
+        torch.cat((module_anchor, environment_anchor), dim=-1), projected.gather_output.weight, bias=None
+    )
+    torch.testing.assert_close(organization_projected.prepared_readout_values.values, expected_anchor, rtol=0, atol=0)
+    assert output_projected.work_counts["cover_executed_anchor_reads"] < output_indexed.work_counts[
+        "cover_executed_anchor_reads"
+    ]
+    assert output_projected.work_counts["projected_context_gather_slots"] == (
+        query_projected.batch_size * query_projected.num_queries * query_projected.receiver_cover.slots
+    )
+
+    parameter_names = (
+        "gather_output.weight",
+        "gather_output.bias",
+        "module_value_projection.weight",
+        "environment_value_projection.weight",
+        "context_blocks.0.em.geometry_score.0.weight",
+        "context_blocks.0.ee.geometry_score.0.weight",
+    )
+    parameters_indexed = dict(indexed.named_parameters())
+    parameters_projected = dict(projected.named_parameters())
+    inputs_indexed = (
+        parameters_indexed[parameter_names[0]],
+        parameters_indexed[parameter_names[1]],
+        parameters_indexed[parameter_names[2]],
+        parameters_indexed[parameter_names[3]],
+        parameters_indexed[parameter_names[4]],
+        parameters_indexed[parameter_names[5]],
+        query_indexed.coordinates,
+        scene_indexed.module_coordinates,
+        scene_indexed.environment_coordinates,
+        controls_indexed,
+    )
+    inputs_projected = (
+        parameters_projected[parameter_names[0]],
+        parameters_projected[parameter_names[1]],
+        parameters_projected[parameter_names[2]],
+        parameters_projected[parameter_names[3]],
+        parameters_projected[parameter_names[4]],
+        parameters_projected[parameter_names[5]],
+        query_projected.coordinates,
+        scene_projected.module_coordinates,
+        scene_projected.environment_coordinates,
+        controls_projected,
+    )
+    loss_indexed = output_indexed.nonlinear_field.square().sum() + output_indexed.thermal_temperature.square().sum()
+    loss_projected = output_projected.nonlinear_field.square().sum() + output_projected.thermal_temperature.square().sum()
+    gradients_indexed = torch.autograd.grad(loss_indexed, inputs_indexed)
+    gradients_projected = torch.autograd.grad(loss_projected, inputs_projected)
+    for actual, expected in zip(gradients_projected, gradients_indexed):
+        torch.testing.assert_close(actual, expected, rtol=2.0e-4, atol=2.0e-5)
+
+
+def test_projected_anchor_read_adds_bias_once_and_checks_prepared_payload():
+    scene = _scene(batch=1)
+    query_mask = torch.tensor([[True, False, True, True, True]])
+    query = _query(scene, query_mask=query_mask)
+    core = _core(query_executor="indexed_projected").eval()
+    with torch.no_grad():
+        core.gather_output.bias.copy_(torch.linspace(-0.4, 0.3, core.context_dim))
+    organization = core.prepare(scene)
+    assert organization.prepared_readout_values is not None
+
+    context, module_context, environment_context = core._gather_scene_readout(
+        organization, query, return_typed_contexts=True
+    )
+    assert module_context is not None and environment_context is not None
+    torch.testing.assert_close(context[0, 1], core.gather_output.bias, rtol=0, atol=0)
+    module_flat = module_context.reshape(query.batch_size, query.num_queries, core.context_dim)
+    environment_flat = environment_context.reshape_as(module_flat)
+    reference = core.gather_output(torch.cat((module_flat, environment_flat), dim=-1))
+    torch.testing.assert_close(context, reference, rtol=3.0e-5, atol=3.0e-6)
+
+    with torch.no_grad():
+        intervention = core.intervene_associations(
+            organization,
+            0.8 * organization.module_atlas.probabilities,
+            0.8 * organization.environment_atlas.probabilities,
+            label="projected-readout-subprobability-check",
+        )
+    assert intervention.prepared_readout_values is not None
+    assert not torch.allclose(
+        intervention.prepared_readout_values.values, organization.prepared_readout_values.values
+    )
+
+    with torch.no_grad():
+        organization.prepared_readout_values.values.add_(0.01)
+    with pytest.raises(ValueError, match="Prepared scene/atlas/value factors changed"):
+        core.decode(organization, query)
+
+
+def test_projected_read_defers_query_count_sync_unless_requested():
+    scene = _scene(batch=1)
+    query = _query(scene)
+    core = _core(query_executor="indexed_projected").eval()
+    assert core.collect_exact_work_counts is False
+    organization = core.prepare(scene)
+    controls = torch.zeros_like(scene.module_mask, dtype=scene.module_features.dtype)
+
+    ordinary = core.decode(organization, query, controls)
+    assert ordinary.work_counts["exact_cover_positive_count_collected"] == 0
+    assert "cover_positive_slots" not in ordinary.work_counts
+    assert ordinary.work_counts["scene_response_executed_associations"] == organization.work_counts[
+        "module_positive_associations"
+    ]
+
+    traced = core.decode(organization, query, controls, return_trace=True)
+    assert traced.work_counts["exact_cover_positive_count_collected"] == 1
+    assert traced.work_counts["cover_positive_slots"] == int(
+        ((query.receiver_cover.weights > 0) & query.receiver_cover.validity).sum() * core.num_heads
+    )
+
+
 def test_selected_scene_edges_match_dense_values_gradients_thermal_and_vjp():
     scene_dense, scene_selected = _scene(batch=1), _scene(batch=1)
     for scene in (scene_dense, scene_selected):
@@ -782,6 +924,37 @@ def _assert_optimizer_states_equal(left, right) -> None:
                     torch.testing.assert_close(left_value, right_value, rtol=0, atol=0)
                 else:
                     assert left_value == right_value
+
+
+def test_exact_count_config_preserves_round4_identity_and_explicit_modes_roundtrip():
+    legacy = _core()
+    legacy_config = legacy.get_config()
+    assert set(legacy_config) == {
+        "schema", "module_input_dim", "environment_input_dim", "coordinate_dim",
+        "query_input_dim", "operating_input_dim", "output_dim", "architecture",
+        "context_dim", "num_heads", "context_depth", "local_hidden_dim", "dropout",
+        "init_seed", "signed_carrier_width", "thermal_response", "normalization",
+        "scene_executor", "query_executor",
+    }
+    assert legacy.collect_exact_work_counts is True
+    assert InheritedAttentionCoreV1.from_config(legacy_config).get_config() == legacy_config
+
+    legacy_without_exact_counts = _core(collect_exact_work_counts=False)
+    disabled_config = legacy_without_exact_counts.get_config()
+    assert disabled_config["collect_exact_work_counts"] is False
+    restored_disabled = InheritedAttentionCoreV1.from_config(disabled_config)
+    assert restored_disabled.collect_exact_work_counts is False
+    assert restored_disabled.get_config() == disabled_config
+
+    projected = _core(query_executor="indexed_projected")
+    projected_config = projected.get_config()
+    assert projected_config["collect_exact_work_counts"] is False
+    assert InheritedAttentionCoreV1.from_config(projected_config).get_config() == projected_config
+
+    projected_exact = _core(query_executor="indexed_projected", collect_exact_work_counts=True)
+    exact_projected_config = projected_exact.get_config()
+    assert exact_projected_config["collect_exact_work_counts"] is True
+    assert InheritedAttentionCoreV1.from_config(exact_projected_config).get_config() == exact_projected_config
 
 
 def test_state_dict_roundtrip_and_same_backend_one_step_resume():

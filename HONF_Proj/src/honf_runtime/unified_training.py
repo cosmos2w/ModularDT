@@ -2844,6 +2844,7 @@ class TrainingEngine:
         source_read_child: Mapping[str, Any] | None = None,
         source_read_child_auxiliary_fit: Callable[..., Mapping[str, Any]] | None = None,
         inherited_attention_sparse_child: Mapping[str, Any] | None = None,
+        moment_hyperedge_child: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2879,6 +2880,43 @@ class TrainingEngine:
         is_source_read_sparse = source_reader_variant in ("S-Utility", "S-Complete")
         source_read_scope = provider_identity.get("protocol")
         iag_recipe = identity.get("recipe", {})
+        from .moment_hyperedge_protocol import (
+            MOMENT_FAMILY,
+            MOMENT_PROTOCOL,
+            MOMENT_WORKFLOW,
+            validate_moment_hyperedge_recipe,
+        )
+
+        identity_is_moment_hyperedge = (
+            identity.get("model_family") == MOMENT_FAMILY
+            or identity.get("workflow") == MOMENT_WORKFLOW
+            or identity.get("protocol") == MOMENT_PROTOCOL
+        )
+        if identity_is_moment_hyperedge:
+            iag_recipe = validate_moment_hyperedge_recipe(iag_recipe)
+            if (identity.get("model_family") != MOMENT_FAMILY
+                    or identity.get("family") != MOMENT_FAMILY
+                    or identity.get("workflow") != MOMENT_WORKFLOW
+                    or identity.get("protocol") != MOMENT_PROTOCOL
+                    or identity.get("variant") != iag_recipe.get("variant")):
+                raise ValueError("Round5 family, workflow, protocol and variant identity fields must agree exactly.")
+        elif moment_hyperedge_child is not None:
+            raise ValueError("A moment-hyperedge child declaration requires the Round5 family identity.")
+        if identity_is_moment_hyperedge and moment_hyperedge_child is None:
+            raise ValueError("Every Round5 fresh branch or exact resume requires its pinned C-soft e500 declaration.")
+        if identity_is_moment_hyperedge and (
+                (branch_from_checkpoint is None and resume_checkpoint is None)
+                or (branch_from_checkpoint is not None and resume_checkpoint is not None)
+                or optimizer_seed is not None or allow_microbatch_change
+                or self.config.training_mode != "joint" or arm != "IAG-C"
+                or self.selection.response_guard_metric is not None
+                or mathematical_route_branch is not None or joint_core_revision is not None
+                or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                or source_read_child is not None or source_read_child_auxiliary_fit is not None
+                or inherited_attention_sparse_child is not None
+                or numerical_pooling_amendment is not None or output_policy_amendment is not None
+                or fresh_initialization is not None):
+            raise ValueError("Round5 continuation is an exclusive joint IAG-C branch or exact resume with field-only selection.")
         is_iag_sparse_development = (
             identity.get("model_family") == "inherited_attention_v1"
             and isinstance(iag_recipe, Mapping)
@@ -3020,6 +3058,14 @@ class TrainingEngine:
                 pass
             else:
                 raise ValueError("An IAG-C sparse child must write to a distinct run directory from its soft parent.")
+        if (identity_is_moment_hyperedge and branch_from_checkpoint is not None
+                and source_path is not None):
+            try:
+                source_path.resolve().relative_to(output)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("A Round5 moment-hyperedge child must write to a distinct run directory from its C parent.")
         source_payload: Mapping[str, Any] | None = None
         restored_rng: Mapping[str, Any] | None = None
         if source_path is not None:
@@ -3030,6 +3076,10 @@ class TrainingEngine:
                     source_payload.get("experiment_identity", {}).get("fresh_initialization")
                     != fresh_initialization):
                 raise ValueError("Fresh matched resume checkpoint does not preserve its original initialization receipt.")
+        if identity_is_moment_hyperedge and resume_checkpoint is not None:
+            from .moment_hyperedge_child import verify_moment_hyperedge_resume
+
+            verify_moment_hyperedge_resume(source_payload, iag_recipe, moment_hyperedge_child)
         start_epoch = 1 if source_payload is None else int(source_payload["epoch"]) + 1
         if resume_checkpoint is not None and is_iag_sparse_development:
             branch = source_payload.get("branch_parent")
@@ -3047,6 +3097,8 @@ class TrainingEngine:
             raise ValueError("Exact resume stop must advance the saved epoch.")
         if not start_epoch <= stop_after <= self.config.total_epochs:
             raise ValueError("Requested stop must advance the saved age and remain inside the common horizon.")
+        if identity_is_moment_hyperedge and stop_after > int(iag_recipe["approved_stop_after"]):
+            raise ValueError("Round5 stop cannot exceed the sealed absolute e2500 primary horizon.")
         if not identity:
             raise ValueError("A sealed nonempty experiment identity is required.")
         model.to(self.device)
@@ -3070,7 +3122,19 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if inherited_attention_sparse_child is not None:
+            if identity_is_moment_hyperedge and branch_from_checkpoint is not None:
+                from .moment_hyperedge_child import prepare_moment_hyperedge_child
+
+                amendment = prepare_moment_hyperedge_child(
+                    model,
+                    source_payload,
+                    sealed_identity,
+                    moment_hyperedge_child,
+                    source_path=source_path,
+                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    stop_after=int(stop_after),
+                )
+            elif inherited_attention_sparse_child is not None:
                 from .inherited_attention_child import prepare_inherited_attention_sparse_child
 
                 amendment = prepare_inherited_attention_sparse_child(
@@ -3145,12 +3209,14 @@ class TrainingEngine:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
             elif (joint_core_revision is None and diagnostic_age_branch is None
                   and architecture_child_initialization is None and source_read_child is None
-                  and inherited_attention_sparse_child is None):
+                  and inherited_attention_sparse_child is None
+                  and not identity_is_moment_hyperedge):
                 if source_payload.get("arm") != "warmup":
                     raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
                 if int(source_payload.get("epoch", -1)) != self.config.warmup_epochs:
                     raise ValueError("Matched arms must branch at the declared common warmup boundary.")
-            if architecture_child_initialization is None and source_read_child is None:
+            if (architecture_child_initialization is None and source_read_child is None
+                    and (not identity_is_moment_hyperedge or resume_checkpoint is not None)):
                 model.load_state_dict(source_payload["model_state_dict"], strict=True)
                 if fresh_initialization is not None:
                     _apply_fresh_native_validation_policy(model)
@@ -3174,7 +3240,15 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
-        if inherited_attention_sparse_child is not None:
+        if identity_is_moment_hyperedge and branch_from_checkpoint is not None:
+            from .moment_hyperedge_child import verify_moment_hyperedge_child_optimizer
+
+            verify_moment_hyperedge_child_optimizer(
+                model, optimizer, source_payload["optimizer_state_by_name"], amendment,
+            )
+            amendment["exact_inherited_moments_verified"] = True
+            amendment["new_optimizer_states_at_attachment"] = 0
+        elif inherited_attention_sparse_child is not None:
             from .inherited_attention_child import verify_inherited_attention_sparse_child_optimizer
 
             verify_inherited_attention_sparse_child_optimizer(
@@ -3288,7 +3362,9 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
-            amendment_name = ('architecture_child_initialization' if architecture_child_initialization is not None else
+            amendment_name = ('moment_hyperedge_child' if identity_is_moment_hyperedge and branch_from_checkpoint is not None else
+                              'moment_hyperedge_resume' if identity_is_moment_hyperedge else
+                              'architecture_child_initialization' if architecture_child_initialization is not None else
                               'inherited_attention_sparse_child' if inherited_attention_sparse_child is not None else
                               'source_read_child' if source_read_child is not None else
                               'numerical_pooling_amendment' if numerical_pooling_amendment is not None else
@@ -3298,7 +3374,7 @@ class TrainingEngine:
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if (joint_core_revision is not None or diagnostic_age_branch is not None
+                category='logs' if (identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
                                     or source_read_child is not None
                                     or inherited_attention_sparse_child is not None
@@ -3328,6 +3404,15 @@ class TrainingEngine:
                     inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
                     inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
                     inherited_history_scope="dense A2-D physical history through e500; child physical rows begin at e501",
+                )
+            elif identity_is_moment_hyperedge:
+                branch_parent.update(
+                    moment_hyperedge_child=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
+                    inherited_history_scope=(
+                        "exact IAG-C soft physical history through e500; Round5 continuation rows begin at absolute e501"
+                    ),
                 )
             elif joint_core_revision is None:
                 history = []
@@ -3748,7 +3833,17 @@ class TrainingEngine:
                     field_score = float(metrics[self.selection.field_metric])
                     if not math.isfinite(field_score):
                         raise FloatingPointError("Nonfinite declared field selector.")
-                    improved_field = field_score < best_field
+                    if identity_is_moment_hyperedge:
+                        from .moment_hyperedge_protocol import moment_selection_eligible
+
+                        declared_checkpoint = (
+                            self.config.checkpoint_epochs is None
+                            or epoch in self.config.checkpoint_epochs
+                        )
+                        selector_candidate = moment_selection_eligible(epoch) and declared_checkpoint
+                    else:
+                        selector_candidate = True
+                    improved_field = selector_candidate and field_score < best_field
                     if improved_field:
                         best_field = field_score
                     guard_key = self.selection.response_guard_metric
@@ -3765,7 +3860,7 @@ class TrainingEngine:
                     (epoch == 1 and (self.config.training_mode != "joint"
                                      or self.config.write_initial_artifacts))
                     or epoch % self.config.curve_every == 0 or epoch == stop_after or clean_stop_requested)
-                should_save = (review or milestone or curve_due
+                should_save = (review or milestone or (curve_due and not identity_is_moment_hyperedge)
                                or (self.config.latest_every is not None and epoch % self.config.latest_every == 0))
                 if should_save:
                     sampler_state = {
@@ -3864,7 +3959,10 @@ class TrainingEngine:
                           process_seconds=max(0.0, time.time() - float(active["started_unix"])))
             _atomic_json(layout.write_path("active_process.json"), active)
             guarded_summary = best_guarded if math.isfinite(best_guarded) else None
-            _atomic_json(layout.write_path("fit_summary.json"), {
+            best_field_summary, selector_status = _reported_best_field_score(
+                best_field, moment_hyperedge=identity_is_moment_hyperedge,
+            )
+            summary = {
                 **active,
                 "case_visits": sum(int(item["case_visits"]) for item in history if int(item["epoch"]) >= start_epoch),
                 "optimizer_updates": sum(int(item["optimizer_updates"]) for item in history if int(item["epoch"]) >= start_epoch),
@@ -3872,12 +3970,18 @@ class TrainingEngine:
                 "cumulative_optimizer_updates": completed_updates,
                 "cumulative_microbatches": sum(int(item["microbatches"]) for item in history),
                 "cumulative_partial_update_cases": sum(int(item["partial_update_cases"]) for item in history),
-                "best_field_score": best_field,
+                "best_field_score": best_field_summary,
                 "best_response_guarded_score": guarded_summary,
                 "branch_parent": branch_parent,
-            })
-            return {**active, "completed_epoch": stopped_at, "best_field_score": best_field,
+            }
+            if selector_status is not None:
+                summary["best_field_selection_status"] = selector_status
+            _atomic_json(layout.write_path("fit_summary.json"), summary)
+            result = {**active, "completed_epoch": stopped_at, "best_field_score": best_field_summary,
                     "best_response_guarded_score": guarded_summary, "branch_parent": branch_parent}
+            if selector_status is not None:
+                result["best_field_selection_status"] = selector_status
+            return result
         except BaseException as exc:
             active.update(status="failed", completed_epoch=stopped_at, ended_unix=time.time(),
                           engine_seconds=time.perf_counter() - total_started,
@@ -3901,3 +4005,13 @@ def _sum_mapping(rows: Sequence[Mapping[str, float]]) -> dict[str, float]:
         for key, value in row.items():
             result[key] = result.get(key, 0.0) + float(value)
     return result
+
+
+def _reported_best_field_score(value: float, *, moment_hyperedge: bool) -> tuple[float | None, str | None]:
+    """Keep pre-eligibility Round5 summaries JSON-safe without changing checkpoint state."""
+
+    if math.isfinite(value):
+        return float(value), ("selected" if moment_hyperedge else None)
+    if moment_hyperedge:
+        return None, "not_yet_eligible"
+    return float(value), None

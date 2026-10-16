@@ -11,7 +11,7 @@ import copy
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import numpy as np
@@ -52,6 +52,17 @@ THERMAL_CONTENT_ENVIRONMENT_SHAPE = (8, 24)
 THERMAL_CONTENT_SURFACE_POINTS = 16
 THERMAL_CONTENT_NATIVE_THETA_COUNT = 64
 THERMAL_CONTENT_FIELD_ORDER = ("u", "v", "p", "omega", "temperature")
+ROUND5_MOMENT_CORE_SCHEMA = "scene_prepared_moment_hyperedge_core_v1"
+
+
+def _iag_core_from_config(config: Mapping[str, Any]) -> nn.Module:
+    if config.get("schema") == ROUND5_MOMENT_CORE_SCHEMA:
+        from honf_forward_core.inherited_attention.moment_model import MomentHyperedgeCoreV1
+
+        return MomentHyperedgeCoreV1.from_config(dict(config))
+    from honf_forward_core.inherited_attention.model import InheritedAttentionCoreV1
+
+    return InheritedAttentionCoreV1.from_config(dict(config))
 
 
 def _stats_json(stats: Mapping[str, Any]) -> dict[str, list[float] | float | int | str | bool | None]:
@@ -186,7 +197,9 @@ class ThermalContentHypergraphAdapter(nn.Module):
             core = ContentHypergraphCore(**config)
         core_config_value = core.get_config()
         iag_affine_capability = (
-            core_config_value.get("schema") == "inherited_attention_core_v1"
+            core_config_value.get("schema") in (
+                "inherited_attention_core_v1", ROUND5_MOMENT_CORE_SCHEMA,
+            )
             and core_config_value.get("architecture") == "IAG-C"
             and core_config_value.get("thermal_response") is True
             and core_config_value.get("signed_carrier_width") == 8
@@ -1109,14 +1122,12 @@ class ThermalInheritedAttentionAdapterV1(ThermalContentHypergraphAdapterV2):
             raise ValueError("Thermal IAG-C retains the native 24x8 geometry-only environment catalogue.")
         if core is None:
             config = dict(core_config or {})
-            if config.get("schema") != self.CORE_SCHEMA or config.get("architecture") != "IAG-C":
-                raise ValueError("Thermal IAG-C requires inherited_attention_core_v1 with architecture=IAG-C.")
-            from honf_forward_core.inherited_attention.model import InheritedAttentionCoreV1
-
-            core = InheritedAttentionCoreV1.from_config(config)
+            if (config.get("schema") not in (self.CORE_SCHEMA, ROUND5_MOMENT_CORE_SCHEMA)
+                    or config.get("architecture") != "IAG-C"):
+                raise ValueError("Thermal IAG-C requires a registered IAG-C core schema.")
+            core = _iag_core_from_config(config)
         config = core.get_config()
         required = {
-            "schema": self.CORE_SCHEMA,
             "architecture": "IAG-C",
             "module_input_dim": THERMAL_CONTENT_MODULE_FEATURES,
             "environment_input_dim": THERMAL_CONTENT_ENVIRONMENT_FEATURES,
@@ -1127,7 +1138,8 @@ class ThermalInheritedAttentionAdapterV1(ThermalContentHypergraphAdapterV2):
             "thermal_response": True,
             "signed_carrier_width": 8,
         }
-        if any(config.get(name) != expected for name, expected in required.items()):
+        if (config.get("schema") not in (self.CORE_SCHEMA, ROUND5_MOMENT_CORE_SCHEMA)
+                or any(config.get(name) != expected for name, expected in required.items())):
             raise ValueError("Thermal IAG-C core differs from the native dimensions or signed affine response law.")
         # Bypass the v2 architecture validator while retaining its unchanged
         # physical extraction and measured-work implementation.
@@ -1169,6 +1181,31 @@ class ThermalInheritedAttentionAdapterV1(ThermalContentHypergraphAdapterV2):
             "normalizer_key": self.normalizer_key,
         }
 
+    def scene_batch(self, structure: Mapping[str, Any], *, scene_key: Any = None) -> SceneBatch:
+        """Attach one live, scene-owned receiver topology to the prepared scene."""
+        from honf_forward_core.inherited_attention import InheritedSceneBatch, prepare_grid_topology
+
+        scene = super().scene_batch(structure, scene_key=scene_key)
+        if scene.coordinate_origin is None or scene.coordinate_scale is None:
+            raise ValueError("Thermal IAG-C topology requires explicit native origin and scale.")
+        legal_bounds = torch.stack(
+            (scene.coordinate_origin, scene.coordinate_origin + scene.coordinate_scale), dim=1,
+        )
+        values = {item.name: getattr(scene, item.name) for item in fields(SceneBatch)}
+        inherited = InheritedSceneBatch(**values, receiver_legal_bounds=legal_bounds)
+        topology = prepare_grid_topology(
+            inherited.environment_coordinates,
+            inherited.environment_ids,
+            inherited.environment_mask,
+            frame_key=inherited.coordinate_frame_key,
+            scene_version=inherited.tensor_version_stamp(),
+            owner_token=object(),
+            normalizer_key=inherited.normalizer_key,
+            scene_key=inherited.scene_key,
+            legal_bounds=inherited.receiver_legal_bounds,
+        )
+        return replace(inherited, receiver_grid_topology=topology)
+
     @classmethod
     def from_state_payload(
         cls,
@@ -1179,11 +1216,9 @@ class ThermalInheritedAttentionAdapterV1(ThermalContentHypergraphAdapterV2):
     ) -> ThermalInheritedAttentionAdapterV1:
         if payload.get("schema") != cls.SCHEMA or payload.get("receiver_cover") != cls.COVER_SCHEMA:
             raise ValueError("Unsupported Thermal IAG-C adapter or receiver-cover schema.")
-        from honf_forward_core.inherited_attention.model import InheritedAttentionCoreV1
-
         adapter = cls(
             payload["normalization_stats"],
-            core=InheritedAttentionCoreV1.from_config(dict(payload["core"])),
+            core=_iag_core_from_config(dict(payload["core"])),
             nx=int(payload["native_grid_nx_ny"][0]),
             ny=int(payload["native_grid_nx_ny"][1]),
             environment_nx=int(payload["environment_grid_nx_ny"][0]),
@@ -1205,20 +1240,19 @@ class ThermalInheritedAttentionAdapterV1(ThermalContentHypergraphAdapterV2):
         result = super()._query_union(*args, **kwargs)
         query = result[0]
         scene = args[0] if args else kwargs["scene"]
-        if scene.coordinate_origin is None or scene.coordinate_scale is None:
-            raise ValueError("Thermal IAG-C receiver cover requires explicit native origin and scale.")
-        legal_bounds = torch.stack(
-            (scene.coordinate_origin, scene.coordinate_origin + scene.coordinate_scale), dim=1,
-        )
+        topology = getattr(scene, "receiver_grid_topology", None)
+        if topology is None:
+            raise ValueError("Thermal IAG-C receiver cover requires the scene's prepared grid topology.")
         cover = smoothstep_grid_receiver_cover(
             query.coordinates,
-            scene.environment_coordinates,
-            scene.environment_ids,
-            scene.environment_mask,
-            query.query_ids,
+            query_ids=query.query_ids,
             frame_key=scene.coordinate_frame_key,
             query_mask=query.query_mask,
-            legal_bounds=legal_bounds,
+            topology=topology,
+            scene_version=scene.tensor_version_stamp(),
+            owner_token=topology.owner_token,
+            normalizer_key=scene.normalizer_key,
+            scene_key=scene.scene_key,
         )
         return (with_receiver_cover(query, cover), *result[1:])
 

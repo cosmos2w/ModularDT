@@ -273,6 +273,82 @@ def _load_inherited_attention_checkpoint(
     return model, adapter, payload
 
 
+def _load_moment_hyperedge_checkpoint(
+    payload: dict[str, Any], *, device: torch.device | str,
+) -> tuple[torch.nn.Module, Any, dict[str, Any]]:
+    """Reconstruct a Round5 child from its self-contained native bindings."""
+
+    from .moment_hyperedge_factory import (
+        moment_hyperedge_attachment_declaration,
+        validate_moment_provider_pair,
+    )
+    from .moment_hyperedge_protocol import (
+        MOMENT_FAMILY,
+        MOMENT_WORKFLOW,
+        canonical_sha256,
+        validate_moment_hyperedge_recipe,
+    )
+    from .moment_hyperedge_child import verify_moment_hyperedge_resume
+
+    identity = payload.get("experiment_identity", {})
+    if payload.get("workflow") != MOMENT_WORKFLOW or identity.get("workflow") != MOMENT_WORKFLOW:
+        raise ValueError("Moment-hyperedge checkpoint workflow identity is missing or inconsistent.")
+    require_model_family(MOMENT_FAMILY, "moment_hyperedges_evaluate")
+    recipe = validate_moment_hyperedge_recipe(identity.get("recipe", {}))
+    if (identity.get("family") != MOMENT_FAMILY or identity.get("model_family") != MOMENT_FAMILY
+            or identity.get("protocol") != recipe["protocol"]
+            or identity.get("variant") != recipe["variant"]
+            or identity.get("recipe_sha256") != canonical_sha256(recipe)
+            or payload.get("arm") != "IAG-C"):
+        raise ValueError("Moment-hyperedge family, variant, arm, or recipe identity is inconsistent.")
+    declaration = moment_hyperedge_attachment_declaration(recipe)
+    verify_moment_hyperedge_resume(payload, recipe, declaration)
+
+    branch = payload["branch_parent"]
+    parent_identity = branch["identity"]
+    provider = identity.get("provider_identity")
+    parent_provider = parent_identity.get("provider_identity")
+    if not isinstance(provider, Mapping) or not isinstance(parent_provider, Mapping):
+        raise TypeError("Moment-hyperedge checkpoint lacks its native provider bindings.")
+    validate_moment_provider_pair(
+        parent_provider, provider, dataset=recipe["dataset"], recipe=recipe,
+    )
+    expected_core_config = {
+        "schema": "scene_prepared_moment_hyperedge_core_v1",
+        "architecture": "IAG-C",
+        **dict(recipe["model"]),
+    }
+    adapter_state = provider.get("adapter_state")
+    if not isinstance(adapter_state, dict):
+        raise TypeError("Moment-hyperedge checkpoint lacks its native adapter state.")
+    if recipe["dataset"] == "thermal":
+        from channelthermal.content_hypergraph import ThermalInheritedAttentionAdapterV1
+
+        if (adapter_state.get("core") != expected_core_config
+                or provider.get("model_config", {}).get("core") != expected_core_config):
+            raise ValueError("Thermal moment core config differs from the exact Round5 recipe.")
+        model = ThermalInheritedAttentionAdapterV1.from_state_payload(adapter_state, device=device)
+        adapter = model
+    elif recipe["dataset"] == "wind":
+        from windfarm.content_hypergraph import WindInheritedAttentionAdapterV1
+        from honf_forward_core.inherited_attention.moment_model import MomentHyperedgeCoreV1
+
+        if dict(provider.get("model_config", {})) != expected_core_config:
+            raise ValueError("Wind moment core config differs from the exact Round5 recipe.")
+        model = MomentHyperedgeCoreV1.from_config(expected_core_config).to(device)
+        adapter = WindInheritedAttentionAdapterV1.from_state_payload(adapter_state, device=device)
+    else:
+        raise ValueError("Unsupported physical dataset in moment-hyperedge checkpoint.")
+    if model.get_config() != provider.get("model_config"):
+        raise ValueError("Reconstructed moment core/adapter differs from checkpoint constructor metadata.")
+    state = payload.get("model_state_dict")
+    if not isinstance(state, dict):
+        raise TypeError("Moment-hyperedge checkpoint has no model tensor state.")
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    return model, adapter, payload
+
+
 def load_content_hypergraph_checkpoint(
     path: str | Path, *, device: torch.device | str = "cpu",
 ) -> tuple[torch.nn.Module, Any, dict[str, Any]]:
@@ -283,6 +359,8 @@ def load_content_hypergraph_checkpoint(
     its native conversion adapter separately.
     """
     payload = load_trusted_checkpoint(path, map_location="cpu")
+    if payload.get("workflow") == "moment_hyperedges_child_v1":
+        return _load_moment_hyperedge_checkpoint(payload, device=device)
     if payload.get("workflow") == "inherited_attention_joint_v1":
         return _load_inherited_attention_checkpoint(payload, device=device)
     identity = payload.get("experiment_identity", {})

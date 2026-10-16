@@ -236,12 +236,51 @@ def test_wind_iag_scene_uses_exact_native_support_bounds_and_versions_them():
         [-17.85594367980957, -14.279596328735352, 0.022507892921566963], dtype=torch.float32,
     ))
     assert torch.equal(scene.receiver_legal_bounds[0, 1], torch.as_tensor(upper))
+    topology = scene.receiver_grid_topology
+    assert topology is not None
+    assert topology.scene_version == scene.tensor_version_stamp()
     # The old rounded scene metadata is preserved exactly, even though y's
     # computed upper endpoint is one FP32 ULP inward from the native bound.
     assert (scene.coordinate_origin + scene.coordinate_scale)[0, 1].item() < upper[1]
     query = adapter.make_query_batch(scene, receivers)
     assert query.receiver_cover is not None
     assert query.receiver_cover.weights.shape == (1, 1, 8)
+    assert query.receiver_cover.topology is topology
+    repeated_query = adapter.make_query_batch(scene, receivers)
+    assert repeated_query.receiver_cover is not None
+    assert repeated_query.receiver_cover.topology is topology
+    assert repeated_query.receiver_cover is not query.receiver_cover
+
+    # Independent oracle for the pre-topology native 3-D atlas: at the
+    # midpoint of each adjacent axis pair, smoothstep(0.5)=0.5, so its eight
+    # tensor-product corner weights are exactly 1/8 in legacy corner order.
+    environment_coordinates = scene.environment_coordinates[0]
+    axes = [
+        torch.unique(environment_coordinates[scene.environment_mask[0], dim], sorted=True)
+        for dim in range(3)
+    ]
+    midpoint = torch.stack([(axis[1] + axis[2]) * 0.5 for axis in axes])
+    midpoint_receivers = replace(
+        receivers,
+        coordinates_D=midpoint.reshape(1, 1, 3).cpu().numpy(),
+    )
+    midpoint_query = adapter.make_query_batch(scene, midpoint_receivers)
+    assert midpoint_query.receiver_cover is not None
+    expected_offsets = []
+    for corner in range(8):
+        target = torch.stack([
+            axes[dim][1 + ((corner >> dim) & 1)] for dim in range(3)
+        ])
+        matches = scene.environment_mask[0] & (environment_coordinates == target).all(dim=-1)
+        expected_offsets.append(torch.nonzero(matches, as_tuple=False).item())
+    expected_offsets = torch.tensor(expected_offsets, dtype=torch.long)
+    torch.testing.assert_close(midpoint_query.receiver_cover.anchor_indices[0, 0], expected_offsets)
+    torch.testing.assert_close(
+        midpoint_query.receiver_cover.anchor_ids[0, 0], scene.environment_ids[0, expected_offsets]
+    )
+    torch.testing.assert_close(
+        midpoint_query.receiver_cover.weights[0, 0], torch.full((8,), 0.125), atol=2e-6, rtol=2e-6
+    )
 
     core = InheritedAttentionCoreV1(
         module_input_dim=2, environment_input_dim=7, coordinate_dim=3, query_input_dim=7,

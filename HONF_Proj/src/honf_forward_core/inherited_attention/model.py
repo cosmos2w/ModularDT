@@ -25,12 +25,14 @@ from .atlas import build_typed_atlas, validate_cover_anchor_identity
 from .contracts import (
     InheritedQueryBatch,
     PreparedAnchorValues,
+    PreparedProjectedAnchorValues,
     ReceiverCover,
     RouteScoreSnapshot,
     TypedAssociationAtlas,
     TypedTokenValues,
 )
 from .query_reader import build_cell_query_plan, query_conditioned_gather
+from .cover_execution import gather_projected_cover_indexed
 from .readers import gather_cover_dense_reference, gather_cover_indexed, prepare_anchor_values
 
 
@@ -98,6 +100,7 @@ class PreparedInheritedOrganization:
     graph_lifetime: _GraphLifetime
     work_counts: dict[str, int]
     trace: dict[str, Any] | None = None
+    prepared_readout_values: PreparedProjectedAnchorValues | None = None
     module_query_keys: Tensor | None = None  # Q only: final-token [B,H,M,D]
     environment_query_keys: Tensor | None = None  # Q only: final-token [B,H,E,D]
 
@@ -154,6 +157,7 @@ class InheritedAttentionCoreV1(nn.Module):
         normalization: str = "soft",
         scene_executor: str = "dense",
         query_executor: str = "indexed",
+        collect_exact_work_counts: bool | None = None,
     ) -> None:
         super().__init__()
         if architecture not in ("IAG-C", "IAG-Q"):
@@ -169,11 +173,14 @@ class InheritedAttentionCoreV1(nn.Module):
             raise ValueError("IAG-C uses eight signed carriers per head and an explicit thermal capability.")
         if normalization not in ("soft", "measure_entmax15"):
             raise ValueError("normalization must be soft or measure_entmax15.")
-        valid_executors = ((scene_executor in ("dense", "selected") and query_executor in ("indexed", "dense_reference"))
+        valid_executors = ((scene_executor in ("dense", "selected") and
+                            query_executor in ("indexed", "indexed_projected", "dense_reference"))
                            if architecture == "IAG-C" else
                            (scene_executor == "cached_tokens" and query_executor in ("cell_selected", "dense_reference")))
         if not valid_executors:
             raise ValueError("Unknown inherited gathering executor.")
+        if collect_exact_work_counts is not None and type(collect_exact_work_counts) is not bool:
+            raise ValueError("collect_exact_work_counts must be a bool or None.")
         if not 0.0 <= dropout < 1.0:
             raise ValueError("dropout must lie in [0,1).")
         self.module_input_dim = int(module_input_dim)
@@ -194,6 +201,10 @@ class InheritedAttentionCoreV1(nn.Module):
         self.normalization = normalization
         self.scene_executor = scene_executor
         self.query_executor = query_executor
+        self.collect_exact_work_counts = (
+            query_executor != "indexed_projected"
+            if collect_exact_work_counts is None else collect_exact_work_counts
+        )
         self._owner_token = id(self)
         self.register_buffer("normalization_epoch", torch.tensor(0, dtype=torch.int64))
 
@@ -267,7 +278,7 @@ class InheritedAttentionCoreV1(nn.Module):
                         module.bias.zero_()
 
     def get_config(self) -> dict[str, Any]:
-        return {
+        config = {
             "schema": self.schema,
             "module_input_dim": self.module_input_dim,
             "environment_input_dim": self.environment_input_dim,
@@ -288,6 +299,14 @@ class InheritedAttentionCoreV1(nn.Module):
             "scene_executor": self.scene_executor,
             "query_executor": self.query_executor,
         }
+        # Preserve the serialized identity of historical executors. Their
+        # default is exact counting, so writing that newly configurable
+        # default would change saved Round4 provider/config fingerprints.
+        # The indexed_projected executor has a new default (False), and an
+        # explicit opt-out on an older executor must also survive round-trip.
+        if self.query_executor == "indexed_projected" or not self.collect_exact_work_counts:
+            config["collect_exact_work_counts"] = self.collect_exact_work_counts
+        return config
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> InheritedAttentionCoreV1:
@@ -388,10 +407,12 @@ class InheritedAttentionCoreV1(nn.Module):
                           organization.module_atlas, organization.environment_atlas,
                           organization.module_values, organization.environment_values,
                           organization.module_anchor_values, organization.environment_anchor_values,
+                          organization.prepared_readout_values,
                           organization.module_states, organization.environment_states, organization.operating_state,
                           organization.frame_origin, organization.frame_scale, organization.source_carriers,
                           organization.source_edge_indices, organization.module_query_keys,
-                          organization.environment_query_keys))
+                          organization.environment_query_keys,
+                          getattr(organization.scene, "receiver_grid_topology", None)))
 
     def _route_keys(self, route: nn.Module, states: Tensor) -> Tensor:
         projected = route.key(route.key_norm(states))
@@ -477,15 +498,24 @@ class InheritedAttentionCoreV1(nn.Module):
             if tensor.requires_grad:
                 tensor.register_hook(life.mark_consumed)
         batch, modules, anchors = scene.batch_size, scene.num_modules, scene.num_environment_tokens
-        eligible = int((ma.donor_valid.sum(1) * ma.destination_valid.sum(1)).sum()
-                       + (ea.donor_valid.sum(1) * ea.destination_valid.sum(1)).sum()) * self.num_heads
-        positive = int((ma.probabilities > 0).sum() + (ea.probabilities > 0).sum())
+        eligible_tensor = ((ma.donor_valid.sum(1) * ma.destination_valid.sum(1)).sum()
+                           + (ea.donor_valid.sum(1) * ea.destination_valid.sum(1)).sum()) * self.num_heads
+        module_positive_tensor = (ma.probabilities > 0).sum()
+        environment_positive_tensor = (ea.probabilities > 0).sum()
+        # Work counters are materialized together at this reporting boundary,
+        # avoiding a device-to-host synchronization for each exact reduction.
+        eligible, module_positive, environment_positive = map(
+            int, torch.stack((eligible_tensor, module_positive_tensor,
+                              environment_positive_tensor)).detach().cpu().tolist()
+        )
+        positive = module_positive + environment_positive
         dense = batch * self.num_heads * anchors * (modules + anchors)
         work = {
             "contextualizer_score_entries": batch * self.num_heads * self.context_depth *
                 (modules * modules + 2 * anchors * modules + anchors * anchors),
             "atlas_score_entries": dense, "atlas_eligible_associations": eligible,
             "atlas_positive_associations": positive,
+            "module_positive_associations": module_positive,
             "scene_value_executed_associations": (0 if self.architecture == "IAG-Q" else
                                                    dense if self.scene_executor == "dense" else positive),
             "typed_projected_token_rows": batch * (modules + anchors),
@@ -500,6 +530,10 @@ class InheritedAttentionCoreV1(nn.Module):
             if return_trace else None,
             module_query_keys=mk, environment_query_keys=ek,
         )
+        organization.prepared_readout_values = self._prepare_scene_readout(organization)
+        if organization.prepared_readout_values is not None:
+            work["projected_anchor_projection_rows"] = batch * anchors
+            work["projected_anchor_projection_multiply_adds"] = batch * anchors * 2 * self.context_dim * self.context_dim
         organization.factor_versions = self._factors(organization)
         return organization
 
@@ -551,10 +585,16 @@ class InheritedAttentionCoreV1(nn.Module):
                               if self.architecture == "IAG-C" else None)
         edges = (torch.nonzero(module.probabilities > 0, as_tuple=True)
                  if self.scene_executor == "selected" and organization.source_carriers is not None else None)
-        positive = int((module.probabilities > 0).sum() + (environment.probabilities > 0).sum())
+        module_positive_tensor = (module.probabilities > 0).sum()
+        environment_positive_tensor = (environment.probabilities > 0).sum()
+        module_positive, environment_positive = map(
+            int, torch.stack((module_positive_tensor, environment_positive_tensor)).detach().cpu().tolist()
+        )
+        positive = module_positive + environment_positive
         work = dict(organization.work_counts)
         work.update(contextualizer_score_entries=0, atlas_score_entries=0, typed_projected_token_rows=0,
                     atlas_positive_associations=positive,
+                    module_positive_associations=module_positive,
                     scene_value_executed_associations=(0 if self.architecture == "IAG-Q" else
                         module.probabilities.numel() + environment.probabilities.numel()
                         if self.scene_executor == "dense" else positive))
@@ -563,6 +603,11 @@ class InheritedAttentionCoreV1(nn.Module):
                          source_edge_indices=edges, graph_lifetime=_GraphLifetime(), work_counts=work,
                          trace={**(organization.trace or {}), "association_intervention": label,
                                 "intervention_reuses_fixed_context_and_token_values": True})
+        result.prepared_readout_values = self._prepare_scene_readout(result)
+        if result.prepared_readout_values is not None:
+            batch, anchors = result.prepared_readout_values.values.shape[:2]
+            work["projected_anchor_projection_rows"] = batch * anchors
+            work["projected_anchor_projection_multiply_adds"] = batch * anchors * 2 * self.context_dim * self.context_dim
         result.factor_versions = self._factors(result)
         return result
 
@@ -595,12 +640,99 @@ class InheritedAttentionCoreV1(nn.Module):
         if query.query_mask is not None and (query.receiver_cover.query_mask is None or
                                             not torch.equal(query.query_mask, query.receiver_cover.query_mask)):
             raise ValueError("Receiver cover validity does not match the query mask.")
+        scene_topology = getattr(organization.scene, "receiver_grid_topology", None)
+        cover_topology = query.receiver_cover.topology
+        if cover_topology is not scene_topology:
+            raise ValueError("Receiver cover must use the prepared scene's exact grid topology object.")
+        if cover_topology is not None:
+            cover_topology.validate_binding(
+                frame_key=organization.scene.coordinate_frame_key,
+                scene_version=organization.scene_versions,
+                normalizer_key=organization.scene.normalizer_key,
+                scene_key=organization.scene.scene_key,
+                anchor_coordinates=organization.scene.environment_coordinates,
+                environment_ids=organization.scene.environment_ids,
+                environment_mask=organization.scene.environment_mask,
+            )
         query.receiver_cover.validate_partition()
         validate_cover_anchor_identity(query.receiver_cover, organization.scene.environment_ids)
 
     def _gather(self, values: PreparedAnchorValues | Tensor, cover: ReceiverCover, anchor_ids: Tensor) -> Tensor:
-        reader = gather_cover_indexed if self.query_executor == "indexed" else gather_cover_dense_reference
+        reader = (gather_cover_indexed if self.query_executor in ("indexed", "indexed_projected")
+                  else gather_cover_dense_reference)
         return reader(values, cover, anchor_ids=anchor_ids, validate_identity=False)
+
+    def _prepare_scene_readout(
+        self, organization: PreparedInheritedOrganization
+    ) -> PreparedProjectedAnchorValues | None:
+        """Prepare one bias-free fused context tensor per environment anchor.
+
+        This narrow hook lets a later scene payload replace the anchor values
+        while preserving the same query-side read and bias convention.
+        """
+        if self.architecture != "IAG-C" or self.query_executor != "indexed_projected":
+            return None
+        module_values = organization.module_anchor_values
+        environment_values = organization.environment_anchor_values
+        if module_values is None or environment_values is None:
+            raise ValueError("Projected IAG-C readout requires both typed anchor payloads.")
+        scene = organization.scene
+        if module_values.values.shape[:3] != environment_values.values.shape[:3]:
+            raise ValueError("Typed anchor payloads must share the same [B,H,E] axes.")
+        batch, heads, anchors, head_width = module_values.values.shape
+        module = module_values.values.permute(0, 2, 1, 3).reshape(batch, anchors, heads * head_width)
+        environment = environment_values.values.permute(0, 2, 1, 3).reshape(batch, anchors, heads * head_width)
+        # The existing 2C->C map is split across type while retaining its
+        # exact head flattening order. Its bias remains query-side.
+        projected = F.linear(
+            torch.cat((module, environment), dim=-1), self.gather_output.weight, bias=None
+        )
+        return PreparedProjectedAnchorValues(
+            values=projected,
+            anchor_ids=scene.environment_ids,
+            frame_key=scene.coordinate_frame_key,
+            scene_version=organization.scene_versions,
+            owner_token=organization.owner_token,
+        )
+
+    def _gather_scene_readout(
+        self,
+        organization: PreparedInheritedOrganization,
+        query: InheritedQueryBatch,
+        *,
+        return_typed_contexts: bool = False,
+    ) -> tuple[Tensor, Tensor | None, Tensor | None]:
+        """Read prepared scene context and keep trace-only typed gathers explicit."""
+        cover = query.receiver_cover
+        assert cover is not None
+        scene = organization.scene
+        prepared = organization.prepared_readout_values
+        if prepared is None:
+            assert organization.module_anchor_values is not None
+            assert organization.environment_anchor_values is not None
+            module_context = self._gather(organization.module_anchor_values, cover, scene.environment_ids)
+            environment_context = self._gather(organization.environment_anchor_values, cover, scene.environment_ids)
+            module_flat = module_context.reshape(query.batch_size, query.num_queries, self.context_dim)
+            environment_flat = environment_context.reshape_as(module_flat)
+            context = self.gather_output(torch.cat((module_flat, environment_flat), dim=-1))
+            return context, module_context, environment_context
+
+        context = gather_projected_cover_indexed(
+            prepared,
+            cover,
+            expected_frame_key=scene.coordinate_frame_key,
+            expected_scene_version=organization.scene_versions,
+            expected_owner_token=organization.owner_token,
+        )
+        if self.gather_output.bias is not None:
+            context = context + self.gather_output.bias
+        if return_typed_contexts:
+            assert organization.module_anchor_values is not None
+            assert organization.environment_anchor_values is not None
+            module_context = self._gather(organization.module_anchor_values, cover, scene.environment_ids)
+            environment_context = self._gather(organization.environment_anchor_values, cover, scene.environment_ids)
+            return context, module_context, environment_context
+        return context, None, None
 
     def _decode_features(self, organization: PreparedInheritedOrganization, query: InheritedQueryBatch,
                          local_gates: Tensor | None = None, *, field_head: bool = True,
@@ -613,9 +745,13 @@ class InheritedAttentionCoreV1(nn.Module):
         qs = self.query_encoder(query, organization.operating_state, organization.frame_origin, organization.frame_scale)
         query_work, query_trace = {}, None
         if self.architecture == "IAG-C":
-            assert organization.module_anchor_values is not None and organization.environment_anchor_values is not None
-            mc = self._gather(organization.module_anchor_values, cover, scene.environment_ids).reshape(query.batch_size, query.num_queries, self.context_dim)
-            ec = self._gather(organization.environment_anchor_values, cover, scene.environment_ids).reshape_as(mc)
+            global_context, mc, ec = self._gather_scene_readout(
+                organization, query, return_typed_contexts=return_query_trace
+            )
+            if mc is not None:
+                mc = mc.reshape(query.batch_size, query.num_queries, self.context_dim)
+            if ec is not None:
+                ec = ec.reshape_as(mc)
         else:
             assert organization.module_query_keys is not None and organization.environment_query_keys is not None
             plan = build_cell_query_plan(cover) if self.query_executor == "cell_selected" else None
@@ -635,7 +771,7 @@ class InheritedAttentionCoreV1(nn.Module):
                 query_trace = {"module": mt, "environment": et,
                                "query_weight_law": "normalize(beta*exp(shared_final_route_QK))",
                                "diagnostic_query_limit": 16}
-        global_context = self.gather_output(torch.cat((mc, ec), dim=-1))
+            global_context = self.gather_output(torch.cat((mc, ec), dim=-1))
         reference = scene.module_measure_reference
         if reference is None:
             reference = scene.module_measure.new_ones(scene.batch_size)
@@ -702,7 +838,9 @@ class InheritedAttentionCoreV1(nn.Module):
         self._validate_controls(organization, controls)
         response = self._anchor_response(organization, controls, dtype)
         assert query.receiver_cover is not None
-        cover = replace(query.receiver_cover, weights=query.receiver_cover.weights.to(dtype))
+        cover = query.receiver_cover
+        if cover.weights.dtype != dtype:
+            cover = replace(cover, weights=cover.weights.to(dtype))
         gathered = self._gather(response, cover, organization.scene.environment_ids)
         far = (gathered * phi.to(dtype)).sum(dim=(-1, -2))
         temperature = far + self._local_apply(pack, coefficients, controls, query.batch_size, query.num_queries, dtype)
@@ -711,25 +849,41 @@ class InheritedAttentionCoreV1(nn.Module):
         return temperature
 
     def _query_work(self, organization: PreparedInheritedOrganization, query: InheritedQueryBatch,
-                    pack: LocalPairPack, *, controls: bool, field: bool, features: bool = True) -> dict[str, int]:
+                    pack: LocalPairPack, *, controls: bool, field: bool, features: bool = True,
+                    collect_exact_work_counts: bool | None = None) -> dict[str, int]:
         cover = query.receiver_cover
         assert cover is not None
-        allocated = query.batch_size * query.num_queries * cover.slots * self.num_heads
-        positive = int(((cover.weights > 0) & cover.validity).sum()) * self.num_heads
-        actual = allocated if self.query_executor == "indexed" else query.batch_size * query.num_queries * organization.scene.num_environment_tokens * self.num_heads
-        return {
+        slot_rows = query.batch_size * query.num_queries * cover.slots
+        allocated = slot_rows * self.num_heads
+        exact_counts = (self.collect_exact_work_counts if collect_exact_work_counts is None
+                        else collect_exact_work_counts)
+        positive = (int((((cover.weights > 0) & cover.validity).sum() * self.num_heads).detach().cpu())
+                    if exact_counts else None)
+        indexed = self.query_executor in ("indexed", "indexed_projected")
+        actual = allocated if indexed else query.batch_size * query.num_queries * organization.scene.num_environment_tokens * self.num_heads
+        projected = organization.prepared_readout_values is not None
+        feature_reads = slot_rows if projected else 2 * actual
+        response_reads = actual
+        work = {
             "receiver_rows": query.batch_size * query.num_queries,
-            "cover_slots": allocated, "cover_positive_slots": positive,
-            "cover_executed_anchor_reads": (actual * (2 * int(features) + int(controls))
+            "cover_slots": allocated,
+            "exact_cover_positive_count_collected": int(exact_counts),
+            "cover_executed_anchor_reads": (feature_reads * int(features) + response_reads * int(controls)
                                              if self.architecture == "IAG-C" else 0),
+            "projected_context_gather_slots": slot_rows * int(features) if projected else 0,
+            "projected_context_bias_rows": query.batch_size * query.num_queries * int(features)
+                if projected else 0,
             "scene_response_executed_associations": (0 if not controls else
                 int(organization.module_atlas.probabilities.numel()) if self.scene_executor == "dense" else
-                int((organization.module_atlas.probabilities > 0).sum())),
+                organization.work_counts["module_positive_associations"]),
             "local_rows": pack.count if features else 0, "local_contraction_rows": pack.count if controls else 0,
             "field_head_rows": query.batch_size * query.num_queries if field else 0,
             "far_pair_value_rows": 0, "direct_source_rows": 0, "edge_rows": 0,
             "direct_dense_reference_entries": 0,
         }
+        if positive is not None:
+            work["cover_positive_slots"] = positive
+        return work
 
     def decode(self, organization: PreparedInheritedOrganization, query: InheritedQueryBatch,
                controls: Tensor | None = None, *, accumulation_dtype: torch.dtype | None = None,
@@ -742,7 +896,10 @@ class InheritedAttentionCoreV1(nn.Module):
                 raise ValueError("This IAG core has no affine thermal response.")
             temperature = self._apply_controls(organization, query, phi, pairs, coefficients, controls,
                                       self._dtype(accumulation_dtype, controls.dtype))
-        work = self._query_work(organization, query, pairs, controls=controls is not None, field=True)
+        work = self._query_work(
+            organization, query, pairs, controls=controls is not None, field=True,
+            collect_exact_work_counts=(True if return_trace else None),
+        )
         work.update(query_work)
         trace = ({"receiver_cover": query.receiver_cover, "module_context": mc, "environment_context": ec,
                   "thermal_phi": phi, "local_pairs": pairs, "local_coefficients": coefficients,
@@ -766,7 +923,8 @@ class InheritedAttentionCoreV1(nn.Module):
         assert phi is not None
         result = self._apply_controls(organization, query, phi, pairs, coefficients, delta_controls,
                              self._dtype(accumulation_dtype, delta_controls.dtype))
-        return (result, self._query_work(organization, query, pairs, controls=True, field=False)) if return_work_counts else result
+        return (result, self._query_work(organization, query, pairs, controls=True, field=False,
+                                         collect_exact_work_counts=True)) if return_work_counts else result
 
     def heat_jvp(self, organization: PreparedInheritedOrganization, query: InheritedQueryBatch,
                  tangent: Tensor, *, accumulation_dtype: torch.dtype | None = None) -> Tensor:
@@ -874,7 +1032,9 @@ class InheritedAttentionCoreV1(nn.Module):
             organization, query, local_gates, field_head=False)
         assert phi is not None and query.receiver_cover is not None and organization.source_carriers is not None
         dtype = self._dtype(accumulation_dtype, organization.module_states.dtype)
-        cover = replace(query.receiver_cover, weights=query.receiver_cover.weights.to(dtype))
+        cover = query.receiver_cover
+        if cover.weights.dtype != dtype:
+            cover = replace(cover, weights=cover.weights.to(dtype))
         density_at_query = self._gather(self._density(organization, dtype), cover, organization.scene.environment_ids)
         kernels = torch.einsum("bqhm,bhmr,bqhr->bqm", density_at_query,
                                organization.source_carriers.to(dtype), phi.to(dtype))

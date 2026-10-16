@@ -703,7 +703,7 @@ class WindInheritedAttentionAdapterV1(WindContentHypergraphAdapterV3):
 
     def make_scene_batch(self, inputs: Sequence[WindContentSceneInputs]) -> SceneBatch:
         """Wrap the unchanged V3 scene with exact native support bounds."""
-        from honf_forward_core.inherited_attention import InheritedSceneBatch
+        from honf_forward_core.inherited_attention import InheritedSceneBatch, prepare_grid_topology
 
         scene = super().make_scene_batch(inputs)
         native_bounds = np.stack(
@@ -716,7 +716,19 @@ class WindInheritedAttentionAdapterV1(WindContentHypergraphAdapterV3):
             dtype=scene.environment_coordinates.dtype,
         )
         values = {item.name: getattr(scene, item.name) for item in fields(SceneBatch)}
-        return InheritedSceneBatch(**values, receiver_legal_bounds=legal_bounds)
+        inherited = InheritedSceneBatch(**values, receiver_legal_bounds=legal_bounds)
+        topology = prepare_grid_topology(
+            inherited.environment_coordinates,
+            inherited.environment_ids,
+            inherited.environment_mask,
+            frame_key=inherited.coordinate_frame_key,
+            scene_version=inherited.tensor_version_stamp(),
+            owner_token=object(),
+            normalizer_key=inherited.normalizer_key,
+            scene_key=inherited.scene_key,
+            legal_bounds=inherited.receiver_legal_bounds,
+        )
+        return replace(inherited, receiver_grid_topology=topology)
 
     def make_query_batch(
         self,
@@ -731,18 +743,22 @@ class WindInheritedAttentionAdapterV1(WindContentHypergraphAdapterV3):
 
         if not isinstance(scene, InheritedSceneBatch) or scene.receiver_legal_bounds is None:
             raise TypeError("Wind IAG-C receiver covers require the inherited scene's native legal bounds.")
+        if scene.receiver_grid_topology is None:
+            raise ValueError("Wind IAG-C receiver covers require the scene's prepared grid topology.")
         query = super().make_query_batch(scene, receivers)
         if scene.coordinate_origin is None or scene.coordinate_scale is None:
             raise ValueError("Wind IAG-C receiver cover requires explicit support origin and extent.")
         cover = smoothstep_grid_receiver_cover(
             query.coordinates,
-            scene.environment_coordinates,
-            scene.environment_ids,
-            scene.environment_mask,
-            query.query_ids,
+            query_ids=query.query_ids,
             frame_key=scene.coordinate_frame_key,
             query_mask=query.query_mask,
             legal_bounds=scene.receiver_legal_bounds,
+            topology=scene.receiver_grid_topology,
+            scene_version=scene.tensor_version_stamp(),
+            owner_token=scene.receiver_grid_topology.owner_token,
+            normalizer_key=scene.normalizer_key,
+            scene_key=scene.scene_key,
         )
         return with_receiver_cover(query, cover)
 

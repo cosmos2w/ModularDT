@@ -274,7 +274,17 @@ def validate_inherited_attention_recipe(value: Mapping[str, Any]) -> dict[str, A
     if architecture == IAG_C_ARCHITECTURE:
         if model.get("scene_executor") not in ("dense", "selected"):
             raise ValueError("IAG-C scene_executor must be dense or selected.")
-        if model.get("query_executor") not in ("indexed", "dense_reference"):
+        legacy_query_executor = model.get("query_executor") in ("indexed", "dense_reference")
+        round5_projected_core = (
+            model.get("schema") == "scene_prepared_moment_hyperedge_core_v1"
+            and model.get("query_executor") == "indexed_projected"
+            and model.get("collect_exact_work_counts") is False
+            and model.get("moment_variant") in ("C0", "M", "H")
+            and model.get("moment_width") == 8
+            and model.get("processor_hidden_dim") == 128
+            and model.get("moment_init_seed") == 0
+        )
+        if not (legacy_query_executor or round5_projected_core):
             raise ValueError("IAG-C query_executor must be indexed or dense_reference.")
     else:
         if model.get("scene_executor") != "cached_tokens":

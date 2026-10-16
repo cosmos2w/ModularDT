@@ -108,6 +108,42 @@ def test_native_union_keeps_logical_roles_and_physical_curl_order():
     assert output["pred_internal_temperature"].shape == (1, 2, 2, 1)
 
 
+def test_inherited_native_query_union_reuses_scene_owned_grid_topology():
+    from channelthermal.content_hypergraph import ThermalInheritedAttentionAdapterV1
+    from honf_forward_core.inherited_attention import InheritedAttentionCoreV1
+
+    core = InheritedAttentionCoreV1(
+        module_input_dim=8,
+        environment_input_dim=8,
+        coordinate_dim=2,
+        query_input_dim=0,
+        operating_input_dim=14,
+        output_dim=3,
+        architecture="IAG-C",
+        context_dim=32,
+        num_heads=4,
+        context_depth=1,
+        local_hidden_dim=16,
+        init_seed=7,
+        signed_carrier_width=8,
+        thermal_response=True,
+    )
+    adapter = ThermalInheritedAttentionAdapterV1(_stats(), core=core, nx=8, ny=6)
+    scene = adapter.scene_batch(_structure(), scene_key=("prepared-grid-native",))
+    topology = scene.receiver_grid_topology
+    assert topology is not None
+    assert topology.scene_version == scene.tensor_version_stamp()
+    fluid, local = _receivers()
+
+    first = adapter._query_union(scene, fluid, local, 16)[0]
+    second = adapter._query_union(scene, fluid, local, 16)[0]
+    assert first.receiver_cover is not None
+    assert second.receiver_cover is not None
+    assert first.receiver_cover.topology is topology
+    assert second.receiver_cover.topology is topology
+    assert second.receiver_cover is not first.receiver_cover
+
+
 def test_surface_receiver_count_is_explicit_for_monitor_and_native_endpoints():
     model = _model().eval()
     fluid, local = _receivers()

@@ -68,7 +68,29 @@ def load_evaluation_components(checkpoint: Path, device: str):
     """Reopen only the checkpoint's authorized native evaluation panel."""
     payload = load_trusted_checkpoint(checkpoint, map_location="cpu")
     standalone = None
-    if payload.get("workflow") == "inherited_attention_joint_v1":
+    if payload.get("workflow") == "moment_hyperedges_child_v1":
+        from honf_runtime.moment_hyperedge_factory import load_moment_hyperedges_components
+
+        components = load_moment_hyperedges_components(
+            checkpoint,
+            runtime_root=PROJECT.parent,
+            device=torch.device(device),
+        )
+        model = components["model"]
+        provider = components["native_provider"]
+        recipe = components["recipe"]
+        standalone = load_content_hypergraph_checkpoint(checkpoint, device=device)
+        expected = payload["experiment_identity"]["provider_identity"]
+        observed = dict(provider.identity_payload())
+        if canonical_sha256(expected) != canonical_sha256(observed):
+            raise ValueError("Round5 native evaluation data/scale/provider binding differs from the saved run.")
+        standalone_model, standalone_adapter, _ = standalone
+        for name, value in standalone_model.state_dict().items():
+            if not torch.equal(value, model.state_dict()[name]):
+                raise ValueError(f"Standalone Round5 native load differs at {name}.")
+        del standalone_model, standalone_adapter
+        return model, provider, payload
+    elif payload.get("workflow") == "inherited_attention_joint_v1":
         from inherited_attention_train import build
         from inherited_attention_train import canonical_sha256 as iag_canonical_sha256
 
@@ -112,8 +134,12 @@ def fixed_monitor_batches(provider, recipe: dict[str, Any], epoch: int, split: s
     """Replay declared monitoring queries at one fixed checkpoint, without updates."""
     if split == "validation":
         return provider.validation_batches(), None
-    if recipe.get("family") == "inherited_attention_v1":
+    if recipe.get("family") in ("inherited_attention_v1", "moment_hyperedges_round5"):
         from inherited_attention_train import engine_for
+        if recipe.get("family") == "moment_hyperedges_round5":
+            from honf_runtime.moment_hyperedge_protocol import native_recipe_for_moment_hyperedges
+
+            recipe = native_recipe_for_moment_hyperedges(recipe)
     else:
         from content_hypergraph_train import engine_for
     engine = engine_for(recipe, str(provider.device))
