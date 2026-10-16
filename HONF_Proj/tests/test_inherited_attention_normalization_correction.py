@@ -20,12 +20,17 @@ from honf_runtime.inherited_attention_child import (
     IAG_NORMALIZATION_CORRECTION_ALLOWED_PATHS,
     IAG_NORMALIZATION_CORRECTION_BINDING_SCHEMA,
     IAG_NORMALIZATION_CORRECTION_PATH,
+    IAG_NORMALIZATION_CORRECTION_Q_ENGINE_PATHS,
+    IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE,
     IAG_NORMALIZATION_CORRECTION_Q_PATHS,
     IAG_NORMALIZATION_CORRECTION_SCHEMA,
     IAG_NORMALIZATION_CORRECTION_SCOPE,
     IAG_NORMALIZATION_CORRECTION_TARGET_SHA256,
     IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS,
     IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE,
+    IAG_Q_ENGINE_DISPATCH_PATH,
+    IAG_Q_ENGINE_DISPATCH_SOURCE_SHA256,
+    IAG_Q_ENGINE_DISPATCH_TARGET_SHA256,
     _json_sha256,
     _require_same_soft_identity,
     bind_inherited_attention_normalization_correction,
@@ -303,8 +308,55 @@ def test_correction_contract_has_distinct_fixed_q_and_thermal_path_sets():
         "src/honf_runtime/inherited_attention_child.py",
         "tools/inherited_attention_train.py",
     })
-    assert IAG_NORMALIZATION_CORRECTION_ALLOWED_PATHS == IAG_NORMALIZATION_CORRECTION_Q_PATHS | IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS
+    assert IAG_NORMALIZATION_CORRECTION_Q_ENGINE_PATHS == (
+        IAG_NORMALIZATION_CORRECTION_Q_PATHS | {IAG_Q_ENGINE_DISPATCH_PATH}
+    )
+    assert IAG_NORMALIZATION_CORRECTION_ALLOWED_PATHS == IAG_NORMALIZATION_CORRECTION_Q_ENGINE_PATHS | IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS
     assert "src/honf_forward_core/inherited_attention/query_reader.py" in IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS
+
+
+def _q_engine_dispatch_pair(tmp_path: Path, *, corrupt: str | None = None):
+    source, target, source_path, receipt_path, receipt = _identity_pair(tmp_path, "IAG-Q")
+    source_files = dict(source["loaded_source"]["files"])
+    target_files = dict(target["loaded_source"]["files"])
+    source_files[IAG_Q_ENGINE_DISPATCH_PATH] = IAG_Q_ENGINE_DISPATCH_SOURCE_SHA256
+    target_files[IAG_Q_ENGINE_DISPATCH_PATH] = IAG_Q_ENGINE_DISPATCH_TARGET_SHA256
+    if corrupt == "source":
+        source_files[IAG_Q_ENGINE_DISPATCH_PATH] = "7" * 64
+    elif corrupt == "target":
+        target_files[IAG_Q_ENGINE_DISPATCH_PATH] = "8" * 64
+    source["loaded_source"] = _loaded_source(source_files)
+    target["loaded_source"] = _loaded_source(target_files)
+    receipt.update({
+        "scope": IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE,
+        "source_files": source_files,
+        "target_files": target_files,
+        "source_loaded_source_sha256": source["loaded_source"]["sha256"],
+        "target_loaded_source_sha256": target["loaded_source"]["sha256"],
+        "file_changes": {name: {"source_sha256": source_files[name], "target_sha256": target_files[name]}
+                         for name in source_files if source_files[name] != target_files[name]},
+        "reason": "Same-architecture Q attachment guard and unchanged C history label; no forward/optimizer change.",
+    })
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True), encoding="utf-8")
+    return source, target, source_path, receipt_path
+
+
+def test_q_engine_dispatch_scope_binds_only_the_reviewed_guard_and_resumes(tmp_path: Path):
+    source, target, source_path, receipt_path = _q_engine_dispatch_pair(tmp_path)
+    binding = bind_inherited_attention_normalization_correction(
+        receipt_path, source, target, source_path=source_path,
+    )
+    target["normalization_correction"] = binding
+    validate_inherited_attention_normalization_correction_resume(binding, target)
+
+
+@pytest.mark.parametrize("corrupt", ["source", "target"])
+def test_q_engine_dispatch_scope_rejects_any_other_engine_revision(tmp_path: Path, corrupt: str):
+    source, target, source_path, receipt_path = _q_engine_dispatch_pair(tmp_path, corrupt=corrupt)
+    with pytest.raises(ValueError, match="exact reviewed attachment guard fix"):
+        bind_inherited_attention_normalization_correction(
+            receipt_path, source, target, source_path=source_path,
+        )
 
 
 def test_cli_resume_contract_matches_the_checkpoint_bound_receipt(tmp_path: Path):

@@ -2898,8 +2898,9 @@ class TrainingEngine:
                 or source_read_child is not None or source_read_child_auxiliary_fit is not None
                 or numerical_pooling_amendment is not None or output_policy_amendment is not None
                 or fresh_initialization is not None or self.config.training_mode != "joint"
-                or arm != "IAG-C"):
-            raise ValueError("A sparse IAG-C child requires one fresh joint branch from its declared soft e500 parent.")
+                or arm not in ("IAG-C", "IAG-Q")
+                or arm != iag_recipe.get("architecture")):
+            raise ValueError("A sparse inherited-attention child requires one fresh joint branch from its declared same-architecture soft e500 parent.")
         if source_read_child is not None and not is_source_read_sparse:
             raise ValueError("A source-read child requires an S-Utility or S-Complete provider identity.")
         if is_source_read_sparse:
@@ -3319,7 +3320,7 @@ class TrainingEngine:
                     inherited_attention_sparse_child=copy.deepcopy(amendment),
                     inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
                     inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
-                    inherited_history_scope="soft IAG-C physical history through e500; sparse child rows begin at absolute e501",
+                    inherited_history_scope=f"soft {arm} physical history through e500; sparse child rows begin at absolute e501",
                 )
             elif source_read_child is not None:
                 branch_parent.update(

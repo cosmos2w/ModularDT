@@ -24,6 +24,9 @@ IAG_SPARSE_CHILD_SCHEMA = "inherited_attention_sparse_child_v1"
 IAG_NORMALIZATION_CORRECTION_SCHEMA = "inherited_attention_normalization_correction_v1"
 IAG_NORMALIZATION_CORRECTION_BINDING_SCHEMA = "inherited_attention_normalization_correction_binding_v1"
 IAG_NORMALIZATION_CORRECTION_SCOPE = "entmax15_fp64_prefix_boundary_correctness_v1"
+IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE = (
+    "entmax15_fp64_prefix_boundary_and_q_engine_dispatch_correctness_v1"
+)
 IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE = (
     "entmax15_fp64_prefix_boundary_with_c_compatibility_v1"
 )
@@ -34,6 +37,14 @@ IAG_NORMALIZATION_CORRECTION_Q_PATHS = frozenset({
     "src/honf_runtime/inherited_attention_child.py",
     "tools/inherited_attention_train.py",
 })
+IAG_Q_ENGINE_DISPATCH_PATH = "src/honf_runtime/unified_training.py"
+# The additional scope binds only the reviewed same-architecture attachment
+# guard and history-label fix; existing correction scopes keep their path sets.
+IAG_Q_ENGINE_DISPATCH_SOURCE_SHA256 = "0265b257284f502ca15fe7aa43d8cbf2605f724fedad646bd401c433fc325c12"
+IAG_Q_ENGINE_DISPATCH_TARGET_SHA256 = "eca20fa4e97bac87ad57ad8b306bb1ef1a98656cdc7f08a32708f310b3cac376"
+IAG_NORMALIZATION_CORRECTION_Q_ENGINE_PATHS = (
+    IAG_NORMALIZATION_CORRECTION_Q_PATHS | {IAG_Q_ENGINE_DISPATCH_PATH}
+)
 IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS = frozenset({
     "src/honf_forward_core/inherited_attention/__init__.py",
     "src/honf_forward_core/inherited_attention/model.py",
@@ -45,7 +56,7 @@ IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS = frozenset({
 })
 IAG_NORMALIZATION_CORRECTION_ADDED_THERMAL_PATH = "src/honf_forward_core/inherited_attention/query_reader.py"
 IAG_NORMALIZATION_CORRECTION_ALLOWED_PATHS = (
-    IAG_NORMALIZATION_CORRECTION_Q_PATHS | IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS
+    IAG_NORMALIZATION_CORRECTION_Q_ENGINE_PATHS | IAG_NORMALIZATION_CORRECTION_THERMAL_PATHS
 )
 IAG_NORMALIZATION_CORRECTION_FIELDS = frozenset({
     "schema",
@@ -187,9 +198,16 @@ def _validate_normalization_correction_receipt(
             or source_recipe.get("dataset") != dataset):
         raise ValueError("Normalization correction must preserve the parent dataset and IAG architecture/representation.")
     if architecture == IAG_Q_ARCHITECTURE:
-        expected_scope = IAG_NORMALIZATION_CORRECTION_SCOPE
+        q_engine_dispatch = receipt.get("scope") == IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE
+        expected_scope = (
+            IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE if q_engine_dispatch
+            else IAG_NORMALIZATION_CORRECTION_SCOPE
+        )
         expected_fields = IAG_NORMALIZATION_CORRECTION_FIELDS
-        allowed_paths = IAG_NORMALIZATION_CORRECTION_Q_PATHS
+        allowed_paths = (
+            IAG_NORMALIZATION_CORRECTION_Q_ENGINE_PATHS if q_engine_dispatch
+            else IAG_NORMALIZATION_CORRECTION_Q_PATHS
+        )
     else:
         expected_scope = IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE
         expected_fields = IAG_NORMALIZATION_CORRECTION_THERMAL_FIELDS
@@ -269,6 +287,12 @@ def _validate_normalization_correction_receipt(
         raise ValueError("Normalization correction must include the measure-entmax normalization implementation.")
     if actual_changes[IAG_NORMALIZATION_CORRECTION_PATH]["target_sha256"] != IAG_NORMALIZATION_CORRECTION_TARGET_SHA256:
         raise ValueError("Normalization correction target does not match the reviewed FP64-prefix implementation.")
+    if (receipt.get("scope") == IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE
+            and actual_changes[IAG_Q_ENGINE_DISPATCH_PATH] != {
+            "source_sha256": IAG_Q_ENGINE_DISPATCH_SOURCE_SHA256,
+            "target_sha256": IAG_Q_ENGINE_DISPATCH_TARGET_SHA256,
+        }):
+        raise ValueError("IAG-Q engine dispatch differs from the exact reviewed attachment guard fix.")
     if architecture == IAG_C_ARCHITECTURE:
         _validate_thermal_runtime_equivalence(receipt)
     reason = receipt.get("reason")
@@ -758,6 +782,8 @@ __all__ = [
     "IAG_NORMALIZATION_CORRECTION_ALLOWED_PATHS",
     "IAG_NORMALIZATION_CORRECTION_BINDING_SCHEMA",
     "IAG_NORMALIZATION_CORRECTION_PATH",
+    "IAG_NORMALIZATION_CORRECTION_Q_ENGINE_PATHS",
+    "IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE",
     "IAG_NORMALIZATION_CORRECTION_SCHEMA",
     "IAG_NORMALIZATION_CORRECTION_SCOPE",
     "IAG_NORMALIZATION_CORRECTION_TARGET_SHA256",
