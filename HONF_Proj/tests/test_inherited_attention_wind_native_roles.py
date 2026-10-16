@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,13 @@ PROJECT = Path(__file__).resolve().parents[1]
 for directory in (PROJECT / "src", PROJECT / "Case_WindFarm/src"):
     sys.path.insert(0, str(directory))
 
+from windfarm.content_hypergraph import (
+    WIND_CONTENT_COORDINATE_FRAME,
+    WindContentReceivers,
+    WindContentSceneInputs,
+    WindInheritedAttentionAdapterV1,
+)
+from windfarm.normalization import VelocityNormalizer, VerticalProfileBaseline
 from windfarm.training import inherited_attention_task as iag_wind
 from windfarm.training.content_hypergraph_task import (
     ROLE_NAMES,
@@ -22,6 +30,60 @@ from windfarm.training.content_hypergraph_task import (
 
 ROLE_COUNTS = (1640, 1640, 1640, 1640, 1632)
 ROLE_IDS = np.repeat(np.arange(5, dtype=np.int8), ROLE_COUNTS)
+
+
+def _row533_adapter_fixture(query_y: np.float32 | None = None):
+    lower = np.asarray(
+        [-17.85594367980957, -14.279596328735352, 0.022507892921566963], dtype=np.float32,
+    )
+    upper = np.asarray(
+        [28.7056827545166, 14.740605354309082, 6.159968376159668], dtype=np.float32,
+    )
+    extent = np.asarray([46.56162643432617, 29.020200729370117, 6.137460708618164], dtype=np.float32)
+    axes = [np.linspace(lo, hi, 4, dtype=np.float32) for lo, hi in zip(lower, upper)]
+    xx, yy, zz = np.meshgrid(*axes, indexing="ij")
+    environment_coordinates = np.stack((xx, yy, zz), axis=-1).reshape(64, 3)
+    scene_input = WindContentSceneInputs(
+        row_index=533,
+        case_name="gen_0177_wd300",
+        layout_index=177,
+        wind_direction_deg=300.0,
+        module_centers_D=np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32),
+        module_present=np.asarray([1.0], dtype=np.float32),
+        module_features=np.asarray([[0.02, 0.1]], dtype=np.float32),
+        module_ids=np.asarray([0], dtype=np.int64),
+        operating_features=np.zeros(11, dtype=np.float32),
+        support_lower_D=lower,
+        support_upper_D=upper,
+        support_extent_D=extent,
+        environment_coordinates_D=environment_coordinates,
+        environment_features=np.zeros((64, 7), dtype=np.float32),
+        environment_measure_D3=np.ones(64, dtype=np.float32),
+    )
+    normalizer = VelocityNormalizer(
+        mean=np.zeros(3), std=np.ones(3), safe_std=np.ones(3),
+    )
+    profile = VerticalProfileBaseline(
+        bin_centers_D=np.asarray([0.0, 6.25]),
+        values_mps=np.zeros((2, 3)),
+        counts=np.ones(2, dtype=np.int64),
+    )
+    adapter = WindInheritedAttentionAdapterV1(normalizer, profile)
+    scene = adapter.make_scene_batch((scene_input,))
+    coordinates = upper[None, None, :].copy()
+    if query_y is not None:
+        coordinates[0, 0, 1] = query_y
+    receivers = WindContentReceivers(
+        coordinates_D=coordinates,
+        features=np.zeros((1, 1, 7), dtype=np.float32),
+        flat_indices=np.zeros((1, 1), dtype=np.int64),
+        role_ids=np.zeros((1, 1), dtype=np.int8),
+        scene_keys=(scene_input.scene_key,),
+        local_batch_indices=np.empty(0, dtype=np.int64),
+        local_query_indices=np.empty(0, dtype=np.int64),
+        local_module_indices=np.empty(0, dtype=np.int64),
+    )
+    return adapter, scene, receivers, lower, upper
 
 
 def _empty_provider() -> iag_wind.WindInheritedAttentionTaskV1:
@@ -162,3 +224,58 @@ def test_native_role_metrics_reject_bad_sampler_receipt_or_row_inventory(monkeyp
     monkeypatch.setattr(provider, "native_evaluation_rows", lambda split, case_keys: (23,))
     with pytest.raises(ValueError, match="exact selected rows"):
         provider.reduce_native_role_evaluation_metrics([record], split="validation")
+
+
+def test_wind_iag_scene_uses_exact_native_support_bounds_and_versions_them():
+    from honf_forward_core.inherited_attention import InheritedAttentionCoreV1, InheritedSceneBatch
+
+    adapter, scene, receivers, _lower, upper = _row533_adapter_fixture()
+    assert isinstance(scene, InheritedSceneBatch)
+    assert scene.coordinate_frame_key == WIND_CONTENT_COORDINATE_FRAME
+    assert torch.equal(scene.receiver_legal_bounds[0, 0], torch.as_tensor(
+        [-17.85594367980957, -14.279596328735352, 0.022507892921566963], dtype=torch.float32,
+    ))
+    assert torch.equal(scene.receiver_legal_bounds[0, 1], torch.as_tensor(upper))
+    # The old rounded scene metadata is preserved exactly, even though y's
+    # computed upper endpoint is one FP32 ULP inward from the native bound.
+    assert (scene.coordinate_origin + scene.coordinate_scale)[0, 1].item() < upper[1]
+    query = adapter.make_query_batch(scene, receivers)
+    assert query.receiver_cover is not None
+    assert query.receiver_cover.weights.shape == (1, 1, 8)
+
+    core = InheritedAttentionCoreV1(
+        module_input_dim=2, environment_input_dim=7, coordinate_dim=3, query_input_dim=7,
+        operating_input_dim=11, context_dim=8, num_heads=2, context_depth=1, local_hidden_dim=8,
+    ).eval()
+    with torch.no_grad():
+        prepared = core.prepare(scene)
+        scene.receiver_legal_bounds[0, 1, 1].add_(1.0e-6)
+        with pytest.raises(ValueError, match="Prepared scene/atlas/value factors changed"):
+            core.validate_prepared_state(prepared, query)
+
+
+def test_wind_iag_scene_rejects_receiver_outside_exact_native_support():
+    adapter, scene, _receivers, _lower, upper = _row533_adapter_fixture()
+    outside_y = np.nextafter(np.float32(upper[1]), np.float32(np.inf))
+    _adapter, _scene, outside_receivers, _lower, _upper = _row533_adapter_fixture(outside_y)
+    with pytest.raises(ValueError, match="within the adapter's legal domain"):
+        adapter.make_query_batch(scene, outside_receivers)
+
+
+def test_inherited_scene_bounds_validate_shape_device_dtype_and_domain():
+    _adapter, scene, _receivers, _lower, _upper = _row533_adapter_fixture()
+    with pytest.raises(TypeError, match="must be a tensor"):
+        replace(scene, receiver_legal_bounds=[[0.0, 0.0, 0.0]])
+    with pytest.raises(ValueError, match="shape"):
+        replace(scene, receiver_legal_bounds=torch.zeros((1, 1, 3), dtype=torch.float32))
+    with pytest.raises(ValueError, match="device"):
+        replace(scene, receiver_legal_bounds=torch.empty((1, 2, 3), dtype=torch.float32, device="meta"))
+    with pytest.raises(TypeError, match="floating environment coordinate dtype"):
+        replace(scene, receiver_legal_bounds=torch.zeros((1, 2, 3), dtype=torch.float64))
+    nonfinite = scene.receiver_legal_bounds.clone()
+    nonfinite[0, 1, 0] = torch.nan
+    with pytest.raises(ValueError, match="finite and ordered"):
+        replace(scene, receiver_legal_bounds=nonfinite)
+    reversed_bounds = scene.receiver_legal_bounds.flip(1)
+    with pytest.raises(ValueError, match="finite and ordered"):
+        replace(scene, receiver_legal_bounds=reversed_bounds)

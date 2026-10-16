@@ -283,7 +283,63 @@ class PreparedSourceIndexedResponse:
 # staged-attention module imports RouteScoreSnapshot from this module.
 from dataclasses import fields as dataclass_fields
 
-from ..content_hypergraph.contracts import QueryBatch
+from ..content_hypergraph.contracts import QueryBatch, SceneBatch, _require_tensor_condition
+
+
+@dataclass(frozen=True)
+class InheritedSceneBatch(SceneBatch):
+    """Native scene contract with optional authoritative receiver bounds."""
+
+    receiver_legal_bounds: Tensor | None = None  # [B,2,D], lower then upper
+
+    def __post_init__(self) -> None:
+        self._validate_receiver_legal_bounds()
+
+    def _validate_receiver_legal_bounds(self) -> None:
+        bounds = self.receiver_legal_bounds
+        if bounds is None:
+            return
+        if not isinstance(bounds, Tensor):
+            raise TypeError("receiver_legal_bounds must be a tensor or None.")
+        if bounds.ndim != 3 or bounds.shape != (
+            self.environment_coordinates.shape[0], 2, self.environment_coordinates.shape[-1]
+        ):
+            raise ValueError("receiver_legal_bounds must have shape [B,2,D].")
+        if bounds.device != self.environment_coordinates.device:
+            raise ValueError("receiver_legal_bounds must share the environment coordinate device.")
+        if bounds.dtype != self.environment_coordinates.dtype or not bounds.is_floating_point():
+            raise TypeError("receiver_legal_bounds must share the floating environment coordinate dtype.")
+        _require_tensor_condition(
+            torch.isfinite(bounds).all() & (bounds[:, 0] <= bounds[:, 1]).all(),
+            "receiver_legal_bounds must be finite and ordered lower-to-upper.",
+        )
+
+    def validate(
+        self,
+        *,
+        coordinate_dim: int,
+        module_input_dim: int,
+        environment_input_dim: int,
+        operating_input_dim: int,
+    ) -> None:
+        super().validate(
+            coordinate_dim=coordinate_dim,
+            module_input_dim=module_input_dim,
+            environment_input_dim=environment_input_dim,
+            operating_input_dim=operating_input_dim,
+        )
+        self._validate_receiver_legal_bounds()
+
+    def tensor_version_stamp(self) -> tuple[tuple[int, int, int], ...]:
+        stamp = super().tensor_version_stamp()
+        bounds = self.receiver_legal_bounds
+        if bounds is None:
+            return stamp
+        try:
+            version = int(bounds._version)
+        except RuntimeError:  # Inference tensors do not expose a version counter.
+            version = -1
+        return (*stamp, (id(bounds), int(bounds.data_ptr()), version))
 
 
 @dataclass(frozen=True)

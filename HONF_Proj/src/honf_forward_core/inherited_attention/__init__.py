@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 
 _EXPORTS = {
+    "InheritedSceneBatch": "contracts",
     "InheritedQueryBatch": "contracts",
     "PreparedAnchorValues": "contracts",
     "PreparedSourceIndexedResponse": "contracts",
@@ -35,6 +36,7 @@ _EXPORTS = {
 __all__ = (
     "InheritedAttentionCoreV1",
     "InheritedQueryBatch",
+    "InheritedSceneBatch",
     "PreparedAnchorValues",
     "PreparedInheritedAffineQuery",
     "PreparedInheritedOrganization",

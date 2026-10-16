@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import numpy as np
@@ -701,22 +701,39 @@ class WindInheritedAttentionAdapterV1(WindContentHypergraphAdapterV3):
             raise ValueError("Wind IAG-C adapter state differs from its canonical transforms.")
         return adapter
 
+    def make_scene_batch(self, inputs: Sequence[WindContentSceneInputs]) -> SceneBatch:
+        """Wrap the unchanged V3 scene with exact native support bounds."""
+        from honf_forward_core.inherited_attention import InheritedSceneBatch
+
+        scene = super().make_scene_batch(inputs)
+        native_bounds = np.stack(
+            [np.stack((item.support_lower_D, item.support_upper_D), axis=0) for item in inputs],
+            axis=0,
+        )
+        legal_bounds = torch.tensor(
+            native_bounds,
+            device=scene.environment_coordinates.device,
+            dtype=scene.environment_coordinates.dtype,
+        )
+        values = {item.name: getattr(scene, item.name) for item in fields(SceneBatch)}
+        return InheritedSceneBatch(**values, receiver_legal_bounds=legal_bounds)
+
     def make_query_batch(
         self,
         scene: SceneBatch,
         receivers: WindContentReceivers,
     ) -> QueryBatch:
         from honf_forward_core.inherited_attention import (
+            InheritedSceneBatch,
             smoothstep_grid_receiver_cover,
             with_receiver_cover,
         )
 
+        if not isinstance(scene, InheritedSceneBatch) or scene.receiver_legal_bounds is None:
+            raise TypeError("Wind IAG-C receiver covers require the inherited scene's native legal bounds.")
         query = super().make_query_batch(scene, receivers)
         if scene.coordinate_origin is None or scene.coordinate_scale is None:
             raise ValueError("Wind IAG-C receiver cover requires explicit support origin and extent.")
-        legal_bounds = torch.stack(
-            (scene.coordinate_origin, scene.coordinate_origin + scene.coordinate_scale), dim=1,
-        )
         cover = smoothstep_grid_receiver_cover(
             query.coordinates,
             scene.environment_coordinates,
@@ -725,7 +742,7 @@ class WindInheritedAttentionAdapterV1(WindContentHypergraphAdapterV3):
             query.query_ids,
             frame_key=scene.coordinate_frame_key,
             query_mask=query.query_mask,
-            legal_bounds=legal_bounds,
+            legal_bounds=scene.receiver_legal_bounds,
         )
         return with_receiver_cover(query, cover)
 
@@ -737,7 +754,7 @@ __all__ = [
     "WIND_CONTENT_LOCAL_RADIUS_D",
     "WindContentHypergraphAdapter",
     "WindContentHypergraphAdapterV3",
-    "WindInheritedAttentionAdapterV1",
     "WindContentReceivers",
     "WindContentSceneInputs",
+    "WindInheritedAttentionAdapterV1",
 ]
