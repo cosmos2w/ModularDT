@@ -35,6 +35,7 @@ from honf_runtime.inherited_attention_child import (
     _require_same_soft_identity,
     bind_inherited_attention_normalization_correction,
     validate_inherited_attention_normalization_correction_resume,
+    verify_inherited_attention_sparse_child_continuation,
 )
 from honf_runtime.inherited_attention_protocol import IAG_PROTOCOL
 
@@ -348,6 +349,118 @@ def test_q_engine_dispatch_scope_binds_only_the_reviewed_guard_and_resumes(tmp_p
     )
     target["normalization_correction"] = binding
     validate_inherited_attention_normalization_correction_resume(binding, target)
+
+
+def test_q_engine_dispatch_scope_passes_same_parent_resume_continuation(tmp_path: Path):
+    source, target, source_path, receipt_path = _q_engine_dispatch_pair(tmp_path)
+    binding = bind_inherited_attention_normalization_correction(
+        receipt_path, source, target, source_path=source_path,
+    )
+    target["normalization_correction"] = binding
+    validate_inherited_attention_normalization_correction_resume(binding, target)
+    receipt = json.loads(binding["receipt_json"])
+    correction_summary = {
+        "scope": receipt["scope"],
+        "receipt_sha256": binding["receipt_sha256"],
+        "target_loaded_source_sha256": receipt["target_loaded_source_sha256"],
+    }
+    payload = {
+        "experiment_identity": copy.deepcopy(target),
+        "branch_parent": {
+            "path": str(source_path.resolve()),
+            "sha256": receipt["source_checkpoint_sha256"],
+            "identity": copy.deepcopy(source),
+            "inherited_attention_sparse_child": {
+                "normalization_correction": correction_summary,
+            },
+        },
+    }
+    inherited_attention_train._validate_normalization_correction_branch_binding(target, payload)
+    contract = {
+        "schema": "inherited_attention_sparse_child_v1",
+        "source_epoch": 500,
+        "trajectory": "soft_e1_500_then_absolute_sparse_transition_e501_800",
+        "source_architecture": "IAG-Q",
+        "source_representation": "iag_q",
+        "target_architecture": "IAG-Q",
+        "target_representation": "iag_q",
+        "representation_review_sha256": "d" * 64,
+        "normalization_correction": correction_summary,
+    }
+    verify_inherited_attention_sparse_child_continuation(
+        contract, completed_epoch=1000, stop_after=2500,
+    )
+
+
+@pytest.mark.parametrize(
+    ("architecture", "representation", "scope", "review_sha"),
+    [
+        ("IAG-C", "iag_c", IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE, None),
+        ("IAG-Q", "iag_q", IAG_NORMALIZATION_CORRECTION_SCOPE, "d" * 64),
+        ("IAG-Q", "iag_q", IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE, "d" * 64),
+    ],
+)
+def test_sparse_child_continuation_accepts_only_architecture_scoped_correction_laws(
+    architecture: str,
+    representation: str,
+    scope: str,
+    review_sha: str | None,
+):
+    contract = {
+        "schema": "inherited_attention_sparse_child_v1",
+        "source_epoch": 500,
+        "trajectory": "soft_e1_500_then_absolute_sparse_transition_e501_800",
+        "source_architecture": architecture,
+        "source_representation": representation,
+        "target_architecture": architecture,
+        "target_representation": representation,
+        "normalization_correction": {
+            "scope": scope,
+            "receipt_sha256": "a" * 64,
+            "target_loaded_source_sha256": "b" * 64,
+        },
+    }
+    if review_sha is not None:
+        contract["representation_review_sha256"] = review_sha
+    verify_inherited_attention_sparse_child_continuation(
+        contract, completed_epoch=1000, stop_after=2500,
+    )
+
+
+@pytest.mark.parametrize(
+    ("architecture", "representation", "scope", "review_sha"),
+    [
+        ("IAG-C", "iag_c", IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE, None),
+        ("IAG-Q", "iag_q", IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE, "d" * 64),
+        ("IAG-Q", "iag_q", "unreviewed_q_correction_scope", "d" * 64),
+    ],
+)
+def test_sparse_child_continuation_rejects_cross_architecture_or_unknown_scope(
+    architecture: str,
+    representation: str,
+    scope: str,
+    review_sha: str | None,
+):
+    contract = {
+        "schema": "inherited_attention_sparse_child_v1",
+        "source_epoch": 500,
+        "trajectory": "soft_e1_500_then_absolute_sparse_transition_e501_800",
+        "source_architecture": architecture,
+        "source_representation": representation,
+        "target_architecture": architecture,
+        "target_representation": representation,
+        "normalization_correction": {
+            "scope": scope,
+            "receipt_sha256": "a" * 64,
+            "target_loaded_source_sha256": "b" * 64,
+        },
+    }
+    if review_sha is not None:
+        contract["representation_review_sha256"] = review_sha
+    with pytest.raises(ValueError, match="malformed entmax numerical-correction binding"):
+        verify_inherited_attention_sparse_child_continuation(
+            contract, completed_epoch=1000, stop_after=2500,
+        )
 
 
 @pytest.mark.parametrize("corrupt", ["source", "target"])

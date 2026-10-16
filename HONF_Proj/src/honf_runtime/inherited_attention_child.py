@@ -763,13 +763,17 @@ def verify_inherited_attention_sparse_child_continuation(
                 or not isinstance(contract.get("representation_review_sha256"), str))):
         raise ValueError("IAG-Q sparse resume lacks its same-architecture review-bound branch identity.")
     correction = contract.get("normalization_correction")
+    allowed_correction_scopes = {
+        IAG_C_ARCHITECTURE: (IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE,),
+        IAG_Q_ARCHITECTURE: (
+            IAG_NORMALIZATION_CORRECTION_SCOPE,
+            IAG_NORMALIZATION_CORRECTION_Q_ENGINE_SCOPE,
+        ),
+    }.get(contract.get("target_architecture"), ())
     if correction is not None and (
         not isinstance(correction, Mapping)
         or set(correction) != {"scope", "receipt_sha256", "target_loaded_source_sha256"}
-        or correction.get("scope") != {
-            IAG_C_ARCHITECTURE: IAG_NORMALIZATION_CORRECTION_THERMAL_SCOPE,
-            IAG_Q_ARCHITECTURE: IAG_NORMALIZATION_CORRECTION_SCOPE,
-        }.get(contract.get("target_architecture"))
+        or correction.get("scope") not in allowed_correction_scopes
         or not _is_sha256(correction.get("receipt_sha256"))
         or not _is_sha256(correction.get("target_loaded_source_sha256"))
     ):
