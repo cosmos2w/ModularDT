@@ -2843,6 +2843,7 @@ class TrainingEngine:
         architecture_child_initialization: Mapping[str, Any] | None = None,
         source_read_child: Mapping[str, Any] | None = None,
         source_read_child_auxiliary_fit: Callable[..., Mapping[str, Any]] | None = None,
+        inherited_attention_sparse_child: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2873,9 +2874,32 @@ class TrainingEngine:
                 raise ValueError("Exact resume requires this run's current latest checkpoint; historical checkpoints cannot rewind history.")
         identity = dict(identity)
         provider_identity = dict(provider.identity_payload())
+        fresh_initialization = identity.get("fresh_initialization")
         source_reader_variant = provider_identity.get("source_reader_variant")
         is_source_read_sparse = source_reader_variant in ("S-Utility", "S-Complete")
         source_read_scope = provider_identity.get("protocol")
+        iag_recipe = identity.get("recipe", {})
+        is_iag_sparse_development = (
+            identity.get("model_family") == "inherited_attention_v1"
+            and isinstance(iag_recipe, Mapping)
+            and iag_recipe.get("protocol") == "inherited_attention_development_v1"
+            and iag_recipe.get("normalization") == "measure_entmax15"
+        )
+        if inherited_attention_sparse_child is not None and not is_iag_sparse_development:
+            raise ValueError("The e500 inherited-attention branch is reserved for segmented IAG-C measure_entmax15.")
+        if (is_iag_sparse_development and resume_checkpoint is None
+                and inherited_attention_sparse_child is None):
+            raise ValueError("A segmented sparse IAG-C child requires its own exact soft IAG-C e500 parent.")
+        if inherited_attention_sparse_child is not None and (
+                branch_from_checkpoint is None or resume_checkpoint is not None
+                or optimizer_seed is not None or allow_microbatch_change
+                or mathematical_route_branch is not None or joint_core_revision is not None
+                or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                or source_read_child is not None or source_read_child_auxiliary_fit is not None
+                or numerical_pooling_amendment is not None or output_policy_amendment is not None
+                or fresh_initialization is not None or self.config.training_mode != "joint"
+                or arm != "IAG-C"):
+            raise ValueError("A sparse IAG-C child requires one fresh joint branch from its declared soft e500 parent.")
         if source_read_child is not None and not is_source_read_sparse:
             raise ValueError("A source-read child requires an S-Utility or S-Complete provider identity.")
         if is_source_read_sparse:
@@ -2885,7 +2909,6 @@ class TrainingEngine:
                 raise ValueError("Sparse source-read providers must attach from the declared dense e500 child checkpoint.")
         elif source_read_child is not None or source_read_child_auxiliary_fit is not None:
             raise ValueError("Source-read auxiliary fitting is reserved for calibrated sparse S-variant children.")
-        fresh_initialization = identity.get("fresh_initialization")
         fresh_provider = provider_identity.get("fresh_matched_comparison") is True
         if (fresh_initialization is not None) != fresh_provider:
             raise ValueError("Fresh matched provider identity and explicit initialization receipt must appear together.")
@@ -2903,6 +2926,7 @@ class TrainingEngine:
             _apply_fresh_native_validation_policy(model)
             if (branch_from_checkpoint is not None or architecture_child_initialization is not None
                     or source_read_child is not None or source_read_child_auxiliary_fit is not None
+                    or inherited_attention_sparse_child is not None
                     or diagnostic_age_branch is not None or joint_core_revision is not None
                     or mathematical_route_branch is not None or allow_microbatch_change
                     or optimizer_seed is not None):
@@ -2925,6 +2949,7 @@ class TrainingEngine:
                 or mathematical_route_branch is not None or joint_core_revision is not None
                 or diagnostic_age_branch is not None or architecture_child_initialization is not None
                 or source_read_child is not None or source_read_child_auxiliary_fit is not None
+                or inherited_attention_sparse_child is not None
                 or fresh_initialization is not None or arm != "A-H6"):
             raise ValueError("A numerical pooling repair requires only the same run's exact latest-state continuation.")
         if output_policy_amendment is not None and (
@@ -2933,6 +2958,7 @@ class TrainingEngine:
                 or mathematical_route_branch is not None or joint_core_revision is not None
                 or diagnostic_age_branch is not None or architecture_child_initialization is not None
                 or source_read_child is not None or source_read_child_auxiliary_fit is not None
+                or inherited_attention_sparse_child is not None
                 or numerical_pooling_amendment is not None or fresh_initialization is not None
                 or arm != "A2-D"):
             raise ValueError("An output-only amendment requires only this formal D run's exact latest resume.")
@@ -2950,7 +2976,7 @@ class TrainingEngine:
                 or diagnostic_age_branch is not None or architecture_child_initialization is not None
                 or numerical_pooling_amendment is not None or output_policy_amendment is not None
                 or fresh_initialization is not None or self.config.training_mode != "joint"
-                or arm != "A2-D"):
+                or inherited_attention_sparse_child is not None or arm != "A2-D"):
             raise ValueError("A source-read child requires one fresh joint A2-D branch from its named dense parent.")
         if source_read_child_auxiliary_fit is not None and source_read_child is None:
             raise ValueError("A source-read auxiliary-fit callback is valid only during its declared child attachment.")
@@ -2986,6 +3012,13 @@ class TrainingEngine:
                 pass
             else:
                 raise ValueError("A source-read child must write to a distinct run directory from its dense parent.")
+        if inherited_attention_sparse_child is not None and source_path is not None:
+            try:
+                source_path.resolve().relative_to(output)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("An IAG-C sparse child must write to a distinct run directory from its soft parent.")
         source_payload: Mapping[str, Any] | None = None
         restored_rng: Mapping[str, Any] | None = None
         if source_path is not None:
@@ -2997,6 +3030,18 @@ class TrainingEngine:
                     != fresh_initialization):
                 raise ValueError("Fresh matched resume checkpoint does not preserve its original initialization receipt.")
         start_epoch = 1 if source_payload is None else int(source_payload["epoch"]) + 1
+        if resume_checkpoint is not None and is_iag_sparse_development:
+            branch = source_payload.get("branch_parent")
+            child_contract = branch.get("inherited_attention_sparse_child") if isinstance(branch, Mapping) else None
+            if not isinstance(child_contract, Mapping):
+                raise ValueError("Sparse IAG-C exact resume is missing its e500 child branch receipt.")
+            from .inherited_attention_child import verify_inherited_attention_sparse_child_continuation
+
+            verify_inherited_attention_sparse_child_continuation(
+                child_contract,
+                completed_epoch=int(source_payload["epoch"]),
+                stop_after=int(stop_after),
+            )
         if resume_checkpoint is not None and int(source_payload["epoch"]) >= stop_after:
             raise ValueError("Exact resume stop must advance the saved epoch.")
         if not start_epoch <= stop_after <= self.config.total_epochs:
@@ -3024,7 +3069,19 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if source_read_child is not None:
+            if inherited_attention_sparse_child is not None:
+                from .inherited_attention_child import prepare_inherited_attention_sparse_child
+
+                amendment = prepare_inherited_attention_sparse_child(
+                    model,
+                    source_payload,
+                    sealed_identity,
+                    inherited_attention_sparse_child,
+                    source_path=source_path,
+                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    stop_after=int(stop_after),
+                )
+            elif source_read_child is not None:
                 from .source_read_child import prepare_source_read_child
 
                 amendment = prepare_source_read_child(
@@ -3086,7 +3143,8 @@ class TrainingEngine:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
             elif (joint_core_revision is None and diagnostic_age_branch is None
-                  and architecture_child_initialization is None and source_read_child is None):
+                  and architecture_child_initialization is None and source_read_child is None
+                  and inherited_attention_sparse_child is None):
                 if source_payload.get("arm") != "warmup":
                     raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
                 if int(source_payload.get("epoch", -1)) != self.config.warmup_epochs:
@@ -3115,7 +3173,14 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
-        if source_read_child is not None:
+        if inherited_attention_sparse_child is not None:
+            from .inherited_attention_child import verify_inherited_attention_sparse_child_optimizer
+
+            verify_inherited_attention_sparse_child_optimizer(
+                model, optimizer, source_payload["optimizer_state_by_name"])
+            amendment["exact_inherited_moments_verified"] = True
+            amendment["new_optimizer_states_at_attachment"] = 0
+        elif source_read_child is not None:
             from .source_read_child import verify_source_read_child_optimizer
 
             verify_source_read_child_optimizer(
@@ -3223,6 +3288,7 @@ class TrainingEngine:
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
             amendment_name = ('architecture_child_initialization' if architecture_child_initialization is not None else
+                              'inherited_attention_sparse_child' if inherited_attention_sparse_child is not None else
                               'source_read_child' if source_read_child is not None else
                               'numerical_pooling_amendment' if numerical_pooling_amendment is not None else
                               'output_policy_amendment' if output_policy_amendment is not None else
@@ -3234,6 +3300,7 @@ class TrainingEngine:
                 category='logs' if (joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
                                     or source_read_child is not None
+                                    or inherited_attention_sparse_child is not None
                                     or numerical_pooling_amendment is not None
                                     or output_policy_amendment is not None) else None), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
@@ -3247,7 +3314,14 @@ class TrainingEngine:
                 "identity": source_payload.get("experiment_identity"),
                 "epoch": int(source_payload["epoch"]),
             }
-            if source_read_child is not None:
+            if inherited_attention_sparse_child is not None:
+                branch_parent.update(
+                    inherited_attention_sparse_child=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
+                    inherited_history_scope="soft IAG-C physical history through e500; sparse child rows begin at absolute e501",
+                )
+            elif source_read_child is not None:
                 branch_parent.update(
                     source_read_child=copy.deepcopy(amendment),
                     inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),

@@ -169,9 +169,13 @@ class WindContentHypergraphTask:
         from honf_runtime.source_read_protocol import SOURCE_READ_PROTOCOLS
 
         source_read = recipe["protocol"] in SOURCE_READ_PROTOCOLS
-        if source_read:
+        inherited_attention = recipe["protocol"] in (
+            "inherited_attention_development_v1",
+            "inherited_attention_full_train1000_v1",
+        )
+        if source_read or inherited_attention:
             if any(value is not None for value in (role_component_scales, role_scale_calibration, role_scale_cache_identity)):
-                raise ValueError("Wind source-read formal two-region protocol must not depend on five-role calibration.")
+                raise ValueError("Wind two-region native protocol must not depend on five-role calibration.")
             self.role_component_scales = None
             self.role_scale_calibration = None
             self.role_scale_cache_identity = None
@@ -218,10 +222,22 @@ class WindContentHypergraphTask:
             raise ValueError("Wind TRAIN and exposed development row membership must be disjoint.")
         if self.allow_formal_protocol:
             if self.seed != 42:
-                raise ValueError("Formal Wind case/query sampling is fixed at sampling_seed=42.")
+                raise ValueError("Formal-semantic Wind case/query sampling is fixed at sampling_seed=42.")
             if self.effective_batch_size != 16 or not 1 <= self.max_microbatch_cases <= 8:
-                raise ValueError("Formal Wind A2-D requires effective batch 16 and microbatches in [1,8].")
-            if self.total_epochs != 2500:
+                raise ValueError("Formal-semantic Wind requires effective batch 16 and microbatches in [1,8].")
+            expected_horizon = (
+                1000 if recipe["protocol"] == "inherited_attention_full_train1000_v1"
+                else 2500
+            )
+            if recipe["protocol"] in (
+                "inherited_attention_development_v1",
+                "inherited_attention_full_train1000_v1",
+            ) and self.total_epochs != expected_horizon:
+                raise ValueError("Inherited-attention Wind horizon differs from its explicit recipe protocol.")
+            if recipe["protocol"] not in (
+                "inherited_attention_development_v1",
+                "inherited_attention_full_train1000_v1",
+            ) and self.total_epochs != 2500:
                 raise ValueError("Formal Wind A2-D is fixed to its 2500-epoch horizon.")
         else:
             if self.seed != 42:
@@ -1682,7 +1698,12 @@ class WindFormalA2DTaskV1(WindContentHypergraphTaskV2):
         if len(rows) != len(volume_samples) or len(rows) != len(band_samples):
             raise ValueError("Formal Wind query receipt rows and region samples differ in length.")
         epoch = 0 if validation else int(key.epoch)
-        protocol = getattr(self, "recipe", {}).get("protocol", "formal_d_full_train_v1")
+        sampling_reference_scope = getattr(self, "sampling_reference_scope", None)
+        reference_protocol = (
+            sampling_reference_scope.get("protocol")
+            if isinstance(sampling_reference_scope, Mapping) else None
+        )
+        protocol = reference_protocol or getattr(self, "recipe", {}).get("protocol", "formal_d_full_train_v1")
         payload = {
             "protocol": protocol,
             "sampling_seed": self.sampling_seed,

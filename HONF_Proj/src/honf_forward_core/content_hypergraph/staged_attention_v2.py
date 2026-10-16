@@ -8,6 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from ..inherited_attention.contracts import RouteScoreSnapshot
 from .spatial_features_v2 import pair_score_features
 
 
@@ -106,13 +107,38 @@ class SpatialRouteAttentionV2(nn.Module):
         *,
         remove_self: bool = False,
         return_attention: bool = False,
+        export_score_snapshot: bool = False,
+        route_name: str | None = None,
+        destination_ids: Tensor | None = None,
+        donor_ids: Tensor | None = None,
         geometry_features: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None]:
+    ) -> tuple[Tensor, Tensor | None] | tuple[Tensor, Tensor | None, RouteScoreSnapshot]:
         batch, query_count, _ = destination.shape
         key_count = donor.shape[1]
         if key_count == 0:
             attention = destination.new_zeros(batch, self.heads, query_count, 0) if return_attention else None
-            return destination.new_zeros(batch, query_count, self.width), attention
+            update = destination.new_zeros(batch, query_count, self.width)
+            if not export_score_snapshot:
+                return update, attention
+            if route_name not in ("em", "ee") or destination_ids is None or donor_ids is None:
+                raise ValueError("An exported route snapshot requires typed EM/EE names and native IDs.")
+            empty_query = destination.new_zeros(batch, self.heads, query_count, self.head_width)
+            empty_key = destination.new_zeros(batch, self.heads, 0, self.head_width)
+            empty_bias = destination.new_zeros(batch, self.heads, query_count, 0)
+            snapshot = RouteScoreSnapshot(
+                route=route_name,
+                query_scaled=empty_query,
+                key_normalized=empty_key,
+                geometry_bias=empty_bias,
+                raw_logits=empty_bias,
+                donor_mask=donor_mask & (donor_measure > 0),
+                destination_mask=destination_mask,
+                donor_measure=donor_measure,
+                anchor_ids=destination_ids,
+                donor_ids=donor_ids,
+                score_origin=f"last_{route_name}",
+            )
+            return update, attention, snapshot
 
         q = self.query(self.query_norm(destination))
         donor_normalized = self.key_norm(donor)
@@ -152,6 +178,24 @@ class SpatialRouteAttentionV2(nn.Module):
         additive = additive.masked_fill(~allowed[:, None, :, :], -torch.inf)
         row_has_donor = allowed.any(dim=-1, keepdim=True)
         additive = torch.where(row_has_donor[:, None, :, :], additive, torch.zeros_like(additive))
+        snapshot = None
+        if export_score_snapshot:
+            if route_name not in ("em", "ee") or destination_ids is None or donor_ids is None:
+                raise ValueError("An exported route snapshot requires typed EM/EE names and native IDs.")
+            raw_logits = torch.matmul(q, k.transpose(-2, -1)) + geometry_bias
+            snapshot = RouteScoreSnapshot(
+                route=route_name,
+                query_scaled=q,
+                key_normalized=k,
+                geometry_bias=geometry_bias,
+                raw_logits=raw_logits,
+                donor_mask=valid_donors,
+                destination_mask=destination_mask,
+                donor_measure=donor_measure,
+                anchor_ids=destination_ids,
+                donor_ids=donor_ids,
+                score_origin=f"last_{route_name}",
+            )
         attended = F.scaled_dot_product_attention(
             q,
             k,
@@ -166,11 +210,11 @@ class SpatialRouteAttentionV2(nn.Module):
         valid_rows = row_has_donor & destination_mask[:, :, None]
         update = update * valid_rows.to(update.dtype)
         if not return_attention:
-            return update, None
+            return (update, None, snapshot) if snapshot is not None else (update, None)
         # Trace-only explicit weights; the production path remains SDPA.
         logits = torch.matmul(q, k.transpose(-2, -1)) + additive
         weights = safe_masked_softmax(logits, allowed[:, None, :, :], dim=-1)
-        return update, weights
+        return (update, weights, snapshot) if snapshot is not None else (update, weights)
 
 
 class TokenFeedForwardV2(nn.Module):
@@ -213,8 +257,9 @@ class StagedContextCycleV2(nn.Module):
         frame_scale: Tensor,
         *,
         return_attention: bool = False,
+        export_route_scores: bool = False,
         geometry_features: dict[str, Tensor] | None = None,
-    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+    ) -> tuple[Tensor, Tensor, dict[str, object]]:
         module_lengths = scene.module_characteristic_lengths
         environment_lengths = scene.environment_characteristic_lengths
         module_measure = scene.module_measure
@@ -239,29 +284,47 @@ class StagedContextCycleV2(nn.Module):
         module_after_mm = module_states + self.dropout(mm)
         module_after_mm = module_after_mm * scene.module_mask[:, :, None].to(module_after_mm.dtype)
 
-        em, em_weights = self.em(
+        em_result = self.em(
             environment_states, module_after_mm,
             scene.environment_coordinates, scene.module_coordinates,
             environment_lengths, module_lengths,
             module_measure, module_reference,
             scene.module_mask, scene.environment_mask, frame_scale,
             return_attention=return_attention,
+            export_score_snapshot=export_route_scores,
+            route_name="em",
+            destination_ids=scene.environment_ids,
+            donor_ids=scene.module_ids,
             geometry_features=None if geometry_features is None else geometry_features["em"],
         )
+        if export_route_scores:
+            em, em_weights, em_snapshot = em_result
+        else:
+            em, em_weights = em_result
+            em_snapshot = None
         environment_after_em = environment_states + self.dropout(em)
         environment_after_em = environment_after_em * scene.environment_mask[:, :, None].to(
             environment_after_em.dtype
         )
 
-        ee, ee_weights = self.ee(
+        ee_result = self.ee(
             environment_after_em, environment_after_em,
             scene.environment_coordinates, scene.environment_coordinates,
             environment_lengths, environment_lengths,
             environment_measure, environment_reference,
             scene.environment_mask, scene.environment_mask, frame_scale,
             return_attention=return_attention,
+            export_score_snapshot=export_route_scores,
+            route_name="ee",
+            destination_ids=scene.environment_ids,
+            donor_ids=scene.environment_ids,
             geometry_features=None if geometry_features is None else geometry_features["ee"],
         )
+        if export_route_scores:
+            ee, ee_weights, ee_snapshot = ee_result
+        else:
+            ee, ee_weights = ee_result
+            ee_snapshot = None
         environment_after_ee = environment_after_em + self.dropout(ee)
         environment_next = self.environment_ff(environment_after_ee, scene.environment_mask)
 
@@ -291,4 +354,7 @@ class StagedContextCycleV2(nn.Module):
             ):
                 if value is not None:
                     trace[name] = value
+        if export_route_scores:
+            trace["em_score_snapshot"] = em_snapshot
+            trace["ee_score_snapshot"] = ee_snapshot
         return module_next, environment_next, trace

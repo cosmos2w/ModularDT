@@ -661,6 +661,75 @@ class WindContentHypergraphAdapterV3(WindContentHypergraphAdapter):
         return scene
 
 
+class WindInheritedAttentionAdapterV1(WindContentHypergraphAdapterV3):
+    """Round4 Wind transforms with a geometry-derived IAG-C receiver cover."""
+
+    SCHEMA = "wind_inherited_attention_adapter_v1"
+    COVER_SCHEMA = "smoothstep_grid_receiver_cover_from_native_environment_v1"
+
+    def __init__(
+        self,
+        normalizer: VelocityNormalizer,
+        background_profile: VerticalProfileBaseline,
+        *,
+        device: torch.device | str = "cpu",
+    ) -> None:
+        super().__init__(normalizer, background_profile, device=device)
+        payload = dict(self._state_payload)
+        payload.update({
+            "schema": self.SCHEMA,
+            "receiver_cover": self.COVER_SCHEMA,
+        })
+        self._state_payload = payload
+        self.normalizer_key = _stable_sha256(self._state_payload)
+
+    @classmethod
+    def from_state_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        device: torch.device | str = "cpu",
+    ) -> WindInheritedAttentionAdapterV1:
+        if payload.get("schema") != cls.SCHEMA or payload.get("receiver_cover") != cls.COVER_SCHEMA:
+            raise ValueError("Unsupported Wind IAG-C adapter or receiver-cover state schema.")
+        if payload.get("coordinate_frame") != WIND_CONTENT_COORDINATE_FRAME:
+            raise ValueError("Wind IAG-C adapter checkpoint uses a different native coordinate frame.")
+        normalizer = VelocityNormalizer.from_dict(dict(payload["normalizer"]))
+        profile = VerticalProfileBaseline.from_dict(dict(payload["background_profile"]))
+        adapter = cls(normalizer, profile, device=device)
+        if adapter.state_payload() != dict(payload):
+            raise ValueError("Wind IAG-C adapter state differs from its canonical transforms.")
+        return adapter
+
+    def make_query_batch(
+        self,
+        scene: SceneBatch,
+        receivers: WindContentReceivers,
+    ) -> QueryBatch:
+        from honf_forward_core.inherited_attention import (
+            smoothstep_grid_receiver_cover,
+            with_receiver_cover,
+        )
+
+        query = super().make_query_batch(scene, receivers)
+        if scene.coordinate_origin is None or scene.coordinate_scale is None:
+            raise ValueError("Wind IAG-C receiver cover requires explicit support origin and extent.")
+        legal_bounds = torch.stack(
+            (scene.coordinate_origin, scene.coordinate_origin + scene.coordinate_scale), dim=1,
+        )
+        cover = smoothstep_grid_receiver_cover(
+            query.coordinates,
+            scene.environment_coordinates,
+            scene.environment_ids,
+            scene.environment_mask,
+            query.query_ids,
+            frame_key=scene.coordinate_frame_key,
+            query_mask=query.query_mask,
+            legal_bounds=legal_bounds,
+        )
+        return with_receiver_cover(query, cover)
+
+
 __all__ = [
     "WIND_CONTENT_COORDINATE_FRAME",
     "WIND_CONTENT_ENVIRONMENT_COUNT",
@@ -668,6 +737,7 @@ __all__ = [
     "WIND_CONTENT_LOCAL_RADIUS_D",
     "WindContentHypergraphAdapter",
     "WindContentHypergraphAdapterV3",
+    "WindInheritedAttentionAdapterV1",
     "WindContentReceivers",
     "WindContentSceneInputs",
 ]

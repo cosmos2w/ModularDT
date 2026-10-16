@@ -251,7 +251,7 @@ class ThermalContentHypergraphTask:
         self.training_case_ids = tuple(str(case["case_id"]) for case in self.training_cases)
         self.validation_case_ids = tuple(str(case["case_id"]) for case in self.validation_cases)
         self.validation_scope = (
-            "fixed25_v1_DEV22_exposed" if self.protocol == "development"
+            "fixed25_v1_DEV22_exposed" if self.protocol in ("development", "inherited_attention_development_v1")
             else "canonical89_exposed_original_test_excluding_0273"
         )
         self.sampling_version = THERMAL_CONTENT_SAMPLING_VERSION
@@ -269,10 +269,19 @@ class ThermalContentHypergraphTask:
             raise ValueError("Thermal content-hypergraph is sealed to seed 0, Q=1024, effective batch 48.")
         if not 1 <= self.microbatch_size <= self.effective_batch_size:
             raise ValueError("Thermal microbatch size must be in [1,48].")
-        expected = (150, 22, 2500) if self.protocol == "development" else (600, 89, 5000)
+        expected = (
+            (150, 22, 2500)
+            if self.protocol in ("development", "inherited_attention_development_v1")
+            else (600, 89, 1000)
+            if self.protocol == "inherited_attention_full_train1000_v1"
+            else (600, 89, 5000)
+        )
         if (len(self.training_cases), len(self.validation_cases), self.total_epochs) != expected:
             raise ValueError("Thermal provider membership/horizon differs from the declared protocol.")
-        if self.protocol not in ("development", "full_train1000", "formal_d_full_train_v1"):
+        if self.protocol not in (
+            "development", "full_train1000", "formal_d_full_train_v1",
+            "inherited_attention_development_v1", "inherited_attention_full_train1000_v1",
+        ):
             raise ValueError("Unsupported Thermal content-hypergraph protocol.")
         if tuple(str(item["family_id"]) for item in self.train_families) != TRAIN_RESPONSE_IDS:
             raise ValueError("Response auxiliary must use the ordered original-TRAIN family inventory.")

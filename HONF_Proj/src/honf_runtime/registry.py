@@ -20,6 +20,12 @@ class ModelFamilySpec:
 
 
 MODEL_FAMILIES = {
+    "inherited_attention_v1": ModelFamilySpec(
+        family_id="inherited_attention_v1",
+        available=True,
+        workflows=("inherited_attention_train", "inherited_attention_evaluate"),
+        description="Dataset-native IAG-C inherited-gathering operator with geometry-derived receiver covers",
+    ),
     "honf_content_hypergraph": ModelFamilySpec(
         family_id="honf_content_hypergraph",
         available=True,

@@ -19,10 +19,14 @@ for directory in (PROJECT / "src", PROJECT / "tools", PROJECT / "Case_ThermalCha
 
 import numpy as np
 import torch
-from content_hypergraph_train import build, canonical_sha256, engine_for, validate_recipe
 
 from honf_runtime.compat import load_trusted_checkpoint
 from honf_runtime.content_hypergraph import load_content_hypergraph_checkpoint
+
+
+def canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
 
 
 def json_safe(value: Any) -> Any:
@@ -63,7 +67,28 @@ def observation_arrays(value: Any, prefix: str = "") -> dict[str, np.ndarray]:
 def load_evaluation_components(checkpoint: Path, device: str):
     """Reopen only the checkpoint's authorized native evaluation panel."""
     payload = load_trusted_checkpoint(checkpoint, map_location="cpu")
-    recipe = validate_recipe(payload["experiment_identity"]["recipe"])
+    standalone = None
+    if payload.get("workflow") == "inherited_attention_joint_v1":
+        from inherited_attention_train import build
+        from inherited_attention_train import canonical_sha256 as iag_canonical_sha256
+
+        from honf_runtime.inherited_attention_protocol import (
+            configure_inherited_attention_numerics,
+            validate_inherited_attention_recipe,
+        )
+
+        recipe = validate_inherited_attention_recipe(payload["experiment_identity"]["recipe"])
+        configure_inherited_attention_numerics(recipe["numerical_policy"])
+        standalone = load_content_hypergraph_checkpoint(checkpoint, device=device)
+        if iag_canonical_sha256(recipe) != payload["experiment_identity"].get("recipe_sha256"):
+            raise ValueError("IAG-C checkpoint recipe checksum is inconsistent.")
+    else:
+        from content_hypergraph_train import build, validate_recipe
+        from content_hypergraph_train import canonical_sha256 as old_canonical_sha256
+
+        recipe = validate_recipe(payload["experiment_identity"]["recipe"])
+        if old_canonical_sha256(recipe) != payload["experiment_identity"].get("recipe_sha256"):
+            raise ValueError("Content-hypergraph checkpoint recipe checksum is inconsistent.")
     model, provider = build(recipe, device=device)
     expected = payload["experiment_identity"]["provider_identity"]
     observed = dict(provider.identity_payload())
@@ -73,11 +98,13 @@ def load_evaluation_components(checkpoint: Path, device: str):
     model.eval()
     # Exercise the self-contained path separately; it must reconstruct exactly
     # the same tensor inventory without relying on provider/dataset state.
-    standalone, adapter, _ = load_content_hypergraph_checkpoint(checkpoint, device=device)
-    for name, value in standalone.state_dict().items():
+    if standalone is None:
+        standalone = load_content_hypergraph_checkpoint(checkpoint, device=device)
+    standalone_model, adapter, _ = standalone
+    for name, value in standalone_model.state_dict().items():
         if not torch.equal(value, model.state_dict()[name]):
             raise ValueError(f"Standalone native load differs at {name}.")
-    del standalone, adapter
+    del standalone_model, adapter
     return model, provider, payload
 
 
@@ -85,6 +112,10 @@ def fixed_monitor_batches(provider, recipe: dict[str, Any], epoch: int, split: s
     """Replay declared monitoring queries at one fixed checkpoint, without updates."""
     if split == "validation":
         return provider.validation_batches(), None
+    if recipe.get("family") == "inherited_attention_v1":
+        from inherited_attention_train import engine_for
+    else:
+        from content_hypergraph_train import engine_for
     engine = engine_for(recipe, str(provider.device))
     ordered, dataset_id = engine.epoch_case_order(provider, epoch)
 
@@ -121,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--split", choices=("validation", "train"), default="validation")
-    parser.add_argument("--panel", choices=("native", "monitor"), default="native")
+    parser.add_argument("--panel", choices=("native", "monitor", "wind_native_roles"), default="native")
     parser.add_argument("--case-keys", help="Comma-separated physical case IDs or native Wind row IDs")
     parser.add_argument("--export-case", action="append", default=[])
     parser.add_argument("--microbatch-cases", type=int, help="Native evaluation packing; exports default to one case")
@@ -138,6 +169,12 @@ def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     model, provider, payload = load_evaluation_components(args.checkpoint, args.device)
     recipe = payload["experiment_identity"]["recipe"]
+    if args.panel == "wind_native_roles":
+        if (recipe.get("family") != "inherited_attention_v1" or recipe.get("dataset") != "wind"
+                or not callable(getattr(provider, "native_role_evaluation_batches", None))):
+            raise ValueError("wind_native_roles is reserved for the opt-in Wind IAG-C provider.")
+        if packing not in (None, 1):
+            raise ValueError("The exact Wind five-role query-hash panel is evaluated one case at a time.")
     selected = None if not args.case_keys else args.case_keys.split(",")
     if selected is not None and recipe["dataset"] == "wind":
         selected = [int(x) for x in selected]
@@ -145,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     records, work, exports, organizations = [], [], [], []
     if args.panel == "monitor":
         batches, selected = fixed_monitor_batches(provider, recipe, int(payload["epoch"]), args.split)
+    elif args.panel == "wind_native_roles":
+        batches = provider.native_role_evaluation_batches(split=args.split, case_keys=selected)
     else:
         batches = provider.native_evaluation_batches(split=args.split, case_keys=selected, microbatch_size=packing)
     with torch.no_grad():
@@ -154,7 +193,10 @@ def main(argv: list[str] | None = None) -> int:
                 model, scene, batch.receivers, recipe["architecture"], "joint",
                 epoch=int(payload["epoch"]), temperature=1.0,
             )
-            records.append(provider.validation_metrics(prediction, batch.targets, auxiliary))
+            if args.panel == "wind_native_roles":
+                records.append(provider.native_role_evaluation_metrics(prediction, batch.targets, batch.auxiliary))
+            else:
+                records.append(provider.validation_metrics(prediction, batch.targets, auxiliary))
             work.append(dict(provider.work_counts(batch, prediction, auxiliary)))
             keys = tuple(str(x) for x in batch.case_keys)
             if (recipe["schema"] == "content_hypergraph_recipe_v2"
@@ -179,9 +221,12 @@ def main(argv: list[str] | None = None) -> int:
                 exports.append({"path": str(path), "case_keys": list(keys),
                                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                                 "array_shapes": {k: list(v.shape) for k, v in arrays.items()}})
-    reducer = getattr(provider, "reduce_native_evaluation_metrics", None)
-    metrics = (reducer(records, split=args.split, case_keys=selected) if callable(reducer)
-               else provider.reduce_native_metrics(records))
+    if args.panel == "wind_native_roles":
+        metrics = provider.reduce_native_role_evaluation_metrics(records, split=args.split, case_keys=selected)
+    else:
+        reducer = getattr(provider, "reduce_native_evaluation_metrics", None)
+        metrics = (reducer(records, split=args.split, case_keys=selected) if callable(reducer)
+                   else provider.reduce_native_metrics(records))
     if args.panel == "monitor":
         metrics = label_monitor_metrics(metrics)
     result = {
@@ -191,8 +236,12 @@ def main(argv: list[str] | None = None) -> int:
         "checkpoint_sha256": hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
         "completed_epoch": int(payload["epoch"]), "split": args.split,
         "panel": args.panel,
-        "receiver_scope": ("full native endpoint support" if args.panel == "native" else
-                           "fixed checkpoint; declared primary monitoring queries and native auxiliary samples"),
+        "receiver_scope": (
+            "fixed five-role native Q8192 diagnostic board, independent of two-region objective"
+            if args.panel == "wind_native_roles" else
+            "full native endpoint support" if args.panel == "native" else
+            "fixed checkpoint; declared primary monitoring queries and native auxiliary samples"
+        ),
         "evaluation_microbatch_cases": packing,
         "provider_binding_sha256": canonical_sha256(payload["experiment_identity"]["provider_identity"]),
         "metrics": metrics, "records": records, "work_counts": work, "exports": exports,
