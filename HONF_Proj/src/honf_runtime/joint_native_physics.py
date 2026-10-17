@@ -487,7 +487,7 @@ def evaluate_seams(model,provider,payload,panel,output,*,crossings=None):
             center=coordinates.new_tensor(source['crossing_center'])[None]
             qid=template.query_ids.new_tensor([[source['query_id']]])
             steps=np.asarray(source['shrinking_steps_native_coordinate_units'],dtype=np.float64)
-            if center.shape!=(1,1,2) or not np.all(np.isfinite(steps)&(steps>0)):
+            if center.shape!=(1,1,template.coordinates.shape[-1]) or not np.all(np.isfinite(steps)&(steps>0)):
                 raise ValueError('Shared crossing coordinates or shrinking steps are invalid.')
             bracket_width=source['crossing_bracket_width']
         else:

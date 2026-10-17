@@ -1,5 +1,6 @@
 """Scientific joins, input-only panels, physical units and explicit E controls."""
 from types import SimpleNamespace
+from dataclasses import replace
 import json
 import copy
 
@@ -141,10 +142,21 @@ def test_native_K_effects_exclude_padding_but_keep_zero_measure_sources():
     assert mask.tolist()==[[[True,True,False],[False,False,False]]]
 
 
-def test_dense_seams_replay_exact_sparse_crossing_coordinates(monkeypatch,tmp_path):
+@pytest.mark.parametrize('coordinate_dim',[2,3])
+def test_dense_seams_replay_exact_sparse_crossing_coordinates(monkeypatch,tmp_path,coordinate_dim):
     import honf_runtime.joint_native_physics as physics
-    core=JointNativeCore.from_a2d(_core('A2-D').double()).eval()
-    scene,query=_double(_scene(1)),_double(_query(1));organization=core.prepare(scene)
+    core=JointNativeCore.from_a2d(_core('A2-D',coordinate_dim=coordinate_dim,
+        query_input_dim=coordinate_dim,thermal_response_rank=0).double()).eval()
+    scene,query=_double(_scene(1)),_double(_query(1))
+    if coordinate_dim==3:
+        def extend(value,fill):return torch.cat((value,torch.full_like(value[...,:1],fill)),-1)
+        scene=replace(scene,module_coordinates=extend(scene.module_coordinates,.1),
+            environment_coordinates=extend(scene.environment_coordinates,.2),
+            module_characteristic_lengths=extend(scene.module_characteristic_lengths,.1),
+            environment_characteristic_lengths=extend(scene.environment_characteristic_lengths,.1),
+            coordinate_origin=extend(scene.coordinate_origin,0.),coordinate_scale=extend(scene.coordinate_scale,1.))
+        query=replace(query,coordinates=extend(query.coordinates,.1),features=extend(query.features,.2))
+    organization=core.prepare(scene)
     provider=SimpleNamespace(adapter=SimpleNamespace(query_features=lambda coordinates,support:coordinates*2,
         physical_velocity=lambda field,coordinates:(field,None,None)))
     batch=SimpleNamespace(case_keys=('A',),scene_inputs=(SimpleNamespace(support=object()),),receivers=object())
