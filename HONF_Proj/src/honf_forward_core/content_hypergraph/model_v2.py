@@ -51,6 +51,12 @@ _DECODE_TRACE_DEFAULTS = (
     "direct_temperature_coefficients",
 )
 _DECODE_TRACE_AVAILABLE = (
+    "native_seed_permission",
+    "native_module_permission",
+    "native_selected_batch",
+    "native_selected_query",
+    "native_selected_source",
+    "native_selected_source_ids",
     "edge_access",
     "edge_base_access",
     "edge_used_access",
@@ -764,6 +770,7 @@ class ContentHypergraphCoreV2(nn.Module):
         if "scene_summary_initial" in selected:
             organization_trace["scene_summary_initial"] = scene_summary
 
+        native_cycle_trace = None
         for cycle_index, block in enumerate(self.context_blocks):
             module_boundary = module_states
             environment_boundary = environment_states
@@ -781,6 +788,17 @@ class ContentHypergraphCoreV2(nn.Module):
                 organization_trace[f"cycle{cycle_index}/module_boundary"] = module_states
             if f"cycle{cycle_index}/environment_boundary" in selected:
                 organization_trace[f"cycle{cycle_index}/environment_boundary"] = environment_states
+            native_capture = self._captures_native_routes() and cycle_index == self.context_depth - 1
+            native_options = ({
+                "capture_native_routes": True,
+                "cycle_index": cycle_index,
+                "owner_token": self._owner_token,
+                "parameter_versions": self._parameter_version_stamp(),
+                "buffer_versions": self._buffer_version_stamp(),
+                "scene_identity": (scene.scene_key, scene.normalizer_key, scene.coordinate_frame_key),
+                "model_config_key": self._config_key(),
+                "scene_tensor_versions": scene.tensor_version_stamp(),
+            } if native_capture else {})
             module_states, environment_states, cycle_trace = block(
                 module_states,
                 environment_states,
@@ -788,7 +806,10 @@ class ContentHypergraphCoreV2(nn.Module):
                 frame_scale,
                 return_attention=request_attention,
                 geometry_features=context_geometry_features,
+                **native_options,
             )
+            if native_capture:
+                native_cycle_trace = cycle_trace
             for name, value in cycle_trace.items():
                 key = f"cycle{cycle_index}/{name}"
                 if key in selected:
@@ -993,7 +1014,7 @@ class ContentHypergraphCoreV2(nn.Module):
             prep_work["source_read_score_projection_entries"] = source_read_projection.numel()
             prep_work["source_read_completion_projection_entries"] = (
                 0 if source_read_completion is None else source_read_completion.numel())
-        return PreparedOrganizationV2(
+        prepared = PreparedOrganizationV2(
             scene=scene,
             module_states=module_states,
             environment_states=environment_states,
@@ -1052,6 +1073,20 @@ class ContentHypergraphCoreV2(nn.Module):
                 else ()
             ),
         )
+        return self._finalize_native_preparation(prepared, native_cycle_trace)
+
+    def _captures_native_routes(self) -> bool:
+        """Narrow opt-in hook; historical families retain their exact path."""
+        return False
+
+    def _finalize_native_preparation(self, organization, cycle_trace):
+        return organization
+
+    def _uses_native_retrieval(self) -> bool:
+        return False
+
+    def _decode_native_retrieval(self, organization, query, query_states, local_pairs, *, return_messages=False):
+        raise NotImplementedError("Native retrieval is an explicit core capability.")
 
     @staticmethod
     def _bounded_trace(values: Mapping[str, Tensor], selected: set[str], max_elements: int, explicit: bool):
@@ -1392,7 +1427,15 @@ class ContentHypergraphCoreV2(nn.Module):
                 and "direct_source_messages" in selected
                 else None
             )
-            if self._uses_source_selection():
+            if self._uses_native_retrieval():
+                result = self._decode_native_retrieval(
+                    organization, query, query_states, local_pairs, return_messages=want_messages)
+                global_context, direct_access = result.context, result.alpha
+                direct_coefficients, messages = result.response, result.messages
+                source_read_work = result.counts
+                trace.update({name: value for name, value in result.trace.items() if name in selected})
+                direct_message_indices = None
+            elif self._uses_source_selection():
                 from .source_read_decoder_v1 import decode_selected_sources_v1
                 result = decode_selected_sources_v1(self, organization, query, query_states,
                                                     return_messages=want_messages)
@@ -1446,6 +1489,7 @@ class ContentHypergraphCoreV2(nn.Module):
                     "thermal_basis", "edge_temperature_contributions", "direct_source_access",
                     "direct_source_messages", "direct_temperature_coefficients",
                     "source_read_gates", "source_read_support",
+                    "native_module_permission", "native_seed_permission",
                 } and value.ndim >= 2 and value.shape[1] == query.num_queries and not (
                     direct_messages_preselected and name == "direct_source_messages"
                 ):
@@ -1589,10 +1633,11 @@ class ContentHypergraphCoreV2(nn.Module):
             })
         if source_read_work is not None:
             fine_rows = int(source_read_work["fine_executed_rows"])
+            message_rows = int(source_read_work.get("fine_message_projection_rows", fine_rows))
             selected_rows = int(source_read_work["fine_selected_rows"])
             full_fastpath = bool(source_read_work.get("source_full_fastpath", 0))
             result.update({"direct_source_rows": fine_rows,
-                           "direct_source_message_entries": fine_rows * self.local_hidden_dim,
+                           "direct_source_message_entries": message_rows * self.local_hidden_dim,
                            "direct_dense_reference_entries": direct_rows if full_fastpath
                                and self.thermal_response_rank else 0,
                            "direct_temperature_coefficient_entries": (direct_rows if full_fastpath else selected_rows)
@@ -1772,6 +1817,9 @@ class ContentHypergraphCoreV2(nn.Module):
                 return_messages=False,
             )
             return basis, None, local_pairs, local_coefficients, None
+        if self._uses_native_retrieval():
+            result = self._decode_native_retrieval(organization, query, query_states, local_pairs)
+            return None, result.response, local_pairs, local_coefficients, result.counts
         if self._uses_source_selection():
             from .source_read_decoder_v1 import decode_selected_sources_v1
             result = decode_selected_sources_v1(self, organization, query, query_states)

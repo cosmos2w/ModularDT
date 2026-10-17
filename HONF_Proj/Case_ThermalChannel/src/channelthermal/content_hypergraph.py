@@ -201,26 +201,44 @@ class ThermalContentHypergraphAdapter(nn.Module):
                 config[name] = expected
             core = ContentHypergraphCore(**config)
         core_config_value = core.get_config()
+        native_retrieval_schema = core_config_value.get("schema") == "native_retrieval_core_v1"
+        if native_retrieval_schema:
+            from honf_forward_core.native_retrieval.core import NativeRetrievalCore
+
+            expected_native_fields = {
+                "schema", "base_model_config", "native_tau_mm", "native_tau_me",
+                "native_tau_q", "native_backend", "environment_value_reader",
+            }
+            base_core_config = core_config_value.get("base_model_config")
+            if (not isinstance(core, NativeRetrievalCore)
+                    or set(core_config_value) != expected_native_fields
+                    or core_config_value.get("environment_value_reader") is not False
+                    or not isinstance(base_core_config, Mapping)
+                    or base_core_config.get("schema") != "content_hypergraph_core_v2"
+                    or base_core_config.get("architecture") != "A2-D"):
+                raise ValueError("Thermal base adapter accepts only the explicit no-E native A2-D capability.")
+        else:
+            base_core_config = core_config_value
         iag_affine_capability = (
-            core_config_value.get("schema") in (
+            base_core_config.get("schema") in (
                 "inherited_attention_core_v1", ROUND5_MOMENT_CORE_SCHEMA,
                 ROUND6_READOUT_CORE_SCHEMA,
             )
-            and core_config_value.get("architecture") == "IAG-C"
-            and core_config_value.get("thermal_response") is True
-            and core_config_value.get("signed_carrier_width") == 8
+            and base_core_config.get("architecture") == "IAG-C"
+            and base_core_config.get("thermal_response") is True
+            and base_core_config.get("signed_carrier_width") == 8
         )
         legacy_affine_capability = (
-            type(core_config_value.get("thermal_response_rank")) is int
-            and core_config_value["thermal_response_rank"] >= 1
+            type(base_core_config.get("thermal_response_rank")) is int
+            and base_core_config["thermal_response_rank"] >= 1
         )
         if (
-            core_config_value["module_input_dim"] != THERMAL_CONTENT_MODULE_FEATURES
-            or core_config_value["environment_input_dim"] != THERMAL_CONTENT_ENVIRONMENT_FEATURES
-            or core_config_value["coordinate_dim"] != 2
-            or core_config_value["query_input_dim"] != 0
-            or core_config_value["operating_input_dim"] != THERMAL_CONTENT_OPERATING_FEATURES
-            or core_config_value["output_dim"] != 3
+            base_core_config["module_input_dim"] != THERMAL_CONTENT_MODULE_FEATURES
+            or base_core_config["environment_input_dim"] != THERMAL_CONTENT_ENVIRONMENT_FEATURES
+            or base_core_config["coordinate_dim"] != 2
+            or base_core_config["query_input_dim"] != 0
+            or base_core_config["operating_input_dim"] != THERMAL_CONTENT_OPERATING_FEATURES
+            or base_core_config["output_dim"] != 3
             or not (legacy_affine_capability or iag_affine_capability)
         ):
             raise ValueError("Thermal content core dimensions or affine response capability are incompatible.")
@@ -881,8 +899,25 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
         core_type = _content_hypergraph_core_v2_type()
         if core is None:
             config = dict(core_config or {})
-            if config.get("schema") != "content_hypergraph_core_v2":
-                raise ValueError("Thermal v2 requires a content_hypergraph_core_v2 config.")
+            native_schema = config.get("schema") == "native_retrieval_core_v1"
+            if native_schema:
+                from honf_forward_core.native_retrieval.core import NativeRetrievalCore
+
+                native_fields = {
+                    "schema", "base_model_config", "native_tau_mm", "native_tau_me",
+                    "native_tau_q", "native_backend", "environment_value_reader",
+                }
+                if set(config) != native_fields or config.get("environment_value_reader") is not False:
+                    raise ValueError("Thermal native-retrieval core config must use the exact no-E schema.")
+                base_config = config.get("base_model_config")
+                if not isinstance(base_config, Mapping) or base_config.get("schema") != "content_hypergraph_core_v2":
+                    raise ValueError("Thermal native retrieval requires its exact v2 A2-D base config.")
+                config_type = NativeRetrievalCore
+            else:
+                if config.get("schema") != "content_hypergraph_core_v2":
+                    raise ValueError("Thermal v2 requires a content_hypergraph_core_v2 config.")
+                base_config = config
+                config_type = core_type
             required = {
                 "module_input_dim": THERMAL_CONTENT_MODULE_FEATURES,
                 "environment_input_dim": THERMAL_CONTENT_ENVIRONMENT_FEATURES,
@@ -892,14 +927,30 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
                 "output_dim": 3,
             }
             for name, expected in required.items():
-                if config.get(name) != expected:
+                if base_config.get(name) != expected:
                     raise ValueError(f"Thermal v2 core requires explicit {name}={expected}.")
-            core = core_type.from_config(config)
+            if native_schema and base_config.get("architecture") != "A2-D":
+                raise ValueError("Thermal native retrieval requires the unchanged A2-D architecture.")
+            core = config_type.from_config(config)
         if not isinstance(core, core_type):
             raise TypeError("Thermal v2 adapter requires ContentHypergraphCoreV2.")
         core_config_value = core.get_config()
-        if core_config_value.get("schema") != "content_hypergraph_core_v2":
-            raise ValueError("Thermal v2 core config has the wrong schema.")
+        native_schema = core_config_value.get("schema") == "native_retrieval_core_v1"
+        if native_schema:
+            from honf_forward_core.native_retrieval.core import NativeRetrievalCore
+
+            native_fields = {
+                "schema", "base_model_config", "native_tau_mm", "native_tau_me",
+                "native_tau_q", "native_backend", "environment_value_reader",
+            }
+            if (not isinstance(core, NativeRetrievalCore) or set(core_config_value) != native_fields
+                    or core_config_value.get("environment_value_reader") is not False):
+                raise ValueError("Thermal v2 accepts only the explicit native-retrieval core capability.")
+            dimensions_config = core_config_value["base_model_config"]
+        else:
+            if core_config_value.get("schema") != "content_hypergraph_core_v2":
+                raise ValueError("Thermal v2 core config has the wrong schema.")
+            dimensions_config = core_config_value
         expected_dimensions = {
             "module_input_dim": THERMAL_CONTENT_MODULE_FEATURES,
             "environment_input_dim": THERMAL_CONTENT_ENVIRONMENT_FEATURES,
@@ -908,9 +959,9 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             "operating_input_dim": THERMAL_CONTENT_OPERATING_FEATURES,
             "output_dim": 3,
         }
-        if any(core_config_value.get(name) != expected for name, expected in expected_dimensions.items()):
+        if any(dimensions_config.get(name) != expected for name, expected in expected_dimensions.items()):
             raise ValueError("Thermal v2 core dimensions differ from the native Thermal feature contract.")
-        if core_config_value.get("architecture") not in ("A2-D", "A2-H6"):
+        if dimensions_config.get("architecture") not in (("A2-D",) if native_schema else ("A2-D", "A2-H6")):
             raise ValueError("Thermal v2 architecture must be A2-D or A2-H6.")
         super().__init__(
             normalization_stats,
@@ -977,7 +1028,12 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             raise ValueError("Thermal v2 checkpoint is missing the fixed E192 environment catalogue.")
         core_type = _content_hypergraph_core_v2_type()
         core_config = dict(payload.get("core", {}))
-        core = core_type.from_config(core_config)
+        if core_config.get("schema") == "native_retrieval_core_v1":
+            from honf_forward_core.native_retrieval.core import NativeRetrievalCore
+
+            core = NativeRetrievalCore.from_config(core_config)
+        else:
+            core = core_type.from_config(core_config)
         adapter = cls(
             payload["normalization_stats"],
             core=core,

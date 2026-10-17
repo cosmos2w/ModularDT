@@ -9,6 +9,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from ..inherited_attention.contracts import RouteScoreSnapshot
+from ..native_retrieval.route_capture import NativeRouteSnapshot, make_native_route_snapshot
 from .spatial_features_v2 import pair_score_features
 
 
@@ -112,32 +113,71 @@ class SpatialRouteAttentionV2(nn.Module):
         destination_ids: Tensor | None = None,
         donor_ids: Tensor | None = None,
         geometry_features: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None] | tuple[Tensor, Tensor | None, RouteScoreSnapshot]:
+        capture_native_route_snapshot: bool = False,
+        stage_identity: str | None = None,
+        owner_token: int | None = None,
+        parameter_versions: tuple[tuple[int, int], ...] = (),
+        buffer_versions: tuple[tuple[int, int], ...] = (),
+        scene_identity: tuple[object, object, object] | None = None,
+        scene_tensor_versions: tuple[tuple[int, int, int], ...] = (),
+        model_config_key: tuple[object, ...] = (),
+    ) -> (
+        tuple[Tensor, Tensor | None]
+        | tuple[Tensor, Tensor | None, RouteScoreSnapshot]
+        | tuple[Tensor, Tensor | None, NativeRouteSnapshot]
+    ):
         batch, query_count, _ = destination.shape
         key_count = donor.shape[1]
         if key_count == 0:
             attention = destination.new_zeros(batch, self.heads, query_count, 0) if return_attention else None
             update = destination.new_zeros(batch, query_count, self.width)
-            if not export_score_snapshot:
+            if not export_score_snapshot and not capture_native_route_snapshot:
                 return update, attention
-            if route_name not in ("em", "ee") or destination_ids is None or donor_ids is None:
-                raise ValueError("An exported route snapshot requires typed EM/EE names and native IDs.")
             empty_query = destination.new_zeros(batch, self.heads, query_count, self.head_width)
             empty_key = destination.new_zeros(batch, self.heads, 0, self.head_width)
             empty_bias = destination.new_zeros(batch, self.heads, query_count, 0)
-            snapshot = RouteScoreSnapshot(
-                route=route_name,
-                query_scaled=empty_query,
-                key_normalized=empty_key,
-                geometry_bias=empty_bias,
-                raw_logits=empty_bias,
-                donor_mask=donor_mask & (donor_measure > 0),
-                destination_mask=destination_mask,
-                donor_measure=donor_measure,
-                anchor_ids=destination_ids,
-                donor_ids=donor_ids,
-                score_origin=f"last_{route_name}",
-            )
+            if export_score_snapshot and capture_native_route_snapshot:
+                raise ValueError("Legacy and native route snapshots use separate versioned contracts.")
+            if route_name is None or destination_ids is None or donor_ids is None:
+                raise ValueError("An exported route snapshot requires a route name and native IDs.")
+            if capture_native_route_snapshot:
+                if route_name not in ("mm", "me", "em", "ee") or not stage_identity:
+                    raise ValueError("A native route snapshot requires a typed route and stage identity.")
+                snapshot = make_native_route_snapshot(
+                    route=route_name,
+                    query_scaled=empty_query,
+                    key_normalized=empty_key,
+                    geometry_bias=empty_bias,
+                    allowed=donor_mask.new_zeros(batch, query_count, 0),
+                    destination_mask=destination_mask,
+                    donor_mask=donor_mask,
+                    destination_ids=destination_ids,
+                    donor_ids=donor_ids,
+                    donor_measure=donor_measure,
+                    stage_identity=stage_identity,
+                    owner_token=owner_token,
+                    parameter_versions=parameter_versions,
+                    buffer_versions=buffer_versions,
+                    scene_identity=scene_identity,
+                    scene_tensor_versions=scene_tensor_versions,
+                    model_config_key=model_config_key,
+                )
+            else:
+                if route_name not in ("em", "ee"):
+                    raise ValueError("The legacy route snapshot remains restricted to EM/EE.")
+                snapshot = RouteScoreSnapshot(
+                    route=route_name,
+                    query_scaled=empty_query,
+                    key_normalized=empty_key,
+                    geometry_bias=empty_bias,
+                    raw_logits=empty_bias,
+                    donor_mask=donor_mask & (donor_measure > 0),
+                    destination_mask=destination_mask,
+                    donor_measure=donor_measure,
+                    anchor_ids=destination_ids,
+                    donor_ids=donor_ids,
+                    score_origin=f"last_{route_name}",
+                )
             return update, attention, snapshot
 
         q = self.query(self.query_norm(destination))
@@ -179,6 +219,7 @@ class SpatialRouteAttentionV2(nn.Module):
         row_has_donor = allowed.any(dim=-1, keepdim=True)
         additive = torch.where(row_has_donor[:, None, :, :], additive, torch.zeros_like(additive))
         snapshot = None
+        native_snapshot = None
         if export_score_snapshot:
             if route_name not in ("em", "ee") or destination_ids is None or donor_ids is None:
                 raise ValueError("An exported route snapshot requires typed EM/EE names and native IDs.")
@@ -189,12 +230,41 @@ class SpatialRouteAttentionV2(nn.Module):
                 key_normalized=k,
                 geometry_bias=geometry_bias,
                 raw_logits=raw_logits,
-                donor_mask=valid_donors,
+                donor_mask=donor_mask,
                 destination_mask=destination_mask,
                 donor_measure=donor_measure,
                 anchor_ids=destination_ids,
                 donor_ids=donor_ids,
                 score_origin=f"last_{route_name}",
+            )
+        if capture_native_route_snapshot:
+            if export_score_snapshot:
+                raise ValueError("Legacy and native route snapshots use separate versioned contracts.")
+            if route_name not in ("mm", "me", "em", "ee") or destination_ids is None or donor_ids is None:
+                raise ValueError("A native route snapshot requires a typed route and native IDs.")
+            if not stage_identity:
+                raise ValueError("A native route snapshot requires a stage identity.")
+            native_snapshot = make_native_route_snapshot(
+                route=route_name,
+                query_scaled=q,
+                key_normalized=k,
+                geometry_bias=geometry_bias,
+                allowed=allowed,
+                destination_mask=destination_mask,
+                # Keep native scene presence distinct from contextualizer
+                # eligibility: a present zero-measure module can still be an
+                # exact native thermal source and retrieval self-member.
+                donor_mask=donor_mask,
+                destination_ids=destination_ids,
+                donor_ids=donor_ids,
+                donor_measure=donor_measure,
+                stage_identity=stage_identity,
+                owner_token=owner_token,
+                parameter_versions=parameter_versions,
+                buffer_versions=buffer_versions,
+                scene_identity=scene_identity,
+                scene_tensor_versions=scene_tensor_versions,
+                model_config_key=model_config_key,
             )
         attended = F.scaled_dot_product_attention(
             q,
@@ -210,11 +280,13 @@ class SpatialRouteAttentionV2(nn.Module):
         valid_rows = row_has_donor & destination_mask[:, :, None]
         update = update * valid_rows.to(update.dtype)
         if not return_attention:
-            return (update, None, snapshot) if snapshot is not None else (update, None)
+            exported = native_snapshot if native_snapshot is not None else snapshot
+            return (update, None, exported) if exported is not None else (update, None)
         # Trace-only explicit weights; the production path remains SDPA.
         logits = torch.matmul(q, k.transpose(-2, -1)) + additive
         weights = safe_masked_softmax(logits, allowed[:, None, :, :], dim=-1)
-        return (update, weights, snapshot) if snapshot is not None else (update, weights)
+        exported = native_snapshot if native_snapshot is not None else snapshot
+        return (update, weights, exported) if exported is not None else (update, weights)
 
 
 class TokenFeedForwardV2(nn.Module):
@@ -258,6 +330,14 @@ class StagedContextCycleV2(nn.Module):
         *,
         return_attention: bool = False,
         export_route_scores: bool = False,
+        capture_native_routes: bool = False,
+        cycle_index: int = 0,
+        owner_token: int | None = None,
+        parameter_versions: tuple[tuple[int, int], ...] = (),
+        buffer_versions: tuple[tuple[int, int], ...] = (),
+        scene_identity: tuple[object, object, object] | None = None,
+        scene_tensor_versions: tuple[tuple[int, int, int], ...] = (),
+        model_config_key: tuple[object, ...] = (),
         geometry_features: dict[str, Tensor] | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, object]]:
         module_lengths = scene.module_characteristic_lengths
@@ -272,15 +352,31 @@ class StagedContextCycleV2(nn.Module):
         if environment_reference is None:
             environment_reference = environment_measure.new_ones(batch)
 
-        mm, mm_weights = self.mm(
+        mm_result = self.mm(
             module_states, module_states,
             scene.module_coordinates, scene.module_coordinates,
             module_lengths, module_lengths,
             module_measure, module_reference,
             scene.module_mask, scene.module_mask, frame_scale,
             remove_self=True, return_attention=return_attention,
+            route_name="mm",
+            destination_ids=scene.module_ids,
+            donor_ids=scene.module_ids,
+            capture_native_route_snapshot=capture_native_routes,
+            stage_identity=f"cycle{cycle_index}/mm",
+            owner_token=owner_token,
+            parameter_versions=parameter_versions,
+            buffer_versions=buffer_versions,
+            scene_identity=scene_identity,
+            scene_tensor_versions=scene_tensor_versions,
+            model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["mm"],
         )
+        if capture_native_routes:
+            mm, mm_weights, mm_snapshot = mm_result
+        else:
+            mm, mm_weights = mm_result
+            mm_snapshot = None
         module_after_mm = module_states + self.dropout(mm)
         module_after_mm = module_after_mm * scene.module_mask[:, :, None].to(module_after_mm.dtype)
 
@@ -328,15 +424,31 @@ class StagedContextCycleV2(nn.Module):
         environment_after_ee = environment_after_em + self.dropout(ee)
         environment_next = self.environment_ff(environment_after_ee, scene.environment_mask)
 
-        me, me_weights = self.me(
+        me_result = self.me(
             module_after_mm, environment_next,
             scene.module_coordinates, scene.environment_coordinates,
             module_lengths, environment_lengths,
             environment_measure, environment_reference,
             scene.environment_mask, scene.module_mask, frame_scale,
             return_attention=return_attention,
+            route_name="me",
+            destination_ids=scene.module_ids,
+            donor_ids=scene.environment_ids,
+            capture_native_route_snapshot=capture_native_routes,
+            stage_identity=f"cycle{cycle_index}/me",
+            owner_token=owner_token,
+            parameter_versions=parameter_versions,
+            buffer_versions=buffer_versions,
+            scene_identity=scene_identity,
+            scene_tensor_versions=scene_tensor_versions,
+            model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["me"],
         )
+        if capture_native_routes:
+            me, me_weights, me_snapshot = me_result
+        else:
+            me, me_weights = me_result
+            me_snapshot = None
         module_after_me = module_after_mm + self.dropout(me)
         module_next = self.module_ff(module_after_me, scene.module_mask)
         trace = {
@@ -357,4 +469,7 @@ class StagedContextCycleV2(nn.Module):
         if export_route_scores:
             trace["em_score_snapshot"] = em_snapshot
             trace["ee_score_snapshot"] = ee_snapshot
+        if capture_native_routes:
+            trace["mm_native_route_snapshot"] = mm_snapshot
+            trace["me_native_route_snapshot"] = me_snapshot
         return module_next, environment_next, trace

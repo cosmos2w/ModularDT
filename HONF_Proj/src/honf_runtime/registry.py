@@ -38,6 +38,12 @@ MODEL_FAMILIES = {
         workflows=("hyperedge_readout_train", "hyperedge_readout_evaluate"),
         description="Round6 matched receiver-conditioned readouts over completed H hyperedge states",
     ),
+    "native_retrieval_v1": ModelFamilySpec(
+        family_id="native_retrieval_v1",
+        available=True,
+        workflows=("native_retrieval_train", "native_retrieval_evaluate"),
+        description="Round7 matched A2-D continuations with typed native-token retrieval and strict no-E primary access",
+    ),
     "honf_content_hypergraph": ModelFamilySpec(
         family_id="honf_content_hypergraph",
         available=True,

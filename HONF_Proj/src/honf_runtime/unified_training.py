@@ -1942,6 +1942,19 @@ class TrainingEngine:
         for group in optimizer.param_groups:
             group["lr"] = by_name[group["group_name"]].schedule.value(epoch)
 
+    @staticmethod
+    def _set_native_retrieval_epoch(model: nn.Module, epoch: int) -> Mapping[str, Any]:
+        core = getattr(model, "core", model)
+        setter = getattr(core, "set_native_training_epoch", None)
+        routing_state = getattr(core, "native_routing_state", None)
+        if not callable(setter) or not callable(routing_state):
+            raise TypeError("G-native-M requires a core with the absolute-age permission curriculum API.")
+        setter(epoch)
+        observed = routing_state()
+        if not isinstance(observed, Mapping) or observed.get("absolute_epoch") != epoch:
+            raise RuntimeError("G-native-M permission state did not advance to the absolute TRAIN age.")
+        return observed
+
     def diagnose_macro_update(
         self,
         model: nn.Module,
@@ -2890,6 +2903,7 @@ class TrainingEngine:
         moment_hyperedge_child: Mapping[str, Any] | None = None,
         hyperedge_readout_child: Mapping[str, Any] | None = None,
         hyperedge_readout_extension: str | Path | None = None,
+        native_retrieval_child: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2941,6 +2955,50 @@ class TrainingEngine:
             identity.get("family") == "hyperedge_readout_round6"
             or identity.get("workflow") == "hyperedge_readout_fit_v1"
         )
+        identity_is_native_retrieval = (
+            identity.get("family") == "native_retrieval_v1"
+            or identity.get("model_family") == "native_retrieval_v1"
+            or identity.get("workflow") == "native_retrieval_joint_v1"
+        )
+        native_recipe = None
+        if identity_is_native_retrieval:
+            from .native_retrieval_protocol import (
+                NATIVE_RETRIEVAL_FAMILY,
+                NATIVE_RETRIEVAL_WORKFLOW,
+                canonical_sha256,
+                native_retrieval_child_declaration,
+                validate_native_retrieval_recipe,
+            )
+
+            native_recipe = validate_native_retrieval_recipe(identity.get("recipe", {}), verify_source_file=True)
+            if (identity.get("family") != NATIVE_RETRIEVAL_FAMILY
+                    or identity.get("model_family") != NATIVE_RETRIEVAL_FAMILY
+                    or identity.get("workflow") != NATIVE_RETRIEVAL_WORKFLOW
+                    or identity.get("protocol") != native_recipe["protocol"]
+                    or identity.get("treatment") != native_recipe["treatment"]
+                    or identity.get("recipe_sha256") != canonical_sha256(native_recipe)):
+                raise ValueError("Round7 family, treatment, workflow and strict recipe identity fields must agree exactly.")
+            if (self.config.training_mode != "joint" or arm != "A2-D"
+                    or self.selection.response_guard_metric is not None
+                    or optimizer_seed is not None or allow_microbatch_change
+                    or mathematical_route_branch is not None or joint_core_revision is not None
+                    or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                    or source_read_child is not None or source_read_child_auxiliary_fit is not None
+                    or inherited_attention_sparse_child is not None or moment_hyperedge_child is not None
+                    or hyperedge_readout_child is not None or hyperedge_readout_extension is not None
+                    or numerical_pooling_amendment is not None or output_policy_amendment is not None
+                    or fresh_initialization is not None):
+                raise ValueError("Round7 is an exclusive segmented D0 A2-D continuation through TrainingEngine.")
+            if native_retrieval_child is None:
+                raise ValueError("Every Round7 branch and exact resume requires its strict D0 child declaration.")
+            if dict(native_retrieval_child) != native_retrieval_child_declaration(native_recipe):
+                raise ValueError("Round7 child declaration differs from the sealed native-retrieval recipe.")
+            if ((branch_from_checkpoint is None) == (resume_checkpoint is None)):
+                raise ValueError("Round7 requires one fresh exact e500 branch or an exact own-run resume.")
+            if stop_after not in (600, 1000, 1500, 2500):
+                raise ValueError("Round7 continuation stops are restricted to the sealed e600/e1000/e1500/e2500 reviews.")
+        elif native_retrieval_child is not None:
+            raise ValueError("A native retrieval child declaration requires the strict Round7 family identity.")
         readout_recipe = None
         if identity_is_hyperedge_readout:
             from .hyperedge_readout_protocol import validate_hyperedge_readout_recipe
@@ -3162,6 +3220,15 @@ class TrainingEngine:
                 pass
             else:
                 raise ValueError("A Round6 joint child must write to a distinct run directory from its H parent.")
+        if identity_is_native_retrieval and branch_from_checkpoint is not None:
+            if source_path is None or source_path.resolve() != Path(native_recipe["source_checkpoint"]).resolve():
+                raise ValueError("Round7 fresh branch path must be the exact recipe-pinned D0 e500 checkpoint.")
+            try:
+                source_path.resolve().relative_to(output)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("A Round7 child must write to a distinct run directory from its D0 parent.")
         source_payload: Mapping[str, Any] | None = None
         restored_rng: Mapping[str, Any] | None = None
         if source_path is not None:
@@ -3172,6 +3239,18 @@ class TrainingEngine:
                     source_payload.get("experiment_identity", {}).get("fresh_initialization")
                     != fresh_initialization):
                 raise ValueError("Fresh matched resume checkpoint does not preserve its original initialization receipt.")
+        if identity_is_native_retrieval:
+            if resume_checkpoint is not None:
+                from .native_retrieval_child import verify_native_retrieval_resume
+
+                verify_native_retrieval_resume(source_payload, recipe=native_recipe, stop_after=int(stop_after))
+                source_identity = source_payload.get("experiment_identity", {})
+                if (source_identity.get("recipe_sha256") != identity.get("recipe_sha256")
+                        or source_payload.get("arm") != "A2-D"):
+                    raise ValueError("Round7 exact resume does not preserve its sealed treatment and A2-D arm.")
+            elif (source_payload.get("epoch") != 500 or source_payload.get("arm") != "A2-D"
+                    or source_payload.get("workflow") != "content_hypergraph_joint_v2"):
+                raise ValueError("Round7 fresh child must branch from exact source D0 A2-D e500.")
         if identity_is_moment_hyperedge and resume_checkpoint is not None:
             from .moment_hyperedge_child import verify_moment_hyperedge_resume
 
@@ -3251,6 +3330,29 @@ class TrainingEngine:
             _sampling_dataset_id(provider_identity)
             if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION else ""
         )
+        if identity_is_native_retrieval:
+            expected_sampling_identity = {
+                "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
+                "source_sampling_dataset_id": sampling_dataset_id,
+                "matches_d0_e500_namespace": True,
+                "arm": "A2-D",
+                "fit_epoch_is_absolute": True,
+                "sampler_epoch_mapping": "identity",
+            }
+            if identity.get("sampling_identity") != expected_sampling_identity:
+                raise ValueError("Round7 must retain the exact D0 case_epoch_v1 query namespace and absolute sampling age.")
+            if (self.config.sampling_version != SamplingKey.CASE_EPOCH_VERSION
+                    or not self.config.deterministic_case_order or arm != "A2-D"):
+                raise ValueError("Round7 requires the original deterministic A2-D case_epoch_v1 sampling arm.")
+            if source_payload is not None:
+                source_identity = source_payload.get("experiment_identity", {})
+                source_engine = source_identity.get("engine_config", {})
+                if (source_identity.get("sampling_dataset_id") != sampling_dataset_id
+                        or source_engine.get("sampling_version") != SamplingKey.CASE_EPOCH_VERSION
+                        or source_engine.get("seed") != self.config.seed
+                        or source_engine.get("deterministic_case_order") is not True
+                        or source_identity.get("sampler_epoch_mapping") != self.sampler_epoch_contract()):
+                    raise ValueError("Round7 sampler namespace, seed or absolute epoch mapping differs from D0 e500.")
         sealed_identity = {
             **dict(identity),
             "provider_identity": provider_identity,
@@ -3268,7 +3370,14 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if identity_is_moment_hyperedge and branch_from_checkpoint is not None:
+            if identity_is_native_retrieval and branch_from_checkpoint is not None:
+                from .native_retrieval_child import prepare_native_retrieval_child
+
+                amendment = prepare_native_retrieval_child(
+                    model, provider, source_payload, sealed_identity, native_retrieval_child,
+                    source_path=source_path, stop_after=int(stop_after),
+                )
+            elif identity_is_moment_hyperedge and branch_from_checkpoint is not None:
                 from .moment_hyperedge_child import prepare_moment_hyperedge_child
 
                 amendment = prepare_moment_hyperedge_child(
@@ -3370,6 +3479,7 @@ class TrainingEngine:
                   and architecture_child_initialization is None and source_read_child is None
                   and inherited_attention_sparse_child is None
                   and hyperedge_readout_child is None
+                  and not identity_is_native_retrieval
                   and not identity_is_moment_hyperedge):
                 if source_payload.get("arm") != "warmup":
                     raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
@@ -3377,6 +3487,7 @@ class TrainingEngine:
                     raise ValueError("Matched arms must branch at the declared common warmup boundary.")
             if (architecture_child_initialization is None and source_read_child is None
                     and hyperedge_readout_child is None
+                    and not (identity_is_native_retrieval and branch_from_checkpoint is not None)
                     and (not identity_is_moment_hyperedge or resume_checkpoint is not None)):
                 model.load_state_dict(source_payload["model_state_dict"], strict=True)
                 if fresh_initialization is not None:
@@ -3401,7 +3512,14 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
-        if identity_is_moment_hyperedge and branch_from_checkpoint is not None:
+        if identity_is_native_retrieval:
+            from .native_retrieval_child import verify_native_retrieval_optimizer
+
+            verify_native_retrieval_optimizer(
+                model, optimizer, source_payload["optimizer_state_by_name"],
+                amendment if branch_from_checkpoint is not None else {},
+            )
+        elif identity_is_moment_hyperedge and branch_from_checkpoint is not None:
             from .moment_hyperedge_child import verify_moment_hyperedge_child_optimizer
 
             verify_moment_hyperedge_child_optimizer(
@@ -3533,6 +3651,7 @@ class TrainingEngine:
             resume_amendments.append(amendment)
             amendment_name = ('moment_hyperedge_child' if identity_is_moment_hyperedge and branch_from_checkpoint is not None else
                               'moment_hyperedge_resume' if identity_is_moment_hyperedge else
+                              'native_retrieval_child' if identity_is_native_retrieval and branch_from_checkpoint is not None else
                               'hyperedge_readout_child' if hyperedge_readout_child is not None else
                               'hyperedge_readout_extension' if readout_extension_amendment is not None else
                               'architecture_child_initialization' if architecture_child_initialization is not None else
@@ -3547,6 +3666,7 @@ class TrainingEngine:
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
                 category='logs' if (identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
+                                    or identity_is_native_retrieval
                                     or hyperedge_readout_child is not None
                                     or readout_extension_amendment is not None
                                     or source_read_child is not None
@@ -3596,6 +3716,17 @@ class TrainingEngine:
                         "Round5 H physical history through absolute e1000; Round6 joint rows begin at e1001"
                     ),
                 )
+            elif identity_is_native_retrieval:
+                branch_parent.update(
+                    native_retrieval_child=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
+                    inherited_history_scope=(
+                        f"exact D0 {native_recipe['treatment']} source history through absolute e500; "
+                        "Round7 child rows begin at absolute e501"
+                    ),
+                )
+                history = []
             elif joint_core_revision is None:
                 history = []
             else:
@@ -3699,6 +3830,9 @@ class TrainingEngine:
                 # may leave the module in evaluation mode. The engine owns the
                 # mode for every optimization epoch.
                 model.train(True)
+                native_core = getattr(model, "core", model)
+                if callable(getattr(native_core, "set_native_training_epoch", None)):
+                    self._set_native_retrieval_epoch(model, epoch)
                 phase = self.config.stage_for_epoch(epoch)
                 stage_receipt = None
                 if phase != previous_phase:
@@ -3844,6 +3978,30 @@ class TrainingEngine:
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                     "case_order_sha256": order_hash,
                 }
+                if identity_is_native_retrieval:
+                    if native_recipe["treatment"] == "G-native-M":
+                        native_core = getattr(model, "core", model)
+                        routing_state = getattr(native_core, "native_routing_state", None)
+                        if not callable(routing_state):
+                            raise RuntimeError("G-native-M lost its absolute-age permission state.")
+                        observed_routing = dict(routing_state())
+                        if observed_routing.get("absolute_epoch") != epoch:
+                            raise RuntimeError("G-native-M permission state did not advance on the absolute TRAIN age.")
+                        row["native_routing_state"] = {
+                            "schema": "native_absolute_age_routing_state_v1",
+                            "treatment": native_recipe["treatment"],
+                            "backend": native_recipe["native_backend"],
+                            **observed_routing,
+                        }
+                    else:
+                        row["native_routing_state"] = {
+                            "schema": "native_absolute_age_routing_state_v1",
+                            "treatment": "D-control",
+                            "backend": "full_direct",
+                            "absolute_epoch": epoch,
+                            "access": "full_A2-D_direct",
+                            "environment_value_reader": False,
+                        }
                 sampler_epoch = self.sampler_epoch(epoch)
                 if sampler_epoch != epoch:
                     row["sampler_epoch"] = sampler_epoch

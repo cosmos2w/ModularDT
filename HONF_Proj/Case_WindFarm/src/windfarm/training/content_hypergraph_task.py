@@ -262,6 +262,7 @@ class WindContentHypergraphTask:
 
     def identity_payload(self) -> Mapping[str, Any]:
         model_config = self.model.get_config()
+        architecture = _wind_core_architecture(model_config)
         adapter_state = self.adapter.state_payload()
         train_layouts = sorted({int(self.view.metadata["layout_index"][row]) for row in self.train_rows})
         validation_layouts = sorted({int(self.view.metadata["layout_index"][row]) for row in self.validation_rows})
@@ -269,7 +270,7 @@ class WindContentHypergraphTask:
             "schema": WIND_CONTENT_PROVIDER_SCHEMA,
             "dataset": "WindFarm",
             "family": WIND_CONTENT_FAMILY,
-            "architecture": str(model_config["architecture"]),
+            "architecture": architecture,
             "protocol": self.recipe["protocol"],
             "dataset_profile": self.profile_id,
             "subset_id": self.manifest.get("subset_id", self.profile_id),
@@ -971,7 +972,7 @@ class WindContentHypergraphTask:
         del stage
         if model is not self.model:
             raise ValueError("Wind optimizer groups must be requested for this provider's shared core.")
-        if arm != model.get_config().get("architecture"):
+        if arm != _wind_core_architecture(model.get_config()):
             raise ValueError("Wind optimizer arm differs from the shared core architecture.")
         names = tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
         all_names = tuple(name for name, _ in model.named_parameters())
@@ -1270,6 +1271,41 @@ def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapp
         raise ValueError("Round2 Wind recipe and core typed centroid mode do not match the supported A2-H6 R1 contract.")
 
 
+def _wind_core_architecture(model_config: Mapping[str, Any]) -> str:
+    """Read architecture only from the explicit schema that owns it."""
+    if model_config.get("schema") == "native_retrieval_core_v1":
+        base = model_config.get("base_model_config")
+        if not isinstance(base, Mapping):
+            raise ValueError("Native Wind core config is missing its base A2-D identity.")
+        return str(base.get("architecture"))
+    return str(model_config.get("architecture"))
+
+
+def _validate_native_wind_core_binding(
+    recipe: Mapping[str, Any], model_config: Mapping[str, Any],
+) -> None:
+    """Allow only the exact no-E NativeRetrievalCore over segmented D0."""
+    expected_fields = {
+        "schema", "base_model_config", "native_tau_mm", "native_tau_me",
+        "native_tau_q", "native_backend", "environment_value_reader",
+    }
+    if (not isinstance(model_config, Mapping) or set(model_config) != expected_fields
+            or model_config.get("schema") != "native_retrieval_core_v1"
+            or model_config.get("environment_value_reader") is not False
+            or model_config.get("native_backend") not in ("selected", "dense_masked", "compiled_selected")):
+        raise ValueError("Wind native retrieval requires the exact no-E native core schema.")
+    if (recipe.get("schema") != "content_hypergraph_recipe_v2"
+            or recipe.get("dataset") != "wind"
+            or recipe.get("protocol") != "source_read_development_v1"
+            or recipe.get("source_reader_variant") != "D0"
+            or recipe.get("architecture") != "A2-D"):
+        raise ValueError("Wind native retrieval binds only to the segmented D0 development objective.")
+    base = model_config.get("base_model_config")
+    if not isinstance(base, Mapping):
+        raise TypeError("Wind native retrieval base model config must be a mapping.")
+    _validate_wind_v2_core_binding(recipe, base)
+
+
 def _apply_wind_source_read_core_options(
     model_config: dict[str, Any],
     model_values: Mapping[str, Any],
@@ -1423,6 +1459,7 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
         recipe: Mapping[str, Any],
         _allow_formal_protocol: bool = False,
         _allow_source_read_protocol: bool = False,
+        _allow_native_retrieval: bool = False,
         **kwargs: Any,
     ) -> None:
         from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
@@ -1441,7 +1478,12 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
             raise TypeError("Round2 Wind provider requires WindContentHypergraphAdapterV3.")
         if not isinstance(model, ContentHypergraphCoreV2):
             raise TypeError("Round2 Wind provider requires ContentHypergraphCoreV2.")
-        _validate_wind_v2_core_binding(recipe, model.get_config())
+        config = model.get_config()
+        if _allow_native_retrieval:
+            _validate_native_wind_core_binding(recipe, config)
+        else:
+            _validate_wind_v2_core_binding(recipe, config)
+        self._allow_native_retrieval = bool(_allow_native_retrieval)
         super().__init__(
             view,
             model=model,
@@ -1503,8 +1545,13 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
         if not isinstance(model, ContentHypergraphCoreV2):
             raise TypeError("Round2 Wind provider requires ContentHypergraphCoreV2; v1 cores are not accepted.")
         config = model.get_config()
-        _validate_wind_v2_core_binding(self.recipe, config)
-        if config.get("architecture") != execution_mode:
+        if config.get("schema") == "native_retrieval_core_v1":
+            if not getattr(self, "_allow_native_retrieval", False):
+                raise ValueError("Native retrieval inference requires its explicit runtime capability.")
+            _validate_native_wind_core_binding(self.recipe, config)
+        else:
+            _validate_wind_v2_core_binding(self.recipe, config)
+        if _wind_core_architecture(config) != execution_mode:
             raise ValueError("Round2 Wind execution arm differs from the core's sealed architecture identity.")
         query = self.adapter.make_query_batch(scene, receivers)
         organization = model.prepare(scene, trace_request=trace_request)
@@ -1969,7 +2016,7 @@ class WindFormalA2DTaskV1(WindContentHypergraphTaskV2):
         stage: str = "joint",
     ) -> Sequence[OptimizerGroupSpec]:
         del stage
-        if model is not self.model or arm != "A2-D" or model.get_config().get("architecture") != "A2-D":
+        if model is not self.model or arm != "A2-D" or _wind_core_architecture(model.get_config()) != "A2-D":
             raise ValueError("Formal Wind optimizer group is bound only to this A2-D model.")
         optimizer = self.recipe["optimizer"]
         if (

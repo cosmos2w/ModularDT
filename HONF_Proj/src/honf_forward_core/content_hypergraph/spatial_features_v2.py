@@ -86,9 +86,22 @@ def query_source_features(
     source_lengths: Tensor,
 ) -> tuple[Tensor, Tensor]:
     """Receiver-to-source descriptor using the source's declared size scale."""
+    descriptor = query_source_score_features(
+        query_coordinates, source_coordinates, frame_scale, source_lengths
+    )
+    delta = query_coordinates[:, :, None, :] - source_coordinates[:, None, :, :]
+    return descriptor, relative_gamma(delta, frame_scale)
+
+
+def query_source_score_features(
+    query_coordinates: Tensor,
+    source_coordinates: Tensor,
+    frame_scale: Tensor,
+    source_lengths: Tensor,
+) -> Tensor:
+    """Return narrow A2-D score geometry without Fourier value features."""
     delta = query_coordinates[:, :, None, :] - source_coordinates[:, None, :, :]
     normalized = delta / frame_scale[:, None, None, :]
     distance = torch.linalg.vector_norm(normalized, dim=-1, keepdim=True)
     local = torch.asinh(delta / source_lengths[:, None, :, :])
-    descriptor = torch.cat((normalized, distance, local), dim=-1)
-    return descriptor, relative_gamma(delta, frame_scale)
+    return torch.cat((normalized, distance, local), dim=-1)
