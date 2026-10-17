@@ -196,3 +196,32 @@ def test_dense_router_native_task_gradient_and_typed_budget_restore(routing_mode
     restored.load_state_dict(model.state_dict())
     assert restored._joint_macro_clock==1
     assert int(restored.joint_budget.duals['M'].macro_step)==1
+
+
+def test_fixed_routes_preserve_repeated_native_cell_ids_and_query_permutations():
+    model=JointNativeCore.from_a2d(_core('A2-D').double(),routing_mode='joint').eval()
+    model.set_training_clock(4001,0)
+    scene,query=_double(_scene(1)),_double(_query(1))
+    order=torch.tensor([0,1,0,3,1])
+    repeated=replace(query,coordinates=query.coordinates[:,order],features=query.features[:,order],query_ids=query.query_ids[:,order])
+    with torch.no_grad():
+        organization=model.prepare(scene)
+        expected=model.decode(organization,repeated).nonlinear_field
+        routes=model.capture_read_routes(organization,repeated)
+        assert routes.query_present.sum()==3
+        actual=model.decode_counterfactual_routes(scene,repeated,routes).nonlinear_field
+        torch.testing.assert_close(actual,expected,atol=2e-12,rtol=2e-12)
+
+
+def test_fixed_routes_accept_an_entirely_masked_receiver_batch():
+    model=JointNativeCore.from_a2d(_core('A2-D').double(),routing_mode='joint').eval()
+    model.set_training_clock(4001,0)
+    scene,query=_double(_scene(1)),_double(_query(1))
+    query=replace(query,query_mask=torch.zeros_like(query.query_ids,dtype=torch.bool))
+    with torch.no_grad():
+        organization=model.prepare(scene)
+        routes=model.capture_read_routes(organization,query)
+        assert routes.support.shape[1]==0
+        expected=model.decode(organization,query)
+        actual=model.decode_counterfactual_routes(scene,query,routes)
+        torch.testing.assert_close(actual.nonlinear_field,expected.nonlinear_field,atol=0,rtol=0)

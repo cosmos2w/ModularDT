@@ -16,7 +16,7 @@ from ..content_hypergraph.model_v2 import ContentHypergraphCoreV2
 from ..content_hypergraph.readers_v2 import DirectSourceReaderV2
 from ..content_hypergraph.decoding import pack_local_pairs
 from ..native_retrieval.contracts import NativeTokenRecords, NativeTokenStore
-from ..native_retrieval.contracts import tensor_versions, _validate_ids
+from ..native_retrieval.contracts import tensor_versions
 from .contracts import TypedNativeRecords
 from .readers import TypedRead, raw_scores, read_typed
 
@@ -35,7 +35,17 @@ class StoredNativeReadRoutes:
 
     def __post_init__(self):
         for name in ("module","environment","query"):
-            _validate_ids(getattr(self,name+"_ids"),getattr(self,name+"_present"),name+" stored IDs")
+            ids,present=getattr(self,name+"_ids"),getattr(self,name+"_present")
+            if ids.ndim!=2 or ids.dtype not in (torch.int32,torch.int64):
+                raise TypeError(f'{name} stored IDs must be integer [B,N].')
+            if present.shape!=ids.shape or present.dtype!=torch.bool or present.device!=ids.device:
+                raise TypeError(f'{name} stored ID validity must be boolean [B,N] on the same device.')
+            # Receiver panels may have thousands of IDs; never validate their
+            # uniqueness through the legacy query-by-query equality rectangle.
+            for row,valid in zip(ids,present):
+                ordered=row[valid].sort().values
+                if bool((ordered[1:]==ordered[:-1]).any()):
+                    raise ValueError(f'Valid {name} stored IDs must be unique within each batch item.')
         if any(value.device!=self.support.device for value in (self.module_ids,self.environment_ids,self.query_ids,
                 self.module_present,self.environment_present,self.query_present)):
             raise ValueError("Stored routes must share one device.")
@@ -419,11 +429,32 @@ class JointNativeCore(ContentHypergraphCoreV2):
         self.validate_prepared_state(organization,query)
         _, context = self._prepare_native_decode(organization,query,self._query_states(organization,query))
         gates = context[0]
+        # Native receiver samplers may repeat a physical cell ID. Store its
+        # one unambiguous read set once, then remap repeated/permuted/chunked
+        # requests by that ID. No query-by-query pair rectangle is formed.
+        present=(query.query_mask if query.query_mask is not None else torch.ones_like(query.query_ids,dtype=torch.bool))
+        hard=gates.detach().gt(0)
+        unique_rows=[]
+        for b in range(query.batch_size):
+            ids=query.query_ids[b,present[b]];support=hard[b,present[b]]
+            unique,inverse=torch.unique(ids,sorted=True,return_inverse=True)
+            first=torch.full((len(unique),),len(ids),dtype=torch.long,device=ids.device)
+            first.scatter_reduce_(0,inverse,torch.arange(len(ids),device=ids.device),reduce='amin',include_self=True)
+            canonical=support[first]
+            if not bool((support==canonical[inverse]).all()):
+                raise ValueError('Repeated receiver IDs have inconsistent read supports; route correspondence is ambiguous.')
+            unique_rows.append((unique,canonical))
+        width=max((len(ids) for ids,_ in unique_rows),default=0)
+        captured_ids=query.query_ids.new_full((query.batch_size,width),-1)
+        captured_support=hard.new_zeros((query.batch_size,width,hard.shape[-1]))
+        captured_present=present.new_zeros((query.batch_size,width))
+        for b,(ids,support) in enumerate(unique_rows):
+            captured_ids[b,:len(ids)]=ids;captured_support[b,:len(ids)]=support;captured_present[b,:len(ids)]=True
         return StoredNativeReadRoutes(organization.scene.module_ids.detach().clone(),
-            organization.scene.environment_ids.detach().clone(),query.query_ids.detach().clone(),
-            gates.detach().gt(0).clone(),organization.scene.module_mask.detach().clone(),
+            organization.scene.environment_ids.detach().clone(),captured_ids,
+            captured_support,organization.scene.module_mask.detach().clone(),
             organization.scene.environment_mask.detach().clone(),
-            (query.query_mask.detach().clone() if query.query_mask is not None else torch.ones_like(query.query_ids,dtype=torch.bool)))
+            captured_present)
 
     @torch.no_grad()
     def decode_counterfactual_routes(self, scene, query, routes, controls=None, **decode_options):
@@ -438,20 +469,37 @@ class JointNativeCore(ContentHypergraphCoreV2):
         def correspondence(current,stored,current_present,stored_present,require_inventory=False):
             if current.shape[0]!=stored.shape[0] or current.device!=stored.device:
                 raise ValueError("Counterfactual route batch/device identity differs.")
-            equal=(current[:,:,None] == stored[:,None,:]) & current_present[:,:,None] & stored_present[:,None,:]
-            if not bool(((equal.sum(-1)==1) | ~current_present).all()):
-                raise ValueError("Counterfactual routes require unique corresponding native IDs.")
-            if require_inventory and not bool(((equal.sum(1)==1) | ~stored_present).all()):
-                raise ValueError("Counterfactual routes require the same present typed inventory.")
-            return equal.long().argmax(-1) if stored.shape[1] else current.new_empty(current.shape)
+            # Sorted native-ID joins avoid a quadratic receiver-ID rectangle.
+            mapping=torch.zeros(current.shape,dtype=torch.long,device=current.device)
+            for b in range(current.shape[0]):
+                stored_indices=stored_present[b].nonzero(as_tuple=False).flatten()
+                if not len(stored_indices):
+                    if bool(current_present[b].any()):raise ValueError('Counterfactual routes lack corresponding native IDs.')
+                    continue
+                order=stored[b,stored_indices].argsort();indices=stored_indices[order];ids=stored[b,indices]
+                locations=torch.searchsorted(ids,current[b].contiguous());safe=locations.clamp_max(len(ids)-1)
+                matches=(locations<len(ids)) & (ids[safe]==current[b])
+                if not bool((matches | ~current_present[b]).all()):
+                    raise ValueError('Counterfactual routes require corresponding native IDs.')
+                mapping[b]=indices[safe]
+                if require_inventory:
+                    coverage=torch.zeros(stored.shape[1],dtype=torch.long,device=current.device)
+                    selected=mapping[b,current_present[b]]
+                    coverage.index_add_(0,selected,torch.ones_like(selected))
+                    if not bool(((coverage==1) | ~stored_present[b]).all()):
+                        raise ValueError('Counterfactual routes require the same present typed inventory.')
+            return mapping
         qpresent=query.query_mask if query.query_mask is not None else torch.ones_like(query.query_ids,dtype=torch.bool)
         qi=correspondence(query.query_ids,routes.query_ids,qpresent,routes.query_present)
         mi=correspondence(scene.module_ids,routes.module_ids,scene.module_mask,routes.module_present,True)
         ei=correspondence(scene.environment_ids,routes.environment_ids,scene.environment_mask,routes.environment_present,True)
         old_m=routes.module_ids.shape[1]
-        selected=routes.support.gather(1,qi[...,None].expand(-1,-1,routes.support.shape[-1]))
-        support=torch.cat((selected[...,:old_m].gather(2,mi[:,None].expand(-1,query.num_queries,-1)),
-                           selected[...,old_m:].gather(2,ei[:,None].expand(-1,query.num_queries,-1))),-1)
+        if routes.support.shape[1]==0:
+            support=routes.support.new_zeros((query.batch_size,query.num_queries,scene.num_modules+scene.num_environment_tokens))
+        else:
+            selected=routes.support.gather(1,qi[...,None].expand(-1,-1,routes.support.shape[-1]))
+            support=torch.cat((selected[...,:old_m].gather(2,mi[:,None].expand(-1,query.num_queries,-1)),
+                               selected[...,old_m:].gather(2,ei[:,None].expand(-1,query.num_queries,-1))),-1)
         eligible=torch.cat((scene.module_mask,scene.environment_mask & (scene.environment_measure>0)),-1)
         support=support & eligible[:,None]
         previous=self._joint_route_override
