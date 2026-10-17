@@ -1273,7 +1273,9 @@ def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapp
 
 def _wind_core_architecture(model_config: Mapping[str, Any]) -> str:
     """Read architecture only from the explicit schema that owns it."""
-    if model_config.get("schema") in ("native_retrieval_core_v1", "native_budgeted_dispatch_v2"):
+    if model_config.get("schema") in (
+        "native_retrieval_core_v1", "native_budgeted_dispatch_v2", "joint_native_hypergraph_v1",
+    ):
         base = model_config.get("base_model_config")
         if not isinstance(base, Mapping):
             raise ValueError("Native Wind core config is missing its base A2-D identity.")
@@ -1333,6 +1335,22 @@ def _validate_budgeted_wind_core_binding(
     base = model_config.get("base_model_config")
     if not isinstance(base, Mapping):
         raise TypeError("Wind Round8 core config must embed its original A2-D base config.")
+    _validate_wind_v2_core_binding(recipe, base)
+
+
+def _validate_joint_wind_core_binding(
+    recipe: Mapping[str, Any], model_config: Mapping[str, Any],
+) -> None:
+    """Bind the direct typed E capability to the unchanged segmented native task."""
+    from honf_forward_core.joint_native.model import JointNativeCore
+
+    base = JointNativeCore.validate_config(model_config)
+    if (recipe.get("schema") != "content_hypergraph_recipe_v2"
+            or recipe.get("dataset") != "wind"
+            or recipe.get("protocol") != "source_read_development_v1"
+            or recipe.get("source_reader_variant") != "D0"
+            or recipe.get("architecture") != "A2-D"):
+        raise ValueError("Wind joint-native retrieval binds only to the segmented D0 development objective.")
     _validate_wind_v2_core_binding(recipe, base)
 
 
@@ -1583,6 +1601,10 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
             if not getattr(self, "_allow_budgeted_native", False):
                 raise ValueError("Round8 native dispatch requires its explicit runtime capability.")
             _validate_budgeted_wind_core_binding(self.recipe, config)
+        elif config.get("schema") == "joint_native_hypergraph_v1":
+            if not getattr(self, "_allow_joint_native", False):
+                raise ValueError("Joint native M/E prediction requires its explicit runtime capability.")
+            _validate_joint_wind_core_binding(self.recipe, config)
         else:
             _validate_wind_v2_core_binding(self.recipe, config)
         if _wind_core_architecture(config) != execution_mode:

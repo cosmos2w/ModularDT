@@ -360,6 +360,10 @@ def load_content_hypergraph_checkpoint(
     its native conversion adapter separately.
     """
     payload = load_trusted_checkpoint(path, map_location="cpu")
+    if payload.get("workflow") == "joint_native_train_v1":
+        from .joint_native_runtime import load_joint_native_checkpoint
+
+        return load_joint_native_checkpoint(str(path), device=device)
     if payload.get("workflow") == "native_retrieval_joint_v1":
         from .native_retrieval_runtime import load_native_retrieval_checkpoint
 

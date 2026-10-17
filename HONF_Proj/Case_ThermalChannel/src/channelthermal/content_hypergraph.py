@@ -233,6 +233,12 @@ class ThermalContentHypergraphAdapter(nn.Module):
                     or base_core_config.get("schema") != "content_hypergraph_core_v2"
                     or base_core_config.get("architecture") != "A2-D"):
                 raise ValueError("Thermal base adapter accepts only the explicit no-E budgeted A2-D capability.")
+        elif core_config_value.get("schema") == "joint_native_hypergraph_v1":
+            from honf_forward_core.joint_native.model import JointNativeCore
+
+            if not isinstance(core, JointNativeCore):
+                raise TypeError("Thermal joint-native capability requires JointNativeCore.")
+            base_core_config = JointNativeCore.validate_config(core_config_value)
         else:
             base_core_config = core_config_value
         iag_affine_capability = (
@@ -917,7 +923,13 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             config = dict(core_config or {})
             native_schema = config.get("schema") == "native_retrieval_core_v1"
             budgeted_schema = config.get("schema") == "native_budgeted_dispatch_v2"
-            if native_schema or budgeted_schema:
+            joint_schema = config.get("schema") == "joint_native_hypergraph_v1"
+            if joint_schema:
+                from honf_forward_core.joint_native.model import JointNativeCore
+
+                base_config = JointNativeCore.validate_config(config)
+                config_type = JointNativeCore
+            elif native_schema or budgeted_schema:
                 if budgeted_schema:
                     from honf_forward_core.native_retrieval.budgeted_core import BudgetedNativeCore
 
@@ -955,7 +967,7 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             for name, expected in required.items():
                 if base_config.get(name) != expected:
                     raise ValueError(f"Thermal v2 core requires explicit {name}={expected}.")
-            if (native_schema or budgeted_schema) and base_config.get("architecture") != "A2-D":
+            if (native_schema or budgeted_schema or joint_schema) and base_config.get("architecture") != "A2-D":
                 raise ValueError("Thermal native retrieval requires the unchanged A2-D architecture.")
             core = config_type.from_config(config)
         if not isinstance(core, core_type):
@@ -963,7 +975,14 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
         core_config_value = core.get_config()
         native_schema = core_config_value.get("schema") == "native_retrieval_core_v1"
         budgeted_schema = core_config_value.get("schema") == "native_budgeted_dispatch_v2"
-        if native_schema or budgeted_schema:
+        joint_schema = core_config_value.get("schema") == "joint_native_hypergraph_v1"
+        if joint_schema:
+            from honf_forward_core.joint_native.model import JointNativeCore
+
+            if not isinstance(core, JointNativeCore):
+                raise TypeError("Thermal joint-native capability requires JointNativeCore.")
+            dimensions_config = JointNativeCore.validate_config(core_config_value)
+        elif native_schema or budgeted_schema:
             if budgeted_schema:
                 from honf_forward_core.native_retrieval.budgeted_core import BudgetedNativeCore
 
@@ -998,7 +1017,7 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
         }
         if any(dimensions_config.get(name) != expected for name, expected in expected_dimensions.items()):
             raise ValueError("Thermal v2 core dimensions differ from the native Thermal feature contract.")
-        if dimensions_config.get("architecture") not in (("A2-D",) if native_schema else ("A2-D", "A2-H6")):
+        if dimensions_config.get("architecture") not in (("A2-D",) if native_schema or budgeted_schema or joint_schema else ("A2-D", "A2-H6")):
             raise ValueError("Thermal v2 architecture must be A2-D or A2-H6.")
         super().__init__(
             normalization_stats,
@@ -1073,6 +1092,10 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             from honf_forward_core.native_retrieval.budgeted_core import BudgetedNativeCore
 
             core = BudgetedNativeCore.from_config(core_config)
+        elif core_config.get("schema") == "joint_native_hypergraph_v1":
+            from honf_forward_core.joint_native.model import JointNativeCore
+
+            core = JointNativeCore.from_config(core_config)
         else:
             core = core_type.from_config(core_config)
         adapter = cls(

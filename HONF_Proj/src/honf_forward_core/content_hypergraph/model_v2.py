@@ -51,6 +51,17 @@ _DECODE_TRACE_DEFAULTS = (
     "direct_temperature_coefficients",
 )
 _DECODE_TRACE_AVAILABLE = (
+    "joint_hard_support",
+    "joint_environment_ids",
+    "joint_record_types",
+    "joint_self_membership",
+    "joint_cross_membership",
+    "joint_protected_mask",
+    "joint_mandatory_support",
+    "joint_environment_support",
+    "joint_environment_access",
+    "joint_environment_context",
+    "joint_conditioned_query",
     "native_hard_support",
     "native_module_ids",
     "native_dispatch_seed",
@@ -1104,6 +1115,15 @@ class ContentHypergraphCoreV2(nn.Module):
     def _decode_native_retrieval(self, organization, query, query_states, local_pairs, *, return_messages=False):
         raise NotImplementedError("Native retrieval is an explicit core capability.")
 
+    def _prepare_native_decode(self, organization, query, query_states, *, trace_enabled=False):
+        """Default-preserving seam for conditioning every physical decode path."""
+        return query_states, None
+
+    def _decode_native_values(self, organization, query, query_states, local_pairs, *,
+                              return_messages=False, decode_context=None):
+        return self._decode_native_retrieval(organization, query, query_states, local_pairs,
+                                             return_messages=return_messages)
+
     @staticmethod
     def _bounded_trace(values: Mapping[str, Tensor], selected: set[str], max_elements: int, explicit: bool):
         trace: dict[str, Tensor] = {}
@@ -1378,7 +1398,9 @@ class ContentHypergraphCoreV2(nn.Module):
         uniform_access: bool = False,
         local_gates: Tensor | None = None,
     ):
-        query_states = self._query_states(organization, query)
+        query_states, decode_context = self._prepare_native_decode(
+            organization, query, self._query_states(organization, query),
+            trace_enabled=return_trace or trace_request is not None)
         local_context, local_pairs, local_coefficients = self.local_reader(
             organization.scene,
             query,
@@ -1444,8 +1466,9 @@ class ContentHypergraphCoreV2(nn.Module):
                 else None
             )
             if self._uses_native_retrieval():
-                result = self._decode_native_retrieval(
-                    organization, query, query_states, local_pairs, return_messages=want_messages)
+                result = self._decode_native_values(
+                    organization, query, query_states, local_pairs, return_messages=want_messages,
+                    decode_context=decode_context)
                 global_context, direct_access = result.context, result.alpha
                 direct_coefficients, messages = result.response, result.messages
                 source_read_work = result.counts
@@ -1508,6 +1531,9 @@ class ContentHypergraphCoreV2(nn.Module):
                     "native_module_permission", "native_seed_permission",
                     "native_hard_support", "native_dispatch_seed", "native_dispatch_seed_ids",
                     "native_protected_direct", "native_protected_exceptions",
+                    "joint_environment_support", "joint_environment_access",
+                    "joint_environment_context", "joint_conditioned_query",
+                    "joint_hard_support", "joint_protected_mask", "joint_mandatory_support",
                 } and value.ndim >= 2 and value.shape[1] == query.num_queries and not (
                     direct_messages_preselected and name == "direct_source_messages"
                 ):
@@ -1813,7 +1839,8 @@ class ContentHypergraphCoreV2(nn.Module):
         self.validate_prepared_state(organization, query)
         self._validate_edge_intervention(organization, edge_gates, uniform_access)
         self._validate_local_intervention(organization, local_gates)
-        query_states = self._query_states(organization, query)
+        query_states, decode_context = self._prepare_native_decode(
+            organization, query, self._query_states(organization, query))
         _, local_pairs, local_coefficients = self.local_reader(
             organization.scene,
             query,
@@ -1836,7 +1863,8 @@ class ContentHypergraphCoreV2(nn.Module):
             )
             return basis, None, local_pairs, local_coefficients, None
         if self._uses_native_retrieval():
-            result = self._decode_native_retrieval(organization, query, query_states, local_pairs)
+            result = self._decode_native_values(organization, query, query_states, local_pairs,
+                                                decode_context=decode_context)
             return None, result.response, local_pairs, local_coefficients, result.counts
         if self._uses_source_selection():
             from .source_read_decoder_v1 import decode_selected_sources_v1

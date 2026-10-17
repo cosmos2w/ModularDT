@@ -82,6 +82,28 @@ def load_evaluation_components(checkpoint: Path, device: str):
     """Reopen only the checkpoint's authorized native evaluation panel."""
     payload = load_trusted_checkpoint(checkpoint, map_location="cpu")
     standalone = None
+    if payload.get("workflow") == "joint_native_train_v1":
+        from honf_runtime.joint_native_factory import build_joint_native_task
+        from honf_runtime.joint_native_protocol import validate_joint_native_recipe
+        from honf_runtime.joint_native_runtime import load_joint_native_checkpoint
+
+        identity = payload.get("experiment_identity")
+        if not isinstance(identity, Mapping):
+            raise TypeError("Round9 checkpoint has no saved experiment identity.")
+        recipe = validate_joint_native_recipe(identity.get("recipe", {}), verify_source=True)
+        if canonical_sha256(recipe) != identity.get("recipe_sha256"):
+            raise ValueError("Round9 evaluation recipe checksum is inconsistent.")
+        task = build_joint_native_task(recipe, device=device, runtime_root=PROJECT.parent)
+        provider = task["provider"]
+        expected = identity.get("provider_identity")
+        if not isinstance(expected, Mapping) or canonical_sha256(expected) != canonical_sha256(provider.identity_payload()):
+            raise ValueError("Round9 evaluation provider differs from the saved native data and transforms.")
+        # The public loader restores the exact clock as well as weights. It
+        # also validates inference without reopening the ancestor or dataset.
+        model, adapter, payload = load_joint_native_checkpoint(checkpoint, device=device)
+        provider.model, provider.adapter = model, adapter
+        provider._allow_joint_native = recipe["arm"] != "D9-M"
+        return model, provider, payload
     if payload.get("workflow") == "native_budgeted_dispatch_joint_v2":
         from honf_runtime.native_budgeted_factory import build_native_budgeted_task
         from honf_runtime.native_budgeted_protocol import validate_native_budgeted_recipe
@@ -231,6 +253,21 @@ def _is_round8_wind_payload(payload: Mapping[str, Any], recipe: Mapping[str, Any
             or recipe.get("model_family") != family):
         raise ValueError("Round8 Wind evaluator dispatch requires the exact saved family and workflow.")
     return recipe.get("dataset") == "wind" and recipe.get("architecture") == "A2-D"
+
+
+def _is_round9_wind_payload(payload: Mapping[str, Any], recipe: Mapping[str, Any]) -> bool:
+    """Select Round9's inherited two-region monitor without changing Round8 dispatch."""
+    if payload.get("workflow") != "joint_native_train_v1":
+        return False
+    identity = payload.get("experiment_identity", {})
+    from honf_runtime.joint_native_protocol import validate_joint_native_recipe
+
+    validated = validate_joint_native_recipe(recipe)
+    if (identity.get("family") != "joint_native_hypergraph_v1"
+            or identity.get("workflow") != "joint_native_train_v1"
+            or identity.get("recipe_sha256") != canonical_sha256(validated)):
+        raise ValueError("Round9 evaluation requires its exact sealed family, workflow and recipe.")
+    return validated["dataset"] == "wind"
 
 
 def _array_from_value(value: Any) -> np.ndarray:
@@ -442,7 +479,8 @@ def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     model, provider, payload = load_evaluation_components(args.checkpoint, args.device)
     recipe = payload["experiment_identity"]["recipe"]
-    round8_wind = _is_round8_wind_payload(payload, recipe)
+    architecture = recipe.get("architecture", recipe.get("base_recipe", {}).get("architecture"))
+    native_two_region_wind = _is_round8_wind_payload(payload, recipe) or _is_round9_wind_payload(payload, recipe)
     if args.panel == "wind_native_roles":
         if (recipe.get("family") != "inherited_attention_v1" or recipe.get("dataset") != "wind"
                 or not callable(getattr(provider, "native_role_evaluation_batches", None))):
@@ -463,16 +501,16 @@ def main(argv: list[str] | None = None) -> int:
         batches = provider.native_evaluation_batches(split=args.split, case_keys=selected, microbatch_size=packing)
     with torch.no_grad():
         for index, batch in enumerate(batches):
-            if round8_wind:
+            if native_two_region_wind:
                 observed_wind_role_counts.append(_round8_wind_role_counts(provider, batch, args.split))
             scene = provider.make_scene(batch.scene_inputs)
             prediction, auxiliary = provider.predict_native(
-                model, scene, batch.receivers, recipe["architecture"], "joint",
+                model, scene, batch.receivers, architecture, "joint",
                 epoch=int(payload["epoch"]), temperature=1.0,
             )
             if args.panel == "wind_native_roles":
                 records.append(provider.native_role_evaluation_metrics(prediction, batch.targets, batch.auxiliary))
-            elif round8_wind and args.split == "train":
+            elif native_two_region_wind and args.split == "train":
                 records.append(_round8_wind_train_metrics(prediction, batch.targets, provider, batch))
             else:
                 records.append(provider.validation_metrics(prediction, batch.targets, auxiliary))
@@ -502,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "array_shapes": {k: list(v.shape) for k, v in arrays.items()}})
     if args.panel == "wind_native_roles":
         metrics = provider.reduce_native_role_evaluation_metrics(records, split=args.split, case_keys=selected)
-    elif round8_wind:
+    elif native_two_region_wind:
         if not observed_wind_role_counts:
             raise ValueError("Round8 Wind evaluation produced no batches from which to verify its native roles.")
         count_set = {(row["volume"], row["hub_band"]) for row in observed_wind_role_counts}
@@ -528,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics = (reducer(records, split=args.split, case_keys=selected) if callable(reducer)
                    else provider.reduce_native_metrics(records))
     if args.panel == "monitor":
-        if round8_wind:
+        if native_two_region_wind:
             metrics = _label_round8_wind_monitor(
                 metrics,
                 split=args.split,
@@ -538,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
             metrics = label_monitor_metrics(metrics)
     result = {
         "schema": "content_hypergraph_native_evaluation_v1", "status": "completed",
-        "dataset": recipe["dataset"], "architecture": recipe["architecture"],
+        "dataset": recipe["dataset"], "architecture": architecture,
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_sha256": hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
         "completed_epoch": int(payload["epoch"]), "split": args.split,
@@ -547,9 +585,9 @@ def main(argv: list[str] | None = None) -> int:
             "fixed five-role native Q8192 diagnostic board, independent of two-region objective"
             if args.panel == "wind_native_roles" else
             "source TRAIN Q8192 (6144 volume + 2048 hub-band), equal-case 0.75/0.25 objective; not a DEV selector"
-            if round8_wind and args.split == "train" else
+            if native_two_region_wind and args.split == "train" else
             "exposed DEV Q10240 (8192 volume + 2048 hub-band), fixed 0.8/0.2 validation objective"
-            if round8_wind and args.split == "validation" else
+            if native_two_region_wind and args.split == "validation" else
             "full native endpoint support" if args.panel == "native" else
             "fixed checkpoint; declared primary monitoring queries and native auxiliary samples"
         ),

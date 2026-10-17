@@ -466,6 +466,10 @@ class ThermalContentHypergraphTask:
         if key.sampling_version != self.sampling_version or key.dataset_id != self.sampling_dataset_id:
             raise ValueError("Thermal query draws require the exact case_epoch_v1 TRAIN membership key.")
         sampling_epoch_limit = int(getattr(self, "_round6_sampling_epoch_limit", self.total_epochs))
+        joint_extension = getattr(self, "_joint_native_sampling_extension", None)
+        if joint_extension is not None:
+            from honf_runtime.joint_native_runtime import joint_native_sampling_epoch_limit
+            sampling_epoch_limit = joint_native_sampling_epoch_limit(self, joint_extension)
         if key.epoch < 1 or key.epoch > sampling_epoch_limit or not case_keys:
             raise ValueError("Thermal TRAIN batch has an invalid epoch or no cases.")
         if len(case_keys) > self.microbatch_size:
@@ -602,11 +606,12 @@ class ThermalContentHypergraphTask:
         if phase != "joint":
             raise ValueError("Thermal content-hypergraph uses the shared joint phase.")
         totals = {name: 0.0 for name in THERMAL_CONTENT_LOSS_WEIGHTS if name != "response"}
+        ordinary_terms = tuple(totals)
         for batch in batches:
             count = len(batch.targets.case_ids)
             if count < 1:
                 raise ValueError("Thermal content-hypergraph cannot plan an empty microbatch.")
-            for name in totals:
+            for name in ordinary_terms:
                 totals[name] += float(count)
             if batch.targets.response is not None:
                 totals["response"] = totals.get("response", 0.0) + 1.0

@@ -20,6 +20,11 @@ class ModelFamilySpec:
 
 
 MODEL_FAMILIES = {
+    "joint_native_hypergraph_v1": ModelFamilySpec(
+        family_id="joint_native_hypergraph_v1", available=True,
+        workflows=("joint_native_train", "joint_native_evaluate"),
+        description="Round9 jointly trained native module/environment reader and typed sparse controls",
+    ),
     "inherited_attention_v1": ModelFamilySpec(
         family_id="inherited_attention_v1",
         available=True,

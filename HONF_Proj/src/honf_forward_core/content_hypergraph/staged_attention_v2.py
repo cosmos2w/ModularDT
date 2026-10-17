@@ -392,9 +392,17 @@ class StagedContextCycleV2(nn.Module):
             route_name="em",
             destination_ids=scene.environment_ids,
             donor_ids=scene.module_ids,
+            capture_native_route_snapshot=capture_native_routes and "em" in native_capture_route_names,
+            stage_identity=f"cycle{cycle_index}/em",
+            owner_token=owner_token,
+            parameter_versions=parameter_versions,
+            buffer_versions=buffer_versions,
+            scene_identity=scene_identity,
+            scene_tensor_versions=scene_tensor_versions,
+            model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["em"],
         )
-        if export_route_scores:
+        if export_route_scores or (capture_native_routes and "em" in native_capture_route_names):
             em, em_weights, em_snapshot = em_result
         else:
             em, em_weights = em_result
@@ -415,9 +423,17 @@ class StagedContextCycleV2(nn.Module):
             route_name="ee",
             destination_ids=scene.environment_ids,
             donor_ids=scene.environment_ids,
+            capture_native_route_snapshot=capture_native_routes and "ee" in native_capture_route_names,
+            stage_identity=f"cycle{cycle_index}/ee",
+            owner_token=owner_token,
+            parameter_versions=parameter_versions,
+            buffer_versions=buffer_versions,
+            scene_identity=scene_identity,
+            scene_tensor_versions=scene_tensor_versions,
+            model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["ee"],
         )
-        if export_route_scores:
+        if export_route_scores or (capture_native_routes and "ee" in native_capture_route_names):
             ee, ee_weights, ee_snapshot = ee_result
         else:
             ee, ee_weights = ee_result
@@ -473,4 +489,8 @@ class StagedContextCycleV2(nn.Module):
         if capture_native_routes:
             trace["mm_native_route_snapshot"] = mm_snapshot
             trace["me_native_route_snapshot"] = me_snapshot
+            if "em" in native_capture_route_names:
+                trace["em_native_route_snapshot"] = em_snapshot
+            if "ee" in native_capture_route_names:
+                trace["ee_native_route_snapshot"] = ee_snapshot
         return module_next, environment_next, trace

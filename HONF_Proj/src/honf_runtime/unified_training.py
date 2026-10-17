@@ -1046,6 +1046,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         "node_edge_rows": "Node-to-edge donor rows executed",
         "receiver_edge_rows": "Receiver-to-edge reads executed",
         "source_read_rows": "Physical source reads executed",
+        "joint_executed_value_rows_M": "Original nonlinear M value rows executed",
+        "joint_executed_value_rows_E": "Original nonlinear E value rows executed",
     }
     work_keys = sorted({key for row in history for key in row.get("work_counts", {})}
                        & set(work_definitions))
@@ -1068,10 +1070,31 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         work_axis.set_ylim(1.0, 10.0)
         work_axis.text(0.5, 0.5, "No recorded work counters", ha="center", va="center",
                        transform=work_axis.transAxes)
-    set_panel_title(work_axis, "Recorded TRAIN work counters",
+    typed_work_series = False
+    if any("joint_native_routing_state" in row for row in history):
+        for kind, color in (("M", "C0"), ("E", "C1")):
+            for quantity, style in (("deterministic", "-"), ("relaxed", "--")):
+                points=[]
+                for row in history:
+                    values=row.get("work_counts", {})
+                    denominator=values.get("joint_"+kind+"_case_requests", 0)
+                    numerator=values.get("joint_"+kind+"_"+quantity+"_case_sum")
+                    if denominator and numerator is not None:
+                        points.append((int(row["epoch"]), float(numerator)/float(denominator)))
+                if points:
+                    if not typed_work_series:
+                        work_axis.clear()
+                        typed_work_series=True
+                    work_axis.plot([x for x,y in points],[y for x,y in points],color=color,linestyle=style,
+                        label=kind+" "+quantity+" retained fraction")
+        if typed_work_series:
+            work_axis.set_ylim(0.,1.02)
+            work_axis.legend(fontsize=7.,frameon=False)
+    set_panel_title(work_axis, "Typed native retained work" if typed_work_series else "Recorded TRAIN work counters",
+                    "Equal-case full-catalogue fractions; timings separate" if typed_work_series else
                     "Counter sums; not measured executor time or savings")
     work_axis.set_xlabel("Completed epoch")
-    work_axis.set_ylabel("Provider counter sum (rows or pairs / epoch)")
+    work_axis.set_ylabel("Retained fraction" if typed_work_series else "Provider counter sum (rows or pairs / epoch)")
     work_axis.grid(alpha=0.25, which="both")
     if masked_count_total:
         routing_axis.text(
@@ -1147,6 +1170,12 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         )
         metadata["panel_definitions"]["train_work"] = (
             "Executed primitive counter sums and native dispatch work; counts are not a runtime or speed claim."
+        )
+    if typed_work_series:
+        metadata["panel_definitions"]["train_work"] = (
+            "Round9 per-type deterministic hard and relaxed full-catalogue retained fractions; "
+            "all requests within each case are aggregated before equal-case means. "
+            "Executed native rows remain separate saved counters; no memory or latency claim is inferred."
         )
     _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
@@ -2627,6 +2656,7 @@ class TrainingEngine:
         loss_weight_overrides: Mapping[str, float] | None = None,
         source_read_ordinary_update_index: int | None = None,
         source_read_primary_fine_rows: int | None = None,
+        successful_step_recorder: Callable[[int, int, int], None] | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, float], str | None]:
         planned = {
             name: _denominator(value)
@@ -2642,6 +2672,8 @@ class TrainingEngine:
         sampling_records: list[str] = []
         optimizer.zero_grad(set_to_none=True)
         native_core = getattr(model, "core", model)
+        from .joint_native_objective import JointMacroObjective
+        joint_objective = JointMacroObjective(native_core, optimizer, epoch, update_index)
         budgeted_begin = getattr(native_core, "budgeted_begin_update", None)
         budgeted_begin_microbatch = getattr(native_core, "budgeted_begin_microbatch", None)
         budgeted_microbatch_result = getattr(native_core, "budgeted_microbatch_result", None)
@@ -2709,9 +2741,11 @@ class TrainingEngine:
             scene = provider.make_scene(batch.scene_inputs)
             if budgeted_enabled:
                 budgeted_begin_microbatch()
+            joint_objective.begin_microbatch()
             predictions, auxiliary_state = provider.predict_native(
                 model, scene, batch.receivers, arm, phase, epoch=epoch,
                 temperature=self.config.temperature_for_epoch(epoch))
+            joint_objective.observe(len(batch.case_keys) + int(bool(batch_auxiliary.get('response_family_id'))))
             if budgeted_enabled:
                 result = budgeted_microbatch_result()
                 if not isinstance(result, Mapping):
@@ -2793,7 +2827,22 @@ class TrainingEngine:
                 piece = term.numerator * (effective_weight / planned[name])
                 objective = piece if objective is None else objective + piece
                 losses[name] += float(term.numerator.detach()) / planned[name] * effective_weight
-            for name, value in provider.work_counts(batch, predictions, auxiliary_state).items():
+            native_work_counts = provider.work_counts(batch, predictions, auxiliary_state)
+            if joint_objective.capable:
+                dense = bool(joint_objective.state.get("dense_router_step", False))
+                for name, value in native_work_counts.items():
+                    for kind in ("M", "E"):
+                        if name.endswith("joint_"+kind+"_value_rows"):
+                            counter="joint_executed_value_rows_"+kind
+                            work[counter]=work.get(counter,0.)+float(value)
+                    if name in ("native_fluid_queries", "native_surface_receiver_slots", "native_outside_receiver_slots",
+                                "native_material_receiver_slots", "native_union_rows", "response_fluid_queries",
+                                "response_native_union_rows", "primary_query_rows", "native_receivers", "query_count"):
+                        work["joint_dense_coverage_"+name] = work.get("joint_dense_coverage_"+name, 0.) + (float(value) if dense else 0.)
+                work["joint_dense_primary_case_visits"] = work.get("joint_dense_primary_case_visits", 0.) + (len(batch.case_keys) if dense else 0)
+                work["joint_primary_case_visits"] = work.get("joint_primary_case_visits", 0.) + len(batch.case_keys)
+                work["joint_dense_response_requests"] = work.get("joint_dense_response_requests", 0.) + (int(bool(batch_auxiliary.get("response_family_id"))) if dense else 0)
+            for name, value in native_work_counts.items():
                 numeric = float(value)
                 if name.endswith("_max_live_tile_bytes_per_call"):
                     work[name] = max(work.get(name, 0.0), numeric)
@@ -2847,6 +2896,7 @@ class TrainingEngine:
                         parameter.grad = contribution
                     else:
                         parameter.grad.add_(contribution)
+        joint_objective.apply()
         primary_fine_rows = None
         if source_read_manager is not None:
             primary_fine_rows = _source_read_primary_fine_rows(work)
@@ -2899,6 +2949,11 @@ class TrainingEngine:
         if not torch.isfinite(norm) or norm <= 0:
             raise FloatingPointError("Nonfinite or zero actual parameter gradient.")
         optimizer.step()
+        if successful_step_recorder is not None:
+            successful_step_recorder(epoch, update_index, sum(len(batch.case_keys) for batch in microbatches))
+        joint_losses, joint_work = joint_objective.after_update()
+        losses.update(joint_losses)
+        work.update(joint_work)
         if budgeted_enabled:
             budgeted_after_update(epoch, update_index)
             losses["budget_work_penalty"] = float(budgeted_macro_summary_values[1])
@@ -3083,6 +3138,7 @@ class TrainingEngine:
         hyperedge_readout_extension: str | Path | None = None,
         native_retrieval_child: Mapping[str, Any] | None = None,
         native_budgeted_child: Mapping[str, Any] | None = None,
+        joint_native_child: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -3144,6 +3200,30 @@ class TrainingEngine:
             or identity.get("model_family") == "native_budgeted_dispatch_v2"
             or identity.get("workflow") == "native_budgeted_dispatch_joint_v2"
         )
+        identity_is_joint_native = identity.get("family") == "joint_native_hypergraph_v1"
+        joint_recipe = None
+        if identity_is_joint_native:
+            from .joint_native_protocol import (validate_joint_native_recipe, validate_joint_native_stop,
+                joint_native_child_declaration, canonical_sha256)
+            joint_recipe = validate_joint_native_recipe(identity.get("recipe", {}), verify_source=True)
+            validate_joint_native_stop(joint_recipe, stop_after)
+            if (self.config.training_mode != "joint" or arm != "A2-D" or optimizer_seed is not None
+                    or self.config.total_epochs != 5000 or joint_native_child != joint_native_child_declaration(joint_recipe)
+                    or identity.get("recipe_sha256") != canonical_sha256(joint_recipe)
+                    or identity.get("workflow") != "joint_native_train_v1"):
+                raise ValueError("Round9 requires the sealed native stage, original arm and explicit child declaration.")
+            if ((branch_from_checkpoint is None) == (resume_checkpoint is None)):
+                raise ValueError("Round9 requires exactly one pinned boundary branch or own-run exact resume.")
+            if joint_recipe['arm'] in ('H9-ME','S9-ME') and joint_recipe['calibration'] is None:
+                raise ValueError("Round9 sparse scientific fit requires measured fixed-TRAIN typed calibration.")
+            competitors=(native_budgeted_child,native_retrieval_child,source_read_child,source_read_child_auxiliary_fit,
+                inherited_attention_sparse_child,moment_hyperedge_child,hyperedge_readout_child,hyperedge_readout_extension,
+                numerical_pooling_amendment,output_policy_amendment,architecture_child_initialization,diagnostic_age_branch,
+                joint_core_revision,mathematical_route_branch,fresh_initialization)
+            if any(item is not None for item in competitors) or allow_microbatch_change:
+                raise ValueError("Round9 is an exclusive sealed TrainingEngine continuation capability.")
+        elif joint_native_child is not None:
+            raise ValueError("A joint native child requires its registered Round9 family.")
         native_recipe = None
         if identity_is_native_retrieval:
             from .native_retrieval_protocol import (
@@ -3475,6 +3555,13 @@ class TrainingEngine:
                     source_payload.get("experiment_identity", {}).get("fresh_initialization")
                     != fresh_initialization):
                 raise ValueError("Fresh matched resume checkpoint does not preserve its original initialization receipt.")
+        if identity_is_joint_native:
+            from .joint_native_child import verify_joint_native_resume
+            if resume_checkpoint is not None:
+                verify_joint_native_resume(source_payload, recipe=joint_recipe, stop_after=stop_after)
+            elif (source_path.resolve() != Path(joint_recipe["source_checkpoint"]).resolve()
+                    or source_payload.get("epoch") != joint_recipe["source_epoch"]):
+                raise ValueError("Round9 branch differs from the pinned stage boundary.")
         if identity_is_native_retrieval:
             if resume_checkpoint is not None:
                 from .native_retrieval_child import verify_native_retrieval_resume
@@ -3640,7 +3727,11 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if identity_is_native_budgeted and branch_from_checkpoint is not None:
+            if identity_is_joint_native and branch_from_checkpoint is not None:
+                from .joint_native_child import prepare_joint_native_child
+                amendment = prepare_joint_native_child(model, provider, source_payload, sealed_identity,
+                    joint_native_child, source_path=source_path, stop_after=int(stop_after))
+            elif identity_is_native_budgeted and branch_from_checkpoint is not None:
                 from .native_budgeted_child import prepare_native_budgeted_child
 
                 amendment = prepare_native_budgeted_child(
@@ -3757,6 +3848,7 @@ class TrainingEngine:
                   and inherited_attention_sparse_child is None
                   and hyperedge_readout_child is None
                   and not (identity_is_native_budgeted and branch_from_checkpoint is not None)
+                  and not identity_is_joint_native
                   and not identity_is_native_retrieval
                   and not identity_is_moment_hyperedge):
                 if source_payload.get("arm") != "warmup":
@@ -3767,6 +3859,7 @@ class TrainingEngine:
                     and hyperedge_readout_child is None
                     and not (identity_is_native_budgeted and branch_from_checkpoint is not None)
                     and not (identity_is_native_retrieval and branch_from_checkpoint is not None)
+                    and not (identity_is_joint_native and branch_from_checkpoint is not None)
                     and (not identity_is_moment_hyperedge or resume_checkpoint is not None)):
                 model.load_state_dict(source_payload["model_state_dict"], strict=True)
                 if fresh_initialization is not None:
@@ -3791,7 +3884,10 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
-        if identity_is_native_budgeted and branch_from_checkpoint is not None:
+        if identity_is_joint_native and branch_from_checkpoint is not None:
+            from .joint_native_child import verify_joint_native_optimizer
+            verify_joint_native_optimizer(model, optimizer, source_payload["optimizer_state_by_name"], amendment)
+        elif identity_is_native_budgeted and branch_from_checkpoint is not None:
             from .native_budgeted_child import verify_native_budgeted_optimizer
 
             verify_native_budgeted_optimizer(
@@ -3935,7 +4031,9 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
-            amendment_name = ('moment_hyperedge_child' if identity_is_moment_hyperedge and branch_from_checkpoint is not None else
+            amendment_name = ('joint_native_child' if identity_is_joint_native and branch_from_checkpoint is not None else
+                              'joint_native_resume' if identity_is_joint_native else
+                              'moment_hyperedge_child' if identity_is_moment_hyperedge and branch_from_checkpoint is not None else
                               'moment_hyperedge_resume' if identity_is_moment_hyperedge else
                               'native_budgeted_child' if identity_is_native_budgeted and branch_from_checkpoint is not None else
                               'native_budgeted_resume' if identity_is_native_budgeted else
@@ -3952,7 +4050,7 @@ class TrainingEngine:
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if (identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
+                category='logs' if (identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
                                     or identity_is_native_budgeted
                                     or identity_is_native_retrieval
@@ -4016,6 +4114,12 @@ class TrainingEngine:
                     ),
                 )
                 history = []
+            elif identity_is_joint_native:
+                branch_parent.update(joint_native_child=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
+                    inherited_history_scope=f"literal parent through e{joint_recipe['source_epoch']}; new stage exposure only")
+                history = []
             elif identity_is_native_budgeted:
                 branch_parent.update(
                     native_budgeted_child=copy.deepcopy(amendment),
@@ -4077,6 +4181,18 @@ class TrainingEngine:
             from .source_read_child import verify_source_read_child_continuation
 
             verify_source_read_child_continuation(source_read_child_contract, stop_after)
+        joint_step_recorder = None
+        if identity_is_joint_native:
+            journal = layout.write_path("joint_optimizer_steps.jsonl", category="logs")
+            def record_joint_step(epoch, update_index, case_visits):
+                receipt = {"schema":"round9_successful_optimizer_step_v1", "unix":time.time(),
+                    "epoch":int(epoch), "macro_index_zero_based":int(update_index),
+                    "case_visits":int(case_visits), "recipe_sha256":sealed_identity["recipe_sha256"]}
+                with journal.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(receipt,sort_keys=True)+"\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            joint_step_recorder = record_joint_step
         active = {
             "status": "running", "arm": arm, "identity": sealed_identity, "device": str(self.device),
             "pid": os.getpid(),
@@ -4199,6 +4315,8 @@ class TrainingEngine:
                                 "source_read_ordinary_update_index": completed_updates + len(update_rows) + 1,
                                 "source_read_primary_fine_rows": source_read_manager.last_primary_fine_rows,
                             }
+                        if joint_step_recorder is not None:
+                            update_kwargs["successful_step_recorder"] = joint_step_recorder
                         losses, work, denominators, sampling_hash = self._run_update(
                             model, provider, optimizer, microbatches,
                             phase=phase, arm=arm, epoch=epoch, update_index=update_index,
@@ -4341,6 +4459,15 @@ class TrainingEngine:
                             "environment_value_reader": False,
                         }
                     row["native_budgeted_admission"] = copy.deepcopy(budgeted_recipe["research_admission"])
+                if identity_is_joint_native:
+                    native_core=getattr(model,"core",model)
+                    row["joint_native_routing_state"]={"arm":joint_recipe["arm"],"absolute_epoch":epoch,
+                        "shared_microbatch_cases":joint_recipe["microbatch_cases"],
+                        "dense_router_cadence":"(sparse_phase_epoch_zero_based+macro_index_zero_based)%4==0",
+                        "sparse_phase_anchor":3001,
+                        "global_optimizer_macro_step":int(getattr(native_core,"joint_macro_clock",completed_updates+len(update_rows)))}
+                    if hasattr(native_core,"joint_budget"):
+                        row["joint_native_routing_state"].update(native_core.joint_budget.schedule())
                 sampler_epoch = self.sampler_epoch(epoch)
                 if sampler_epoch != epoch:
                     row["sampler_epoch"] = sampler_epoch
@@ -4434,6 +4561,17 @@ class TrainingEngine:
                     }
                 if stage_receipt is not None:
                     row["stage_receipt"] = stage_receipt
+                if identity_is_joint_native:
+                    native_core=getattr(model,"core",model)
+                    conditioning=getattr(native_core,"environment_conditioning",None)
+                    if conditioning is not None:
+                        row["joint_environment_conditioning"]={"projection_l2_norm":float(conditioning.weight.detach().double().norm().cpu()),
+                            "interpretation":"parameter amplitude; physical E-read effect requires separate measurement"}
+                    reviewer=getattr(provider,"joint_native_review",None)
+                    if (joint_recipe["arm"] in ("H9-ME","S9-ME") and (epoch-3000)%25==0):
+                        if reviewer is None or not callable(getattr(reviewer,"review_epoch",None)):
+                            raise RuntimeError("Sparse Round9 fit requires its fixed-TRAIN 25-epoch review capability.")
+                        row["joint_native_train_review"]=reviewer.review_epoch(model,provider,self,epoch,layout,training_row=row)
                 clean_stop_request = _read_clean_stop_request(output, clean_stop_name)
                 clean_stop_requested = clean_stop_request is not None
                 review = (epoch % self.config.monitor_every == 0 or epoch in self.config.monitor_epochs
