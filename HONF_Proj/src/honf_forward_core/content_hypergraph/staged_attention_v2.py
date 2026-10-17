@@ -331,6 +331,7 @@ class StagedContextCycleV2(nn.Module):
         return_attention: bool = False,
         export_route_scores: bool = False,
         capture_native_routes: bool = False,
+        native_capture_route_names: tuple[str, ...] = ("mm", "me"),
         cycle_index: int = 0,
         owner_token: int | None = None,
         parameter_versions: tuple[tuple[int, int], ...] = (),
@@ -362,7 +363,7 @@ class StagedContextCycleV2(nn.Module):
             route_name="mm",
             destination_ids=scene.module_ids,
             donor_ids=scene.module_ids,
-            capture_native_route_snapshot=capture_native_routes,
+            capture_native_route_snapshot=capture_native_routes and "mm" in native_capture_route_names,
             stage_identity=f"cycle{cycle_index}/mm",
             owner_token=owner_token,
             parameter_versions=parameter_versions,
@@ -372,7 +373,7 @@ class StagedContextCycleV2(nn.Module):
             model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["mm"],
         )
-        if capture_native_routes:
+        if capture_native_routes and "mm" in native_capture_route_names:
             mm, mm_weights, mm_snapshot = mm_result
         else:
             mm, mm_weights = mm_result
@@ -434,7 +435,7 @@ class StagedContextCycleV2(nn.Module):
             route_name="me",
             destination_ids=scene.module_ids,
             donor_ids=scene.environment_ids,
-            capture_native_route_snapshot=capture_native_routes,
+            capture_native_route_snapshot=capture_native_routes and "me" in native_capture_route_names,
             stage_identity=f"cycle{cycle_index}/me",
             owner_token=owner_token,
             parameter_versions=parameter_versions,
@@ -444,7 +445,7 @@ class StagedContextCycleV2(nn.Module):
             model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["me"],
         )
-        if capture_native_routes:
+        if capture_native_routes and "me" in native_capture_route_names:
             me, me_weights, me_snapshot = me_result
         else:
             me, me_weights = me_result

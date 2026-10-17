@@ -1273,7 +1273,7 @@ def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapp
 
 def _wind_core_architecture(model_config: Mapping[str, Any]) -> str:
     """Read architecture only from the explicit schema that owns it."""
-    if model_config.get("schema") == "native_retrieval_core_v1":
+    if model_config.get("schema") in ("native_retrieval_core_v1", "native_budgeted_dispatch_v2"):
         base = model_config.get("base_model_config")
         if not isinstance(base, Mapping):
             raise ValueError("Native Wind core config is missing its base A2-D identity.")
@@ -1303,6 +1303,36 @@ def _validate_native_wind_core_binding(
     base = model_config.get("base_model_config")
     if not isinstance(base, Mapping):
         raise TypeError("Wind native retrieval base model config must be a mapping.")
+    _validate_wind_v2_core_binding(recipe, base)
+
+
+def _validate_budgeted_wind_core_binding(
+    recipe: Mapping[str, Any], model_config: Mapping[str, Any],
+) -> None:
+    """Allow the separately registered Round8 core on the exact Wind D0 provider."""
+    expected_fields = {
+        "schema", "base_model_config", "native_backend", "routing_seed",
+        "membership_bias", "lambda0", "environment_value_reader",
+    }
+    if (not isinstance(model_config, Mapping) or set(model_config) != expected_fields
+            or model_config.get("schema") != "native_budgeted_dispatch_v2"
+            or model_config.get("environment_value_reader") is not False
+            or model_config.get("native_backend") not in (
+                "dense_hard_reference", "flat_selected_reference", "grouped_native",
+            )
+            or type(model_config.get("routing_seed")) is not int
+            or type(model_config.get("membership_bias")) not in (int, float)
+            or type(model_config.get("lambda0")) not in (int, float)):
+        raise ValueError("Wind Round8 requires the exact no-E budgeted native core schema.")
+    if (recipe.get("schema") != "content_hypergraph_recipe_v2"
+            or recipe.get("dataset") != "wind"
+            or recipe.get("protocol") != "source_read_development_v1"
+            or recipe.get("source_reader_variant") != "D0"
+            or recipe.get("architecture") != "A2-D"):
+        raise ValueError("Wind Round8 binds only to the segmented D0 development objective.")
+    base = model_config.get("base_model_config")
+    if not isinstance(base, Mapping):
+        raise TypeError("Wind Round8 core config must embed its original A2-D base config.")
     _validate_wind_v2_core_binding(recipe, base)
 
 
@@ -1549,6 +1579,10 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
             if not getattr(self, "_allow_native_retrieval", False):
                 raise ValueError("Native retrieval inference requires its explicit runtime capability.")
             _validate_native_wind_core_binding(self.recipe, config)
+        elif config.get("schema") == "native_budgeted_dispatch_v2":
+            if not getattr(self, "_allow_budgeted_native", False):
+                raise ValueError("Round8 native dispatch requires its explicit runtime capability.")
+            _validate_budgeted_wind_core_binding(self.recipe, config)
         else:
             _validate_wind_v2_core_binding(self.recipe, config)
         if _wind_core_architecture(config) != execution_mode:

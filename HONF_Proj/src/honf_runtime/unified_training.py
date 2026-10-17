@@ -712,6 +712,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     from matplotlib.figure import Figure
 
     joint_run = any(row.get("phase") == "joint" for row in history)
+    budgeted_native_run = any(isinstance(row.get("native_budgeted_routing_state"), Mapping) for row in history)
 
     def objective_at(row: Mapping[str, Any]) -> Mapping[str, Any]:
         objective = row.get("validation_objective")
@@ -726,7 +727,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 loss_metadata[name].get("panel", "native_prediction"), 0)
         if name in {"operator_residual", "response"}:
             return 1
-        if name in {"base_loss", "router_importance_loss", "expected_work"}:
+        if name in {"base_loss", "router_importance_loss", "expected_work", "budget_work_penalty"}:
             return 2
         if name == "reconstruction" or name.startswith("native_role/"):
             return 0
@@ -747,6 +748,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             return "Router probability loss"
         if name == "expected_work":
             return "Expected selected-read penalty"
+        if name == "budget_work_penalty":
+            return "Equal-case macro work-constraint penalty"
         if name.startswith("native_role/"):
             role = name.split("/", 1)[1]
             role_labels = {
@@ -823,6 +826,14 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 "unit": "dimensionless weighted expected selected-read fraction",
                 "formula": "Expected selected fine reads divided by active receiver-source pairs, multiplied by the calibrated TRAIN penalty weight.",
                 "weight": "TRAIN-calibrated coefficient, capped by the provider configuration.",
+            }
+        if name == "budget_work_penalty":
+            return {
+                "panel": "routing",
+                "label": term_label(name),
+                "unit": "dimensionless equal-case macro constraint penalty",
+                "formula": "lambda*[mean_case(C_i - target_i)]+ + zeta/2*[mean_case(C_i - target_i)]+^2; the hinge is applied after equal-case normalization across the complete optimizer update, including any scheduled response request.",
+                "weight": "Serialized Round8 dual state; logged as a reporting value and differentiated through the exact macro residual chain rule.",
             }
         if name.startswith("native_role/"):
             role = name.split("/", 1)[1]
@@ -1129,6 +1140,14 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "routing": "Other provider-defined objectives; this joint family has no B/F gate or routing curriculum.",
             "train_work": "Executed primitive counter sums; counts alone do not establish sparse executor savings.",
         })
+    if budgeted_native_run:
+        metadata["panel_definitions"]["routing"] = (
+            "Round8 learned native routing: binary dispatch and the serialized equal-case macro work-constraint penalty. "
+            "The penalty is differentiated from the mean case residual over the complete optimizer update."
+        )
+        metadata["panel_definitions"]["train_work"] = (
+            "Executed primitive counter sums and native dispatch work; counts are not a runtime or speed claim."
+        )
     _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"
@@ -2622,6 +2641,51 @@ class TrainingEngine:
         work: dict[str, float] = {}
         sampling_records: list[str] = []
         optimizer.zero_grad(set_to_none=True)
+        native_core = getattr(model, "core", model)
+        budgeted_begin = getattr(native_core, "budgeted_begin_update", None)
+        budgeted_begin_microbatch = getattr(native_core, "budgeted_begin_microbatch", None)
+        budgeted_microbatch_result = getattr(native_core, "budgeted_microbatch_result", None)
+        budgeted_after_update = getattr(native_core, "budgeted_after_update", None)
+        budgeted_capable = any(callable(hook) for hook in (
+            budgeted_begin, budgeted_begin_microbatch, budgeted_microbatch_result, budgeted_after_update,
+        ))
+        if budgeted_capable and not all(callable(hook) for hook in (
+                budgeted_begin, budgeted_begin_microbatch, budgeted_microbatch_result, budgeted_after_update)):
+            raise TypeError("Round8 native core must implement the complete macro/microbatch work-objective API.")
+        routing_state = None
+        if budgeted_capable:
+            routing_state = budgeted_begin(epoch, update_index)
+            if (not isinstance(routing_state, Mapping)
+                    or routing_state.get("absolute_epoch") != int(epoch)):
+                raise ValueError("Round8 budget controller did not enter the requested absolute TRAIN epoch.")
+        native_retrieval_active = getattr(native_core, "_uses_native_retrieval", None)
+        budgeted_enabled = budgeted_capable and (
+            not callable(native_retrieval_active) or bool(native_retrieval_active())
+        )
+        budgeted_expected_denominator = 0
+        budgeted_observed_denominator = 0
+        budgeted_residual_tensors: list[torch.Tensor] = []
+        budgeted_work_gradients: dict[torch.nn.Parameter, torch.Tensor] = {}
+        budgeted_optimizer_parameters: tuple[torch.nn.Parameter, ...] = ()
+        budgeted_scalar_tensors: dict[str, list[torch.Tensor]] = {}
+        budgeted_telemetry_values: dict[str, list[torch.Tensor | float]] = {}
+        if budgeted_enabled:
+            seen_parameter_ids = set()
+            unique_optimizer_parameters = []
+            for group in optimizer.param_groups:
+                for parameter in group["params"]:
+                    if parameter.requires_grad and id(parameter) not in seen_parameter_ids:
+                        seen_parameter_ids.add(id(parameter))
+                        unique_optimizer_parameters.append(parameter)
+            budgeted_optimizer_parameters = tuple(unique_optimizer_parameters)
+            if not budgeted_optimizer_parameters:
+                raise ValueError("Round8 work objective requires trainable optimizer parameters.")
+            for batch in microbatches:
+                auxiliary = batch.auxiliary if isinstance(batch.auxiliary, Mapping) else {}
+                response_present = bool(auxiliary.get("response_family_id"))
+                budgeted_expected_denominator += len(batch.case_keys) + int(response_present)
+            if budgeted_expected_denominator <= 0:
+                raise ValueError("Round8 work objective requires the complete macro's case and response request count.")
         source_read_manager = getattr(provider, "source_read_auxiliary_manager", None)
         if source_read_manager is not None:
             if (source_read_ordinary_update_index is None or source_read_primary_fine_rows is None
@@ -2643,9 +2707,67 @@ class TrainingEngine:
                     raise ValueError("Provider query-sampling receipt must be a SHA256 hex string.")
                 sampling_records.append(sample_hash)
             scene = provider.make_scene(batch.scene_inputs)
+            if budgeted_enabled:
+                budgeted_begin_microbatch()
             predictions, auxiliary_state = provider.predict_native(
                 model, scene, batch.receivers, arm, phase, epoch=epoch,
                 temperature=self.config.temperature_for_epoch(epoch))
+            if budgeted_enabled:
+                result = budgeted_microbatch_result()
+                if not isinstance(result, Mapping):
+                    raise TypeError("Round8 core must return a mapping of differentiable macro residual and telemetry.")
+                residual_numerator = result.get("constraint_residual_numerator")
+                denominator = result.get("work_penalty_denominator")
+                expected_microbatch = len(batch.case_keys) + int(bool(
+                    isinstance(batch.auxiliary, Mapping) and batch.auxiliary.get("response_family_id")
+                ))
+                if (not torch.is_tensor(residual_numerator) or residual_numerator.numel() != 1
+                        or not residual_numerator.requires_grad
+                        or type(denominator) is not int or denominator != expected_microbatch):
+                    raise ValueError(
+                        "Round8 macro residual must be differentiable and count every case plus scheduled response."
+                    )
+                if not bool(torch.isfinite(residual_numerator.detach())):
+                    raise FloatingPointError("Round8 macro constraint residual is nonfinite.")
+                budgeted_observed_denominator += denominator
+                budgeted_residual_tensors.append(residual_numerator.detach().reshape(()))
+                microbatch_gradients = torch.autograd.grad(
+                    residual_numerator / budgeted_expected_denominator,
+                    budgeted_optimizer_parameters,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+                for parameter, gradient in zip(budgeted_optimizer_parameters, microbatch_gradients):
+                    if gradient is None:
+                        continue
+                    if parameter in budgeted_work_gradients:
+                        budgeted_work_gradients[parameter].add_(gradient.detach())
+                    else:
+                        budgeted_work_gradients[parameter] = gradient.detach().clone()
+                scalars = {}
+                for name in ("relaxed_case_sum", "controller_case_sum", "target_case_sum"):
+                    value = result.get(name)
+                    if not torch.is_tensor(value) or value.numel() != 1:
+                        raise TypeError(f"Round8 {name} telemetry must be one detached scalar tensor.")
+                    scalars[name] = value.detach().reshape(())
+                if any(value.requires_grad for value in scalars.values()):
+                    raise ValueError("Round8 reporting/controller telemetry must not retain a prediction graph.")
+                for name, value in scalars.items():
+                    budgeted_scalar_tensors.setdefault(name, []).append(value)
+                telemetry = result.get("telemetry", {})
+                if not isinstance(telemetry, Mapping):
+                    raise TypeError("Round8 work telemetry must be a mapping.")
+                for name, value in telemetry.items():
+                    if not isinstance(name, str) or not name:
+                        raise ValueError("Round8 telemetry keys must be nonempty strings.")
+                    if torch.is_tensor(value):
+                        if value.numel() != 1:
+                            raise ValueError(f"Round8 telemetry {name!r} must be scalar.")
+                        budgeted_telemetry_values.setdefault(name, []).append(value.detach().reshape(()))
+                    elif type(value) in (int, float) and math.isfinite(float(value)):
+                        budgeted_telemetry_values.setdefault(name, []).append(float(value))
+                    else:
+                        raise TypeError(f"Round8 telemetry {name!r} must be finite numeric or a scalar tensor.")
             terms = provider.loss_terms(predictions, batch.targets, phase, auxiliary_state)
             if not isinstance(terms, Mapping):
                 raise TypeError("loss_terms must return a mapping of names to LossTerm values.")
@@ -2678,7 +2800,7 @@ class TrainingEngine:
                 else:
                     work[name] = work.get(name, 0.0) + numeric
             if objective is None:
-                raise ValueError("A microbatch produced no differentiable loss terms.")
+                raise ValueError("A microbatch produced no differentiable native objective terms.")
             if not bool(torch.isfinite(objective.detach())):
                 raise FloatingPointError("Nonfinite optimizer objective.")
             objective.backward()
@@ -2686,6 +2808,45 @@ class TrainingEngine:
             actual = observed.get(name, 0.0)
             if not math.isclose(actual, expected, rel_tol=1.0e-6, abs_tol=1.0e-7):
                 raise ValueError(f"Actual denominator for {name!r} ({actual}) differs from prepass ({expected}).")
+        if budgeted_enabled and budgeted_observed_denominator != budgeted_expected_denominator:
+            raise ValueError("Round8 observed work denominator differs from the full macro case/response request count.")
+        budgeted_macro_residual = None
+        budgeted_macro_penalty = None
+        budgeted_macro_coefficient = None
+        budgeted_macro_summary_values: list[float] = []
+        budgeted_summary_names = ("relaxed_case_sum", "controller_case_sum", "target_case_sum")
+        if budgeted_enabled:
+            if not budgeted_residual_tensors:
+                raise ValueError("Round8 macro constraint did not observe any case residuals.")
+            budgeted_macro_residual = torch.stack(budgeted_residual_tensors).sum() / budgeted_expected_denominator
+            dual = getattr(getattr(native_core, "budgeted_router", None), "dual", None)
+            if dual is None or not callable(getattr(dual, "penalty_residual", None)):
+                raise TypeError("Round8 native core must expose its serialized macro-residual dual state.")
+            positive_residual = torch.relu(budgeted_macro_residual)
+            budgeted_macro_penalty = dual.penalty_residual(budgeted_macro_residual)
+            budgeted_macro_coefficient = (
+                dual.dual_lambda.to(budgeted_macro_residual)
+                * (budgeted_macro_residual > 0).to(budgeted_macro_residual.dtype)
+                + dual.zeta.to(budgeted_macro_residual) * positive_residual
+            ).detach()
+            if (not bool(torch.isfinite(budgeted_macro_residual))
+                    or not bool(torch.isfinite(budgeted_macro_penalty))
+                    or not bool(torch.isfinite(budgeted_macro_coefficient))):
+                raise FloatingPointError("Round8 macro residual or constrained penalty is nonfinite.")
+            if any(name not in budgeted_scalar_tensors for name in budgeted_summary_names):
+                raise ValueError("Round8 core omitted equal-case macro telemetry.")
+            summary_totals = [torch.stack(budgeted_scalar_tensors[name]).sum()
+                              for name in budgeted_summary_names]
+            budgeted_macro_summary_values = torch.stack((budgeted_macro_residual.detach(),
+                budgeted_macro_penalty.detach(), budgeted_macro_coefficient, *summary_totals)
+            ).cpu().tolist()
+            if budgeted_macro_summary_values[2] != 0.0:
+                for parameter, residual_gradient in budgeted_work_gradients.items():
+                    contribution = budgeted_macro_coefficient.to(residual_gradient) * residual_gradient
+                    if parameter.grad is None:
+                        parameter.grad = contribution
+                    else:
+                        parameter.grad.add_(contribution)
         primary_fine_rows = None
         if source_read_manager is not None:
             primary_fine_rows = _source_read_primary_fine_rows(work)
@@ -2738,6 +2899,23 @@ class TrainingEngine:
         if not torch.isfinite(norm) or norm <= 0:
             raise FloatingPointError("Nonfinite or zero actual parameter gradient.")
         optimizer.step()
+        if budgeted_enabled:
+            budgeted_after_update(epoch, update_index)
+            losses["budget_work_penalty"] = float(budgeted_macro_summary_values[1])
+            work["budget_macro_constraint_residual"] = float(budgeted_macro_summary_values[0])
+            work["budget_work_case_requests"] = float(budgeted_observed_denominator)
+            for index, result_name in enumerate(budgeted_summary_names, start=3):
+                work[f"budget_{result_name}"] = float(budgeted_macro_summary_values[index])
+            for name, values in budgeted_telemetry_values.items():
+                tensors = [value for value in values if torch.is_tensor(value)]
+                numbers = [float(value) for value in values if not torch.is_tensor(value)]
+                if tensors:
+                    total = torch.stack(tensors).sum().detach().cpu().item()
+                    numbers.append(float(total))
+                if name.endswith("_max") or name.endswith("_max_bytes"):
+                    work[name] = max(numbers, default=0.0)
+                else:
+                    work[name] = sum(numbers)
         if source_read_manager is not None:
             assert source_read_primary_fine_rows is not None and primary_fine_rows is not None
             source_read_manager.record_primary_fine_rows(
@@ -2904,6 +3082,7 @@ class TrainingEngine:
         hyperedge_readout_child: Mapping[str, Any] | None = None,
         hyperedge_readout_extension: str | Path | None = None,
         native_retrieval_child: Mapping[str, Any] | None = None,
+        native_budgeted_child: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2960,6 +3139,11 @@ class TrainingEngine:
             or identity.get("model_family") == "native_retrieval_v1"
             or identity.get("workflow") == "native_retrieval_joint_v1"
         )
+        identity_is_native_budgeted = (
+            identity.get("family") == "native_budgeted_dispatch_v2"
+            or identity.get("model_family") == "native_budgeted_dispatch_v2"
+            or identity.get("workflow") == "native_budgeted_dispatch_joint_v2"
+        )
         native_recipe = None
         if identity_is_native_retrieval:
             from .native_retrieval_protocol import (
@@ -2999,6 +3183,48 @@ class TrainingEngine:
                 raise ValueError("Round7 continuation stops are restricted to the sealed e600/e1000/e1500/e2500 reviews.")
         elif native_retrieval_child is not None:
             raise ValueError("A native retrieval child declaration requires the strict Round7 family identity.")
+        budgeted_recipe = None
+        if identity_is_native_budgeted:
+            from .native_budgeted_protocol import (
+                NATIVE_BUDGETED_FAMILY,
+                NATIVE_BUDGETED_WORKFLOW,
+                canonical_sha256,
+                native_budgeted_child_declaration,
+                validate_native_budgeted_recipe,
+            )
+
+            budgeted_recipe = validate_native_budgeted_recipe(
+                identity.get("recipe", {}), verify_source_file=True, verify_admission=True,
+            )
+            if (identity.get("family") != NATIVE_BUDGETED_FAMILY
+                    or identity.get("model_family") != NATIVE_BUDGETED_FAMILY
+                    or identity.get("workflow") != NATIVE_BUDGETED_WORKFLOW
+                    or identity.get("protocol") != budgeted_recipe["protocol"]
+                    or identity.get("treatment") != budgeted_recipe["treatment"]
+                    or identity.get("recipe_sha256") != canonical_sha256(budgeted_recipe)):
+                raise ValueError("Round8 family, treatment, workflow and strict research recipe must agree exactly.")
+            competing_children = (
+                native_retrieval_child, source_read_child, source_read_child_auxiliary_fit,
+                inherited_attention_sparse_child, moment_hyperedge_child, hyperedge_readout_child,
+                hyperedge_readout_extension, numerical_pooling_amendment, output_policy_amendment,
+                fresh_initialization, architecture_child_initialization, diagnostic_age_branch,
+                joint_core_revision, mathematical_route_branch,
+            )
+            if (self.config.training_mode != "joint" or arm != "A2-D"
+                    or self.selection.response_guard_metric is not None
+                    or optimizer_seed is not None or allow_microbatch_change
+                    or any(item is not None for item in competing_children)):
+                raise ValueError("Round8 is an exclusive segmented A2-D continuation through the maintained TrainingEngine.")
+            if native_budgeted_child is None:
+                raise ValueError("Every Round8 branch or exact resume requires its strict research child declaration.")
+            if dict(native_budgeted_child) != native_budgeted_child_declaration(budgeted_recipe):
+                raise ValueError("Round8 child declaration differs from the sealed D0/admission recipe.")
+            if ((branch_from_checkpoint is None) == (resume_checkpoint is None)):
+                raise ValueError("Round8 requires one exact e500 D0 branch or an exact own-run resume.")
+            if stop_after not in (600, 1000, 1500, 2500):
+                raise ValueError("Round8 stops are restricted to the declared e600/e1000/e1500/e2500 reviews.")
+        elif native_budgeted_child is not None:
+            raise ValueError("A Round8 child declaration requires the strict native_budgeted_dispatch_v2 family.")
         readout_recipe = None
         if identity_is_hyperedge_readout:
             from .hyperedge_readout_protocol import validate_hyperedge_readout_recipe
@@ -3229,6 +3455,16 @@ class TrainingEngine:
                 pass
             else:
                 raise ValueError("A Round7 child must write to a distinct run directory from its D0 parent.")
+        if identity_is_native_budgeted and branch_from_checkpoint is not None:
+            if (source_path is None
+                    or source_path.resolve() != Path(budgeted_recipe["source_checkpoint"]).resolve()):
+                raise ValueError("Round8 fresh branch path must be the exact recipe-pinned D0 e500 checkpoint.")
+            try:
+                source_path.resolve().relative_to(output)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("A Round8 child must write to a distinct run directory from its D0 parent.")
         source_payload: Mapping[str, Any] | None = None
         restored_rng: Mapping[str, Any] | None = None
         if source_path is not None:
@@ -3251,6 +3487,18 @@ class TrainingEngine:
             elif (source_payload.get("epoch") != 500 or source_payload.get("arm") != "A2-D"
                     or source_payload.get("workflow") != "content_hypergraph_joint_v2"):
                 raise ValueError("Round7 fresh child must branch from exact source D0 A2-D e500.")
+        if identity_is_native_budgeted:
+            if resume_checkpoint is not None:
+                from .native_budgeted_child import verify_native_budgeted_resume
+
+                verify_native_budgeted_resume(source_payload, recipe=budgeted_recipe, stop_after=int(stop_after))
+                saved_identity = source_payload.get("experiment_identity", {})
+                if (saved_identity.get("recipe_sha256") != identity.get("recipe_sha256")
+                        or source_payload.get("arm") != "A2-D"):
+                    raise ValueError("Round8 exact resume changed its admitted recipe or original A2-D sampler arm.")
+            elif (source_payload.get("epoch") != 500 or source_payload.get("arm") != "A2-D"
+                    or source_payload.get("workflow") != "content_hypergraph_joint_v2"):
+                raise ValueError("Round8 fresh child must branch from exact source D0 A2-D e500.")
         if identity_is_moment_hyperedge and resume_checkpoint is not None:
             from .moment_hyperedge_child import verify_moment_hyperedge_resume
 
@@ -3353,6 +3601,28 @@ class TrainingEngine:
                         or source_engine.get("deterministic_case_order") is not True
                         or source_identity.get("sampler_epoch_mapping") != self.sampler_epoch_contract()):
                     raise ValueError("Round7 sampler namespace, seed or absolute epoch mapping differs from D0 e500.")
+        if identity_is_native_budgeted:
+            expected_sampling_identity = {
+                "sampling_version": SamplingKey.CASE_EPOCH_VERSION,
+                "source_sampling_dataset_id": sampling_dataset_id,
+                "matches_d0_e500_namespace": True,
+                "arm": "A2-D",
+                "fit_epoch_is_absolute": True,
+                "sampler_epoch_mapping": "identity",
+            }
+            if (identity.get("sampling_identity") != expected_sampling_identity
+                    or self.config.sampling_version != SamplingKey.CASE_EPOCH_VERSION
+                    or not self.config.deterministic_case_order or arm != "A2-D"):
+                raise ValueError("Round8 must retain the original D0 A2-D absolute case_epoch_v1 stream.")
+            if source_payload is not None:
+                source_identity = source_payload.get("experiment_identity", {})
+                source_engine = source_identity.get("engine_config", {})
+                if (source_identity.get("sampling_dataset_id") != sampling_dataset_id
+                        or source_engine.get("sampling_version") != SamplingKey.CASE_EPOCH_VERSION
+                        or source_engine.get("seed") != self.config.seed
+                        or source_engine.get("deterministic_case_order") is not True
+                        or source_identity.get("sampler_epoch_mapping") != self.sampler_epoch_contract()):
+                    raise ValueError("Round8 changed the exact D0 sampler seed, namespace or absolute age mapping.")
         sealed_identity = {
             **dict(identity),
             "provider_identity": provider_identity,
@@ -3370,7 +3640,14 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            if identity_is_native_retrieval and branch_from_checkpoint is not None:
+            if identity_is_native_budgeted and branch_from_checkpoint is not None:
+                from .native_budgeted_child import prepare_native_budgeted_child
+
+                amendment = prepare_native_budgeted_child(
+                    model, provider, source_payload, sealed_identity, native_budgeted_child,
+                    source_path=source_path, stop_after=int(stop_after),
+                )
+            elif identity_is_native_retrieval and branch_from_checkpoint is not None:
                 from .native_retrieval_child import prepare_native_retrieval_child
 
                 amendment = prepare_native_retrieval_child(
@@ -3479,6 +3756,7 @@ class TrainingEngine:
                   and architecture_child_initialization is None and source_read_child is None
                   and inherited_attention_sparse_child is None
                   and hyperedge_readout_child is None
+                  and not (identity_is_native_budgeted and branch_from_checkpoint is not None)
                   and not identity_is_native_retrieval
                   and not identity_is_moment_hyperedge):
                 if source_payload.get("arm") != "warmup":
@@ -3487,6 +3765,7 @@ class TrainingEngine:
                     raise ValueError("Matched arms must branch at the declared common warmup boundary.")
             if (architecture_child_initialization is None and source_read_child is None
                     and hyperedge_readout_child is None
+                    and not (identity_is_native_budgeted and branch_from_checkpoint is not None)
                     and not (identity_is_native_retrieval and branch_from_checkpoint is not None)
                     and (not identity_is_moment_hyperedge or resume_checkpoint is not None)):
                 model.load_state_dict(source_payload["model_state_dict"], strict=True)
@@ -3512,7 +3791,14 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
-        if identity_is_native_retrieval:
+        if identity_is_native_budgeted and branch_from_checkpoint is not None:
+            from .native_budgeted_child import verify_native_budgeted_optimizer
+
+            verify_native_budgeted_optimizer(
+                model, optimizer, source_payload["optimizer_state_by_name"], amendment,
+                dataset=budgeted_recipe["dataset"],
+            )
+        elif identity_is_native_retrieval:
             from .native_retrieval_child import verify_native_retrieval_optimizer
 
             verify_native_retrieval_optimizer(
@@ -3651,6 +3937,8 @@ class TrainingEngine:
             resume_amendments.append(amendment)
             amendment_name = ('moment_hyperedge_child' if identity_is_moment_hyperedge and branch_from_checkpoint is not None else
                               'moment_hyperedge_resume' if identity_is_moment_hyperedge else
+                              'native_budgeted_child' if identity_is_native_budgeted and branch_from_checkpoint is not None else
+                              'native_budgeted_resume' if identity_is_native_budgeted else
                               'native_retrieval_child' if identity_is_native_retrieval and branch_from_checkpoint is not None else
                               'hyperedge_readout_child' if hyperedge_readout_child is not None else
                               'hyperedge_readout_extension' if readout_extension_amendment is not None else
@@ -3666,6 +3954,7 @@ class TrainingEngine:
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
                 category='logs' if (identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
+                                    or identity_is_native_budgeted
                                     or identity_is_native_retrieval
                                     or hyperedge_readout_child is not None
                                     or readout_extension_amendment is not None
@@ -3724,6 +4013,17 @@ class TrainingEngine:
                     inherited_history_scope=(
                         f"exact D0 {native_recipe['treatment']} source history through absolute e500; "
                         "Round7 child rows begin at absolute e501"
+                    ),
+                )
+                history = []
+            elif identity_is_native_budgeted:
+                branch_parent.update(
+                    native_budgeted_child=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
+                    inherited_history_scope=(
+                        f"exact D0 {budgeted_recipe['treatment']} source history through absolute e500; "
+                        "Round8 child rows begin at absolute e501"
                     ),
                 )
                 history = []
@@ -4002,6 +4302,45 @@ class TrainingEngine:
                             "access": "full_A2-D_direct",
                             "environment_value_reader": False,
                         }
+                if identity_is_native_budgeted:
+                    if budgeted_recipe["treatment"] == "G-budgeted-M":
+                        native_core = getattr(model, "core", model)
+                        routing_state = getattr(native_core, "native_routing_state", None)
+                        if not callable(routing_state):
+                            raise RuntimeError("G8 lost its absolute-age budget schedule API.")
+                        observed_routing = dict(routing_state())
+                        expected_macro = completed_updates + len(update_rows)
+                        observed_macro = int(getattr(native_core, "budgeted_macro_step", -1))
+                        if (observed_routing.get("absolute_epoch") != epoch
+                                or observed_macro != expected_macro):
+                            raise RuntimeError("G8 age or global macro clock differs from exact TrainingEngine progress.")
+                        macro_start = observed_macro - len(update_rows)
+                        dense_count = sum(
+                            1 for index in range(macro_start, observed_macro)
+                            if epoch <= 700 or (index + 1) % 4 == 0
+                        )
+                        row["native_budgeted_routing_state"] = {
+                            "schema": "native_budgeted_absolute_age_state_v1",
+                            "treatment": budgeted_recipe["treatment"],
+                            "backend": budgeted_recipe["native_backend"],
+                            **observed_routing,
+                            "schedule_snapshot_for": "next_optimizer_macro_after_completed_update",
+                            "global_optimizer_macro_step": observed_macro,
+                            "dense_router_updates_this_epoch": dense_count,
+                            "dense_router_cadence": "every_four_global_optimizer_macro_steps_after_e700",
+                            "environment_value_reader": False,
+                        }
+                    else:
+                        row["native_budgeted_routing_state"] = {
+                            "schema": "native_budgeted_absolute_age_state_v1",
+                            "treatment": "D-control",
+                            "backend": "full_direct",
+                            "absolute_epoch": epoch,
+                            "phase": "unchanged_A2-D_control",
+                            "access": "full_A2-D_direct",
+                            "environment_value_reader": False,
+                        }
+                    row["native_budgeted_admission"] = copy.deepcopy(budgeted_recipe["research_admission"])
                 sampler_epoch = self.sampler_epoch(epoch)
                 if sampler_epoch != epoch:
                     row["sampler_epoch"] = sampler_epoch

@@ -51,6 +51,18 @@ _DECODE_TRACE_DEFAULTS = (
     "direct_temperature_coefficients",
 )
 _DECODE_TRACE_AVAILABLE = (
+    "native_hard_support",
+    "native_module_ids",
+    "native_dispatch_seed",
+    "native_dispatch_seed_ids",
+    "native_membership_hard",
+    "native_membership_probabilities",
+    "native_protected_direct",
+    "native_protected_exceptions",
+    "native_group_member_ids",
+    "native_group_member_valid",
+    "native_group_query_ids",
+    "native_group_query_valid",
     "native_seed_permission",
     "native_module_permission",
     "native_selected_batch",
@@ -791,6 +803,7 @@ class ContentHypergraphCoreV2(nn.Module):
             native_capture = self._captures_native_routes() and cycle_index == self.context_depth - 1
             native_options = ({
                 "capture_native_routes": True,
+                "native_capture_route_names": self._native_capture_route_names(),
                 "cycle_index": cycle_index,
                 "owner_token": self._owner_token,
                 "parameter_versions": self._parameter_version_stamp(),
@@ -1078,6 +1091,9 @@ class ContentHypergraphCoreV2(nn.Module):
     def _captures_native_routes(self) -> bool:
         """Narrow opt-in hook; historical families retain their exact path."""
         return False
+
+    def _native_capture_route_names(self):
+        return ("mm", "me")
 
     def _finalize_native_preparation(self, organization, cycle_trace):
         return organization
@@ -1490,6 +1506,8 @@ class ContentHypergraphCoreV2(nn.Module):
                     "direct_source_messages", "direct_temperature_coefficients",
                     "source_read_gates", "source_read_support",
                     "native_module_permission", "native_seed_permission",
+                    "native_hard_support", "native_dispatch_seed", "native_dispatch_seed_ids",
+                    "native_protected_direct", "native_protected_exceptions",
                 } and value.ndim >= 2 and value.shape[1] == query.num_queries and not (
                     direct_messages_preselected and name == "direct_source_messages"
                 ):

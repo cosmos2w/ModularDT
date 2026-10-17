@@ -202,6 +202,7 @@ class ThermalContentHypergraphAdapter(nn.Module):
             core = ContentHypergraphCore(**config)
         core_config_value = core.get_config()
         native_retrieval_schema = core_config_value.get("schema") == "native_retrieval_core_v1"
+        budgeted_native_schema = core_config_value.get("schema") == "native_budgeted_dispatch_v2"
         if native_retrieval_schema:
             from honf_forward_core.native_retrieval.core import NativeRetrievalCore
 
@@ -217,6 +218,21 @@ class ThermalContentHypergraphAdapter(nn.Module):
                     or base_core_config.get("schema") != "content_hypergraph_core_v2"
                     or base_core_config.get("architecture") != "A2-D"):
                 raise ValueError("Thermal base adapter accepts only the explicit no-E native A2-D capability.")
+        elif budgeted_native_schema:
+            from honf_forward_core.native_retrieval.budgeted_core import BudgetedNativeCore
+
+            expected_budgeted_fields = {
+                "schema", "base_model_config", "native_backend", "routing_seed",
+                "membership_bias", "lambda0", "environment_value_reader",
+            }
+            base_core_config = core_config_value.get("base_model_config")
+            if (not isinstance(core, BudgetedNativeCore)
+                    or set(core_config_value) != expected_budgeted_fields
+                    or core_config_value.get("environment_value_reader") is not False
+                    or not isinstance(base_core_config, Mapping)
+                    or base_core_config.get("schema") != "content_hypergraph_core_v2"
+                    or base_core_config.get("architecture") != "A2-D"):
+                raise ValueError("Thermal base adapter accepts only the explicit no-E budgeted A2-D capability.")
         else:
             base_core_config = core_config_value
         iag_affine_capability = (
@@ -900,19 +916,29 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
         if core is None:
             config = dict(core_config or {})
             native_schema = config.get("schema") == "native_retrieval_core_v1"
-            if native_schema:
-                from honf_forward_core.native_retrieval.core import NativeRetrievalCore
+            budgeted_schema = config.get("schema") == "native_budgeted_dispatch_v2"
+            if native_schema or budgeted_schema:
+                if budgeted_schema:
+                    from honf_forward_core.native_retrieval.budgeted_core import BudgetedNativeCore
 
-                native_fields = {
-                    "schema", "base_model_config", "native_tau_mm", "native_tau_me",
-                    "native_tau_q", "native_backend", "environment_value_reader",
-                }
+                    config_type = BudgetedNativeCore
+                    native_fields = {
+                        "schema", "base_model_config", "native_backend", "routing_seed",
+                        "membership_bias", "lambda0", "environment_value_reader",
+                    }
+                else:
+                    from honf_forward_core.native_retrieval.core import NativeRetrievalCore
+
+                    config_type = NativeRetrievalCore
+                    native_fields = {
+                        "schema", "base_model_config", "native_tau_mm", "native_tau_me",
+                        "native_tau_q", "native_backend", "environment_value_reader",
+                    }
                 if set(config) != native_fields or config.get("environment_value_reader") is not False:
-                    raise ValueError("Thermal native-retrieval core config must use the exact no-E schema.")
+                    raise ValueError("Thermal native core config must use an exact explicit no-E schema.")
                 base_config = config.get("base_model_config")
                 if not isinstance(base_config, Mapping) or base_config.get("schema") != "content_hypergraph_core_v2":
                     raise ValueError("Thermal native retrieval requires its exact v2 A2-D base config.")
-                config_type = NativeRetrievalCore
             else:
                 if config.get("schema") != "content_hypergraph_core_v2":
                     raise ValueError("Thermal v2 requires a content_hypergraph_core_v2 config.")
@@ -929,23 +955,34 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             for name, expected in required.items():
                 if base_config.get(name) != expected:
                     raise ValueError(f"Thermal v2 core requires explicit {name}={expected}.")
-            if native_schema and base_config.get("architecture") != "A2-D":
+            if (native_schema or budgeted_schema) and base_config.get("architecture") != "A2-D":
                 raise ValueError("Thermal native retrieval requires the unchanged A2-D architecture.")
             core = config_type.from_config(config)
         if not isinstance(core, core_type):
             raise TypeError("Thermal v2 adapter requires ContentHypergraphCoreV2.")
         core_config_value = core.get_config()
         native_schema = core_config_value.get("schema") == "native_retrieval_core_v1"
-        if native_schema:
-            from honf_forward_core.native_retrieval.core import NativeRetrievalCore
+        budgeted_schema = core_config_value.get("schema") == "native_budgeted_dispatch_v2"
+        if native_schema or budgeted_schema:
+            if budgeted_schema:
+                from honf_forward_core.native_retrieval.budgeted_core import BudgetedNativeCore
 
-            native_fields = {
-                "schema", "base_model_config", "native_tau_mm", "native_tau_me",
-                "native_tau_q", "native_backend", "environment_value_reader",
-            }
-            if (not isinstance(core, NativeRetrievalCore) or set(core_config_value) != native_fields
+                config_type = BudgetedNativeCore
+                native_fields = {
+                    "schema", "base_model_config", "native_backend", "routing_seed",
+                    "membership_bias", "lambda0", "environment_value_reader",
+                }
+            else:
+                from honf_forward_core.native_retrieval.core import NativeRetrievalCore
+
+                config_type = NativeRetrievalCore
+                native_fields = {
+                    "schema", "base_model_config", "native_tau_mm", "native_tau_me",
+                    "native_tau_q", "native_backend", "environment_value_reader",
+                }
+            if (not isinstance(core, config_type) or set(core_config_value) != native_fields
                     or core_config_value.get("environment_value_reader") is not False):
-                raise ValueError("Thermal v2 accepts only the explicit native-retrieval core capability.")
+                raise ValueError("Thermal v2 accepts only explicit no-E native-retrieval capabilities.")
             dimensions_config = core_config_value["base_model_config"]
         else:
             if core_config_value.get("schema") != "content_hypergraph_core_v2":
@@ -1032,6 +1069,10 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             from honf_forward_core.native_retrieval.core import NativeRetrievalCore
 
             core = NativeRetrievalCore.from_config(core_config)
+        elif core_config.get("schema") == "native_budgeted_dispatch_v2":
+            from honf_forward_core.native_retrieval.budgeted_core import BudgetedNativeCore
+
+            core = BudgetedNativeCore.from_config(core_config)
         else:
             core = core_type.from_config(core_config)
         adapter = cls(

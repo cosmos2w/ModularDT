@@ -44,6 +44,12 @@ MODEL_FAMILIES = {
         workflows=("native_retrieval_train", "native_retrieval_evaluate"),
         description="Round7 matched A2-D continuations with typed native-token retrieval and strict no-E primary access",
     ),
+    "native_budgeted_dispatch_v2": ModelFamilySpec(
+        family_id="native_budgeted_dispatch_v2",
+        available=True,
+        workflows=("native_budgeted_dispatch_train", "native_budgeted_dispatch_evaluate"),
+        description="Round8 matched D0 continuations with learned budgeted native hyperedge dispatch and strict no-E primary access",
+    ),
     "honf_content_hypergraph": ModelFamilySpec(
         family_id="honf_content_hypergraph",
         available=True,
