@@ -5,7 +5,6 @@ from dataclasses import fields, replace
 
 import pytest
 import torch
-
 from honf_forward_core.content_hypergraph.contracts import QueryBatch, SceneBatch
 from honf_forward_core.content_hypergraph.model_v2 import ContentHypergraphCoreV2
 from honf_forward_core.inherited_attention import (
@@ -466,9 +465,12 @@ def test_projected_read_defers_query_count_sync_unless_requested():
     ordinary = core.decode(organization, query, controls)
     assert ordinary.work_counts["exact_cover_positive_count_collected"] == 0
     assert "cover_positive_slots" not in ordinary.work_counts
-    assert ordinary.work_counts["scene_response_executed_associations"] == organization.work_counts[
-        "module_positive_associations"
-    ]
+    assert organization.work_counts["atlas_exact_counts_available"] == 0
+    assert "atlas_positive_associations" not in organization.work_counts
+    assert "module_positive_associations" not in organization.work_counts
+    assert ordinary.work_counts["scene_response_executed_associations"] == (
+        organization.module_atlas.probabilities.numel()
+    )
 
     traced = core.decode(organization, query, controls, return_trace=True)
     assert traced.work_counts["exact_cover_positive_count_collected"] == 1

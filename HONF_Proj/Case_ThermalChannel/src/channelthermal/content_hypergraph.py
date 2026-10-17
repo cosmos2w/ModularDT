@@ -53,9 +53,14 @@ THERMAL_CONTENT_SURFACE_POINTS = 16
 THERMAL_CONTENT_NATIVE_THETA_COUNT = 64
 THERMAL_CONTENT_FIELD_ORDER = ("u", "v", "p", "omega", "temperature")
 ROUND5_MOMENT_CORE_SCHEMA = "scene_prepared_moment_hyperedge_core_v1"
+ROUND6_READOUT_CORE_SCHEMA = "hyperedge_readout_core_v1"
 
 
 def _iag_core_from_config(config: Mapping[str, Any]) -> nn.Module:
+    if config.get("schema") == ROUND6_READOUT_CORE_SCHEMA:
+        from honf_forward_core.inherited_attention.readout_model import HyperedgeReadoutCoreV1
+
+        return HyperedgeReadoutCoreV1.from_config(dict(config))
     if config.get("schema") == ROUND5_MOMENT_CORE_SCHEMA:
         from honf_forward_core.inherited_attention.moment_model import MomentHyperedgeCoreV1
 
@@ -199,6 +204,7 @@ class ThermalContentHypergraphAdapter(nn.Module):
         iag_affine_capability = (
             core_config_value.get("schema") in (
                 "inherited_attention_core_v1", ROUND5_MOMENT_CORE_SCHEMA,
+                ROUND6_READOUT_CORE_SCHEMA,
             )
             and core_config_value.get("architecture") == "IAG-C"
             and core_config_value.get("thermal_response") is True
@@ -1122,7 +1128,8 @@ class ThermalInheritedAttentionAdapterV1(ThermalContentHypergraphAdapterV2):
             raise ValueError("Thermal IAG-C retains the native 24x8 geometry-only environment catalogue.")
         if core is None:
             config = dict(core_config or {})
-            if (config.get("schema") not in (self.CORE_SCHEMA, ROUND5_MOMENT_CORE_SCHEMA)
+            if (config.get("schema") not in (self.CORE_SCHEMA, ROUND5_MOMENT_CORE_SCHEMA,
+                                               ROUND6_READOUT_CORE_SCHEMA)
                     or config.get("architecture") != "IAG-C"):
                 raise ValueError("Thermal IAG-C requires a registered IAG-C core schema.")
             core = _iag_core_from_config(config)
@@ -1138,7 +1145,8 @@ class ThermalInheritedAttentionAdapterV1(ThermalContentHypergraphAdapterV2):
             "thermal_response": True,
             "signed_carrier_width": 8,
         }
-        if (config.get("schema") not in (self.CORE_SCHEMA, ROUND5_MOMENT_CORE_SCHEMA)
+        if (config.get("schema") not in (self.CORE_SCHEMA, ROUND5_MOMENT_CORE_SCHEMA,
+                                           ROUND6_READOUT_CORE_SCHEMA)
                 or any(config.get(name) != expected for name, expected in required.items())):
             raise ValueError("Thermal IAG-C core differs from the native dimensions or signed affine response law.")
         # Bypass the v2 architecture validator while retaining its unchanged

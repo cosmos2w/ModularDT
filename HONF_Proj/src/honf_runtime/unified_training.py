@@ -1348,6 +1348,22 @@ def _read_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
     return request
 
 
+def _pending_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
+    """Return an unconsumed request and reject re-use of an acknowledged ID."""
+    request = _read_clean_stop_request(output, name)
+    if request is None:
+        return None
+    acknowledgement_path = output / "clean_stop_acknowledged.json"
+    if acknowledgement_path.is_file():
+        acknowledgement = json.loads(acknowledgement_path.read_text(encoding="utf-8"))
+        if isinstance(acknowledgement, dict) and acknowledgement.get("request_id") == request["request_id"]:
+            return None
+    request_tag = hashlib.sha256(request["request_id"].encode("utf-8")).hexdigest()[:16]
+    if (output / f"clean_stop_consumed_{request_tag}.json").is_file():
+        raise ValueError("Clean-stop request_id was already consumed; use a unique request ID.")
+    return request
+
+
 def _consume_acknowledged_clean_stop(output: Path, name: str, layout: RunLayout) -> None:
     """Remove only a leftover request whose exact identity was already acked."""
 
@@ -1731,6 +1747,21 @@ class TrainingEngine:
         self.device = torch.device(device)
         self.selection = selection or SelectionPolicy()
 
+    def sampler_epoch(self, fit_epoch: int) -> int:
+        """Map a training-history age to the deterministic sampler age.
+
+        Most protocols use the same clock for both values. A narrowly scoped
+        child protocol may override this hook when it starts a fresh fit while
+        continuing the parent sampler sequence.
+        """
+        if type(fit_epoch) is not int or fit_epoch < 1:
+            raise ValueError("Fit epochs must be positive integers before sampler mapping.")
+        return fit_epoch
+
+    def sampler_epoch_contract(self) -> Mapping[str, Any] | None:
+        """Return a JSON-safe identity contract when the sampler clock differs."""
+        return None
+
     def epoch_case_order(
         self, provider: TaskProvider, epoch: int,
     ) -> tuple[list[Any], str]:
@@ -1741,11 +1772,14 @@ class TrainingEngine:
         scientific fit. ``fit`` uses the same method, so cost probes cannot
         drift from its deterministic case-order or dataset-key rules.
         """
-        ordered_cases = list(provider.epoch_cases(epoch, self.config.seed))
+        sampler_epoch = self.sampler_epoch(epoch)
+        ordered_cases = list(provider.epoch_cases(sampler_epoch, self.config.seed))
         if not ordered_cases:
             raise ValueError("Each development epoch must visit at least one selected TRAIN case.")
         if self.config.deterministic_case_order:
-            rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, epoch, 0x484F4E46]))
+            rng = np.random.default_rng(np.random.SeedSequence([
+                self.config.seed, sampler_epoch, 0x484F4E46,
+            ]))
             order = rng.permutation(len(ordered_cases)).tolist()
             ordered_cases = [ordered_cases[index] for index in order]
         dataset_id = (
@@ -1776,7 +1810,7 @@ class TrainingEngine:
         for micro_index, start in enumerate(range(0, len(update_cases), self.config.microbatch_cases)):
             case_chunk = update_cases[start:start + self.config.microbatch_cases]
             key = SamplingKey(
-                self.config.seed, epoch, update_index, micro_index, phase, arm,
+                self.config.seed, self.sampler_epoch(epoch), update_index, micro_index, phase, arm,
                 sampling_version=self.config.sampling_version,
                 dataset_id=sampling_dataset_id,
             )
@@ -1856,7 +1890,8 @@ class TrainingEngine:
         if self.config.training_mode == "refinement" and arm != "warmup":
             raise ValueError("A disposable preflight update must use the shared warmup arm.")
         model.to(self.device)
-        cases = tuple(provider.epoch_cases(1, self.config.seed))
+        sampler_epoch = self.sampler_epoch(1)
+        cases = tuple(provider.epoch_cases(sampler_epoch, self.config.seed))
         if not cases:
             raise ValueError("The task provider has no TRAIN case for a dry run.")
         cases = cases[:1]
@@ -1864,7 +1899,7 @@ class TrainingEngine:
         provider_identity = dict(provider.identity_payload())
         dataset_id = (_sampling_dataset_id(provider_identity)
                       if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION else "")
-        key = SamplingKey(self.config.seed, 1, 0, 0, phase, arm,
+        key = SamplingKey(self.config.seed, sampler_epoch, 0, 0, phase, arm,
                           sampling_version=self.config.sampling_version, dataset_id=dataset_id)
         batch = provider.make_batch(cases, key)
         if tuple(batch.case_keys) and list(batch.case_keys) != list(cases):
@@ -2035,7 +2070,11 @@ class TrainingEngine:
                     )
                     loss_values[name] += float(term.numerator.detach()) / planned[name] * float(term.weight)
                 for name, value in provider.work_counts(batch, predictions, auxiliary_state).items():
-                    work[name] = work.get(name, 0.0) + float(value)
+                    numeric = float(value)
+                    if name.endswith("_max_live_tile_bytes_per_call"):
+                        work[name] = max(work.get(name, 0.0), numeric)
+                    else:
+                        work[name] = work.get(name, 0.0) + numeric
 
                 active_objectives = [(name, value) for name, value in objectives.items() if value is not None]
                 if not active_objectives:
@@ -2620,7 +2659,11 @@ class TrainingEngine:
                 objective = piece if objective is None else objective + piece
                 losses[name] += float(term.numerator.detach()) / planned[name] * effective_weight
             for name, value in provider.work_counts(batch, predictions, auxiliary_state).items():
-                work[name] = work.get(name, 0.0) + float(value)
+                numeric = float(value)
+                if name.endswith("_max_live_tile_bytes_per_call"):
+                    work[name] = max(work.get(name, 0.0), numeric)
+                else:
+                    work[name] = work.get(name, 0.0) + numeric
             if objective is None:
                 raise ValueError("A microbatch produced no differentiable loss terms.")
             if not bool(torch.isfinite(objective.detach())):
@@ -2845,6 +2888,8 @@ class TrainingEngine:
         source_read_child_auxiliary_fit: Callable[..., Mapping[str, Any]] | None = None,
         inherited_attention_sparse_child: Mapping[str, Any] | None = None,
         moment_hyperedge_child: Mapping[str, Any] | None = None,
+        hyperedge_readout_child: Mapping[str, Any] | None = None,
+        hyperedge_readout_extension: str | Path | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2892,6 +2937,49 @@ class TrainingEngine:
             or identity.get("workflow") == MOMENT_WORKFLOW
             or identity.get("protocol") == MOMENT_PROTOCOL
         )
+        identity_is_hyperedge_readout = (
+            identity.get("family") == "hyperedge_readout_round6"
+            or identity.get("workflow") == "hyperedge_readout_fit_v1"
+        )
+        readout_recipe = None
+        if identity_is_hyperedge_readout:
+            from .hyperedge_readout_protocol import validate_hyperedge_readout_recipe
+
+            readout_recipe = validate_hyperedge_readout_recipe(identity.get("recipe", {}))
+            if (identity.get("family") != "hyperedge_readout_round6"
+                    or identity.get("model_family") != "hyperedge_readout_round6"
+                    or identity.get("workflow") != "hyperedge_readout_fit_v1"
+                    or identity.get("protocol") != "frozen_hyperedge_readout_diagnostic_v1"
+                    or identity.get("phase") != readout_recipe["phase"]
+                    or identity.get("receiver_reduction") != readout_recipe["receiver_reduction"]
+                    or identity.get("receiver_access") != readout_recipe["receiver_access"]
+                    or identity.get("recipe_sha256") != _canonical_sha256(readout_recipe)):
+                raise ValueError("Round6 family, workflow, phase and strict recipe identity fields must agree exactly.")
+            if (self.config.training_mode != "joint" or arm != "IAG-C"
+                    or self.selection.response_guard_metric is not None
+                    or optimizer_seed is not None or allow_microbatch_change
+                    or mathematical_route_branch is not None or joint_core_revision is not None
+                    or diagnostic_age_branch is not None or architecture_child_initialization is not None
+                    or source_read_child is not None or source_read_child_auxiliary_fit is not None
+                    or inherited_attention_sparse_child is not None or moment_hyperedge_child is not None
+                    or numerical_pooling_amendment is not None or output_policy_amendment is not None
+                    or fresh_initialization is not None
+                    or (readout_recipe["phase"] == "joint_confirmation"
+                        and hyperedge_readout_extension is not None)):
+                raise ValueError("Round6 is an exclusive native joint IAG-C fit with its own declared optimizer path.")
+            if readout_recipe["phase"] == "frozen_probe":
+                if branch_from_checkpoint is not None or hyperedge_readout_child is not None:
+                    raise ValueError("Frozen Round6 fits start from the sealed H e2500 model without a joint branch attachment.")
+            elif ((branch_from_checkpoint is None) == (resume_checkpoint is None)
+                  or (branch_from_checkpoint is not None) != (hyperedge_readout_child is not None)):
+                raise ValueError("Joint Round6 requires either its explicit fresh H e1000 attachment or an exact own-run resume.")
+        if hyperedge_readout_child is not None and (
+                not identity_is_hyperedge_readout
+                or identity.get("phase") != "joint_confirmation"
+                or branch_from_checkpoint is None or resume_checkpoint is not None
+                or allow_microbatch_change or self.config.training_mode != "joint"
+                or arm != "IAG-C"):
+            raise ValueError("Round6 child attachment is reserved for a fresh joint-confirmation IAG-C branch.")
         if identity_is_moment_hyperedge:
             iag_recipe = validate_moment_hyperedge_recipe(iag_recipe)
             if (identity.get("model_family") != MOMENT_FAMILY
@@ -3066,6 +3154,14 @@ class TrainingEngine:
                 pass
             else:
                 raise ValueError("A Round5 moment-hyperedge child must write to a distinct run directory from its C parent.")
+        if (identity_is_hyperedge_readout and branch_from_checkpoint is not None
+                and source_path is not None):
+            try:
+                source_path.resolve().relative_to(output)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("A Round6 joint child must write to a distinct run directory from its H parent.")
         source_payload: Mapping[str, Any] | None = None
         restored_rng: Mapping[str, Any] | None = None
         if source_path is not None:
@@ -3080,6 +3176,15 @@ class TrainingEngine:
             from .moment_hyperedge_child import verify_moment_hyperedge_resume
 
             verify_moment_hyperedge_resume(source_payload, iag_recipe, moment_hyperedge_child)
+        if hyperedge_readout_child is not None:
+            from .hyperedge_readout_protocol import validate_hyperedge_readout_recipe
+
+            readout_recipe = validate_hyperedge_readout_recipe(identity.get("recipe", {}))
+            if (readout_recipe.get("phase") != "joint_confirmation"
+                    or int(source_payload.get("epoch", -1)) != 1000
+                    or stop_after != 2500
+                    or self.config.total_epochs != 2500):
+                raise ValueError("Round6 joint confirmation must continue the exact H e1000 source through e2500.")
         start_epoch = 1 if source_payload is None else int(source_payload["epoch"]) + 1
         if resume_checkpoint is not None and is_iag_sparse_development:
             branch = source_payload.get("branch_parent")
@@ -3099,6 +3204,41 @@ class TrainingEngine:
             raise ValueError("Requested stop must advance the saved age and remain inside the common horizon.")
         if identity_is_moment_hyperedge and stop_after > int(iag_recipe["approved_stop_after"]):
             raise ValueError("Round5 stop cannot exceed the sealed absolute e2500 primary horizon.")
+        readout_extension_amendment = None
+        if identity_is_hyperedge_readout:
+            if readout_recipe["phase"] == "frozen_probe":
+                from .hyperedge_readout_protocol import READOUT_HEALTH_REVIEW_AGE, READOUT_PRIMARY_FIT_AGE
+
+                _pending_clean_stop_request(output, clean_stop_name)
+                if source_payload is None and stop_after != READOUT_HEALTH_REVIEW_AGE:
+                    raise ValueError(
+                        "A fresh Round6 frozen fit must target the fit-age-100 health review; "
+                        "later primary-age continuation requires exact resume after the review."
+                    )
+                if source_payload is not None:
+                    if resume_checkpoint is None or int(source_payload.get("epoch", -1)) >= stop_after:
+                        raise ValueError("Frozen Round6 continuation must exactly resume its own latest checkpoint.")
+                    saved_fit_age = int(source_payload["epoch"])
+                    required_stop = (
+                        READOUT_HEALTH_REVIEW_AGE if saved_fit_age < READOUT_HEALTH_REVIEW_AGE
+                        else READOUT_PRIMARY_FIT_AGE if saved_fit_age < READOUT_PRIMARY_FIT_AGE
+                        else readout_recipe["fit_age_ceiling"]
+                    )
+                    if stop_after != required_stop:
+                        raise ValueError(
+                            "Round6 frozen continuation must reach the next sealed review boundary: "
+                            f"fit age {required_stop}."
+                        )
+                    from .hyperedge_readout_protocol import frozen_extension_resume_amendment
+
+                    readout_extension_amendment = frozen_extension_resume_amendment(
+                        source_payload, recipe=readout_recipe, stop_after=stop_after,
+                        decision_path=hyperedge_readout_extension,
+                    )
+                elif hyperedge_readout_extension is not None:
+                    raise ValueError("A fresh fit cannot use an extension decision before the fit-500 TRAIN review.")
+            elif stop_after != readout_recipe["fit_age_ceiling"]:
+                raise ValueError("Round6 joint confirmation must finish at absolute H age 2500.")
         if not identity:
             raise ValueError("A sealed nonempty experiment identity is required.")
         model.to(self.device)
@@ -3118,6 +3258,12 @@ class TrainingEngine:
             "selection_policy": asdict(self.selection),
             "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in group_specs],
         }
+        sampler_epoch_contract = self.sampler_epoch_contract()
+        if sampler_epoch_contract is not None:
+            existing_sampler_contract = sealed_identity.get("sampler_epoch_mapping")
+            if existing_sampler_contract is not None and existing_sampler_contract != dict(sampler_epoch_contract):
+                raise ValueError("Experiment identity sampler-age mapping differs from its TrainingEngine.")
+            sealed_identity["sampler_epoch_mapping"] = dict(sampler_epoch_contract)
         if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
@@ -3131,7 +3277,16 @@ class TrainingEngine:
                     sealed_identity,
                     moment_hyperedge_child,
                     source_path=source_path,
-                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    case_keys=tuple(provider.epoch_cases(self.sampler_epoch(start_epoch), self.config.seed)),
+                    stop_after=int(stop_after),
+                )
+            elif hyperedge_readout_child is not None:
+                from .hyperedge_readout_child import prepare_hyperedge_readout_child
+
+                amendment = prepare_hyperedge_readout_child(
+                    model, source_payload, sealed_identity, hyperedge_readout_child,
+                    source_path=source_path,
+                    case_keys=tuple(provider.epoch_cases(self.sampler_epoch(start_epoch), self.config.seed)),
                     stop_after=int(stop_after),
                 )
             elif inherited_attention_sparse_child is not None:
@@ -3143,7 +3298,7 @@ class TrainingEngine:
                     sealed_identity,
                     inherited_attention_sparse_child,
                     source_path=source_path,
-                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    case_keys=tuple(provider.epoch_cases(self.sampler_epoch(start_epoch), self.config.seed)),
                     stop_after=int(stop_after),
                 )
             elif source_read_child is not None:
@@ -3153,7 +3308,7 @@ class TrainingEngine:
                     model, source_payload, sealed_identity, source_read_child,
                     source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
                     source_path=source_path,
-                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    case_keys=tuple(provider.epoch_cases(self.sampler_epoch(start_epoch), self.config.seed)),
                     stop_after=int(stop_after))
             elif architecture_child_initialization is not None:
                 from .architecture_child import prepare_native_routing_child
@@ -3161,14 +3316,14 @@ class TrainingEngine:
                 amendment = prepare_native_routing_child(
                     model, source_payload, sealed_identity, architecture_child_initialization,
                     source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
-                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    case_keys=tuple(provider.epoch_cases(self.sampler_epoch(start_epoch), self.config.seed)),
                     stop_after=int(stop_after))
             elif diagnostic_age_branch is not None:
                 amendment = _diagnostic_age_branch_amendment(
                     source_payload.get("experiment_identity", {}), sealed_identity,
                     diagnostic_age_branch,
                     source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
-                    case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                    case_keys=tuple(provider.epoch_cases(self.sampler_epoch(start_epoch), self.config.seed)),
                     stop_after=int(stop_after))
                 if (source_payload.get("arm") != arm
                         or int(source_payload.get("epoch", -1)) != diagnostic_age_branch["source_epoch"]):
@@ -3204,18 +3359,24 @@ class TrainingEngine:
             else:
                 amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
                     allow_microbatch_change=allow_microbatch_change)
+            if readout_extension_amendment is not None:
+                if amendment is not None:
+                    raise ValueError("Round6 extension receipt cannot be combined with another resume amendment.")
+                amendment = readout_extension_amendment
             if resume_checkpoint is not None:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
             elif (joint_core_revision is None and diagnostic_age_branch is None
                   and architecture_child_initialization is None and source_read_child is None
                   and inherited_attention_sparse_child is None
+                  and hyperedge_readout_child is None
                   and not identity_is_moment_hyperedge):
                 if source_payload.get("arm") != "warmup":
                     raise ValueError("Matched arms may branch only from the shared warmup checkpoint.")
                 if int(source_payload.get("epoch", -1)) != self.config.warmup_epochs:
                     raise ValueError("Matched arms must branch at the declared common warmup boundary.")
             if (architecture_child_initialization is None and source_read_child is None
+                    and hyperedge_readout_child is None
                     and (not identity_is_moment_hyperedge or resume_checkpoint is not None)):
                 model.load_state_dict(source_payload["model_state_dict"], strict=True)
                 if fresh_initialization is not None:
@@ -3245,6 +3406,14 @@ class TrainingEngine:
 
             verify_moment_hyperedge_child_optimizer(
                 model, optimizer, source_payload["optimizer_state_by_name"], amendment,
+            )
+            amendment["exact_inherited_moments_verified"] = True
+            amendment["new_optimizer_states_at_attachment"] = 0
+        elif hyperedge_readout_child is not None:
+            from .hyperedge_readout_child import verify_joint_optimizer_birth
+
+            verify_joint_optimizer_birth(
+                model, source_payload["optimizer_state_by_name"], amendment,
             )
             amendment["exact_inherited_moments_verified"] = True
             amendment["new_optimizer_states_at_attachment"] = 0
@@ -3294,13 +3463,13 @@ class TrainingEngine:
                 source_read_child_auxiliary_fit, model, provider, optimizer, source_payload,
                 amendment,
                 added_parameter_names=source_read_child["added_parameter_names"],
-                train_case_keys=tuple(provider.epoch_cases(start_epoch, self.config.seed)),
+                train_case_keys=tuple(provider.epoch_cases(self.sampler_epoch(start_epoch), self.config.seed)),
                 rng_devices=rng_devices)
         source_read_manager = getattr(provider, "source_read_auxiliary_manager", None)
         if is_source_read_sparse:
             from .source_read_auxiliary import make_source_read_auxiliary_manager
 
-            expected_train_keys = tuple(provider.epoch_cases(start_epoch, self.config.seed))
+            expected_train_keys = tuple(provider.epoch_cases(self.sampler_epoch(start_epoch), self.config.seed))
             if source_read_child is not None:
                 if source_read_manager is None:
                     raise ValueError("Calibrated sparse source-read attachment did not install its manager.")
@@ -3364,6 +3533,8 @@ class TrainingEngine:
             resume_amendments.append(amendment)
             amendment_name = ('moment_hyperedge_child' if identity_is_moment_hyperedge and branch_from_checkpoint is not None else
                               'moment_hyperedge_resume' if identity_is_moment_hyperedge else
+                              'hyperedge_readout_child' if hyperedge_readout_child is not None else
+                              'hyperedge_readout_extension' if readout_extension_amendment is not None else
                               'architecture_child_initialization' if architecture_child_initialization is not None else
                               'inherited_attention_sparse_child' if inherited_attention_sparse_child is not None else
                               'source_read_child' if source_read_child is not None else
@@ -3376,6 +3547,8 @@ class TrainingEngine:
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
                 category='logs' if (identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
+                                    or hyperedge_readout_child is not None
+                                    or readout_extension_amendment is not None
                                     or source_read_child is not None
                                     or inherited_attention_sparse_child is not None
                                     or numerical_pooling_amendment is not None
@@ -3411,7 +3584,16 @@ class TrainingEngine:
                     inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
                     inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
                     inherited_history_scope=(
-                        "exact IAG-C soft physical history through e500; Round5 continuation rows begin at absolute e501"
+                    "exact IAG-C soft physical history through e500; Round5 continuation rows begin at absolute e501"
+                    ),
+                )
+            elif hyperedge_readout_child is not None:
+                branch_parent.update(
+                    hyperedge_readout_child=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in history),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in history),
+                    inherited_history_scope=(
+                        "Round5 H physical history through absolute e1000; Round6 joint rows begin at e1001"
                     ),
                 )
             elif joint_core_revision is None:
@@ -3662,6 +3844,9 @@ class TrainingEngine:
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                     "case_order_sha256": order_hash,
                 }
+                sampler_epoch = self.sampler_epoch(epoch)
+                if sampler_epoch != epoch:
+                    row["sampler_epoch"] = sampler_epoch
                 if source_read_manager is not None:
                     auxiliary_updates = [
                         item["source_read_auxiliary"] for item in update_rows
@@ -3823,6 +4008,23 @@ class TrainingEngine:
                             "comparability_note": "TRAIN averages macro-update means over changing joint weights; exposed DEV pools valid elements at fixed review weights. Neither is independent TEST evidence.",
                             "definition": "Provider-defined physical objectives; TRAIN averages macro-update means, DEV pools valid elements. Stored TRAIN response/operator targets remain separate.",
                         })
+                    if (identity_is_hyperedge_readout
+                            and readout_recipe["phase"] == "frozen_probe"):
+                        objective.update({
+                            "training_prediction_mode": (
+                                "native IAG-C objective with only receiver_readout, field_head and the Thermal "
+                                "response_phi allowlist trainable"
+                            ),
+                            "validation_prediction_mode": (
+                                "same native IAG-C prediction path; H contextualization, P, moments, Z, local "
+                                "source reader and all buffers remain fixed"
+                            ),
+                            "parameter_scope": copy.deepcopy(identity.get("fit_scope", {})),
+                            "representation_scope": (
+                                "frozen H scene preparation and local support; new receiver readout and common "
+                                "output heads adapt"
+                            ),
+                        })
                     loss_metadata = getattr(provider, "loss_metadata", None)
                     if callable(loss_metadata):
                         objective["term_definitions"] = dict(loss_metadata())
@@ -3851,6 +4053,12 @@ class TrainingEngine:
                     improved_guarded = guard_key is not None and guard_pass and field_score < best_guarded
                     if improved_guarded:
                         best_guarded = field_score
+                frozen_state_guard = getattr(provider, "verify_post_epoch_state", None)
+                if callable(frozen_state_guard) and (
+                        epoch == stop_after
+                        or self.config.checkpoint_epochs is None
+                        or epoch in self.config.checkpoint_epochs):
+                    row["post_epoch_frozen_state_audit"] = frozen_state_guard(model, epoch)
                 history.append(row)
                 print(json.dumps(row, sort_keys=True, default=str, allow_nan=False), flush=True)
                 milestone = ((review if self.config.checkpoint_epochs is None
@@ -3872,6 +4080,8 @@ class TrainingEngine:
                         "case_visits_this_epoch": len(ordered_cases),
                         "optimizer_updates_this_epoch": len(update_rows),
                     }
+                    if sampler_epoch != epoch:
+                        sampler_state["absolute_sampling_epoch"] = sampler_epoch
                     payload = self._checkpoint_payload(model, optimizer, identity=sealed_identity, arm=arm, epoch=epoch,
                         history=history, best_field=best_field, best_guarded=best_guarded, sampler_state=sampler_state,
                         group_specs=optimizer_specs,
@@ -4003,7 +4213,11 @@ def _sum_mapping(rows: Sequence[Mapping[str, float]]) -> dict[str, float]:
     result: dict[str, float] = {}
     for row in rows:
         for key, value in row.items():
-            result[key] = result.get(key, 0.0) + float(value)
+            numeric = float(value)
+            if key.endswith("_max_live_tile_bytes_per_call"):
+                result[key] = max(result.get(key, 0.0), numeric)
+            else:
+                result[key] = result.get(key, 0.0) + numeric
     return result
 
 

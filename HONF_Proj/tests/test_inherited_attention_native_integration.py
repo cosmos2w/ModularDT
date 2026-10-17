@@ -153,6 +153,7 @@ def test_full_train_cli_receipt_gate_precedes_native_provider_build(monkeypatch:
 def _child_identity(*, scene_executor: str, normalization: str, sparse: bool) -> dict:
     recipe = {
         "protocol": "inherited_attention_development_v1",
+        "architecture": "IAG-C",
         "normalization": normalization,
         "trajectory": "e500_sparse_child" if sparse else "fresh_soft",
         "sparse_transition": {"blend_start_epoch": 501} if sparse else None,

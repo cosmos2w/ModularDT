@@ -66,10 +66,15 @@ IAG_WIND_PROVIDER_SCHEMA = "wind_inherited_attention_provider_v1"
 IAG_WIND_FULL_PROFILE = "wind_original420_train_fullVALID90_followup1000_v1"
 IAG_WIND_LOSS_NAME = "inherited_attention_wind/native_velocity_mse"
 ROUND5_MOMENT_CORE_SCHEMA = "scene_prepared_moment_hyperedge_core_v1"
+ROUND6_READOUT_CORE_SCHEMA = "hyperedge_readout_core_v1"
 _WIND_REPRESENTATIONS = IAG_ARCHITECTURE_REPRESENTATION
 
 
 def _core_from_config(config: Mapping[str, Any]) -> InheritedAttentionCoreV1:
+    if config.get("schema") == ROUND6_READOUT_CORE_SCHEMA:
+        from honf_forward_core.inherited_attention.readout_model import HyperedgeReadoutCoreV1
+
+        return HyperedgeReadoutCoreV1.from_config(dict(config))
     if config.get("schema") == ROUND5_MOMENT_CORE_SCHEMA:
         from honf_forward_core.inherited_attention.moment_model import MomentHyperedgeCoreV1
 

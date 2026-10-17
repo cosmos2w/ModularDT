@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import fields as dataclass_fields, replace
+from dataclasses import fields as dataclass_fields
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -20,12 +21,12 @@ from .model import (
 )
 from .moments import (
     HeadwiseMomentLift,
-    PreparedMomentHyperedgeView,
     PreparedMomentHyperedges,
+    PreparedMomentHyperedgeView,
+    _tensor_tree,
     build_moment_descriptor,
     compute_typed_moments,
     export_prepared_moment_hyperedges,
-    _tensor_tree,
 )
 from .readers import gather_cover_indexed
 
@@ -327,28 +328,30 @@ class MomentHyperedgeCoreV1(InheritedAttentionCoreV1):
         )
         processor_macs = input_projection_macs + context_projection_macs + heat_projection_macs
 
-        # Count unique allocations by backing storage across cache aliases. The
-        # incremental figure excludes tensors already retained by the base
-        # organization, such as P, native IDs/masks and source carriers.
-        package_storages = self._storage_map(prepared.tensors())
-        base_values = tuple(
-            getattr(organization, item.name)
-            for item in dataclass_fields(organization)
-            if item.name != "moment_hyperedges"
-        )
-        base_storages = self._storage_map(_tensor_tree(base_values))
-        incremental_storages = {
-            key: size for key, size in package_storages.items() if key not in base_storages
-        }
+        exact_counters = self.collect_exact_work_counts
+        if exact_counters:
+            # Count unique allocations by backing storage across cache aliases.
+            # The incremental figure excludes tensors retained by the base org.
+            package_tensors = prepared.tensors()
+            package_storages = self._storage_map(package_tensors)
+            base_values = tuple(
+                getattr(organization, item.name)
+                for item in dataclass_fields(organization)
+                if item.name != "moment_hyperedges"
+            )
+            base_storages = self._storage_map(_tensor_tree(base_values))
+            incremental_storages = {
+                key: size for key, size in package_storages.items() if key not in base_storages
+            }
 
-        module_audit = prepared.module.audit
-        environment_audit = prepared.environment.audit
-        audit_counts = torch.stack((
-            module_audit.latent_clamped.sum() + environment_audit.latent_clamped.sum(),
-            module_audit.spatial_clamped.sum() + environment_audit.spatial_clamped.sum(),
-            module_audit.latent_large_negative.sum() + environment_audit.latent_large_negative.sum(),
-            module_audit.spatial_large_negative.sum() + environment_audit.spatial_large_negative.sum(),
-        )).detach().to(torch.int64).cpu().tolist()
+            module_audit = prepared.module.audit
+            environment_audit = prepared.environment.audit
+            audit_counts = torch.stack((
+                module_audit.latent_clamped.sum() + environment_audit.latent_clamped.sum(),
+                module_audit.spatial_clamped.sum() + environment_audit.spatial_clamped.sum(),
+                module_audit.latent_large_negative.sum() + environment_audit.latent_large_negative.sum(),
+                module_audit.spatial_large_negative.sum() + environment_audit.spatial_large_negative.sum(),
+            )).detach().to(torch.int64).cpu().tolist()
 
         work = organization.work_counts
         work.update({
@@ -370,16 +373,20 @@ class MomentHyperedgeCoreV1(InheritedAttentionCoreV1):
             "moment_processed_context_add_elements": descriptor_rows * self.context_dim,
             "projected_context_gather_value_reads_per_slot": self.context_dim,
             "projected_context_gather_bytes_per_slot": self.context_dim * prepared.processed_state.element_size(),
-            "moment_cache_logical_tensor_count": len(prepared.tensors()),
-            "moment_cache_unique_storage_count": len(package_storages),
-            "moment_cache_unique_storage_bytes": sum(package_storages.values()),
-            "moment_cache_incremental_storage_count": len(incremental_storages),
-            "moment_cache_incremental_storage_bytes": sum(incremental_storages.values()),
-            "moment_latent_variance_clamped_entries": int(audit_counts[0]),
-            "moment_spatial_variance_clamped_entries": int(audit_counts[1]),
-            "moment_latent_variance_large_negative_entries": int(audit_counts[2]),
-            "moment_spatial_variance_large_negative_entries": int(audit_counts[3]),
+            "moment_optional_counters_available": int(exact_counters),
         })
+        if exact_counters:
+            work.update({
+                "moment_cache_logical_tensor_count": len(package_tensors),
+                "moment_cache_unique_storage_count": len(package_storages),
+                "moment_cache_unique_storage_bytes": sum(package_storages.values()),
+                "moment_cache_incremental_storage_count": len(incremental_storages),
+                "moment_cache_incremental_storage_bytes": sum(incremental_storages.values()),
+                "moment_latent_variance_clamped_entries": int(audit_counts[0]),
+                "moment_spatial_variance_clamped_entries": int(audit_counts[1]),
+                "moment_latent_variance_large_negative_entries": int(audit_counts[2]),
+                "moment_spatial_variance_large_negative_entries": int(audit_counts[3]),
+            })
         if self.thermal_response:
             factor_entries = batch * heads * anchors * self.signed_carrier_width * module_donors
             work.update({
@@ -437,7 +444,7 @@ class MomentHyperedgeCoreV1(InheritedAttentionCoreV1):
                 raise ValueError("C0 organizations must not carry new moment processor factors.")
             return
         if not isinstance(prepared, PreparedMomentHyperedges):
-            raise ValueError("M/H prepared organizations require their scene-owned moment cache.")
+            raise TypeError("M/H prepared organizations require their scene-owned moment cache.")
         scene = organization.scene
         prepared.validate_binding(
             frame_key=scene.coordinate_frame_key,
@@ -600,13 +607,12 @@ class MomentHyperedgeCoreV1(InheritedAttentionCoreV1):
             raise ValueError("Explicit source-kernel export exceeds its bounded diagnostic budget.")
         if not self.thermal_response:
             raise ValueError("This IAG core has no affine thermal response.")
-        _field, phi, pack, coefficients_local, _mc, _ec, _work, _trace = self._decode_features(
+        _field, phi, pack, coefficients_local, _mc, _ec, _work, _trace, _receiver_readout_trace = self._decode_features(
             organization, query, local_gates, field_head=False
         )
         assert phi is not None and query.receiver_cover is not None
         dtype = self._dtype(accumulation_dtype, organization.module_states.dtype)
         transport = self._source_transport_coefficients(organization, dtype)
-        weights = query.receiver_cover.weights.to(dtype) * query.receiver_cover.validity.to(dtype)
         kernels = organization.module_states.new_zeros(
             query.batch_size, query.num_queries, organization.scene.num_modules, dtype=dtype
         )
@@ -648,7 +654,7 @@ class MomentHyperedgeCoreV1(InheritedAttentionCoreV1):
         if self.moment_variant == "C0":
             raise ValueError("C0 has no new moment outputs to intervene on.")
         self.validate_prepared_state(organization)
-        prepared = getattr(organization, "moment_hyperedges")
+        prepared = organization.moment_hyperedges
         lifetime = _GraphLifetime()
         zero_context = torch.zeros_like(prepared.context_residual)
         zero_constant = None if prepared.heat_mix_constant is None else torch.zeros_like(prepared.heat_mix_constant)

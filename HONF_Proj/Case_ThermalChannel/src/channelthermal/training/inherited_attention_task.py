@@ -53,9 +53,14 @@ from .unified_task import (
 IAG_THERMAL_PROVIDER_SCHEMA = "thermal_inherited_attention_provider_v1"
 IAG_THERMAL_FULL_PROFILE = THERMAL_CONTENT_FULL_TRAIN_DATASET
 ROUND5_MOMENT_CORE_SCHEMA = "scene_prepared_moment_hyperedge_core_v1"
+ROUND6_READOUT_CORE_SCHEMA = "hyperedge_readout_core_v1"
 
 
 def _core_from_config(config: Mapping[str, Any]) -> InheritedAttentionCoreV1:
+    if config.get("schema") == ROUND6_READOUT_CORE_SCHEMA:
+        from honf_forward_core.inherited_attention.readout_model import HyperedgeReadoutCoreV1
+
+        return HyperedgeReadoutCoreV1.from_config(dict(config))
     if config.get("schema") == ROUND5_MOMENT_CORE_SCHEMA:
         from honf_forward_core.inherited_attention.moment_model import MomentHyperedgeCoreV1
 

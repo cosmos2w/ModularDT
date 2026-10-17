@@ -4,12 +4,10 @@ from dataclasses import replace
 
 import pytest
 import torch
-
 from honf_forward_core.content_hypergraph.contracts import QueryBatch, SceneBatch
 from honf_forward_core.inherited_attention.hyperedge_processor import MomentHyperedgeProcessor
 from honf_forward_core.inherited_attention.moment_model import MomentHyperedgeCoreV1
 from honf_forward_core.inherited_attention.moments import (
-    HeadwiseMomentLift,
     MomentGraphLifetime,
     PreparedMomentHyperedges,
     build_moment_descriptor,
@@ -408,7 +406,13 @@ def _scene_batch() -> SceneBatch:
     )
 
 
-def _moment_core(variant: str, *, coordinate_dim: int = 2, thermal: bool = True):
+def _moment_core(
+    variant: str,
+    *,
+    coordinate_dim: int = 2,
+    thermal: bool = True,
+    collect_exact_work_counts: bool = False,
+):
     return MomentHyperedgeCoreV1(
         module_input_dim=2,
         environment_input_dim=2,
@@ -428,7 +432,7 @@ def _moment_core(variant: str, *, coordinate_dim: int = 2, thermal: bool = True)
         normalization="soft",
         scene_executor="dense",
         query_executor="indexed_projected",
-        collect_exact_work_counts=False,
+        collect_exact_work_counts=collect_exact_work_counts,
         moment_variant=variant,
         moment_init_seed=73,
     )
@@ -496,7 +500,11 @@ def test_environment_donor_and_receiver_permutation_preserves_id_bound_hyperedge
 
 
 def test_moment_core_schema_preparation_recovery_and_new_organization_intervention():
-    c0, m, h = (_moment_core("C0"), _moment_core("M"), _moment_core("H"))
+    c0, m, h = (
+        _moment_core("C0"),
+        _moment_core("M", collect_exact_work_counts=True),
+        _moment_core("H"),
+    )
     c0.eval()
     m.eval()
     h.eval()
@@ -506,8 +514,8 @@ def test_moment_core_schema_preparation_recovery_and_new_organization_interventi
     assert MomentHyperedgeCoreV1.from_config(m.get_config()).get_config() == m.get_config()
     m_parameters, h_parameters = dict(m.named_parameters()), dict(h.named_parameters())
     assert m_parameters.keys() == h_parameters.keys()
-    for name in m_parameters:
-        torch.testing.assert_close(m_parameters[name], h_parameters[name], rtol=0, atol=0)
+    for name, value in m_parameters.items():
+        torch.testing.assert_close(value, h_parameters[name], rtol=0, atol=0)
     common_c0 = dict(c0.named_parameters())
     for name, value in common_c0.items():
         torch.testing.assert_close(value, m_parameters[name], rtol=0, atol=0)
@@ -580,6 +588,7 @@ def test_moment_core_schema_preparation_recovery_and_new_organization_interventi
         assert torch.count_nonzero(zeroed.moment_hyperedges.heat_mix_spatial) == 0
         assert torch.count_nonzero(cache.context_residual) > 0
 
+
         module_p = organization.module_atlas.probabilities.clone()
         module_p[:, :, 0, :] = 0.0
         intervened = m.intervene_associations(
@@ -593,6 +602,75 @@ def test_moment_core_schema_preparation_recovery_and_new_organization_interventi
         assert not bool(intervened.moment_hyperedges.module.typed_valid[:, :, 0].any())
         assert torch.count_nonzero(intervened.moment_hyperedges.module.lifted_value_mean[:, :, 0]) == 0
         assert organization.moment_hyperedges is cache
+
+
+def test_optional_counter_gate_preserves_h_outputs_and_first_second_derivatives():
+    from honf_forward_core.inherited_attention import smoothstep_grid_receiver_cover, with_receiver_cover
+
+    def evaluate(exact_counters: bool):
+        base_scene = _scene_batch()
+        scene = replace(
+            base_scene,
+            module_features=base_scene.module_features.clone().requires_grad_(),
+            environment_features=base_scene.environment_features.clone().requires_grad_(),
+            environment_coordinates=base_scene.environment_coordinates.clone().requires_grad_(),
+        )
+        model = _moment_core(
+            "H", thermal=False, collect_exact_work_counts=exact_counters
+        ).eval()
+        coordinates = torch.tensor([[[0.18, 0.21], [0.82, 0.75]]], requires_grad=True)
+        base_query = QueryBatch(
+            coordinates=coordinates,
+            features=torch.tensor([[[0.1], [-0.2]]]),
+            query_mask=torch.ones(1, 2, dtype=torch.bool),
+            query_ids=torch.tensor([[501, 502]]),
+            scene_key=scene.scene_key,
+            coordinate_frame_key=scene.coordinate_frame_key,
+            receiver_key="counter-equivalence-query",
+        )
+        cover = smoothstep_grid_receiver_cover(
+            coordinates,
+            scene.environment_coordinates,
+            scene.environment_ids,
+            scene.environment_mask,
+            base_query.query_ids,
+            frame_key=scene.coordinate_frame_key,
+            query_mask=base_query.query_mask,
+        )
+        query = with_receiver_cover(base_query, cover)
+        organization = model.prepare(scene)
+        output = model.decode(organization, query)
+        loss = output.nonlinear_field.square().sum() + 0.03 * output.nonlinear_field.sum()
+        watched = (
+            scene.module_features,
+            model.field_head.net[2].weight,
+        )
+        first = torch.autograd.grad(loss, watched, create_graph=True)
+        second_loss = sum(value.square().sum() for value in first)
+        second = torch.autograd.grad(second_loss, watched)
+        return output.nonlinear_field.detach(), first, second, organization.work_counts
+
+    without = evaluate(False)
+    with_counts = evaluate(True)
+    torch.testing.assert_close(without[0], with_counts[0], rtol=0, atol=0)
+    for left_group, right_group in zip(without[1:3], with_counts[1:3]):
+        for left, right in zip(left_group, right_group):
+            torch.testing.assert_close(left, right, rtol=2e-6, atol=2e-7)
+    assert without[3]["atlas_exact_counts_available"] == 0
+    assert without[3]["moment_optional_counters_available"] == 0
+    for key in (
+        "atlas_eligible_associations",
+        "atlas_positive_associations",
+        "module_positive_associations",
+        "moment_cache_logical_tensor_count",
+        "moment_cache_unique_storage_bytes",
+        "moment_latent_variance_clamped_entries",
+    ):
+        assert key not in without[3]
+    assert with_counts[3]["atlas_exact_counts_available"] == 1
+    assert with_counts[3]["moment_optional_counters_available"] == 1
+    assert "atlas_positive_associations" in with_counts[3]
+    assert "moment_cache_unique_storage_bytes" in with_counts[3]
 
 
 def test_actual_moment_core_rejects_stale_owner_frame_ids_parameters_and_consumed_graph():

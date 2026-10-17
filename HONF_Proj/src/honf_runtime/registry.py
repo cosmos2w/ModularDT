@@ -32,6 +32,12 @@ MODEL_FAMILIES = {
         workflows=("moment_hyperedges_train", "moment_hyperedges_evaluate"),
         description="Round5 scene-prepared signed-moment hyperedge continuation on native IAG-C providers",
     ),
+    "hyperedge_readout_round6": ModelFamilySpec(
+        family_id="hyperedge_readout_round6",
+        available=True,
+        workflows=("hyperedge_readout_train", "hyperedge_readout_evaluate"),
+        description="Round6 matched receiver-conditioned readouts over completed H hyperedge states",
+    ),
     "honf_content_hypergraph": ModelFamilySpec(
         family_id="honf_content_hypergraph",
         available=True,

@@ -465,7 +465,8 @@ class ThermalContentHypergraphTask:
     def make_batch(self, case_keys: Sequence[Any], key: SamplingKey) -> TaskBatch:
         if key.sampling_version != self.sampling_version or key.dataset_id != self.sampling_dataset_id:
             raise ValueError("Thermal query draws require the exact case_epoch_v1 TRAIN membership key.")
-        if key.epoch < 1 or key.epoch > self.total_epochs or not case_keys:
+        sampling_epoch_limit = int(getattr(self, "_round6_sampling_epoch_limit", self.total_epochs))
+        if key.epoch < 1 or key.epoch > sampling_epoch_limit or not case_keys:
             raise ValueError("Thermal TRAIN batch has an invalid epoch or no cases.")
         if len(case_keys) > self.microbatch_size:
             raise ValueError("Thermal engine microbatch exceeds its declared case capacity.")
