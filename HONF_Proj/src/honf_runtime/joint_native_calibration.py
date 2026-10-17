@@ -45,7 +45,7 @@ def apply_joint_native_calibration(core,recipe):
     return receipt
 
 
-def calibrate_joint_native_task(task, *, max_batches=8):
+def _calibrate_joint_native_task(task, *, max_batches=8):
     """Use first fixed absolute-e3001 native batches, preserving RNG and parent weights.
 
     The returned receipt records unsupported zero-gradient cases explicitly;
@@ -55,12 +55,10 @@ def calibrate_joint_native_task(task, *, max_batches=8):
     from honf_forward_core.joint_native.routing import ScoreCalibration
     from honf_forward_core.joint_native.graph import calibrate_bias
     from honf_forward_core.joint_native.budget import calibrated_dual_weight
-    from .unified_training import capture_rng_state,restore_rng_state
     model,provider,engine=task['model'],task['provider'],task['engine'];core=getattr(model,'core',model)
     recipe=task['identity']['recipe']
     if recipe['arm'] not in ('H9-ME','S9-ME') or recipe['source_epoch']!=3000:
         raise ValueError('Calibration requires a fresh sparse child of the literal shared e3000 warm-up.')
-    original_state=copy.deepcopy(core.state_dict());rng=capture_rng_state();previous_mode=model.training
     core.set_training_clock(3001,0);core.joint_begin_update(3001,0);model.train()
     cases,dataset_id=engine.epoch_case_order(provider,3001)
     batches=[];macro_indices=[]
@@ -164,5 +162,71 @@ def calibrate_joint_native_task(task, *, max_batches=8):
         return receipt
     finally:
         for handle in handles:handle.remove()
-        core.router.route=original_route;core._joint_entries=[];core.load_state_dict(original_state,strict=True)
-        model.train(previous_mode);restore_rng_state(rng)
+        core.router.route=original_route;core._joint_entries=[]
+
+
+def _capture_calibration_rng_state():
+    """Snapshot existing RNGs without initializing CUDA for a CPU calibration."""
+    import random
+    import numpy as np
+    state = {"python": random.getstate(), "numpy": np.random.get_state(),
+             "torch_cpu": torch.get_rng_state().clone()}
+    if torch.cuda.is_initialized():
+        state["torch_cuda"] = [value.clone() for value in torch.cuda.get_rng_state_all()]
+    return state
+
+
+def _restore_calibration_rng_state(state):
+    import random
+    import numpy as np
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    if "torch_cuda" in state:
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
+def calibrate_joint_native_task(task, *, max_batches=8):
+    """Calibrate without changing model state, provider exposure, RNGs or clocks.
+
+    Protection begins before case/batch preparation. Only CUDA RNGs that were
+    already initialized are captured, so CPU preflight never opens a GPU context.
+    """
+    from numbers import Number
+    model, provider = task["model"], task["provider"]
+    core = getattr(model, "core", model)
+    original_state = copy.deepcopy(core.state_dict())
+    original_modes = {module: module.training for module in model.modules()}
+    original_entries = getattr(core, "_joint_entries", None)
+    router = getattr(core, "router", None)
+    had_instance_route = router is not None and "route" in vars(router)
+    original_instance_route = vars(router).get("route") if router is not None else None
+    original_hooks = {module: set(module._forward_hooks) for module in core.modules()}
+    counters = {name: copy.deepcopy(value) for name, value in vars(provider).items()
+                if isinstance(value, Number)}
+    rng = _capture_calibration_rng_state()
+    try:
+        receipt = _calibrate_joint_native_task(task, max_batches=max_batches)
+        receipt["provider_numeric_counters_restored"] = True
+        receipt["rng_scope"] = "CPU and already-initialized CUDA RNGs; no CUDA initialization"
+        return receipt
+    finally:
+        for module, previous in original_hooks.items():
+            for key in set(module._forward_hooks) - previous:
+                del module._forward_hooks[key]
+        if router is not None:
+            if had_instance_route:
+                router.route = original_instance_route
+            elif "route" in vars(router):
+                del router.route
+        core.load_state_dict(original_state, strict=True)
+        if original_entries is not None:
+            core._joint_entries = original_entries
+        for module, training in original_modes.items():
+            module.training = training
+        for name, value in tuple(vars(provider).items()):
+            if isinstance(value, Number) and name not in counters:
+                delattr(provider, name)
+        for name, value in counters.items():
+            setattr(provider, name, value)
+        _restore_calibration_rng_state(rng)

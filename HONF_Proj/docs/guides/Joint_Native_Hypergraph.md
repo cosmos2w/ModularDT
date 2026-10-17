@@ -23,6 +23,21 @@ E values use original query-specific nonlinear messages and a within-E measure-w
 
 Thermal retains T=Kh with zero-background heat-affine capability, heat-independent routing/flow, native interpolation, curl, flux-proxy extraction and separately recomputed peaks. Wind retains original native cell IDs, the aligned TRAIN-fitted background profile and scaled velocity residual in m/s. Dense contextualization remains upstream, so a record omitted from the final read can still influence selected contextualized states. Final read support is executed model organization, not a causal boundary over physical inputs.
 
+### Dependency contract
+
+| Quantity | Permitted inputs | Meaning of the restriction |
+|---|---|---|
+| Prepared M/E states | Prescribed geometry, material/environment descriptors, dense contextualization and scene summaries | Architectural dependence; final sparsity does not remove this ancestry |
+| Scene membership | Actual MM/ME/EM/EE scores, typed calibration and prescribed scene RNG | Query-independent organization; targets and heat amplitudes are excluded |
+| Query dispatch and protection | Original query state and coordinates, prepared M/E scores, original local support and nearest positive-measure E | One dispatch before E-value conditioning; an architectural execution rule |
+| E context and conditioned query | Individually evaluated selected E messages, E measures and bias-free A_E | Learned information path; E records are not independent physical interventions in the existing data |
+| Module information and local field decoding | Conditioned query, selected original M values and original local features | E can alter native M messages, rather than only adding a final offset |
+| Thermal signed K and flow | Prescribed heat-free scene and query inputs, including the permitted E path | Heat-affine generator contract: heat amplitudes enter only through the original source contraction |
+| Thermal temperature, derived roles and peaks | Signed K, original heat amplitudes and unchanged native extraction | Physical source columns stay tied to original modules; peaks are recomputed |
+| Wind physical velocity | Native model residual, original TRAIN-fitted scaling and aligned background profile | Dataset/provider contract; no interpolated targets or changed reference frame |
+
+These contracts distinguish a generator's physical laws from the available dataset variation and the model's chosen organization. Successful graph intervention establishes an executed information path. Physical interaction identification additionally requires compatible saved reference states for every endpoint of the intervention.
+
 ## Training and execution
 
 The first 200 sparse epochs use hard-forward dense router gradients at every macro. Subsequent dense-router steps use `((sparse_epoch_zero_based + macro_index_zero_based) % 4 == 0)`. This exposes every macro position once in four epochs, including the partial final batch. Saved clocks determine the cadence on resume. The original Thermal response cadence remains separate. Selected steps use actual packed native values, while dense-router steps deliberately evaluate omitted values to provide restorative gate gradients.
