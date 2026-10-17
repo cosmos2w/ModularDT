@@ -160,6 +160,10 @@ def run_evaluation(args,storage,check):
     check()
     model,provider,payload=load_evaluation_components(args.checkpoint,args.device)
     check()
+    execution={'device':args.device,'torch_num_threads_after_native_builder':torch.get_num_threads(),
+        'torch_num_interop_threads_after_native_builder':torch.get_num_interop_threads(),
+        'OMP_NUM_THREADS':os.environ.get('OMP_NUM_THREADS'),'MKL_NUM_THREADS':os.environ.get('MKL_NUM_THREADS'),
+        'cuda_matmul_allow_tf32':torch.backends.cuda.matmul.allow_tf32,'cudnn_allow_tf32':torch.backends.cudnn.allow_tf32}
     recipe=payload['experiment_identity']['recipe'];dataset=recipe['dataset']
     if args.command=='panel':
         result=freeze_native_panel(provider,dataset,source_checkpoint=args.checkpoint)
@@ -183,6 +187,7 @@ def run_evaluation(args,storage,check):
             'arm':payload['experiment_identity'].get('treatment'),
             'provider_binding_sha256':canonical_sha256(payload['experiment_identity']['provider_identity']),
             'panel_path':str(args.panel.resolve()) if hasattr(args,'panel') else None,'storage':storage,
+            'measured_execution_after_native_builder':execution,
             'crossings_source':({'path':str(args.crossings.resolve()),'sha256':file_sha256(args.crossings)}
                 if getattr(args,'crossings',None) is not None else None),
             'free_after_bytes':shutil.disk_usage('/data2').free})

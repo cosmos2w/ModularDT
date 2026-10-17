@@ -160,7 +160,7 @@ def thermal_record_and_arrays(predictions,batch):
     record={'case_id':case,'module_count':int(present.sum()),'fields':fields,
         'module_peaks':[{'native_module_id':int(native),'prediction':float(p),'target':float(t),'error':float(p-t)}
                         for native,p,t in zip(ids,predicted_peaks,actual_peaks)]}
-    arrays={'fluid_xy':array(batch.receivers.fluid_xy[0]),'field_prediction':pred,'field_target':truth,
+    arrays={'fluid_xy':array(prepared.fluid_xy[0]),'field_prediction':pred,'field_target':truth,
         'field_error':pred-truth,'fluid_valid':fluid,'interface_prediction':interface,'interface_target':interface_target,
         'interface_error':interface-interface_target,'interface_valid':surface,'outside_valid':outside,
         'material_prediction':material,'material_target':material_target,'material_error':material-material_target,
@@ -170,6 +170,8 @@ def thermal_record_and_arrays(predictions,batch):
         'environment_coordinates':array(prepared.scene_batch.environment_coordinates[0]),
         'fluid_native_ids':np.arange(len(pred),dtype=np.int64),
         'native_neural_union_ids':array(prepared.query_batch.query_ids[0]),
+        'native_neural_union_xy':array(prepared.query_batch.coordinates[0]),
+        'receiver_coordinate_export_policy':np.asarray('fluid and neural union xy are direct prepared receivers; surface/material xy are not retained by the native prepared object, so only original theta/local definitions and geometry are exported'),
         'module_characteristic_lengths':array(prepared.scene_batch.module_characteristic_lengths[0]),
         'surface_theta':np.arange(interface.shape[1],dtype=np.float64)*2*np.pi/interface.shape[1],
         'interface_native_module_ids':np.broadcast_to(array(prepared.scene_batch.module_ids[0])[:,None],interface.shape[:-1]),
