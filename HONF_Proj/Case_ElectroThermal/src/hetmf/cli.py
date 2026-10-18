@@ -75,6 +75,29 @@ def main(argv: list[str] | None = None) -> None:
     formal.add_argument("--yes", action="store_true")
     formal.add_argument("--device", default="cuda:0")
     formal.add_argument("--resume", action="store_true")
+    export = commands.add_parser("export-training", help="Build one self-contained processed training H5")
+    export.add_argument("--release", type=Path, required=True)
+    export.add_argument("--output", type=Path, required=True)
+    export.add_argument("--retained-budget-gib", type=float, required=True)
+    export.add_argument("--temporary-budget-gib", type=float, required=True)
+    export.add_argument("--minimum-free-gib", type=float, default=100)
+    verify = commands.add_parser("verify-training", help="Verify inputs, splits, TRAIN normalization, and target bytes")
+    verify.add_argument("--dataset", type=Path, required=True)
+    training_links = commands.add_parser("link-training")
+    training_links.add_argument("--case-dir", type=Path, default=CASE_DIR)
+    for option in ("standard-release", "expanded-release", "standard-h5", "expanded-h5", "readiness"):
+        training_links.add_argument("--" + option, type=Path)
+    smoke = commands.add_parser("honf-smoke", help="Exercise the actual general HONF interface on CPU without fitting")
+    smoke.add_argument("--dataset", type=Path, required=True)
+    smoke.add_argument("--queries", type=int, default=17)
+    smoke.add_argument("--output", type=Path, required=True)
+    diagnostic = commands.add_parser("diagnose-releases", help="Saved-field galleries and bounded CPU refinement")
+    diagnostic.add_argument("--standard-release", type=Path, required=True)
+    diagnostic.add_argument("--expanded-release", type=Path, required=True)
+    diagnostic.add_argument("--output-root", type=Path, required=True)
+    diagnostic.add_argument("--retained-budget-gib", type=float, required=True)
+    diagnostic.add_argument("--temporary-budget-gib", type=float, required=True)
+    diagnostic.add_argument("--minimum-free-gib", type=float, default=100)
     args = parser.parse_args(argv)
 
     if args.command == "preflight":
@@ -199,10 +222,52 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(link_dataset(args.root, args.case_dir, replace_owned_links=args.replace_owned_links), indent=2))
     elif args.command == "status":
         root = args.root
+        plan_path = root / "inputs" / "formal_plan.json"
+        if not plan_path.exists():
+            plan_path = root / "inputs" / "pilot_plan.json"
         print(json.dumps({"root": str(root), "raw_cases": len(list((root / "raw").glob("*.h5"))),
                           "processed_cases": len(list((root / "processed").glob("*.h5"))),
+                          "raw_shards": len(list((root / "raw_shards").glob("*.h5"))),
+                          "processed_shards": len(list((root / "processed_shards").glob("*.h5"))),
                           "figures": len(list((root / "figures").glob("*.pdf"))),
-                          "plan_sha256": sha256_file(root / "inputs" / "pilot_plan.json") if (root / "inputs" / "pilot_plan.json").exists() else None}, indent=2))
+                          "plan_sha256": sha256_file(plan_path) if plan_path.exists() else None}, indent=2))
+    elif args.command == "export-training":
+        from .training_data import export_training_h5
+        result = export_training_h5(args.release, args.output,
+                                   retained_budget_bytes=int(args.retained_budget_gib * 2**30),
+                                   temporary_budget_bytes=int(args.temporary_budget_gib * 2**30),
+                                   minimum_free_bytes=int(args.minimum_free_gib * 2**30))
+        print(json.dumps(result, indent=2))
+    elif args.command == "verify-training":
+        from .training_data import verify_training_h5
+        print(json.dumps(verify_training_h5(args.dataset, verify_payload=True), indent=2))
+    elif args.command == "link-training":
+        from .resources import link_training_artifacts
+        options = {"formal_standard": args.standard_release, "formal_expanded": args.expanded_release,
+                   "standard.h5": args.standard_h5, "expanded.h5": args.expanded_h5,
+                   "readiness": args.readiness}
+        print(json.dumps(link_training_artifacts(args.case_dir,
+                         {key: value for key, value in options.items() if value is not None}), indent=2))
+    elif args.command == "honf-smoke":
+        from .honf_adapter import diagnose_honf_dataset
+        from .resources import require_owned_root
+        require_owned_root(args.output.parent)
+        result = diagnose_honf_dataset(args.dataset, queries=args.queries)
+        write_json_atomic(args.output, result)
+        print(json.dumps(result, indent=2))
+    elif args.command == "diagnose-releases":
+        from .resources import require_owned_root
+        output = require_owned_root(args.output_root)
+        temporary = output / "temporary"
+        temporary.mkdir(parents=True, exist_ok=True)
+        os.environ["TMPDIR"] = str(temporary)
+        os.environ["MPLCONFIGDIR"] = str(temporary / "mplconfig")
+        from .readiness import diagnose_releases
+        result = diagnose_releases(args.standard_release, args.expanded_release, output,
+                                   retained_budget_bytes=int(args.retained_budget_gib * 2**30),
+                                   temporary_budget_bytes=int(args.temporary_budget_gib * 2**30),
+                                   minimum_free_bytes=int(args.minimum_free_gib * 2**30))
+        print(json.dumps(result, indent=2))
     elif args.command == "generate":
         from .formal import dry_run_formal, run_formal
         plan = _plan(args.plan)
@@ -216,3 +281,5 @@ def main(argv: list[str] | None = None) -> None:
             result = run_formal(plan, json.loads(args.approval.read_text()), root=args.root,
                                 yes=args.yes, device=args.device, resume=args.resume)
         print(json.dumps(result, indent=2))
+        if not args.dry_run and not result.get("complete", False):
+            raise RuntimeError("formal generation stopped incomplete; inspect its receipt before resuming")

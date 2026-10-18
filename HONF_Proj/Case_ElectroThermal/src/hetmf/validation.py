@@ -9,7 +9,8 @@ import numpy as np
 
 from .contacts import rasterize_contacts
 from .environment import render_environment
-from .finite_volume import apply_operator, prepare_faces
+from .finite_volume import (apply_operator, face_energy_heat, prepare_faces,
+                            staggered_face_density)
 
 
 def validate_solution(scene: dict, solution: dict, *, residual_limit: float = 1e-10,
@@ -48,6 +49,8 @@ def audit_persisted(root: Path, scene: dict, grid: int, *, rtol: float = 1e-5) -
         ix = handle["terminal_current"][:].astype(np.float64)
         jx = handle["jx_face"][:].astype(np.float64)
         jy = handle["jy_face"][:].astype(np.float64)
+        hx = handle["heat_flux_x_face"][:].astype(np.float64)
+        hy = handle["heat_flux_y_face"][:].astype(np.float64)
     s, k, beta = render_environment(scene["environment"], grid, grid)
     chi, _ = rasterize_contacts(scene["contacts"], grid, grid, 4)
     gamma = np.asarray([c["gamma"] for c in scene["contacts"]], dtype=np.float64)
@@ -66,6 +69,16 @@ def audit_persisted(root: Path, scene: dict, grid: int, *, rtol: float = 1e-5) -
     supplied = float(np.dot(u, currents))
     cooling = float(area * np.sum(beta * theta))
     q_power = float(area * (qs + qc).sum())
+    expected_qs, _, _ = face_energy_heat(v, s, sx, sy)
+    expected_qc = np.sum(density * (u[:, None, None] - v[None])**2, axis=0)
+    expected_jx, expected_jy = staggered_face_density(v, sx, sy)
+    expected_hx, expected_hy = staggered_face_density(theta, kx, ky)
+
+    def relative_error(observed: np.ndarray, expected: np.ndarray) -> float:
+        difference = float(np.linalg.norm(observed - expected))
+        scale = float(np.linalg.norm(expected))
+        return difference / scale if scale else (0.0 if difference == 0 else float("inf"))
+
     closure = {
         "electrical_residual_relative": float(np.linalg.norm(rv) / np.linalg.norm(area*b)),
         "thermal_residual_relative": float(np.linalg.norm(rt) / np.linalg.norm(area*(qs+qc))),
@@ -73,8 +86,18 @@ def audit_persisted(root: Path, scene: dict, grid: int, *, rtol: float = 1e-5) -
         "electrical_power_relative": float(abs(supplied - face_power - contact_power) / max(abs(supplied), q_power)),
         "thermal_power_relative": float(abs(cooling - q_power) / max(abs(cooling), q_power)),
         "terminal_current_storage_max_absolute": float(np.max(abs(ix-currents))),
-        "exterior_face_flux_max_absolute": float(max(np.max(abs(jx[:, (0,-1)])), np.max(abs(jy[(0,-1), :])))),
+        "terminal_current_storage_relative": relative_error(ix, currents),
+        "sheet_heat_storage_relative": relative_error(qs, expected_qs),
+        "contact_heat_storage_relative": relative_error(qc, expected_qc),
+        "jx_storage_relative": relative_error(jx, expected_jx),
+        "jy_storage_relative": relative_error(jy, expected_jy),
+        "heat_flux_x_storage_relative": relative_error(hx, expected_hx),
+        "heat_flux_y_storage_relative": relative_error(hy, expected_hy),
+        "exterior_face_flux_max_absolute": float(max(np.max(abs(jx[:, (0,-1)])), np.max(abs(jy[(0,-1), :])),
+                                                       np.max(abs(hx[:, (0,-1)])), np.max(abs(hy[(0,-1), :])))),
     }
-    return {"accepted": all(np.isfinite(x) and x <= rtol for key, x in closure.items()
-                            if key.endswith("relative")) and closure["exterior_face_flux_max_absolute"] == 0,
+    return {"accepted": bool(all(np.isfinite(x) and x <= rtol for key, x in closure.items()
+                            if key.endswith("relative")) and closure["exterior_face_flux_max_absolute"] == 0
+            and all(np.isfinite(x).all() for x in (v, theta, qs, qc, ix, jx, jy, hx, hy))
+            and min(theta.min(), qs.min(), qc.min()) >= -1e-10),
             **closure}

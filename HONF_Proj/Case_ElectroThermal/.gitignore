@@ -1,5 +1,9 @@
 Dataset/pilot
 Dataset/formal_standard
+Dataset/formal_expanded
+Dataset/standard.h5
+Dataset/expanded.h5
+Dataset/readiness
 Dataset/raw
 Dataset/processed
 Dataset/figures

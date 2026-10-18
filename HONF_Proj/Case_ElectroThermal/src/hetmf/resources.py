@@ -122,3 +122,36 @@ def link_dataset(root: Path, case_dir: Path, *, replace_owned_links: bool = Fals
     old.update({str(dataset / k): v for k, v in made.items()})
     ownership.write_text(json.dumps(old, indent=2) + "\n")
     return made
+
+
+def link_training_artifacts(case_dir: Path, targets: dict[str, Path]) -> dict[str, str]:
+    """Expose verified release/training payloads without replacing existing paths."""
+    allowed = {"formal_standard", "formal_expanded", "standard.h5", "expanded.h5", "readiness"}
+    if not targets or not set(targets) <= allowed:
+        raise ValueError("unknown training browsing link")
+    case_dir = Path(case_dir).resolve(strict=True)
+    dataset = case_dir / "Dataset"
+    if (case_dir.name != "Case_ElectroThermal" or not (case_dir / "pyproject.toml").is_file()
+            or not dataset.is_dir() or dataset.is_symlink()):
+        raise ValueError("expected the real Case_ElectroThermal/Dataset directory")
+    checked = {}
+    for name, candidate in targets.items():
+        target = require_owned_root(candidate)
+        if not target.exists():
+            raise FileNotFoundError(target)
+        if name.endswith(".h5") and not target.is_file():
+            raise ValueError("training H5 target must be a file")
+        if not name.endswith(".h5") and not target.is_dir():
+            raise ValueError("release/diagnostic target must be a directory")
+        destination = dataset / name
+        if destination.is_symlink():
+            if os.readlink(destination) != str(target):
+                raise FileExistsError(f"refusing foreign browsing link: {destination}")
+        elif destination.exists():
+            raise FileExistsError(f"refusing regular browsing path: {destination}")
+        checked[name] = target
+    for name, target in checked.items():
+        destination = dataset / name
+        if not destination.is_symlink():
+            destination.symlink_to(target, target_is_directory=target.is_dir())
+    return {name: str(target) for name, target in checked.items()}

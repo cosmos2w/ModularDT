@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HET-MF standalone training H5 root metadata v1",
+  "description": "Root-attribute contract; numerical dataset and membership validation is implemented by verify_training_h5.",
+  "type": "object",
+  "required": ["schema", "accepted", "profile", "plan_hash", "payload_sha256", "field_order", "environment_columns", "contact_columns", "renderer", "units", "grid_n", "source_approval_sha256"],
+  "properties": {
+    "schema": {"const": "hetmf_training_h5_v1"},
+    "accepted": {"const": true},
+    "profile": {"enum": ["compact", "standard", "expanded"]},
+    "plan_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_approval_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "field_order": {"const": "potential,jx_cell,jy_cell,temperature_rise,q_total"},
+    "environment_columns": {"const": "center_x,center_y,spacing_x,spacing_y,sampling_area,s,kappa,beta"},
+    "contact_columns": {"const": "x,y,r,gamma,u"},
+    "renderer": {"const": "log_bilinear_centers_border_v1"},
+    "units": {"const": "dimensionless"},
+    "grid_n": {"type": "integer", "minimum": 2}
+  }
+}
