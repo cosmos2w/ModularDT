@@ -159,7 +159,8 @@ def test_dense_seams_replay_exact_sparse_crossing_coordinates(monkeypatch,tmp_pa
     organization=core.prepare(scene)
     provider=SimpleNamespace(adapter=SimpleNamespace(query_features=lambda coordinates,support:coordinates*2,
         physical_velocity=lambda field,coordinates:(field,None,None)))
-    batch=SimpleNamespace(case_keys=('A',),scene_inputs=(SimpleNamespace(support=object()),),receivers=object())
+    batch=SimpleNamespace(case_keys=('A',),scene_inputs=(SimpleNamespace(support_lower_D=np.zeros(coordinate_dim),
+        support_upper_D=np.ones(coordinate_dim),support_extent_D=np.ones(coordinate_dim)),),receivers=object())
     monkeypatch.setattr(physics,'validate_native_panel',lambda *args:None)
     monkeypatch.setattr(physics,'native_batches',lambda *args,**kwargs:iter([batch]))
     monkeypatch.setattr(physics,'predict_physical',lambda *args:(None,{}))
@@ -182,13 +183,47 @@ def test_continuous_seam_helper_rebuilds_query_features_and_keeps_typed_support(
     scene,template=_double(_scene(1)),_double(_query(1))
     prepared=core.prepare(scene)
     provider=SimpleNamespace(adapter=SimpleNamespace(query_features=lambda coordinates,support:coordinates*2))
-    batch=SimpleNamespace(scene_inputs=(SimpleNamespace(support=object()),),receivers=SimpleNamespace(heat=torch.ones(1,3,dtype=torch.double)))
+    batch=SimpleNamespace(scene_inputs=(SimpleNamespace(support_lower_D=np.zeros(2),support_upper_D=np.ones(2),
+        support_extent_D=np.ones(2)),),receivers=SimpleNamespace(heat=torch.ones(1,3,dtype=torch.double)))
     coordinates=template.coordinates[:,:2]+.001
     query=_continuous_query(provider,batch,prepared,template,coordinates,template.query_ids[:,:2])
     torch.testing.assert_close(query.features,coordinates*2)
     model=SimpleNamespace(core=core,prepare_native=object(),field_std=torch.ones(5,dtype=torch.double),field_mean=torch.zeros(5,dtype=torch.double))
     with torch.no_grad():values,support,dispatch=_continuous_values(provider,model,batch,prepared,query)
     assert values.shape==(2,4) and support.shape==(2,7) and dispatch.shape==(2,)
+
+
+@pytest.mark.parametrize('shift',[0.,.001,-.001])
+def test_continuous_wind_query_uses_real_target_free_bounds_and_native_features(shift):
+    from windfarm.content_hypergraph import WindContentSceneInputs,WindContentHypergraphAdapter,WIND_CONTENT_COORDINATE_FRAME
+    from windfarm.normalization import VelocityNormalizer,VerticalProfileBaseline
+    from windfarm.geometry import SupportGeometry,support_features
+
+    adapter=WindContentHypergraphAdapter(VelocityNormalizer(np.zeros(3),np.ones(3),np.ones(3)),
+        VerticalProfileBaseline(np.array([0.,2.]),np.array([[7.,0.,0.],[9.,0.,0.]]),np.ones(2,dtype=np.int64)))
+    lower=np.array([-10.,-5.,.1],dtype=np.float32);upper=np.array([20.,8.,3.],dtype=np.float32)
+    scene=WindContentSceneInputs(0,'input_only',0,270.,np.zeros((1,3),np.float32),np.ones(1,bool),
+        np.zeros((1,2),np.float32),np.array([0]),np.zeros(11,np.float32),lower,upper,upper-lower,
+        np.zeros((64,3),np.float32),np.zeros((64,7),np.float32),np.ones(64,np.float32))
+    assert not hasattr(scene,'support')
+    original_support=SupportGeometry(lower.copy(),upper.copy(),lower.copy(),upper.copy(),upper-lower,1.,1.)
+    organization=SimpleNamespace(scene=SimpleNamespace(scene_key=('native',),coordinate_frame_key=WIND_CONTENT_COORDINATE_FRAME))
+    coordinates=torch.tensor([[[-3.,1.,.4],[4.,2.,1.2],[10.,-2.,2.]]]);coordinates[...,0]+=shift
+    ids=torch.tensor([[1,8,19]])
+    query=_continuous_query(SimpleNamespace(adapter=adapter),SimpleNamespace(scene_inputs=(scene,)),organization,
+        SimpleNamespace(features=torch.zeros(1,3,7)),coordinates,ids)
+    np.testing.assert_array_equal(query.features.numpy()[0],support_features(coordinates[0].numpy(),original_support))
+    assert query.coordinates is coordinates and query.query_ids is ids
+    assert query.features.shape==(1,3,7) and query.features.dtype==coordinates.dtype
+    assert query.query_mask.all() and query.scene_key==organization.scene.scene_key
+    assert query.coordinate_frame_key==WIND_CONTENT_COORDINATE_FRAME
+
+
+def test_continuous_featureless_query_does_not_require_wind_scene_bounds():
+    organization=SimpleNamespace(scene=SimpleNamespace(scene_key=('thermal',),coordinate_frame_key='native'))
+    coordinates=torch.zeros(1,2,2);ids=torch.tensor([[4,9]])
+    query=_continuous_query(None,None,organization,SimpleNamespace(features=None),coordinates,ids)
+    assert query.features is None and query.coordinates is coordinates and query.query_ids is ids
 
 
 def test_present_pair_work_denominator_does_not_count_padding_as_learned_sparsity():

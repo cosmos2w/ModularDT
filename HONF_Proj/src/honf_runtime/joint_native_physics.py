@@ -11,7 +11,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import torch
@@ -390,7 +390,12 @@ def _continuous_query(provider,batch,organization,template,coordinates,ids):
     from honf_forward_core.content_hypergraph.contracts import QueryBatch
     features=None
     if template.features is not None:
-        values=provider.adapter.query_features(array(coordinates[0]),batch.scene_inputs[0].support)
+        # Target-free Wind scene inputs retain bounds, not the source case's
+        # SupportGeometry object. Reuse the native feature transform unchanged.
+        scene_input=batch.scene_inputs[0]
+        support=SimpleNamespace(lower_D=scene_input.support_lower_D,
+            upper_D=scene_input.support_upper_D,extent_D=scene_input.support_extent_D)
+        values=provider.adapter.query_features(array(coordinates[0]),support)
         features=torch.as_tensor(values[None],device=coordinates.device,dtype=coordinates.dtype)
     return QueryBatch(coordinates,features=features,query_mask=torch.ones(coordinates.shape[:2],dtype=torch.bool,device=coordinates.device),
         query_ids=ids,scene_key=organization.scene.scene_key,coordinate_frame_key=organization.scene.coordinate_frame_key,

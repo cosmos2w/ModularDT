@@ -1,6 +1,6 @@
 # HONF Round9 — matched e3500 evaluation and decision stop
 
-**Status:** authorized amendment during execution on October 17, 2026; measurements are pending until the named artifacts are verified. **Scope:** all four Thermal and four Wind arms. This amendment supersedes the remaining training horizon and pending audit ages in the [original Round9 work plan](HONF_Round9_Joint_Native_Hypergraph_Work_Plan.md). It preserves that document and the completed evidence as history.
+**Status:** completed matched e3500 evaluation and decision stop on October 18, 2026; all eight endpoints and 156 applicable terminal audit scopes are verified in the [report](../docs/reports/HONF_Joint_Native_Hypergraph_Round9_e3500_Report.md) and [evidence index](../docs/reports/HONF_Joint_Native_Hypergraph_Round9_e3500_Evidence_Index.md). Conditional saved-design ranking remains unqualified and unexecuted. Further training awaits the user’s decision. **Scope:** all four Thermal and four Wind arms. This amendment supersedes the remaining training horizon and pending audit ages in the [original Round9 work plan](HONF_Round9_Joint_Native_Hypergraph_Work_Plan.md). It preserves that document and the completed evidence as history.
 
 The user amended Round9 to stop every arm at literal epoch 3500, evaluate the matched models, complete the report and cleanup, commit and push durable work, and wait for a decision. Epochs 4000–5000 are not authorized by this amendment. The resulting study must be described as an e3500 decision stop, not completion of the original e5000 horizons.
 
