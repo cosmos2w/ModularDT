@@ -3,6 +3,6 @@
   "dataset_family": "hetmf_contact_sheet_v1",
   "pilot": {"status": "complete", "logical_id": "hetmf_pilot_20261017_v1", "plan_hash": "e1cfcb37c073ecf95422c4479ac45d0598ebcd47e90b5dd46784b472679e56d9", "native_grid": 96, "accepted_raw_cases": 320, "distinct_physical_states": 286, "root": "/data2/wanglz/ModularDT/datasets/hetmf/pilots/pilot_20261017_v1"},
   "formal_compact": {"status": "input_plan_only_unapproved", "plan_hash": "cdffb87e9effdf5fcef331839e50b2dbe26dbadfc4f2ed5ed16ead4c127c1ae4", "actual_hash": null},
-  "formal_standard": {"status": "input_plan_only_unapproved", "plan_hash": "a94ddd9e0374fb9a971f4856944b2f8cc475749db6b2f797cddccbd3afa29e6b", "actual_hash": null},
+  "formal_standard": {"status": "complete", "plan_hash": "a94ddd9e0374fb9a971f4856944b2f8cc475749db6b2f797cddccbd3afa29e6b", "approval_hash": "96b9a45e0f7ea1057ad59f58a34b4bb84097e72e1167f1508caae1d638536da2", "accepted_states": 4608, "raw_shards": 73, "processed_shards": 73, "root": "/data2/wanglz/ModularDT/datasets/hetmf/releases/standard_20261017_v1", "integrity_receipt": "/data2/wanglz/ModularDT/datasets/hetmf/releases/standard_20261017_v1/diagnostics/formal_pack_receipt.json"},
   "formal_expanded": {"status": "input_plan_only_unapproved", "plan_hash": "f7f25efd5194cdec7dcc16d94ada30c2d92027e4334a21928e5531935df2ae99", "actual_hash": null}
 }
