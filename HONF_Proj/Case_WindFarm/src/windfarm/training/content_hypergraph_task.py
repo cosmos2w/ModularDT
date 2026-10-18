@@ -1274,7 +1274,7 @@ def _validate_wind_v2_core_binding(recipe: Mapping[str, Any], model_config: Mapp
 def _wind_core_architecture(model_config: Mapping[str, Any]) -> str:
     """Read architecture only from the explicit schema that owns it."""
     if model_config.get("schema") in (
-        "native_retrieval_core_v1", "native_budgeted_dispatch_v2", "joint_native_hypergraph_v1",
+        "native_retrieval_core_v1", "native_budgeted_dispatch_v2", "joint_native_hypergraph_v1", "continuous_joint_native_v1", "unified_continuous_joint_native_v1",
     ):
         base = model_config.get("base_model_config")
         if not isinstance(base, Mapping):
@@ -1601,6 +1601,14 @@ class WindContentHypergraphTaskV2(WindContentHypergraphTask):
             if not getattr(self, "_allow_budgeted_native", False):
                 raise ValueError("Round8 native dispatch requires its explicit runtime capability.")
             _validate_budgeted_wind_core_binding(self.recipe, config)
+        elif config.get("schema") in ("continuous_joint_native_v1","unified_continuous_joint_native_v1"):
+            if not getattr(self,"_allow_continuous_joint",False):
+                raise ValueError('Continuous Wind core requires its explicit provider binding.')
+            from honf_forward_core.continuous_joint.model import ContinuousJointCore
+            if config.get('schema')=='unified_continuous_joint_native_v1':
+                from honf_forward_core.continuous_joint.unified import UnifiedJointCore as ContinuousJointCore
+            ContinuousJointCore.validate_config(config)
+            _validate_wind_v2_core_binding(self.recipe,config['base_model_config'])
         elif config.get("schema") == "joint_native_hypergraph_v1":
             if not getattr(self, "_allow_joint_native", False):
                 raise ValueError("Joint native M/E prediction requires its explicit runtime capability.")

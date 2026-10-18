@@ -3200,22 +3200,30 @@ class TrainingEngine:
             or identity.get("model_family") == "native_budgeted_dispatch_v2"
             or identity.get("workflow") == "native_budgeted_dispatch_joint_v2"
         )
-        identity_is_joint_native = identity.get("family") == "joint_native_hypergraph_v1"
+        identity_is_continuous_joint = identity.get("family") in ("continuous_joint_native_v1","unified_continuous_joint_native_v1")
+        identity_is_joint_native = identity.get("family") == "joint_native_hypergraph_v1" or identity_is_continuous_joint
         joint_recipe = None
         if identity_is_joint_native:
             from .joint_native_protocol import (validate_joint_native_recipe, validate_joint_native_stop,
                 joint_native_child_declaration, canonical_sha256)
+            if identity_is_continuous_joint:
+                from .continuous_joint_protocol import (validate_continuous_joint_recipe as validate_joint_native_recipe,
+                    validate_continuous_joint_stop as validate_joint_native_stop,
+                    continuous_joint_child_declaration as joint_native_child_declaration)
             joint_recipe = validate_joint_native_recipe(identity.get("recipe", {}), verify_source=True)
             validate_joint_native_stop(joint_recipe, stop_after)
             if (self.config.training_mode != "joint" or arm != "A2-D" or optimizer_seed is not None
                     or self.config.total_epochs != 5000 or joint_native_child != joint_native_child_declaration(joint_recipe)
                     or identity.get("recipe_sha256") != canonical_sha256(joint_recipe)
-                    or identity.get("workflow") != "joint_native_train_v1"):
+                    or identity.get("workflow") != ("continuous_joint_train_v1" if identity_is_continuous_joint else "joint_native_train_v1")):
                 raise ValueError("Round9 requires the sealed native stage, original arm and explicit child declaration.")
             if ((branch_from_checkpoint is None) == (resume_checkpoint is None)):
                 raise ValueError("Round9 requires exactly one pinned boundary branch or own-run exact resume.")
-            if joint_recipe['arm'] in ('H9-ME','S9-ME') and joint_recipe['calibration'] is None:
+            if joint_recipe['arm'] in ('H9-ME','S9-ME','C10-H','C10-S','U10-H','U10-S') and joint_recipe['calibration'] is None:
                 raise ValueError("Round9 sparse scientific fit requires measured fixed-TRAIN typed calibration.")
+            if joint_recipe['arm'].startswith('U10-'):
+                from .continuous_joint_protocol import validate_unified_admission
+                validate_unified_admission(joint_recipe)
             competitors=(native_budgeted_child,native_retrieval_child,source_read_child,source_read_child_auxiliary_fit,
                 inherited_attention_sparse_child,moment_hyperedge_child,hyperedge_readout_child,hyperedge_readout_extension,
                 numerical_pooling_amendment,output_policy_amendment,architecture_child_initialization,diagnostic_age_branch,
@@ -3557,6 +3565,8 @@ class TrainingEngine:
                 raise ValueError("Fresh matched resume checkpoint does not preserve its original initialization receipt.")
         if identity_is_joint_native:
             from .joint_native_child import verify_joint_native_resume
+            if identity_is_continuous_joint:
+                from .continuous_joint_child import verify_continuous_joint_resume as verify_joint_native_resume
             if resume_checkpoint is not None:
                 verify_joint_native_resume(source_payload, recipe=joint_recipe, stop_after=stop_after)
             elif (source_path.resolve() != Path(joint_recipe["source_checkpoint"]).resolve()
@@ -3729,6 +3739,8 @@ class TrainingEngine:
         if source_payload is not None:
             if identity_is_joint_native and branch_from_checkpoint is not None:
                 from .joint_native_child import prepare_joint_native_child
+                if identity_is_continuous_joint:
+                    from .continuous_joint_child import prepare_continuous_joint_child as prepare_joint_native_child
                 amendment = prepare_joint_native_child(model, provider, source_payload, sealed_identity,
                     joint_native_child, source_path=source_path, stop_after=int(stop_after))
             elif identity_is_native_budgeted and branch_from_checkpoint is not None:
@@ -3865,6 +3877,9 @@ class TrainingEngine:
                 if fresh_initialization is not None:
                     _apply_fresh_native_validation_policy(model)
             optimizer_seed = source_payload["optimizer_state_by_name"]
+            if identity_is_continuous_joint and branch_from_checkpoint is not None:
+                from .continuous_joint_child import filtered_continuous_optimizer_seed
+                optimizer_seed = filtered_continuous_optimizer_seed(optimizer_seed,amendment)
             restored_rng = source_payload["rng_state"]
             restore_provider_state = getattr(provider, "load_training_state_dict", None)
             provider_state = source_payload.get("provider_training_state", {})
@@ -3886,6 +3901,8 @@ class TrainingEngine:
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
         if identity_is_joint_native and branch_from_checkpoint is not None:
             from .joint_native_child import verify_joint_native_optimizer
+            if identity_is_continuous_joint:
+                from .continuous_joint_child import verify_continuous_joint_optimizer as verify_joint_native_optimizer
             verify_joint_native_optimizer(model, optimizer, source_payload["optimizer_state_by_name"], amendment)
         elif identity_is_native_budgeted and branch_from_checkpoint is not None:
             from .native_budgeted_child import verify_native_budgeted_optimizer
@@ -4185,7 +4202,7 @@ class TrainingEngine:
         if identity_is_joint_native:
             journal = layout.write_path("joint_optimizer_steps.jsonl", category="logs")
             def record_joint_step(epoch, update_index, case_visits):
-                receipt = {"schema":"round9_successful_optimizer_step_v1", "unix":time.time(),
+                receipt = {"schema":"round10_successful_optimizer_step_v1" if identity_is_continuous_joint else "round9_successful_optimizer_step_v1", "unix":time.time(),
                     "epoch":int(epoch), "macro_index_zero_based":int(update_index),
                     "case_visits":int(case_visits), "recipe_sha256":sealed_identity["recipe_sha256"]}
                 with journal.open("a", encoding="utf-8") as stream:
@@ -4463,7 +4480,7 @@ class TrainingEngine:
                     native_core=getattr(model,"core",model)
                     row["joint_native_routing_state"]={"arm":joint_recipe["arm"],"absolute_epoch":epoch,
                         "shared_microbatch_cases":joint_recipe["microbatch_cases"],
-                        "dense_router_cadence":"(sparse_phase_epoch_zero_based+macro_index_zero_based)%4==0",
+                        "dense_router_cadence":"none_continuous_every_step" if identity_is_continuous_joint else "(sparse_phase_epoch_zero_based+macro_index_zero_based)%4==0",
                         "sparse_phase_anchor":3001,
                         "global_optimizer_macro_step":int(getattr(native_core,"joint_macro_clock",completed_updates+len(update_rows)))}
                     if hasattr(native_core,"joint_budget"):

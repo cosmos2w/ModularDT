@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import math
 
 import torch
@@ -121,6 +123,7 @@ class SpatialRouteAttentionV2(nn.Module):
         scene_identity: tuple[object, object, object] | None = None,
         scene_tensor_versions: tuple[tuple[int, int, int], ...] = (),
         model_config_key: tuple[object, ...] = (),
+        value_policy=None,
     ) -> (
         tuple[Tensor, Tensor | None]
         | tuple[Tensor, Tensor | None, RouteScoreSnapshot]
@@ -178,6 +181,9 @@ class SpatialRouteAttentionV2(nn.Module):
                     donor_ids=donor_ids,
                     score_origin=f"last_{route_name}",
                 )
+            if value_policy is not None and capture_native_route_snapshot:
+                snapshot = replace(snapshot, applied_incidence=destination.new_zeros(batch, query_count, 0),
+                    applied_message_mass=destination.new_zeros(batch,query_count,self.heads))
             return update, attention, snapshot
 
         q = self.query(self.query_norm(destination))
@@ -266,6 +272,20 @@ class SpatialRouteAttentionV2(nn.Module):
                 scene_tensor_versions=scene_tensor_versions,
                 model_config_key=model_config_key,
             )
+        if value_policy is not None:
+            from ..continuous_joint.preparation import contextual_value_update
+            update, weights, applied, applied_mass = contextual_value_update(
+                self, q, k, v, geometry_bias, donor_measure, allowed,
+                destination_mask, value_policy, route_name=route_name,
+                stage_identity=stage_identity, destination_ids=destination_ids,
+                donor_ids=donor_ids)
+            if native_snapshot is not None:
+                # Snapshot binds scores to their actual source-state stage;
+                # coefficients are exported separately, never recomputed afterward.
+                native_snapshot = replace(native_snapshot, applied_incidence=applied, applied_message_mass=applied_mass)
+            exported = native_snapshot if native_snapshot is not None else snapshot
+            return (update, weights if return_attention else None, exported) if exported is not None else (
+                update, weights if return_attention else None)
         attended = F.scaled_dot_product_attention(
             q,
             k,
@@ -340,6 +360,7 @@ class StagedContextCycleV2(nn.Module):
         scene_tensor_versions: tuple[tuple[int, int, int], ...] = (),
         model_config_key: tuple[object, ...] = (),
         geometry_features: dict[str, Tensor] | None = None,
+        value_policy=None,
     ) -> tuple[Tensor, Tensor, dict[str, object]]:
         module_lengths = scene.module_characteristic_lengths
         environment_lengths = scene.environment_characteristic_lengths
@@ -372,6 +393,7 @@ class StagedContextCycleV2(nn.Module):
             scene_tensor_versions=scene_tensor_versions,
             model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["mm"],
+            value_policy=value_policy,
         )
         if capture_native_routes and "mm" in native_capture_route_names:
             mm, mm_weights, mm_snapshot = mm_result
@@ -401,6 +423,7 @@ class StagedContextCycleV2(nn.Module):
             scene_tensor_versions=scene_tensor_versions,
             model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["em"],
+            value_policy=value_policy,
         )
         if export_route_scores or (capture_native_routes and "em" in native_capture_route_names):
             em, em_weights, em_snapshot = em_result
@@ -432,6 +455,7 @@ class StagedContextCycleV2(nn.Module):
             scene_tensor_versions=scene_tensor_versions,
             model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["ee"],
+            value_policy=value_policy,
         )
         if export_route_scores or (capture_native_routes and "ee" in native_capture_route_names):
             ee, ee_weights, ee_snapshot = ee_result
@@ -460,6 +484,7 @@ class StagedContextCycleV2(nn.Module):
             scene_tensor_versions=scene_tensor_versions,
             model_config_key=model_config_key,
             geometry_features=None if geometry_features is None else geometry_features["me"],
+            value_policy=value_policy,
         )
         if capture_native_routes and "me" in native_capture_route_names:
             me, me_weights, me_snapshot = me_result
@@ -486,6 +511,11 @@ class StagedContextCycleV2(nn.Module):
         if export_route_scores:
             trace["em_score_snapshot"] = em_snapshot
             trace["ee_score_snapshot"] = ee_snapshot
+        if value_policy is not None:
+            for route, snapshot in (("mm", mm_snapshot), ("em", em_snapshot),
+                                    ("ee", ee_snapshot), ("me", me_snapshot)):
+                if snapshot is not None and hasattr(snapshot, "applied_incidence"):
+                    trace[f"{route}_applied_incidence"] = snapshot.applied_incidence
         if capture_native_routes:
             trace["mm_native_route_snapshot"] = mm_snapshot
             trace["me_native_route_snapshot"] = me_snapshot

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from honf_runtime.joint_native_evaluation import (canonical_sha256,freeze_native_panel,validate_native_panel,
+from honf_runtime.joint_native_evaluation import (canonical_sha256,checkpoint_arm,freeze_native_panel,validate_native_panel,
     metric,select_input_representatives,summarize,write_arrays,compare_physical_boards,typed_work_summary,THERMAL_FIELDS,BOARD_SCHEMA)
 from honf_runtime.joint_native_physics import (environment_read_intervention,mixed_finite_difference,_response_structure,
     _continuous_query,_continuous_values,_fixed_read_fingerprint,_effect_magnitudes,_effect_validity,
@@ -16,6 +16,16 @@ from honf_runtime.joint_native_physics import (environment_read_intervention,mix
 from honf_forward_core.joint_native.model import JointNativeCore
 from tests.test_content_hypergraph_v2_core import _core,_scene,_query
 from tests.test_budgeted_native_core import _double
+
+
+def test_checkpoint_arm_preserves_literal_native_identity():
+    assert checkpoint_arm({'experiment_identity': {'treatment': 'D9-M'}}) == 'D9-M'
+    assert checkpoint_arm({'experiment_identity': {'recipe': {'arm': 'C10-H'}}}) == 'C10-H'
+    assert checkpoint_arm({'experiment_identity': {'treatment': 'C10-S', 'recipe': {'arm': 'C10-S'}}}) == 'C10-S'
+    with pytest.raises(ValueError, match='conflicting'):
+        checkpoint_arm({'experiment_identity': {'treatment': 'C10-H', 'recipe': {'arm': 'C10-S'}}})
+    with pytest.raises(ValueError, match='no literal arm'):
+        checkpoint_arm({'experiment_identity': {}})
 
 
 def test_panel_selection_uses_input_strata_and_rejects_membership_or_normalizer_drift(tmp_path):

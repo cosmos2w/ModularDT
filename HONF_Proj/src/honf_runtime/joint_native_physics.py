@@ -16,7 +16,7 @@ from types import MethodType, SimpleNamespace
 import numpy as np
 import torch
 
-from .joint_native_evaluation import (array,array_sha256,file_sha256,metric,native_batches,
+from .joint_native_evaluation import (array,array_sha256,checkpoint_arm,file_sha256,metric,native_batches,
     predict_physical,thermal_record_and_arrays,validate_native_panel,write_json_new,write_arrays,canonical_sha256)
 
 
@@ -347,7 +347,7 @@ def evaluate_saved_responses(model,provider,payload,inventory,output,*,family_id
             independent=_evaluate_independent_heat_null(model,atlas,inventory['independent_heat_null'],output,device)
         del predictions,frozen_predictions,saved,baseline_prepared,baseline_routes
     result={'schema':'round9_saved_physical_response_replay_v1','dataset':'thermal','completed_epoch':int(payload['epoch']),
-        'arm':payload['experiment_identity'].get('treatment'),
+        'arm':checkpoint_arm(payload),
         'families':families,'independent_heat_null':locals().get('independent'),
         'geometry_plus_heat_interaction':{'available':False,'reason':'compatible combined physical endpoint missing'},
         'independent_environment_physics_evidence':{'available':False,'reason':'no independently excited E physical field in current inventory'},

@@ -752,10 +752,12 @@ class ContentHypergraphCoreV2(nn.Module):
         )
         module_states, environment_states = raw_module_states, raw_environment_states
         module_reference, environment_reference = self._measure_references(scene, dtype)
-        scene_summary = self._scene_summary(
+        use_summary = self._uses_scene_summary()
+        context_value_policy = self._context_value_policy()
+        scene_summary = (self._scene_summary(
             scene, module_states, environment_states, operating_state, frame_scale,
             module_reference, environment_reference,
-        )
+        ) if use_summary else None)
 
         prep_trace_available = [
             "module_gather_weights", "environment_gather_weights", "edges", "edge_anchors", "edge_scales",
@@ -794,24 +796,30 @@ class ContentHypergraphCoreV2(nn.Module):
             organization_trace["scene_summary_initial"] = scene_summary
 
         native_cycle_trace = None
+        applied_context_stages = []
+        context_work_summaries = []
+        context_stage_metadata = []
         for cycle_index, block in enumerate(self.context_blocks):
             module_boundary = module_states
             environment_boundary = environment_states
             module_states = module_states + self.module_raw_gate * self.module_raw_projection(raw_module_states)
-            module_states = module_states + self.module_scene_gate * self.module_scene_projection(scene_summary)[:, None, :]
+            if use_summary:
+                module_states = module_states + self.module_scene_gate * self.module_scene_projection(scene_summary)[:, None, :]
             environment_states = environment_states + self.environment_raw_gate * self.environment_raw_projection(
                 raw_environment_states
             )
-            environment_states = environment_states + self.environment_scene_gate * self.environment_scene_projection(
-                scene_summary
-            )[:, None, :]
+            if use_summary:
+                environment_states = environment_states + self.environment_scene_gate * self.environment_scene_projection(
+                    scene_summary
+                )[:, None, :]
             module_states = module_states * scene.module_mask[:, :, None].to(dtype)
             environment_states = environment_states * scene.environment_mask[:, :, None].to(dtype)
             if f"cycle{cycle_index}/module_boundary" in selected:
                 organization_trace[f"cycle{cycle_index}/module_boundary"] = module_states
             if f"cycle{cycle_index}/environment_boundary" in selected:
                 organization_trace[f"cycle{cycle_index}/environment_boundary"] = environment_states
-            native_capture = self._captures_native_routes() and cycle_index == self.context_depth - 1
+            native_capture = self._captures_native_routes() and (
+                cycle_index == self.context_depth - 1 or context_value_policy is not None)
             native_options = ({
                 "capture_native_routes": True,
                 "native_capture_route_names": self._native_capture_route_names(),
@@ -830,8 +838,18 @@ class ContentHypergraphCoreV2(nn.Module):
                 frame_scale,
                 return_attention=request_attention,
                 geometry_features=context_geometry_features,
+                **({"value_policy": context_value_policy, "cycle_index": cycle_index}
+                   if context_value_policy is not None and not native_capture else
+                   {"value_policy": context_value_policy} if context_value_policy is not None else {}),
                 **native_options,
             )
+            if context_value_policy is not None:
+                from ..continuous_joint.preparation import compact_context_work, context_stage_manifest
+                context_work_summaries.append(compact_context_work(cycle_trace, getattr(self, "_joint_epoch", 3000)))
+                context_stage_metadata.extend(context_stage_manifest(cycle_trace))
+                if return_trace or (trace_request is not None and trace_request is not False):
+                    applied_context_stages.append({key: value for key, value in cycle_trace.items()
+                        if key.endswith("_native_route_snapshot") or key.endswith("_applied_incidence")})
             if native_capture:
                 native_cycle_trace = cycle_trace
             for name, value in cycle_trace.items():
@@ -840,10 +858,11 @@ class ContentHypergraphCoreV2(nn.Module):
                     organization_trace[key] = value
             # Recompute the typed, measure-normalized scene summary at every
             # cycle boundary. G^{l+1} sees the final M/E states of this cycle.
-            scene_summary = self._scene_summary(
-                scene, module_states, environment_states, operating_state, frame_scale,
-                module_reference, environment_reference,
-            )
+            if use_summary:
+                scene_summary = self._scene_summary(
+                    scene, module_states, environment_states, operating_state, frame_scale,
+                    module_reference, environment_reference,
+                )
 
         if "module_states" in selected:
             organization_trace["module_states"] = module_states
@@ -1025,6 +1044,17 @@ class ContentHypergraphCoreV2(nn.Module):
             # Query indices are accepted uniformly by prepare/decode, but
             # preparation has no receiver axis and therefore uses no slice.
             raise ValueError("trace_request.query_indices is only valid on decode/affine reader traces.")
+        if not use_summary:
+            organization_trace.pop("scene_summary", None)
+            organization_trace.pop("scene_summary_initial", None)
+            prep_work["scene_summary_module_entries"] = 0
+            prep_work["scene_summary_environment_entries"] = 0
+            prep_work["scene_reinjection_rows"] = 0
+        if context_work_summaries:
+            native_cycle_trace = dict(native_cycle_trace or {})
+            native_cycle_trace["applied_context_stages"] = tuple(applied_context_stages)
+            native_cycle_trace["context_work_summary"] = sum(context_work_summaries)
+            native_cycle_trace["context_stage_metadata"] = tuple(context_stage_metadata)
         bounded_trace = self._bounded_trace(organization_trace, selected, trace_cap, trace_explicit)
         prep_work["trace_payload_elements"] = int(
             sum(value.numel() for value in (bounded_trace or {}).values())
@@ -1098,6 +1128,14 @@ class ContentHypergraphCoreV2(nn.Module):
             ),
         )
         return self._finalize_native_preparation(prepared, native_cycle_trace)
+
+    def _uses_scene_summary(self) -> bool:
+        """Legacy default; unified local-input models remove this value path."""
+        return True
+
+    def _context_value_policy(self):
+        """Optional applied typed incidence, evaluated before contextual reduction."""
+        return None
 
     def _captures_native_routes(self) -> bool:
         """Narrow opt-in hook; historical families retain their exact path."""

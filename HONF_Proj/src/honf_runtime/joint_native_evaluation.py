@@ -23,6 +23,22 @@ THERMAL_FIELDS = ("u","v","p","omega","temperature_fluid","temperature_surface",
                   "temperature_material","q_proxy","module_peak_endpoint")
 
 
+def checkpoint_arm(payload):
+    """Resolve the literal arm across inherited and continuous identities."""
+    identity = payload.get('experiment_identity')
+    if not isinstance(identity, Mapping):
+        raise ValueError('Native checkpoint lacks experiment identity.')
+    treatment = identity.get('treatment')
+    recipe = identity.get('recipe')
+    continuous = recipe.get('arm') if isinstance(recipe, Mapping) else None
+    if treatment is not None and continuous is not None and treatment != continuous:
+        raise ValueError('Native checkpoint has conflicting arm identities.')
+    arm = treatment if treatment is not None else continuous
+    if not isinstance(arm, str) or not arm:
+        raise ValueError('Native checkpoint has no literal arm.')
+    return arm
+
+
 def canonical_sha256(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()
 
@@ -289,7 +305,7 @@ def evaluate_board(model,provider,payload,panel,split,output,*,exports='represen
         from windfarm.training.native_role_evaluation import summarize_physical_role_metrics
         metrics=summarize_physical_role_metrics(rows)
     result={'schema':BOARD_SCHEMA,'dataset':dataset,'split':split,'completed_epoch':int(payload['epoch']),
-        'arm':payload['experiment_identity'].get('treatment'),'panel_sha256':panel['panel_sha256'],
+        'arm':checkpoint_arm(payload),'panel_sha256':panel['panel_sha256'],
         'scope':'all selected original TRAIN endpoint audit' if split=='train' else 'complete exposed native DEV board',
         'receiver_policy':panel['physical_receiver_policy'],'scientific_monitor_policy_unchanged':True,
         'parameter_count':sum(parameter.numel() for parameter in model.parameters()),

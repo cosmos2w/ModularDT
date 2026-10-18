@@ -17,6 +17,12 @@ class JointMacroObjective:
             needed=('joint_begin_microbatch','joint_microbatch_result','joint_constraint_duals','joint_after_update')
             if not all(callable(getattr(core,name,None)) for name in needed):
                 raise TypeError('Joint core must implement the complete typed macro constraint capability.')
+            kinds = getattr(core, 'joint_constraint_kinds', lambda: ('M','E'))()
+            if not isinstance(kinds,(tuple,list)) or any(not isinstance(kind,str) or not kind for kind in kinds):
+                raise ValueError('Joint constraint kinds must be nonempty names.')
+            if len(set(kinds)) != len(kinds) or not {'M','E'}.issubset(kinds):
+                raise ValueError('Joint constraint capability must declare unique M/E and any additional kinds.')
+            self.constraint_kinds = set(kinds)
             self.state=core.joint_begin_update(epoch,update_index)
             if not isinstance(self.state,Mapping) or self.state.get('absolute_epoch')!=epoch:
                 raise ValueError('Joint core failed to restore the absolute TRAIN clock.')
@@ -29,8 +35,8 @@ class JointMacroObjective:
         if not self.enabled:return
         result=self.core.joint_microbatch_result()
         constraints=result.get('constraints')
-        if not isinstance(constraints,Mapping) or set(constraints)!={'M','E'}:
-            raise ValueError('Joint native macro requires distinct M/E residuals.')
+        if not isinstance(constraints,Mapping) or set(constraints)!=self.constraint_kinds:
+            raise ValueError('Joint native macro residual kinds differ from the declared capability.')
         for typed,row in constraints.items():
             value=row.get('residual_numerator');count=row.get('denominator');controller=row.get('controller_numerator')
             if (not torch.is_tensor(value) or value.numel()!=1 or not value.requires_grad
@@ -60,7 +66,7 @@ class JointMacroObjective:
         self.losses={};self.work=dict(self.telemetry);self.controller_residuals={}
         if not self.enabled:return
         duals=self.core.joint_constraint_duals()
-        if set(duals)!={'M','E'}:raise ValueError('Joint controller requires serialized typed dual states.')
+        if set(duals)!=self.constraint_kinds:raise ValueError('Joint controller requires serialized typed dual states.')
         for typed,values in self.residuals.items():
             if not self.denominators[typed]:
                 self.controller_residuals[typed]=torch.stack(self.controller[typed]).sum()*0

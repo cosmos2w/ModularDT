@@ -82,6 +82,9 @@ def load_evaluation_components(checkpoint: Path, device: str):
     """Reopen only the checkpoint's authorized native evaluation panel."""
     payload = load_trusted_checkpoint(checkpoint, map_location="cpu")
     standalone = None
+    if payload.get("workflow") == "continuous_joint_train_v1":
+        from honf_runtime.continuous_joint_runtime import load_continuous_evaluation_components
+        return load_continuous_evaluation_components(checkpoint,device=device,runtime_root=PROJECT)
     if payload.get("workflow") == "joint_native_train_v1":
         from honf_runtime.joint_native_factory import build_joint_native_task
         from honf_runtime.joint_native_protocol import validate_joint_native_recipe

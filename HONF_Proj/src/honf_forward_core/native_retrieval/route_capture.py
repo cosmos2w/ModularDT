@@ -42,6 +42,8 @@ class NativeRouteSnapshot:
     scene_identity: tuple[Any, Any, Any] | None = None
     scene_tensor_versions: tuple[tuple[int, int, int], ...] = ()
     model_config_key: tuple[Any, ...] = ()
+    applied_incidence: Tensor | None = None  # optional actual contextual b, [B,D,S]
+    applied_message_mass: Tensor | None = None  # actual reduced mass, including bias weighting
     _tensor_versions: tuple[tuple[int, int, int], ...] = field(default=(), init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -92,6 +94,19 @@ class NativeRouteSnapshot:
                 raise ValueError("Captured route cannot allow padded destination or donor records.")
             if bool((self.allowed[:, None, :, :] & ~torch.isfinite(self.raw_scores)).any()):
                 raise ValueError("Captured eligible route scores must be finite.")
+        if self.applied_incidence is not None:
+            if self.applied_incidence.shape != self.allowed.shape:
+                raise ValueError("Applied contextual incidence must match the native route axes.")
+            condition = (torch.isfinite(self.applied_incidence).all()
+                         & (self.applied_incidence >= 0).all() & (self.applied_incidence <= 1).all()
+                         & (self.applied_incidence.masked_select(~self.allowed) == 0).all())
+            if self.applied_incidence.device.type == "cuda":
+                torch._assert_async(condition, "Invalid applied contextual incidence.")
+            elif not bool(condition):
+                raise ValueError("Invalid applied contextual incidence.")
+        if self.applied_message_mass is not None:
+            if self.applied_message_mass.shape != (batch,destinations,heads):
+                raise ValueError('Applied contextual message mass must match [B,D,H].')
         if not self.measure_convention:
             raise ValueError("measure_convention must be explicit.")
         if not self.stage_identity:
@@ -110,6 +125,8 @@ class NativeRouteSnapshot:
                 self.destination_ids,
                 self.donor_ids,
                 self.donor_measure,
+                *(() if self.applied_incidence is None else (self.applied_incidence,)),
+                *(() if self.applied_message_mass is None else (self.applied_message_mass,)),
             ),
         )
 
@@ -126,6 +143,8 @@ class NativeRouteSnapshot:
             self.destination_ids,
             self.donor_ids,
             self.donor_measure,
+            *(() if self.applied_incidence is None else (self.applied_incidence,)),
+            *(() if self.applied_message_mass is None else (self.applied_message_mass,)),
         )
         if current != self._tensor_versions:
             raise ValueError("Captured native route scores, masks, measures, or IDs changed in place.")
