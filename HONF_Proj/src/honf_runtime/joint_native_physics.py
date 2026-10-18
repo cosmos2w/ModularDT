@@ -431,16 +431,48 @@ def _literal_grid_probes(model,batch,point):
             if 'Native curl is defined only on native cell-centred receivers' not in str(error):raise
             # Preserve the adapter's physical boundary. Adjacent native cells
             # are a supported diagnostic, but are not a shrinking seam limit.
-            adjacent=torch.cat((point,point+point.new_tensor([dx,0.])[None,None]),1)
+            lengths=model.scene_batch(batch.scene_inputs.structure,scene_key=batch.scene_inputs.case_ids).coordinate_scale.to(point)
+            spacing=lengths/point.new_tensor([model.nx,model.ny])
+            indices=torch.round(point[:,0]/spacing-.5).long()
+            indices[:,0].clamp_(0,model.nx-2);indices[:,1].clamp_(0,model.ny-1)
+            def pair_xy(index):
+                first=(index.to(point)+.5)*spacing
+                return torch.stack((first,first+torch.stack((spacing[:,0],torch.zeros_like(spacing[:,1])),-1)),1)
+            adjacent=pair_xy(indices)
             prepared=model.prepare_native(batch.scene_inputs.structure,adjacent,local_query_points=None,
                 ntheta=batch.receivers.ntheta,scene_key=batch.scene_inputs.case_ids)
+            mask=prepared.native_solid_mask[0]
+            chosen=indices[0];valid=bool(prepared.stencils['fluid'].valid.all()) and not bool(mask[chosen[1],chosen[0]:chosen[0]+2].any())
+            search={'initial_indices_xy':array(chosen).tolist(),'initial_pair_valid_fluid':valid,'policy':'nearest valid adjacent x-pair midpoint to original point; ties row-major'}
+            if not valid:
+                eligible=~mask[:,:-1]&~mask[:,1:]
+                candidates=torch.nonzero(eligible,as_tuple=False)
+                search['valid_pair_candidates']=int(len(candidates))
+                if len(candidates)==0:
+                    return {'available':False,'reason':str(error),'public_boundary_rejection_checked':True,
+                        'scope':'literal native-grid shrinking crossing unavailable through maintained curl API',
+                        'supported_adjacent_cell_diagnostic':{'available':False,'reason':'no adjacent native fluid pair','search':search}},saved
+                mid=torch.stack(((candidates[:,1].to(point)+1)*spacing[0,0],(candidates[:,0].to(point)+.5)*spacing[0,1]),-1)
+                nearest=((mid-point[0,0])**2).sum(-1).argmin()
+                yx=candidates[nearest];indices=torch.stack((yx[1],yx[0]))[None]
+                adjacent=pair_xy(indices)
+                prepared=model.prepare_native(batch.scene_inputs.structure,adjacent,local_query_points=None,
+                    ntheta=batch.receivers.ntheta,scene_key=batch.scene_inputs.case_ids)
+                chosen=indices[0];valid=bool(prepared.stencils['fluid'].valid.all()) and not bool(prepared.native_solid_mask[0,chosen[1],chosen[0]:chosen[0]+2].any())
+            search['chosen_indices_xy']=array(chosen).tolist()
+            if not valid:raise ValueError('Selected native adjacent fluid pair did not remain valid.')
             values=model.apply_native(prepared,batch.receivers.heat)['pred_field'][0]
-            saved.update(supported_adjacent_cell_coordinates=array(adjacent[0]),supported_adjacent_cell_fields=array(values))
+            saved.update(original_arbitrary_seam_point=array(point[0]),supported_adjacent_cell_coordinates=array(adjacent[0]),
+                supported_adjacent_cell_displacement_from_original=array((adjacent-point)[0]),supported_adjacent_cell_fields=array(values))
             return {'available':False,'reason':str(error),'public_boundary_rejection_checked':True,
                 'scope':'literal native-grid shrinking crossing unavailable through the maintained curl API',
-                'supported_adjacent_cell_diagnostic':{'coordinate_gap':dx,'physical_field_difference':array(values[1]-values[0]).tolist(),
+                'supported_adjacent_cell_diagnostic':{'available':True,'coordinate_gap':float(spacing[0,0]),
+                    'original_point':array(point[0]).tolist(),'snapped_coordinates':array(adjacent[0]).tolist(),
+                    'displacement_from_original':array((adjacent-point)[0]).tolist(),'search':search,
+                    'physical_field_difference':array(values[1]-values[0]).tolist(),
                     'channels':['u','v','p','omega','temperature'],'valid':array(prepared.stencils['fluid'].valid[0]).tolist(),
-                    'interpretation':'difference between adjacent legal native cell centres; not a continuity limit'}},saved
+                    'both_native_centres_fluid':True,
+                    'interpretation':'physical-grid-scale difference between adjacent legal native fluid cell centres; not a shrinking continuity limit; no shifted physical target'}},saved
         values=model.apply_native(prepared,batch.receivers.heat)['pred_field'][0]
         stencil=prepared.stencils['fluid'];native_ids=prepared.union.grid_indices[0][stencil.indices[0]]
         probes.append({'requested_step':step,'step_over_native_dx':fraction,
