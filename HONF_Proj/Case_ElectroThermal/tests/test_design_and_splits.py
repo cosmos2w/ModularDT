@@ -177,6 +177,31 @@ def test_formal_approval_binds_qualified_precision_and_coefficients(tmp_path, mo
         validate_approval(plan, {**approval, "coefficient_bounds":
                                  {**approval["coefficient_bounds"], "s": {"min": 1, "max": 1.1}}},
                           root=release, yes=True)
+    concurrent = {"mode": "concurrent", "minimum_free_mib": 16384,
+                  "process_memory_fraction": 0.25}
+    assert validate_approval(plan, {**approval, "gpu_sharing": concurrent},
+                             root=release, yes=True)["precision"] == "fp64"
+    with pytest.raises(ValueError, match="GPU sharing policy"):
+        validate_approval(plan, {**approval, "gpu_sharing":
+                                 {**concurrent, "minimum_free_mib": 8192}}, root=release, yes=True)
+    with pytest.raises(ValueError, match="GPU sharing policy"):
+        validate_approval(plan, {**approval, "gpu_sharing":
+                                 {**concurrent, "process_memory_fraction": 0.5}}, root=release, yes=True)
+
+
+def test_formal_gpu2_sharing_checks_each_batch(monkeypatch):
+    from hetmf.formal import _check_gpu2_sharing
+    monkeypatch.setattr("hetmf.formal.gpu2_status", lambda: {
+        "free_mib": 20000, "compute_processes": ["999,GPU-other-job"]})
+    sharing = {"gpu_sharing": {"mode": "concurrent", "minimum_free_mib": 16384,
+                              "process_memory_fraction": 0.25}}
+    assert _check_gpu2_sharing(sharing)["free_mib"] == 20000
+    with pytest.raises(RuntimeError, match="foreign GPU2 job"):
+        _check_gpu2_sharing({})
+    monkeypatch.setattr("hetmf.formal.gpu2_status", lambda: {
+        "free_mib": 16000, "compute_processes": ["999,GPU-other-job"]})
+    with pytest.raises(RuntimeError, match="below approved concurrent floor"):
+        _check_gpu2_sharing(sharing)
 
 
 def test_formal_shard_packs_verified_sources_without_removing_them(tmp_path):

@@ -114,6 +114,19 @@ def validate_approval(plan: dict, approval: dict, *, root: Path, yes: bool,
                 raise ValueError(f"formal {key} control coefficients exceed approved bounds")
     if int(approval["batch_size"]) < 1 or int(approval["batch_size"]) > 32:
         raise ValueError("formal batch size outside 1..32")
+    sharing = approval.get("gpu_sharing", {"mode": "exclusive"})
+    if sharing == {"mode": "exclusive"}:
+        pass
+    elif (isinstance(sharing, dict) and set(sharing) ==
+          {"mode", "minimum_free_mib", "process_memory_fraction"} and
+          sharing["mode"] == "concurrent" and
+          isinstance(sharing["minimum_free_mib"], int) and
+          sharing["minimum_free_mib"] >= 16 * 1024 and
+          isinstance(sharing["process_memory_fraction"], (int, float)) and
+          0 < sharing["process_memory_fraction"] <= 0.25):
+        pass
+    else:
+        raise ValueError("formal GPU sharing policy is invalid or exceeds bounded concurrent limits")
     if any(int(approval[key]) <= 0 for key in
            ("max_elapsed_seconds", "retained_budget_bytes", "temporary_budget_bytes", "minimum_free_bytes")):
         raise ValueError("formal time/storage limits must be positive")
@@ -183,12 +196,16 @@ def _append_journal(path: Path, record: dict) -> None:
         os.fsync(handle.fileno())
 
 
-def _require_no_foreign_gpu2_job() -> None:
+def _check_gpu2_sharing(approval: dict) -> dict:
     status = gpu2_status()
     foreign = [line for line in status["compute_processes"]
                if line.split(",", 1)[0].strip() != str(os.getpid())]
-    if foreign:
+    sharing = approval.get("gpu_sharing", {"mode": "exclusive"})
+    if sharing["mode"] == "exclusive" and foreign:
         raise RuntimeError(f"foreign GPU2 job appeared: {foreign}")
+    if sharing["mode"] == "concurrent" and status["free_mib"] < sharing["minimum_free_mib"]:
+        raise RuntimeError(f"GPU2 free memory below approved concurrent floor: {status}")
+    return status
 
 
 def bind_gpu2_visibility() -> None:
@@ -244,7 +261,16 @@ def run_formal(plan: dict, approval: dict, *, root: Path, yes: bool = False,
     """
     binding = validate_approval(plan, approval, root=root, yes=yes, device=device)
     bind_gpu2_visibility()
-    require_exclusive_gpu2()
+    sharing = approval.get("gpu_sharing", {"mode": "exclusive"})
+    if sharing["mode"] == "exclusive":
+        require_exclusive_gpu2()
+    else:
+        _check_gpu2_sharing(approval)
+        import torch
+        torch.set_num_threads(2)
+        torch.cuda.set_per_process_memory_fraction(sharing["process_memory_fraction"], 0)
+        if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+            raise RuntimeError("physical GPU2 must be the sole visible CUDA device")
     owned = Path(binding["disk_root"])
     require_remaining_budget(owned, approval)
     stable_budget = {"retained_budget_bytes": int(approval["retained_budget_bytes"]),
@@ -327,7 +353,7 @@ def run_formal(plan: dict, approval: dict, *, root: Path, yes: bool = False,
                                          next_retained_upper=len(pending) * estimated_case_bytes,
                                          next_temporary_upper=estimated_case_bytes,
                                          free_bytes=capacity["free_bytes"], approval=approval)
-            _require_no_foreign_gpu2_job()
+            gpu_before_batch = _check_gpu2_sharing(approval)
             from .gpu_physics import solve_gpu_batch
             from .validation import audit_persisted, validate_solution
             solutions = solve_gpu_batch([scene for _, scene in pending], batch_grid,
@@ -338,6 +364,9 @@ def run_formal(plan: dict, approval: dict, *, root: Path, yes: bool = False,
                 record = {"formal_state_id": row["state_id"], "raw_state_key": scene["state_id"],
                           "physical_input_hash": row["input_hash"], "grid": batch_grid,
                           "plan_hash": plan["plan_hash"], "approval_hash": binding["approval_hash"],
+                          "gpu2_free_mib_before_batch": gpu_before_batch["free_mib"],
+                          "gpu2_foreign_processes_before_batch": [line for line in gpu_before_batch["compute_processes"]
+                                                                   if line.split(",", 1)[0].strip() != str(os.getpid())],
                           "quality": quality, "timestamp_unix": time.time()}
                 if not quality["accepted"]:
                     record["status"] = "failed_qualification"

@@ -119,5 +119,6 @@ def link_dataset(root: Path, case_dir: Path, *, replace_owned_links: bool = Fals
         os.replace(temporary, dest)
         made[name] = str(target)
     ownership.parent.mkdir(parents=True, exist_ok=True)
-    ownership.write_text(json.dumps({str(dataset / k): v for k, v in made.items()}, indent=2) + "\n")
+    old.update({str(dataset / k): v for k, v in made.items()})
+    ownership.write_text(json.dumps(old, indent=2) + "\n")
     return made
