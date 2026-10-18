@@ -1,0 +1,8 @@
+{
+  "schema": "hetmf_dataset_registry_v1",
+  "dataset_family": "hetmf_contact_sheet_v1",
+  "pilot": {"status": "complete", "logical_id": "hetmf_pilot_20261017_v1", "plan_hash": "e1cfcb37c073ecf95422c4479ac45d0598ebcd47e90b5dd46784b472679e56d9", "native_grid": 96, "accepted_raw_cases": 320, "distinct_physical_states": 286, "root": "/data2/wanglz/ModularDT/datasets/hetmf/pilots/pilot_20261017_v1"},
+  "formal_compact": {"status": "input_plan_only_unapproved", "plan_hash": "cdffb87e9effdf5fcef331839e50b2dbe26dbadfc4f2ed5ed16ead4c127c1ae4", "actual_hash": null},
+  "formal_standard": {"status": "input_plan_only_unapproved", "plan_hash": "a94ddd9e0374fb9a971f4856944b2f8cc475749db6b2f797cddccbd3afa29e6b", "actual_hash": null},
+  "formal_expanded": {"status": "input_plan_only_unapproved", "plan_hash": "f7f25efd5194cdec7dcc16d94ada30c2d92027e4334a21928e5531935df2ae99", "actual_hash": null}
+}

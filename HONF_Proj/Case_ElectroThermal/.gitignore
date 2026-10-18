@@ -1,0 +1,10 @@
+Dataset/pilot
+Dataset/raw
+Dataset/processed
+Dataset/figures
+Dataset/catalogues
+Dataset/links/
+Dataset/dataset_locations.local.json
+__pycache__/
+.pytest_cache/
+*.pyc

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HET-MF physical case v1",
+  "type": "object",
+  "required": ["state_id", "split", "environment_root_id", "layout_root_id", "environment", "contacts", "input_hash"],
+  "properties": {
+    "state_id": {"type": "string"},
+    "split": {"type": "string"},
+    "environment_root_id": {"type": "string"},
+    "layout_root_id": {"type": "string"},
+    "environment": {"$ref": "environment_catalogue_v1.schema.json"},
+    "contacts": {"type": "array", "minItems": 2, "items": {"type": "object", "required": ["id", "x", "y", "r", "gamma", "u"], "properties": {"id": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"}, "r": {"type": "number", "exclusiveMinimum": 0}, "gamma": {"type": "number", "exclusiveMinimum": 0}, "u": {"type": "number"}}}},
+    "input_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
