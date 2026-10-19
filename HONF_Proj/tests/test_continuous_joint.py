@@ -191,6 +191,23 @@ def test_full_frozen_plan_owner_ids_mutation_restoration_and_E_conditioning(mode
             model.decode_with_plan(org,query,plan,heat)
 
 
+def test_frozen_plan_coordinate_gradient_after_checkpointed_forward():
+    _,model=_model('direct',checkpoint=True,tile=10);model.eval()
+    scene,query=_double(_scene(1)),_double(_query(1))
+    query=replace(query,coordinates=query.coordinates.clone().requires_grad_(True),
+                  query_ids=torch.arange(query.num_queries)[None])
+    heat=torch.ones((1,3),dtype=torch.double)
+    with torch.no_grad():
+        org=model.prepare(scene)
+        plan=model.capture_continuous_plan(org,query)
+    output=model.decode_with_plan(org,query,plan,heat)
+    gradient=torch.autograd.grad(output.thermal_temperature.sum()+output.nonlinear_field.sum(),
+                                 query.coordinates)[0]
+    assert torch.isfinite(gradient).all()
+    assert model._continuous_frozen_plan is None
+    assert model.checkpoint_pipeline
+
+
 @pytest.mark.parametrize('tile',[1,2,8])
 def test_response_tile_kernel_heat_adjoint_and_coordinate_gradients(tile):
     _,model=_model('direct',checkpoint=True,tile=tile);model.eval()

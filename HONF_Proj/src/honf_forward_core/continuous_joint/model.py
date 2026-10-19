@@ -159,6 +159,12 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         try:return self.decode(organization,query,controls,**options)
         finally:self._continuous_frozen_plan=previous
 
+    def _checkpoint_native_tile(self):
+        # Frozen plans are scoped to the forward call. Checkpoint backward runs
+        # after that scope closes, so a frozen-plan diagnostic retains its
+        # bounded tile graph instead of recomputing with live routing.
+        return self.checkpoint_pipeline and torch.is_grad_enabled() and self._continuous_frozen_plan is None
+
     def _read(self,kind,organization,query,qstates,gate,scores=None,return_messages=False):
         scene=organization.scene;is_m=kind=='module'
         valid=getattr(scene,kind+'_mask')
@@ -288,7 +294,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
             tile=slice_query_v1(query,start,min(start+self.query_tile_size,query.num_queries))
             def function(coords,tile=tile):
                 return self._response_tile(organization,replace(tile,coordinates=coords),local_gates)
-            direct,local,work,counts=checkpoint(function,tile.coordinates,use_reentrant=False) if self.checkpoint_pipeline and torch.is_grad_enabled() else function(tile.coordinates)
+            direct,local,work,counts=checkpoint(function,tile.coordinates,use_reentrant=False) if self._checkpoint_native_tile() else function(tile.coordinates)
             work=self._checkpoint_work(organization,tile)
             coefficients.append(direct);locals_.append(local)
             total_counts=counts if total_counts is None else total_counts+counts
@@ -347,7 +353,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
             tile=slice_query_v1(query,start,min(start+self.query_tile_size,query.num_queries))
             def function(coords,tile=tile):
                 return self._tile(organization,replace(tile,coordinates=coords),None,None,local_gates,return_affine=True)
-            field,direct,local,work,counts=checkpoint(function,tile.coordinates,use_reentrant=False) if self.checkpoint_pipeline and torch.is_grad_enabled() else function(tile.coordinates)
+            field,direct,local,work,counts=checkpoint(function,tile.coordinates,use_reentrant=False) if self._checkpoint_native_tile() else function(tile.coordinates)
             work=self._checkpoint_work(organization,tile)
             fields.append(field);directs.append(direct);local_coefficients.append(local)
             p=pack_local_pairs(organization.scene,tile,organization.frame_scale)
@@ -392,7 +398,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
             # Freeze each closure's tile: backward may occur after the loop ends.
             def function(coords,tile=tile):
                 return self._tile(organization,replace(tile,coordinates=coords),controls,accumulation_dtype,local_gates)
-            result=checkpoint(function,tile.coordinates,use_reentrant=False) if self.checkpoint_pipeline and torch.is_grad_enabled() else function(tile.coordinates)
+            result=checkpoint(function,tile.coordinates,use_reentrant=False) if self._checkpoint_native_tile() else function(tile.coordinates)
             field,temp,work,counts=result
             work=self._checkpoint_work(organization,tile)
             fields.append(field)
