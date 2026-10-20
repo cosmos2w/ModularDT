@@ -134,7 +134,8 @@ def main():
             'cases':len(cases),'updates_per_epoch':len(task['engine'].epoch_update_slices(len(cases))),
             'loaded_source_exact':True,'recipe_unchanged':True,'cuda_initialized':torch.cuda.is_initialized(),'scientific_updates':0}
         atomic(campaign.root/f'receipts/{args.operation}.json',receipt);print(json.dumps(receipt,sort_keys=True));return
-    with campaign.device(args.physical_gpu) as uuid:
+    access = 'shared_training' if args.command == 'run' else 'exclusive'
+    with campaign.device(args.physical_gpu, access=access) as uuid:
         seed(args)
         from honf_joint_device_continue import read_object
         # Read only metadata before reserving the complete bounded operation.

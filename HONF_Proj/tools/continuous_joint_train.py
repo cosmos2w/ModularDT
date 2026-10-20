@@ -103,7 +103,8 @@ def main(argv=None):
         resume=resolve_checkpoint(args.output,'latest');start=load_trusted_checkpoint(resume,map_location='cpu')['epoch']
     updates=(args.epochs if args.command=='qualify' else args.stop_after-start)*(4 if recipe['dataset']=='thermal' else 5)
     operation='continuous_'+recipe['dataset']+'_'+recipe['arm']+'_'+str(time.time_ns())
-    with campaign.device(args.physical_gpu) as uuid:
+    access = 'exclusive' if args.command == 'qualify' else 'shared_training'
+    with campaign.device(args.physical_gpu, access=access) as uuid:
         campaign.reserve(operation,track='C' if recipe['arm'].startswith('U10-') else 'B',kind='engineering' if args.command=='qualify' else 'main',updates=updates,seconds=args.reserve_seconds,physical_gpu=args.physical_gpu)
         status='failed';error=None;actual=0
         journal=args.output.resolve()/'logs/joint_optimizer_steps.jsonl'

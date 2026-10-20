@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atomic Round10 accounting and exclusive physical-device leases.
+"""Atomic Round10 accounting and explicit training/measurement device leases.
 
 This module deliberately lives outside HONF_Proj's frozen scientific inventory.
 Reservations charge worst-case work while live, then actual work at closeout.
@@ -76,6 +76,20 @@ def device_processes(uuid):
             for pid,gpu,memory in [line.split(',')] if gpu.strip()==uuid]
 
 
+def device_memory(uuid):
+    inventory = subprocess.check_output(
+        ['nvidia-smi', '--query-gpu=uuid,memory.free,memory.total', '--format=csv,noheader,nounits'],
+        text=True, timeout=5)
+    for line in inventory.splitlines():
+        found, free, total = [part.strip() for part in line.split(',')]
+        if found == uuid:
+            free, total = int(free) * 1024**2, int(total) * 1024**2
+            return dict(gpu_free_bytes=free, gpu_total_bytes=total,
+                        gpu_floor_bytes=max(8 * 1024**3, math.ceil(.2 * total)),
+                        preventive_margin_bytes=6 * 1024**3)
+    raise RuntimeError('Reserved GPU is missing from the memory inventory.')
+
+
 class Campaign:
     def __init__(self, root):
         self.root = Path(root).resolve(strict=True)
@@ -85,6 +99,7 @@ class Campaign:
         self.start = datetime.fromisoformat(self.master['created_utc']).timestamp()
         self.limits = self.master['limits']
         self.ledger_path = self.root / 'receipts/execution_ledger_v1.json'
+        self.device_access_mode = 'exclusive'
 
     def check_storage(self):
         mount = subprocess.check_output(['findmnt', '-n', '-o', 'TARGET,SOURCE,FSTYPE', '-T', '/data2'], text=True)
@@ -121,6 +136,8 @@ class Campaign:
             raise ValueError('Invalid operation allocation.')
         if str(physical_gpu) not in self.master['authorized_gpus']:
             raise ValueError('GPU is outside the Round10 authorization.')
+        if self.device_access_mode == 'shared_training' and kind != 'main':
+            raise ValueError('Shared GPU leases admit main training only; measurements require exclusive access.')
         self.check_storage()
         if time.time() + seconds > self.start + self.limits['wall_seconds']:
             raise RuntimeError('Operation cannot finish within the Round10 wall budget.')
@@ -145,6 +162,7 @@ class Campaign:
                     raise RuntimeError('Round10 update reservation exhausted.')
             row = dict(operation=operation, track=track, kind=kind, status='running', pid=os.getpid(),
                        physical_gpu=physical_gpu, gpu_uuid=self.master['authorized_gpus'][str(physical_gpu)],
+                       device_lease_mode=self.device_access_mode,
                        reserved_updates=int(updates), reserved_seconds=float(seconds), started_unix=time.time())
             ledger['operations'][operation] = row
         return row
@@ -161,7 +179,9 @@ class Campaign:
         return row
 
     @contextmanager
-    def device(self, physical_gpu):
+    def device(self, physical_gpu, *, access='exclusive'):
+        if access not in ('exclusive', 'shared_training'):
+            raise ValueError('Unknown GPU access mode.')
         if str(physical_gpu) not in self.master['authorized_gpus']:
             raise ValueError('Unauthorized physical device.')
         with (self.root / f'receipts/gpu{physical_gpu}.lock').open('a') as lock:
@@ -173,8 +193,18 @@ class Campaign:
             if (physical_gpu, uuid) not in [(int(a.strip()), b.strip()) for a,b in (line.split(',') for line in inventory.splitlines())]:
                 raise ValueError('Physical GPU index/UUID changed.')
             competitors=[row for row in device_processes(uuid) if row['pid']!=os.getpid()]
-            if competitors:raise RuntimeError('Reserved GPU already has a competing compute process: '+str(competitors))
-            yield uuid
+            if competitors and access == 'exclusive':
+                raise RuntimeError('Reserved GPU already has a competing compute process: '+str(competitors))
+            memory = device_memory(uuid)
+            if memory['gpu_free_bytes'] <= memory['gpu_floor_bytes'] + memory['preventive_margin_bytes']:
+                raise RuntimeError('Reserved GPU has no capacity above the memory floor and preventive margin.')
+            # Keep one campaign job per physical lane, even when other users share it.
+            previous = self.device_access_mode
+            self.device_access_mode = access
+            try:
+                yield uuid
+            finally:
+                self.device_access_mode = previous
 
 
 class Monitor:
@@ -186,21 +216,19 @@ class Monitor:
         now=time.time(); reasons=[]
         row={'unix':now,'operation':self.operation,'gpu_uuid':self.uuid}
         try:
-            inventory=subprocess.check_output(['nvidia-smi','--query-gpu=uuid,memory.free,memory.total','--format=csv,noheader,nounits'],text=True,timeout=5)
-            found=False
-            for line in inventory.splitlines():
-                uuid,free,total=[x.strip() for x in line.split(',')]
-                if uuid==self.uuid:
-                    found=True; free=int(free)*1024**2; total=int(total)*1024**2
-                    floor=max(8*1024**3,math.ceil(.2*total)); margin=6*1024**3
-                    row.update(gpu_free_bytes=free,gpu_total_bytes=total,gpu_floor_bytes=floor,preventive_margin_bytes=margin)
-                    if free<floor+margin:reasons.append('gpu_floor_plus_margin')
-            if not found:reasons.append('gpu_missing')
+            row.update(device_memory(self.uuid))
+            if row['gpu_free_bytes'] < row['gpu_floor_bytes'] + row['preventive_margin_bytes']:
+                reasons.append('gpu_floor_plus_margin')
             row['compute_processes']=device_processes(self.uuid)
             row['unexpected_compute_processes']=[p for p in row['compute_processes'] if p['pid']!=os.getpid()]
-            if row['unexpected_compute_processes']:reasons.append('unexpected_gpu_competitor')
             row.update(self.campaign.check_storage())
             ledger=read(self.campaign.ledger_path); operation=ledger['operations'][self.operation]
+            mode = operation.get('device_lease_mode', 'exclusive')
+            if mode not in ('exclusive', 'shared_training') or (mode == 'shared_training' and operation['kind'] != 'main'):
+                raise ValueError('Invalid operation GPU lease mode.')
+            row['device_lease_mode'] = mode
+            if row['unexpected_compute_processes'] and mode == 'exclusive':
+                reasons.append('unexpected_gpu_competitor')
             accounting=self.campaign.time_accounting(ledger,now=now,running_as_reserved=False)
             row['actual_time_accounting']=accounting
             evaluation_cap=self.campaign.limits['gpu_associated_seconds_reserved_for_evaluation']

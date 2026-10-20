@@ -25,6 +25,9 @@ def campaign(tmp_path,monkeypatch):
     (tmp_path/'receipts/master_reservation_v1.json').write_text(json.dumps(master))
     value=resources.Campaign(tmp_path)
     monkeypatch.setattr(value,'check_storage',lambda:{})
+    monkeypatch.setattr(resources, 'device_memory', lambda uuid: {
+        'gpu_free_bytes': 40 * 1024**3, 'gpu_total_bytes': 48 * 1024**3,
+        'gpu_floor_bytes': 10 * 1024**3, 'preventive_margin_bytes': 6 * 1024**3})
     return value
 
 
@@ -119,6 +122,69 @@ def test_device_lock_is_exclusive(campaign,monkeypatch):
         with pytest.raises(BlockingIOError):
             with campaign.device(1):
                 pytest.fail('A second lease must not acquire the physical device.')
+
+
+def shared_device_inventory(monkeypatch):
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-one')
+    monkeypatch.setattr(resources.subprocess, 'check_output', lambda *args, **kwargs: '1, GPU-one\n')
+    monkeypatch.setattr(resources, 'device_processes', lambda uuid: [{'pid': 987654, 'gpu_uuid': uuid}])
+
+
+def test_shared_training_keeps_external_processes_as_telemetry(campaign, monkeypatch, tmp_path):
+    shared_device_inventory(monkeypatch)
+    with campaign.device(1, access='shared_training'):
+        reserve(campaign, 'shared')
+        with pytest.raises(BlockingIOError):
+            with campaign.device(1, access='shared_training'):
+                pytest.fail('One campaign job per lane still applies.')
+    assert campaign.device_access_mode == 'exclusive'
+    row = resources.read(campaign.ledger_path)['operations']['shared']
+    assert row['device_lease_mode'] == 'shared_training'
+    output = tmp_path / 'shared'; output.mkdir()
+    sample = resources.Monitor(campaign, 'shared', output, 'GPU-one').sample()
+    assert sample['unexpected_compute_processes'][0]['pid'] == 987654
+    assert sample['device_lease_mode'] == 'shared_training'
+    assert sample['stop_reasons'] == []
+    assert not (output / 'CLEAN_STOP_REQUEST.json').exists()
+
+
+def test_shared_training_still_rejects_memory_pressure_at_admission(campaign, monkeypatch):
+    shared_device_inventory(monkeypatch)
+    monkeypatch.setattr(resources, 'device_memory', lambda uuid: {
+        'gpu_free_bytes': 16, 'gpu_floor_bytes': 10, 'preventive_margin_bytes': 6})
+    with pytest.raises(RuntimeError, match='no capacity'):
+        with campaign.device(1, access='shared_training'):
+            pytest.fail('No allocator capacity remains.')
+    assert not campaign.ledger_path.exists()
+
+
+@pytest.mark.parametrize('kind', ['engineering', 'evaluation'])
+def test_shared_lease_cannot_admit_measurements(campaign, monkeypatch, kind):
+    shared_device_inventory(monkeypatch)
+    with campaign.device(1, access='shared_training'):
+        with pytest.raises(ValueError, match='main training only'):
+            campaign.reserve('measurement', track='W6', kind=kind, updates=0, seconds=300, physical_gpu=1)
+    assert not campaign.ledger_path.exists()
+
+
+@pytest.mark.parametrize('mode,pressure,expected', [
+    ('shared_training', True, 'gpu_floor_plus_margin'),
+    ('exclusive', False, 'unexpected_gpu_competitor'),
+])
+def test_monitor_keeps_pressure_and_exclusive_measurement_stops(campaign, monkeypatch, tmp_path,
+                                                              mode, pressure, expected):
+    shared_device_inventory(monkeypatch)
+    campaign.device_access_mode = mode
+    reserve(campaign, 'monitored')
+    if pressure:
+        monkeypatch.setattr(resources, 'device_memory', lambda uuid: {
+            'gpu_free_bytes': 15, 'gpu_floor_bytes': 10, 'preventive_margin_bytes': 6})
+    output = tmp_path / 'monitored'; output.mkdir()
+    sample = resources.Monitor(campaign, 'monitored', output, 'GPU-one').sample()
+    assert expected in sample['stop_reasons']
+    assert (output / 'CLEAN_STOP_REQUEST.json').exists()
+    if mode == 'shared_training':
+        assert 'unexpected_gpu_competitor' not in sample['stop_reasons']
 
 
 def test_storage_scan_counts_regular_paths_and_tmp_components(tmp_path,monkeypatch):
