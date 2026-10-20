@@ -8,12 +8,14 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import datetime
+import errno
 import fcntl
 import json
 import math
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -30,6 +32,41 @@ def atomic(path, value):
         json.dump(value, stream, sort_keys=True, indent=2, allow_nan=False)
         stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
     os.replace(temporary, path)
+
+
+def _scan_storage_once(root):
+    """Count regular files without following links, counting every path once."""
+    retained = temporary = 0
+    pending = [(os.fspath(root), False)]
+    while pending:
+        directory, parent_is_temporary = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                is_temporary = parent_is_temporary or entry.name == 'tmp'
+                info = entry.stat(follow_symlinks=False)
+                mode = info.st_mode
+                if stat.S_ISLNK(mode):
+                    continue
+                if stat.S_ISDIR(mode):
+                    pending.append((entry.path, is_temporary))
+                elif stat.S_ISREG(mode):
+                    if is_temporary:
+                        temporary += info.st_size
+                    else:
+                        retained += info.st_size
+    return retained, temporary
+
+
+def _scan_storage(root, *, attempts=3, retry_delay_seconds=0.05):
+    """Return a complete inventory, restarting the whole walk on ENOENT only."""
+    for attempt in range(attempts):
+        try:
+            return _scan_storage_once(root)
+        except OSError as error:
+            if error.errno != errno.ENOENT or attempt + 1 == attempts:
+                raise
+            time.sleep(retry_delay_seconds)
+    raise AssertionError('Unreachable storage scan retry state.')
 
 
 def device_processes(uuid):
@@ -56,13 +93,7 @@ class Campaign:
         free = shutil.disk_usage('/data2').free
         if free < self.limits['minimum_free_data2_bytes'] + 128 * 1024**2:
             raise OSError('Round10 disk headroom exhausted.')
-        retained = temporary = 0
-        for path in self.root.rglob('*'):
-            if path.is_file() and not path.is_symlink():
-                if 'tmp' in path.relative_to(self.root).parts:
-                    temporary += path.stat().st_size
-                else:
-                    retained += path.stat().st_size
+        retained, temporary = _scan_storage(self.root)
         if retained > self.limits['retained_payload_bytes'] or temporary > self.limits['temporary_payload_bytes'] or retained + temporary > self.limits['peak_new_payload_bytes']:
             raise OSError('Round10 payload budget exhausted.')
         return {'retained_bytes': retained, 'temporary_bytes': temporary, 'free_bytes': free}

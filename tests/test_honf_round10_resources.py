@@ -1,8 +1,11 @@
 """CPU checks for shared campaign admission and protected GPU ownership."""
 from datetime import datetime, timezone
+import errno
 import importlib.util
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,3 +119,100 @@ def test_device_lock_is_exclusive(campaign,monkeypatch):
         with pytest.raises(BlockingIOError):
             with campaign.device(1):
                 pytest.fail('A second lease must not acquire the physical device.')
+
+
+def test_storage_scan_counts_regular_paths_and_tmp_components(tmp_path,monkeypatch):
+    (tmp_path/'visible').write_bytes(b'1234567')
+    (tmp_path/'.hidden').write_bytes(b'abc')
+    (tmp_path/'tmp').write_bytes(b'12345')
+    (tmp_path/'nested'/'tmp').mkdir(parents=True)
+    (tmp_path/'nested'/'tmp'/'payload').write_bytes(b'12345678901')
+    (tmp_path/'nested2'/'tmp'/'data').parent.mkdir(parents=True)
+    (tmp_path/'nested2'/'tmp'/'data').write_bytes(b'1234567890123')
+    os.link(tmp_path/'visible',tmp_path/'visible-hardlink')
+    (tmp_path/'outside').write_bytes(b'x'*101)
+    (tmp_path/'file-link').symlink_to(tmp_path/'outside')
+    (tmp_path/'directory-link').symlink_to(tmp_path/'nested',target_is_directory=True)
+
+    real_scandir=os.scandir; entry_paths=[]; stat_calls=[]
+    class WrappedEntry:
+        def __init__(self,entry):
+            self.entry=entry;self.name=entry.name;self.path=entry.path
+        def stat(self,*,follow_symlinks=True):
+            stat_calls.append((self.path,follow_symlinks))
+            return self.entry.stat(follow_symlinks=follow_symlinks)
+    class WrappedScan:
+        def __init__(self,path):self.context=real_scandir(path)
+        def __enter__(self):
+            entries=self.context.__enter__()
+            def wrapped_entries():
+                for entry in entries:
+                    entry_paths.append(entry.path)
+                    yield WrappedEntry(entry)
+            return wrapped_entries()
+        def __exit__(self,*args):return self.context.__exit__(*args)
+    monkeypatch.setattr(resources.os,'scandir',WrappedScan)
+
+    assert resources._scan_storage(tmp_path)==(118,29)
+    assert stat_calls==[(path,False) for path in entry_paths]
+
+
+def test_scan_storage_restarts_complete_walk_on_enoent(monkeypatch):
+    calls=[]; sleeps=[]
+    def scan(root):
+        calls.append(root)
+        if len(calls)<3:
+            raise FileNotFoundError(errno.ENOENT,'entry disappeared')
+        return 17,29
+    monkeypatch.setattr(resources,'_scan_storage_once',scan)
+    monkeypatch.setattr(resources.time,'sleep',sleeps.append)
+
+    assert resources._scan_storage('/scan/root')==(17,29)
+    assert calls==['/scan/root']*3
+    assert sleeps==[0.05,0.05]
+
+
+def test_scan_storage_propagates_retry_exhaustion_and_unexpected_errors(monkeypatch):
+    calls=[]
+    def vanished(root):
+        calls.append(root)
+        raise FileNotFoundError(errno.ENOENT,'entry disappeared')
+    monkeypatch.setattr(resources,'_scan_storage_once',vanished)
+    monkeypatch.setattr(resources.time,'sleep',lambda _:None)
+    with pytest.raises(FileNotFoundError):
+        resources._scan_storage('/scan/root')
+    assert len(calls)==3
+
+    calls.clear()
+    def denied(root):
+        calls.append(root)
+        raise PermissionError(errno.EACCES,'scan denied')
+    monkeypatch.setattr(resources,'_scan_storage_once',denied)
+    with pytest.raises(PermissionError):
+        resources._scan_storage('/scan/root')
+    assert len(calls)==1
+
+
+def test_campaign_storage_preserves_mount_headroom_and_payload_caps(tmp_path,monkeypatch):
+    root=tmp_path/'campaign';root.mkdir()
+    (root/'payload').write_bytes(b'1234')
+    campaign=resources.Campaign.__new__(resources.Campaign)
+    campaign.root=root
+    campaign.master={'mount':'/data2 /dev/mock ext4'}
+    campaign.limits={'minimum_free_data2_bytes':100,'retained_payload_bytes':4,
+                     'temporary_payload_bytes':0,'peak_new_payload_bytes':4}
+    monkeypatch.setattr(resources.subprocess,'check_output',lambda *args,**kwargs:'/data2 /dev/mock ext4\n')
+    monkeypatch.setattr(resources.shutil,'disk_usage',lambda path:SimpleNamespace(free=100+128*1024**2))
+
+    assert campaign.check_storage()=={'retained_bytes':4,'temporary_bytes':0,'free_bytes':100+128*1024**2}
+    monkeypatch.setattr(resources.subprocess,'check_output',lambda *args,**kwargs:'/data2 /dev/changed ext4\n')
+    with pytest.raises(RuntimeError,match='mount differs'):
+        campaign.check_storage()
+    monkeypatch.setattr(resources.subprocess,'check_output',lambda *args,**kwargs:'/data2 /dev/mock ext4\n')
+    monkeypatch.setattr(resources.shutil,'disk_usage',lambda path:SimpleNamespace(free=100+128*1024**2-1))
+    with pytest.raises(OSError,match='headroom exhausted'):
+        campaign.check_storage()
+    monkeypatch.setattr(resources.shutil,'disk_usage',lambda path:SimpleNamespace(free=100+128*1024**2))
+    campaign.limits['retained_payload_bytes']=3
+    with pytest.raises(OSError,match='payload budget'):
+        campaign.check_storage()
