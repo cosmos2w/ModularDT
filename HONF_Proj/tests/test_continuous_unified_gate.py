@@ -82,6 +82,65 @@ def test_triplet_storage_forecast_enforces_temporary_and_peak_caps():
         storage_projection_headroom(limits,{'retained_bytes':0,'temporary_bytes':0},-1,0,200)
 
 
+@pytest.mark.parametrize(('dataset','expected_updates'),[('thermal',24000),('wind',30000)])
+def test_complete_qualification_reaches_typed_triplet_resource_forecast(tmp_path,monkeypatch,dataset,expected_updates):
+    import shutil
+    import time
+    from types import SimpleNamespace
+    import honf_runtime.continuous_joint_protocol as protocol
+    import honf_runtime.continuous_unified_gate as gate
+
+    panel_path=tmp_path/'panel.json';panel_path.write_text(json.dumps({'dataset':dataset,'panel_sha256':'p'*64}))
+    dense_path=tmp_path/'dense.json';dense_path.write_text(json.dumps({'rows':[]}))
+    safety_path=tmp_path/'safety.json'
+    safety_path.write_text(json.dumps({'schema':'round10_unified_software_qualification_v1',
+        'source_target_isolation':True,'continuous_value_gradient':True,'native_law':True,
+        'fresh_state':True,'all_open_equations':True}))
+    endpoint=tmp_path/'epoch_5000_model.pt';endpoint.write_bytes(b'endpoint-fixture')
+    qualification={}
+    external={}
+    for arm in ('U10-D','U10-H','U10-S'):
+        path=tmp_path/f'{arm}.json';path.write_text('{}');qualification[arm]=str(path)
+        launch=tmp_path/f'{arm}_launch.json';launch.write_text('{}')
+        completion=tmp_path/f'{arm}_completion.json';completion.write_text('{}')
+        launch_binding=launch if arm=='U10-S' else bound(launch)
+        external[arm]={'launch_receipt':launch_binding,'completion_receipt':bound(completion)}
+    board_index=tmp_path/'boards.jsonl';board_index.write_text('')
+    ledger_path=tmp_path/'ledger.json';ledger_path.write_text(json.dumps({'operations':{}}))
+    resource_path=tmp_path/'master_reservation.json';resource_path.write_text('{}')
+    spec=dict(dataset=dataset,panel=bound(panel_path),track_b_endpoint_checkpoint=str(endpoint),
+        resource_reservation=str(resource_path),
+        dense_checkpoint_index=bound(dense_path),train_board_index=str(board_index),train_boards={},
+        software_qualification=bound(safety_path),qualification=qualification,
+        external_hash_bound_launch_completion_receipts_required=True,
+        external_qualification_receipts=external,
+        other_required_reservations=[{'kind':'main','seconds':22850,'updates':4570},
+            {'kind':'engineering','seconds':2160,'updates':144},
+            {'kind':'evaluation','seconds':28800,'updates':0}],
+        other_required_reservations_complete=True,forecast_overhead_factor=1.25,
+        validation_checkpoint_io_seconds=0,projected_retained_bytes=0,projected_temporary_bytes=0)
+    limits={'gpu_associated_seconds':345600,'gpu_associated_seconds_reserved_for_evaluation':28800,
+        'main_scientific_updates':144000,'discarded_engineering_updates':2048,
+        'retained_payload_bytes':1024,'temporary_payload_bytes':1024,'peak_new_payload_bytes':2048,
+        'minimum_free_data2_bytes':0,'wall_seconds':345600}
+    campaign=SimpleNamespace(limits=limits,ledger_path=ledger_path,start=time.time()-10,
+        check_storage=lambda:{'retained_bytes':0,'temporary_bytes':0,'free_bytes':10**12})
+    monkeypatch.setattr(protocol,'_source',lambda _path:{'epoch':5000,'experiment_identity':{
+        'family':protocol.CONTINUOUS_FAMILY,'recipe':{'arm':'C10-H','dataset':dataset,
+            'source_checkpoint_sha256':PARENT_SHA[dataset]}}})
+    monkeypatch.setattr(gate,'board_registry',lambda _spec:{})
+    monkeypatch.setattr(gate,'_validate_unified_qualification',
+        lambda _spec,_campaign,*,arm,**_kwargs:(1.,{'arm':arm}))
+    monkeypatch.setattr(shutil,'disk_usage',lambda _path:SimpleNamespace(free=10**12))
+    result=gate.evaluate_unified_gate(spec,campaign)
+    assert result['status']=='pending'
+    assert result['triplet_updates']==expected_updates
+    assert result['process_time_headroom']['forecast_other_main_updates']==4570
+    assert result['process_time_headroom']['forecast_other_engineering_updates']==144
+    assert result['update_budget_ok'] and result['engineering_update_budget_ok']
+    assert 'whole_triplet_resource_reservation' not in result['missing_conditions']
+
+
 def qualification_fixture(tmp_path,monkeypatch,*,physical_gpu=1):
     from types import SimpleNamespace
     import honf_runtime.continuous_joint_protocol as protocol
@@ -179,6 +238,19 @@ def test_strict_native_qualification_accepts_and_verifies_existing_bound_path_sh
     assert seconds==1.25
     spec['qualification']['U10-H']['sha256']='0'*64
     with pytest.raises(ValueError,match='bytes changed'):
+        _validate_unified_qualification(spec,campaign,arm='U10-H',dataset='thermal',case_count=150,updates=4)
+
+
+def test_strict_native_qualification_accepts_hash_bound_external_receipt_sidecars(tmp_path,monkeypatch):
+    spec,campaign=qualification_fixture(tmp_path,monkeypatch)
+    receipts=spec['external_qualification_receipts']['U10-H']
+    spec['external_qualification_receipts']['U10-H']={
+        name:bound(path) for name,path in receipts.items()}
+    seconds,binding=_validate_unified_qualification(spec,campaign,arm='U10-H',dataset='thermal',case_count=150,updates=4)
+    assert seconds==1.25
+    assert binding['launch_receipt']['sha256']==spec['external_qualification_receipts']['U10-H']['launch_receipt']['sha256']
+    spec['external_qualification_receipts']['U10-H']['launch_receipt']['sha256']='0'*64
+    with pytest.raises(ValueError,match='external receipt bytes changed'):
         _validate_unified_qualification(spec,campaign,arm='U10-H',dataset='thermal',case_count=150,updates=4)
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import math
+import os
 from pathlib import Path
 from .continuous_joint_protocol import PARENT_SHA,canonical_sha256,file_sha256
 
@@ -116,7 +117,26 @@ def read_bound(binding):
 
 
 def _bound_receipt(path):
-    return dict(path=str(Path(path).resolve(strict=True)),sha256=file_sha256(path))
+    if isinstance(path,dict):
+        if set(path)!={'path','sha256'} or not isinstance(path.get('path'),str) or not isinstance(path.get('sha256'),str):
+            raise ValueError('Unified external receipt binding must contain exactly path and sha256.')
+        resolved=Path(path['path']).resolve(strict=True)
+        actual=file_sha256(resolved)
+        if path['sha256']!=actual:
+            raise ValueError('Unified external receipt bytes changed.')
+        return dict(path=str(resolved),sha256=actual)
+    resolved=Path(path).resolve(strict=True)
+    return dict(path=str(resolved),sha256=file_sha256(resolved))
+
+
+def _external_receipt_path(value):
+    if isinstance(value,str):return value
+    if isinstance(value,os.PathLike):
+        path=os.fspath(value)
+        return path if isinstance(path,str) else None
+    if isinstance(value,dict) and set(value)=={'path','sha256'} and isinstance(value.get('path'),str):
+        return value['path']
+    return None
 
 
 def _validate_gpu0_device_authorization(binding,*,campaign,source_manifest,gpu_uuid):
@@ -453,7 +473,8 @@ def evaluate_unified_gate(spec,campaign):
         if spec.get('external_hash_bound_launch_completion_receipts_required') is True:
             receipts=spec.get('external_qualification_receipts',{}).get(arm,{})
             required=('launch_receipt','completion_receipt')
-            if any(not receipts.get(name) or not Path(receipts[name]).is_file() for name in required):
+            if any((receipt_path:=_external_receipt_path(receipts.get(name))) is None
+                   or not Path(receipt_path).is_file() for name in required):
                 missing.append(arm+'_hash_bound_external_qualification_receipts');continue
         case_count=150 if dataset=='thermal' else 72;updates=4 if dataset=='thermal' else 5
         times[arm],qualification_sources[arm]=_validate_unified_qualification(spec,campaign,arm=arm,
@@ -465,12 +486,12 @@ def evaluate_unified_gate(spec,campaign):
         ledger=read(campaign.ledger_path) if campaign.ledger_path.exists() else {'operations':{}}
         operations=list(ledger['operations'].values())
         other_reservations=spec['other_required_reservations']
+        new_updates=2000*(4 if dataset=='thermal' else 5)*3
         headroom=process_time_headroom(campaign.limits,operations,other_reservations)
         update_headroom=process_update_headroom(campaign.limits,operations,other_reservations,new_updates)
         other_seconds=headroom['forecast_other_total_seconds']
         remaining=min(headroom['total_remaining_seconds'],headroom['non_evaluation_remaining_seconds'])
         proposed=2000*sum(times.values())*spec['forecast_overhead_factor']+spec['validation_checkpoint_io_seconds']+360
-        new_updates=2000*(4 if dataset=='thermal' else 5)*3
         if spec['forecast_overhead_factor']<1 or spec['validation_checkpoint_io_seconds']<0:
             raise ValueError('Triplet forecast cannot reduce the measured native epoch cost.')
         storage=campaign.check_storage()
