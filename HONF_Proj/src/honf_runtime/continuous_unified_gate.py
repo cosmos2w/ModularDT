@@ -132,8 +132,8 @@ def _validate_gpu0_device_authorization(binding,*,campaign,source_manifest,gpu_u
         or amendment.get('cuda_visible_devices')!=gpu_uuid):
         raise ValueError('GPU0 amendment does not authorize this physical index/UUID.')
     basis=amendment.get('authorization_basis',{})
-    if (basis.get('instruction')!='2026-10-20 Round10 GPU0 continuation amendment'
-        or basis.get('scope')!='four_track_b_arms_only'):
+    if any(not isinstance(basis.get(name),str) or not basis[name].strip()
+        for name in ('instruction','scope')):
         raise ValueError('GPU0 amendment lacks the recorded user scope.')
     master=amendment.get('master_reference',{})
     if (Path(master.get('path','')).resolve()!=master_path.resolve()

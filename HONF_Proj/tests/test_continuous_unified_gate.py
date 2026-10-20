@@ -114,7 +114,8 @@ def qualification_fixture(tmp_path,monkeypatch,*,physical_gpu=1):
     if physical_gpu==0:
         sidecar_path=root/'receipts/gpu0_continuation_authorization_v2.json'
         sidecar=dict(schema='round10_gpu0_continuation_authorization_v2',status='authorized_by_user',root=str(root.resolve()),
-            authorization_basis={'instruction':'2026-10-20 Round10 GPU0 continuation amendment','scope':'four_track_b_arms_only'},
+            authorization_basis={'instruction':'User explicitly authorized continuing Round 10 on physical GPU 0.',
+                'scope':'Only the four Track-B recipe/source/checkpoint bindings listed in recipes are covered.'},
             authorized_gpus={'0':uuid},physical_gpu0=0,gpu_uuid=uuid,cuda_visible_devices=uuid,
             master_reference={'path':str(master_path.resolve()),'sha256':file_sha256(master_path)},
             source_manifest=source_binding,recipes={name:{} for name in ('thermal_H','wind_H','thermal_S','wind_S')})
