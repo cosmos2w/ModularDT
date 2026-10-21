@@ -283,7 +283,9 @@ def test_frozen_complete_context_plan_blocks_cross_component_values_at_every_sta
             def component(ids):return (ids==47)|(ids==131)|(ids==149)
             return allowed * (component(destinations)[...,None]==component(donors)[:,None,:])*.4
     core.router.incidence=Components()
-    include=[f'cycle{cycle}/{route}_attention' for cycle in range(2) for route in ('mm','em','ee','me')]
+    include=[f'cycle{cycle}/{name}' for cycle in range(2) for name in (
+        'mm_attention','em_attention','ee_attention','me_attention',
+        'module_after_mm','environment_after_em','environment_after_ee','module_after_me')]
     with torch.no_grad():
         original=core.prepare(scene,return_trace=True,trace_request={'include':include})
     plans={}
@@ -302,7 +304,7 @@ def test_frozen_complete_context_plan_blocks_cross_component_values_at_every_sta
     changed_features=scene.module_features.clone();changed_features[0,0]+=3.
     perturbed=replace(scene,module_features=changed_features)
     with torch.no_grad():
-        frozen=core.prepare(perturbed,return_trace=True)
+        frozen=core.prepare(perturbed,return_trace=True,trace_request={'include':include})
     assert torch.equal(original.raw_module_states[:,2],frozen.raw_module_states[:,2])
     assert torch.equal(original.raw_environment_states[:,2:],frozen.raw_environment_states[:,2:])
     for cycle in range(2):
@@ -310,6 +312,9 @@ def test_frozen_complete_context_plan_blocks_cross_component_values_at_every_sta
         for route in ('mm','em','ee','me'):
             assert torch.equal(original.applied_context_stages[cycle][route+'_applied_incidence'],
                                frozen.applied_context_stages[cycle][route+'_applied_incidence'])
+        for name in ('module_after_mm','environment_after_em','environment_after_ee','module_after_me'):
+            key=f'cycle{cycle}/{name}'
+            assert torch.equal(original.trace[key][:,2:],frozen.trace[key][:,2:]),key
     assert torch.equal(original.module_states[:,2],frozen.module_states[:,2])
     assert torch.equal(original.environment_states[:,2:],frozen.environment_states[:,2:])
 
