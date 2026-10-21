@@ -242,3 +242,31 @@ def test_present_pair_work_denominator_does_not_count_padding_as_learned_sparsit
     assert result['M']['equal_case_selected_fraction']==1.
     assert result['M']['executed_nonlinear_rows']==12
     assert result['E']['available'] is False
+
+
+def test_present_pair_denominator_uses_case_inventory_without_adding_decode_aliases():
+    rows=[]
+    for selected,present in ((2,2),(2,8)):
+        row={}
+        for kind in ('M','E'):
+            row.update({f'core_decode_primary_joint_{kind}_selected_rows':selected,
+                f'core_decode_primary_joint_{kind}_candidate_rows':present,
+                f'core_decode_primary_joint_{kind}_value_rows':selected,
+                f'core_decode_primary_joint_{kind}_available_present_rows':present,
+                f'joint_{kind}_available_present_rows':present})
+        rows.append(row)
+    result=typed_work_summary(rows)
+    for kind in ('M','E'):
+        assert result[kind]['case_count']==2
+        assert result[kind]['available_present_rows']==10
+        assert result[kind]['selected_rows']==result[kind]['executed_nonlinear_rows']==4
+        assert result[kind]['equal_case_selected_fraction']==pytest.approx((1.+.25)/2)
+
+
+def test_present_pair_denominator_keeps_legacy_prefixed_counter_without_case_inventory():
+    result=typed_work_summary([{'source_read_joint_M_selected_rows':3,
+        'source_read_joint_M_candidate_rows':8,'source_read_joint_M_value_rows':8,
+        'source_read_joint_M_available_present_rows':4}])
+    assert result['M']['available_present_rows']==4
+    assert result['M']['equal_case_selected_fraction']==.75
+    assert result['M']['executed_nonlinear_rows']==8

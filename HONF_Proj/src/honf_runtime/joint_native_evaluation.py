@@ -229,11 +229,20 @@ def native_batches(provider,dataset,panel,split,*,representatives_only=False):
 
 
 def typed_work_summary(work):
+    """Sum executed work, using the physical panel's single pair denominator.
+
+    Providers may also export per-decode available-pair counters. The unprefixed
+    counter is the independently counted query/present-record inventory for the
+    case, so adding those aliases would count availability more than once.
+    """
     result={}
     for kind in ('M','E'):
         entries=[]
         for row in work:
             def lookup(suffix):
+                canonical='joint_'+kind+'_'+suffix
+                if suffix=='available_present_rows' and canonical in row:
+                    return row[canonical]
                 selected=[value for name,value in row.items() if name.endswith('joint_'+kind+'_'+suffix)]
                 return sum(selected) if selected else None
             selected,candidates,executed,present=(lookup(name) for name in ('selected_rows','candidate_rows','value_rows','available_present_rows'))
