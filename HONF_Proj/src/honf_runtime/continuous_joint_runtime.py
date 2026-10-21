@@ -98,9 +98,52 @@ def load_continuous_evaluation_components(checkpoint,device='cpu',runtime_root=N
     unused,provider=build_continuous_native_provider(recipe,identity['provider_identity'],device=device);del unused
     provider.model=model;provider.adapter=adapter;provider._allow_continuous_joint=True
     # Provider identities include constructor and TRAIN-fitted native scales.
-    if canonical_sha256(provider.identity_payload())!=canonical_sha256(identity['provider_identity']):
-        raise ValueError('Continuous evaluation provider differs from saved native data/transforms.')
+    _, aliases = reconcile_evaluation_path_aliases(
+        dict(provider.identity_payload()), identity['provider_identity'])
+    provider.evaluation_path_aliases = tuple(aliases)
     return model,provider,payload
+
+
+def reconcile_evaluation_path_aliases(actual, expected):
+    """Accept relocated path labels only for the same exact physical inputs.
+
+    This changes evaluation identity comparison, never a saved checkpoint or
+    transform. Callers retain the aliases in provenance; all other identity
+    fields must match. Equal contents in a different file are insufficient.
+    """
+    actual = copy.deepcopy(actual)
+    aliases = []
+    old_rows = expected.get('response_family_sources', [])
+    new_rows = actual.get('response_family_sources', [])
+    if len(old_rows) != len(new_rows):
+        raise ValueError('Continuous evaluation response-family membership differs.')
+    for row, old in zip(new_rows, old_rows):
+        if {key: value for key, value in row.items() if key != 'path'} != {
+                key: value for key, value in old.items() if key != 'path'}:
+            raise ValueError('Continuous evaluation response-family identity differs.')
+        if row.get('path') != old.get('path'):
+            current, inherited = Path(row['path']), Path(old['path'])
+            if not current.is_file() or not current.samefile(inherited):
+                raise ValueError('Relocated response reference is not the same physical file.')
+            if file_sha256(current) != old.get('sha256'):
+                raise ValueError('Relocated response-reference bytes differ from the saved hash.')
+            aliases.append(dict(kind='response_family_source', family_id=old['family_id'],
+                actual_path=str(current), inherited_path=str(inherited), sha256=old['sha256']))
+            row['path'] = old['path']
+    old_cache = expected.get('native_role_catalogue_cache', {})
+    new_cache = actual.get('native_role_catalogue_cache', {})
+    old_directory = old_cache.get('persistent_directory')
+    new_directory = new_cache.get('persistent_directory')
+    if old_directory != new_directory and old_directory and new_directory:
+        current, inherited = Path(new_directory), Path(old_directory)
+        if not current.is_dir() or not current.samefile(inherited):
+            raise ValueError('Relocated native catalogue is not the same physical directory.')
+        aliases.append(dict(kind='native_role_catalogue_cache', actual_path=str(current),
+                            inherited_path=str(inherited), same_directory_inode=True))
+        new_cache['persistent_directory'] = old_directory
+    if canonical_sha256(actual) != canonical_sha256(expected):
+        raise ValueError('Continuous evaluation provider differs from saved native data/transforms.')
+    return actual, aliases
 
 
 def build_continuous_native_provider(recipe,provider_identity,*,device):

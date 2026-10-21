@@ -5,6 +5,32 @@ from ..joint_native.readers import raw_scores, _dense_reduce, _flat_messages, Ty
 from .primitives import guarded_weights
 
 
+def _empty_selected_values(reader, qstates, qcoords, coordinates, lengths,
+                           scale, values, alpha, gate):
+    """Preserve dense zero-gradient edges without evaluating omitted values.
+
+    AdamW treats a missing gradient differently from an explicit zero. Empty
+    views retain the latter's autograd connections without reading padding or
+    constructing Fourier features, messages, or full-width activations.
+    """
+    inputs = (qstates, qcoords, coordinates, lengths, scale, values, alpha)
+    zero = qstates.new_zeros(())
+    for value in inputs:
+        zero = zero + value.unsqueeze(0)[:0].sum()
+    for name in ('query_value', 'relative_value', 'source_scale_projection', 'message_output'):
+        layer = getattr(reader, name)
+        if layer is not None:
+            for parameter in layer.parameters():
+                zero = zero + parameter.unsqueeze(0)[:0].sum()
+    batch, queries = qstates.shape[:2]
+    context = zero.expand(batch, queries, reader.heads, reader.head_width)
+    scalar_zero = zero + gate.unsqueeze(0)[:0].sum()
+    if reader.thermal_output is not None:
+        for parameter in reader.thermal_output.parameters():
+            scalar_zero = scalar_zero + parameter.unsqueeze(0)[:0].sum()
+    return context, scalar_zero.expand(0), zero.expand(0, reader.width)
+
+
 def _selected_source_order_reduce(reader,qstates,qcoords,coordinates,lengths,scale,values,indices,alpha,gate,
                                   return_messages=False):
     """Compute positive-g NN rows, then use the parent's source-axis sum order.
@@ -14,8 +40,8 @@ def _selected_source_order_reduce(reader,qstates,qcoords,coordinates,lengths,sca
     """
     batch,queries,count=alpha.shape[:3]
     if not indices.shape[0]:
-        return (qstates.new_zeros(batch,queries,reader.heads,reader.head_width),
-                qstates.new_empty((0,)),qstates.new_empty((0,reader.width)))
+        return _empty_selected_values(reader, qstates, qcoords, coordinates, lengths,
+                                      scale, values, alpha, gate)
     messages,scalar=_flat_messages(reader,qstates,qcoords,coordinates,lengths,scale,values,indices)
     b,q,n=indices.unbind(-1)
     weighted=messages.reshape(-1,reader.heads,reader.head_width)*alpha[b,q,n,:,None]

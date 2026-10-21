@@ -186,6 +186,7 @@ def run_evaluation(args,storage,check):
             'checkpoint_sha256':file_sha256(args.checkpoint),'completed_epoch':int(payload['epoch']),
             'arm':payload['experiment_identity'].get('treatment'),
             'provider_binding_sha256':canonical_sha256(payload['experiment_identity']['provider_identity']),
+            'provider_identity_path_aliases':getattr(provider,'evaluation_path_aliases',()),
             'panel_path':str(args.panel.resolve()) if hasattr(args,'panel') else None,'storage':storage,
             'measured_execution_after_native_builder':execution,
             'crossings_source':({'path':str(args.crossings.resolve()),'sha256':file_sha256(args.crossings)}
