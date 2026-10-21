@@ -1,6 +1,6 @@
 # HONF Round10 continuation progress
 
-**Initial snapshot:** 20 October 2026, 19:57 UTC. **Latest verified update:** 23:58 UTC. **Status:** campaign in progress; this is a measured continuation record, not the final Round10 closeout. **Contract:** [scientific plan](../../UpgradePlan/HONF_Round10_Continuous_Unified_Organization_Work_Plan.md) and [device/state guidance](../../UpgradePlan/HONF_Round10_GPU0_Continuation_Guidance.md).
+**Initial snapshot:** 20 October 2026, 19:57 UTC. **Latest independently verified execution recovery:** 21 October 2026, 02:13:43 UTC; the dated recovery and first-price records appear below. Subsequent monitoring must establish live state before another action. **Status:** campaign in progress; this is a measured continuation record, not the final Round10 closeout. **Contract:** [scientific plan](../../UpgradePlan/HONF_Round10_Continuous_Unified_Organization_Work_Plan.md) and [device/state guidance](../../UpgradePlan/HONF_Round10_GPU0_Continuation_Guidance.md).
 
 Round10 has completed all eight old-model e5000 horizons and implemented the continuous and unified functions. This continuation repaired the interrupted Thermal H handoff and completed that same child's literal e5000 horizon, verified real GPU0 resume boundaries, completed all six unified engineering qualifications, and added two physical endpoint boards on GPU2. Thermal S then continued its full remaining horizon on primary GPU0 while fresh Wind S trained in parallel on GPU2. The user approved a 96 GPU-hour total after measured rates exceeded the earlier 72-hour forecast. Predictor quality, executed organization, complete cost and physical decision use remain separate measurements.
 
@@ -32,6 +32,18 @@ The newly accepted Thermal D9-ME e5000 boards cover all selected TRAIN150 and ex
 | Flux proxy | 0.817179 | 0.871368 | +6.63% | 3.154855 | 3.153947 | −0.03% |
 
 The physical TRAIN board therefore finds a substantial fluid-temperature gain alongside worse surface/material temperature and pressure means. DEV improvements do not remove those selected-TRAIN misses. Tail errors, populated module-count strata, response references and the trained H/S boards must be reviewed before a representation recommendation. Exact accepted [board bindings and result paths](../../diagnostics/generated/continuous_joint_round10_20261018T153522Z/receipts/round10_native_board_index.jsonl) retain receiver policies, masks, per-case errors, source closure and checkpoint hashes.
+
+The first accepted GPU0 C10-H board supplies a separate literal e4900 selected-TRAIN150 comparison with same-age D9-M. The [saved comparison](../../diagnostics/generated/endpoint_parity_policy_v1/thermal_e4900_saved_native_train_comparison_v1.json) verifies identical case/query receipts, physical panel fingerprint and TRAIN role scales, without further inference. The table uses the saved equal-case mean RMSEs in each field's original dataset units; module-peak RMSE compares each present module's predicted and target maxima over valid material receivers before the equal-case reduction. This is an exposed TRAIN measurement at e4900, not the pending e5000 result.
+
+| Native quantity | D9-M e4900 | C10-H e4900 | Change |
+| --- | ---: | ---: | ---: |
+| Fluid temperature RMSE | 0.402203 | 0.419213 | +4.23% |
+| Surface temperature RMSE | 0.243051 | 0.354545 | +45.87% |
+| Material temperature RMSE | 0.259669 | 0.381749 | +47.01% |
+| Flux-proxy RMSE | 0.886029 | 0.900506 | +1.63% |
+| Module-peak temperature RMSE | 0.218610 | 0.504976 | +130.99% |
+
+At this age C10-H misses all five displayed priority means, with module-peak error at 2.310 times D9-M. The frozen gate's actual pair validator accepts the matched scope, but its full-series review remains pending: a catastrophic decision requires the same priority mean above twice dense at adjacent saved 100-epoch endpoints, and 19 C10-H age pairs are still missing. One age cannot establish persistence or pass that gate. The same board records equal-case positive M/E access fractions of 0.42884/0.19062; these executed read counts do not establish complete-cost savings or physical causality. Different devices and operational paths prevent treating these boards' elapsed times as a matched runtime comparison.
 
 ![Literal e5000 native fluid u and temperature predictions and absolute errors for fixed Thermal TRAIN case 0006.](../../diagnostics/generated/thermal_D9M_vs_D9ME_e5000_train_case0006_native_comparison_v1/page1_fluid_u_temperature_v4_preview.png)
 
