@@ -116,6 +116,12 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
         weights = coefficients[b, r, d]
         contribution = messages * weights[..., None]
         reduced = reduced.index_add(0, b * receivers + r, contribution)
+    else:
+        # A dense zero-coefficient reduction still visits projected V in its
+        # autograd graph. Preserve its zero gradient (and AdamW state/decay)
+        # without materializing donor-edge values. Empty views also avoid
+        # reading poisoned or nonfinite values on an unused value path.
+        reduced = reduced + value.unsqueeze(0)[:0].sum()
     reduced = reduced.reshape(batch, receivers, attention.width)
     # A projection bias belongs to the donor path. Split it equally across
     # heads, so its reduced coefficient is mean per-head message mass.
