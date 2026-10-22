@@ -17,8 +17,8 @@
     ],
     "options": {
       "backend": "dense_weighted",
-      "query_tile_size": 512,
-      "checkpoint": "tile",
+      "query_tile_size": 1024,
+      "checkpoint": "values",
       "context_backend": "segment"
     }
   },
@@ -41,7 +41,7 @@
     "local_horizon": 1000,
     "first_segment_epochs": 200,
     "effective_batch_size": 48,
-    "microbatch_cases": 8,
+    "microbatch_cases": 24,
     "primary_queries": 1024,
     "seed": 0,
     "monitor_every": 50,

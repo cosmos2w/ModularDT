@@ -37,7 +37,18 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--run", required=True)
     resume.add_argument("--device", required=True)
     resume.add_argument("--devices", nargs="+")
-    resume.add_argument("--additional-epochs", type=int, required=True)
+    resume_stop = resume.add_mutually_exclusive_group(required=True)
+    resume_stop.add_argument("--additional-epochs", type=int)
+    resume_stop.add_argument("--stop-after-epoch", type=int,
+                             help="absolute local epoch to reach, including the checkpoint epoch")
+    resume.add_argument("--microbatch-cases", type=int,
+                        help="execution-only runtime packing; does not change run identity")
+    resume.add_argument("--query-tile-size", type=int,
+                        help="execution-only query tile override")
+    resume.add_argument("--checkpoint", choices=("off", "values", "tile"),
+                        help="execution-only activation-checkpoint mode")
+    resume.add_argument("--backend", choices=("segment", "dense_weighted", "source_order", "packed", "dense"),
+                        help="execution-only native execution backend")
 
     evaluate = commands.add_parser("evaluate", help="evaluate latest, best, or an explicit checkpoint")
     evaluate.add_argument("--run", required=True)
@@ -69,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             devices=args.devices,
             additional_epochs=args.additional_epochs,
+            stop_after_epoch=args.stop_after_epoch,
+            microbatch_cases=args.microbatch_cases,
+            query_tile_size=args.query_tile_size,
+            checkpoint=args.checkpoint,
+            backend=args.backend,
         )
     elif args.command == "evaluate":
         result = research.evaluate(args.run, device=args.device, checkpoint=args.checkpoint)

@@ -1,0 +1,64 @@
+{
+  "schema": "honf_thermal_research_run_v1",
+  "name": "thermal_u_d_full5000_v1",
+  "dataset": {
+    "name": "thermal",
+    "data_path": "/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "manifest_path": "/data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json",
+    "base_recipe_path": "../../src/config_core/forward/content_hypergraph/thermal_a2-d_formal_full_train_v1.json"
+  },
+  "initialization": {
+    "source_kind": "classic_identity_metadata_only",
+    "source_checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_a2d_full5000/checkpoints/epoch_5000_model.pt",
+    "source_identity_path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_a2d_full5000/configs/experiment_identity.json",
+    "source_alias": "thermal_a2d_full5000/epoch_5000_model.pt (identity metadata only; weights are not deserialized)",
+    "source_arm": "classic_a2d_reference",
+    "source_parent_age": 5000,
+    "normalization_mode": "classic_train600_stats",
+    "fresh_routing_mode": "dense",
+    "fresh_controller_lambda0": {
+      "M": 1.007182002067566,
+      "E": 1.59217369556427
+    },
+    "fresh_controller_lambda0_source": "Fixed TRAIN calibration scalar hyperparameters from the Round11 U-H development controller declaration; no trained weights, optimizer moments, mature dual values, counters, or windows are loaded. Dense U-D disables controller enforcement and has no context dual.",
+    "fresh_model_schedule": {
+      "coordinate_start_epoch": 3000,
+      "coordinate_span_epochs": 5000,
+      "ramp_epochs": 5000
+    }
+  },
+  "optimizer": {
+    "kind": "fresh_adamw_from_classic_formal_contract",
+    "schedule": "constant_classic_formal_lr"
+  },
+  "execution": {
+    "preferred_devices": ["cuda:0", "cuda:1"],
+    "options": {
+      "backend": "dense_weighted",
+      "query_tile_size": 1024,
+      "checkpoint": "values",
+      "context_backend": "segment"
+    }
+  },
+  "storage": {
+    "output_root": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_u_d_full5000_v1",
+    "max_output_bytes": 10737418240,
+    "max_peak_temporary_bytes": 2147483648,
+    "minimum_free_headroom_bytes": 214748364800
+  },
+  "training": {
+    "membership": "classic_train600_exposed_val89",
+    "local_horizon": 5000,
+    "first_segment_epochs": 5000,
+    "effective_batch_size": 48,
+    "microbatch_cases": 24,
+    "primary_queries": 1024,
+    "seed": 0,
+    "monitor_every": 10,
+    "checkpoint_every": 10,
+    "checkpoint_epochs": [10, 50, 100, 250, 500, 1000, 2500, 5000],
+    "latest_every": 10,
+    "curve_every": 10,
+    "progress_enabled": true
+  }
+}

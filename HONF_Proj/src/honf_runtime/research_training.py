@@ -43,7 +43,9 @@ _EVAL_DIR = "evaluations/research"
 
 
 def _parent_age(config: Mapping[str, Any]) -> int:
-    return 0 if config["initialization"]["normalization_mode"] == "fresh_full_train600_stats" else int(
+    return 0 if config["initialization"]["normalization_mode"] in (
+        "fresh_full_train600_stats", "classic_train600_stats",
+    ) else int(
         config["initialization"]["source_parent_age"],
     )
 
@@ -64,6 +66,58 @@ def _fresh_model_schedule_epoch(config: Mapping[str, Any], local_epoch: int) -> 
 def _canonical_sha256(value: Any) -> str:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+_EXECUTION_OPTION_DEFAULTS = {
+    "backend": "dense_weighted",
+    "query_tile_size": 512,
+    "checkpoint": "tile",
+    "context_backend": "segment",
+}
+
+
+def _validated_execution_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(dict(options))
+    if set(result) != set(_EXECUTION_OPTION_DEFAULTS):
+        raise ValueError("Execution options must declare backend, query tile, checkpoint, and context backend.")
+    if result["backend"] not in ("segment", "dense_weighted", "source_order", "packed", "dense"):
+        raise ValueError("Unsupported runtime execution backend.")
+    if type(result["query_tile_size"]) is not int or result["query_tile_size"] < 1:
+        raise ValueError("Runtime query tile size must be a positive integer.")
+    if result["checkpoint"] not in ("off", "values", "tile"):
+        raise ValueError("Runtime checkpoint mode must be off, values, or tile.")
+    if result["context_backend"] not in ("segment", "dense_weighted"):
+        raise ValueError("Unsupported runtime context backend.")
+    return result
+
+
+def _restore_checkpoint_identity_metadata(provider, payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep execution settings out of the saved model/provider identity fields."""
+    for field, payload_key in (
+        ("_research_identity_adapter_state", "adapter_state"),
+        ("_research_identity_model_config", "model_config"),
+    ):
+        saved = getattr(provider, field, None)
+        if saved is not None:
+            payload[payload_key] = copy.deepcopy(saved)
+    return payload
+
+
+def _resolve_resume_stop(*, current_epoch: int, local_horizon: int,
+                         additional_epochs: int | None, stop_after_epoch: int | None) -> int:
+    if (additional_epochs is None) == (stop_after_epoch is None):
+        raise ValueError("Specify exactly one of additional_epochs or stop_after_epoch.")
+    if additional_epochs is not None:
+        if type(additional_epochs) is not int or additional_epochs < 1:
+            raise ValueError("--additional-epochs must be a positive integer.")
+        stop_after = int(current_epoch) + additional_epochs
+    else:
+        if type(stop_after_epoch) is not int or stop_after_epoch <= current_epoch:
+            raise ValueError("--stop-after-epoch must be greater than the current checkpoint epoch.")
+        stop_after = stop_after_epoch
+    if stop_after > local_horizon:
+        raise ValueError(f"Resume would exceed local horizon {local_horizon}.")
+    return stop_after
 
 
 def research_membership_fingerprint(*, dataset_identity: Mapping[str, Any], training_case_ids: Sequence[str],
@@ -120,8 +174,10 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
     training = config["training"]
     optimizer = config["optimizer"]
     execution = config["execution"]
-    if training.get("membership") not in ("fixed25_train150_dev22", "original_train600_fixed25_dev22"):
-        raise ValueError("Thermal membership must be fixed25 TRAIN150/DEV22 or original TRAIN600/fixed25 DEV22.")
+    if training.get("membership") not in (
+        "fixed25_train150_dev22", "original_train600_fixed25_dev22", "classic_train600_exposed_val89",
+    ):
+        raise ValueError("Thermal membership must be fixed25 TRAIN150/DEV22, original TRAIN600/DEV22, or classic TRAIN600/exposed VAL89.")
     for field in ("local_horizon", "first_segment_epochs", "effective_batch_size", "microbatch_cases",
                   "primary_queries", "monitor_every", "latest_every", "curve_every"):
         if type(training.get(field)) is not int or training[field] < 1:
@@ -133,20 +189,27 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
     if training["first_segment_epochs"] > training["local_horizon"]:
         raise ValueError("First segment cannot exceed the local horizon.")
     normalization_mode = config["initialization"].get("normalization_mode")
-    if (optimizer.get("kind") != "fresh_adamw_from_source_groups"
-            or optimizer.get("schedule") != "constant_source_terminal_lr"):
-        raise ValueError("Research starts reset optimizer moments and use each source group's terminal learning rate.")
-    if normalization_mode == "fresh_full_train600_stats":
+    allowed_optimizer_contracts = {
+        ("fresh_adamw_from_source_groups", "constant_source_terminal_lr"),
+        ("fresh_adamw_from_classic_formal_contract", "constant_classic_formal_lr"),
+    }
+    if (optimizer.get("kind"), optimizer.get("schedule")) not in allowed_optimizer_contracts:
+        raise ValueError("Research starts require a supported fresh AdamW optimizer contract.")
+    if normalization_mode in ("fresh_full_train600_stats", "classic_train600_stats"):
         schedule = config["initialization"].get("fresh_model_schedule")
         if not isinstance(schedule, Mapping) or any(
                 type(schedule.get(key)) is not int or schedule[key] < 1 for key in
                 ("coordinate_start_epoch", "coordinate_span_epochs", "ramp_epochs")):
             raise ValueError("Fresh normalization needs an explicit positive native model-clock ramp.")
         strengths = config["initialization"].get("fresh_controller_lambda0")
-        if (not isinstance(strengths, Mapping) or set(strengths) != {"M", "E", "context"}
+        arm = config["initialization"].get("fresh_routing_mode")
+        expected_strengths = ({"M", "E"} if arm == "dense" else {"M", "E", "context"})
+        if arm is None:
+            expected_strengths = {"M", "E", "context"}
+        if (not isinstance(strengths, Mapping) or set(strengths) != expected_strengths
                 or any(not isinstance(value, (int, float)) or not math.isfinite(float(value))
                        or float(value) <= 0.0 for value in strengths.values())):
-            raise ValueError("Fresh normalization needs positive calibrated M/E/context lambda0 strengths.")
+            raise ValueError("Fresh normalization needs positive calibrated strengths for its active M/E/context duals.")
         if not config["initialization"].get("fresh_controller_lambda0_source"):
             raise ValueError("Fresh controller strengths must record their calibration source.")
     options = execution.get("options", {})
@@ -165,9 +228,24 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
         if type(storage.get(key)) is not int or storage[key] < 0:
             raise ValueError(f"storage.{key} must be a nonnegative integer byte count.")
     if config["initialization"].get("normalization_mode") not in (
-        "inherit_source_train150", "fresh_full_train600_stats",
+        "inherit_source_train150", "fresh_full_train600_stats", "classic_train600_stats",
     ):
-        raise ValueError("Select source TRAIN150 normalization or explicit fresh full-TRAIN600 normalization.")
+        raise ValueError("Select source TRAIN150 normalization, fresh full-TRAIN600 stats, or saved classic TRAIN600 stats.")
+    if normalization_mode == "classic_train600_stats":
+        init = config["initialization"]
+        if (training.get("membership") != "classic_train600_exposed_val89"
+                or init.get("source_kind") != "classic_identity_metadata_only"
+                or init.get("fresh_routing_mode") not in ("dense", "hypergraph", "direct")
+                or not init.get("source_identity_path")):
+            raise ValueError("Classic fresh profiles require the saved classic identity, exact TRAIN600/VAL89, and a declared routing mode.")
+        if config["optimizer"].get("kind") != "fresh_adamw_from_classic_formal_contract":
+            raise ValueError("Classic fresh profiles must use the saved classic formal AdamW contract.")
+        milestone_epochs = training.get("checkpoint_epochs")
+        if (not isinstance(milestone_epochs, list) or not milestone_epochs
+                or any(type(epoch) is not int or epoch < 1 or epoch > training["local_horizon"]
+                       for epoch in milestone_epochs)
+                or milestone_epochs != sorted(set(milestone_epochs))):
+            raise ValueError("Classic profiles require sorted unique in-horizon checkpoint_epochs.")
 
 
 def verify_storage(config: Mapping[str, Any], *, output: str | Path | None = None,
@@ -238,7 +316,10 @@ def _tree_bytes(root: Path) -> int:
 def _estimate_run_bytes(config: Mapping[str, Any], *, epochs: int, source_size: int, diagnostic: bool) -> int:
     training = config["training"]
     interval = int(training["checkpoint_every"])
-    milestones = max(1, math.ceil(epochs / interval))
+    configured_epochs = training.get("checkpoint_epochs")
+    milestones = (sum(1 for epoch in configured_epochs if int(epoch) <= epochs)
+                  if isinstance(configured_epochs, list) else math.ceil(epochs / interval))
+    milestones = max(1, milestones)
     # The engine retains each declared milestone, best and latest aliases.
     model_payloads = (milestones + 2) * int(source_size * 1.4)
     plots_and_history = 256 * 1024**2 if not diagnostic else 128 * 1024**2
@@ -350,6 +431,101 @@ def _source_components(config: Mapping[str, Any], device: torch.device):
     if expected_sha and actual_sha != expected_sha:
         raise ValueError("Source initialization checkpoint bytes differ from the optional preset SHA256.")
     from .compat import load_trusted_checkpoint
+    if init.get("source_kind") == "classic_identity_metadata_only":
+        # The classic weight file is bound as provenance, but it is never
+        # deserialized. Architecture, fitted TRAIN600 normalization, exact
+        # memberships and the AdamW schedule come from its small saved identity.
+        identity_path = Path(init["source_identity_path"]).expanduser().resolve(strict=True)
+        identity = read_json(identity_path)
+        recipe = identity.get("recipe", {})
+        provider_identity = identity.get("provider_identity", {})
+        source_epoch = int(recipe.get("total_epochs", -1))
+        if (identity.get("workflow") != "content_hypergraph_joint_v2"
+                or recipe.get("protocol") != "formal_d_full_train_v1"
+                or recipe.get("architecture") != "A2-D"
+                or int(recipe.get("seed", -1)) != 0
+                or source_epoch != int(init.get("source_parent_age", -2))
+                or len(provider_identity.get("training_case_ids", ())) != 600
+                or len(provider_identity.get("validation_case_ids", ())) != 89
+                or provider_identity.get("validation_scope") != "canonical89_exposed_original_test_excluding_0273"):
+            raise ValueError("Classic identity does not declare the authorized A2-D TRAIN600/exposed VAL89 contract.")
+        adapter_state = provider_identity.get("adapter_state", {})
+        adapter_model_config = provider_identity.get("model_config", {})
+        base_model_config = adapter_state.get("core")
+        if (not isinstance(base_model_config, Mapping)
+                or base_model_config.get("schema") != "content_hypergraph_core_v2"
+                or base_model_config.get("architecture") != "A2-D"
+                or adapter_model_config.get("core") != base_model_config):
+            raise ValueError("Classic identity lacks the saved actual A2-D base architecture config.")
+        if provider_identity.get("normalization_stats_sha256") != "7c8f7691455b01c42a7caa626257393c5e40d4d2482ab85847bf1f278e9e754c":
+            raise ValueError("Classic TRAIN600 normalizer statistics differ from the authorized saved identity.")
+        source_payload = {
+            "epoch": source_epoch,
+            "experiment_identity": {
+                "recipe": recipe,
+                "provider_identity": provider_identity,
+                "optimizer_schedule_contract": identity.get("optimizer_schedule_contract"),
+            },
+            "classic_identity_path": str(identity_path),
+            "classic_sampling_dataset_id": identity.get("sampling_dataset_id"),
+            "classic_checkpoint_sha256": actual_sha,
+        }
+        source_contract = identity.get("optimizer_schedule_contract")
+        if not isinstance(source_contract, Sequence) or len(source_contract) != 1:
+            raise ValueError("Classic identity lacks the one-group formal AdamW schedule contract.")
+        classic_group = source_contract[0]
+        if (classic_group.get("name") != "formal_joint"
+                or abs(float(classic_group.get("schedule", {}).get("final_lr", -1.0)) - 3e-4) > 1e-12
+                or abs(float(classic_group.get("weight_decay", -1.0)) - 1e-5) > 1e-12):
+            raise ValueError("Classic formal optimizer contract differs from the declared 3e-4/1e-5 AdamW setup.")
+        from honf_forward_core.continuous_joint.unified import UnifiedJointCore
+        from channelthermal.content_hypergraph import ThermalContentHypergraphAdapterV2
+
+        fresh_base_config = copy.deepcopy(dict(base_model_config))
+        fresh_base_config["init_seed"] = int(config["training"].get("seed", 0))
+        routing_mode = str(init["fresh_routing_mode"])
+        execution_options = config["execution"]["options"]
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(int(config["training"].get("seed", 0)))
+            core = UnifiedJointCore(
+                fresh_base_config,
+                input_dataset="thermal",
+                routing_mode=routing_mode,
+                native_backend=execution_options["backend"],
+                checkpoint_pipeline=execution_options["checkpoint"] != "off",
+                query_tile_size=int(execution_options["query_tile_size"]),
+                entmax_temperature=1.0,
+            )
+        core.set_execution_options(**execution_options)
+        strengths = init["fresh_controller_lambda0"]
+        duals = getattr(getattr(core, "joint_budget", None), "duals", {})
+        if set(duals) != set(strengths):
+            raise ValueError(
+                f"Fresh {routing_mode} core exposes duals {sorted(duals)}, "
+                f"but config declares {sorted(strengths)}."
+            )
+        for name, value in strengths.items():
+            dual = duals[name]
+            setter = getattr(dual, "set_calibrated_lambda0", None)
+            if not callable(setter):
+                raise TypeError(f"Fresh {name} controller lacks set_calibrated_lambda0().")
+            setter(float(value))
+        stats = adapter_state.get("normalization_stats")
+        if not isinstance(stats, Mapping):
+            raise ValueError("Classic identity lacks saved TRAIN600 normalization statistics.")
+        adapter = ThermalContentHypergraphAdapterV2(
+            stats,
+            core=core,
+            nx=int(adapter_state["native_grid_nx_ny"][0]),
+            ny=int(adapter_state["native_grid_nx_ny"][1]),
+            environment_nx=int(adapter_state["environment_grid_nx_ny"][0]),
+            environment_ny=int(adapter_state["environment_grid_nx_ny"][1]),
+        ).to(device)
+        if adapter.normalizer_key != adapter_state.get("normalizer_key"):
+            raise ValueError("Fresh model did not bind the exact saved classic TRAIN600 normalizer.")
+        adapter.train(True)
+        return adapter, source_payload, source_path, actual_sha
+
     source_payload = load_trusted_checkpoint(source_path, map_location="cpu")
     identity = source_payload.get("experiment_identity", {})
     recipe = identity.get("recipe", {})
@@ -377,10 +553,16 @@ def _source_components(config: Mapping[str, Any], device: torch.device):
 
 def _read_run_checkpoint(run_dir: Path, selector: str = "latest") -> tuple[dict[str, Any], Path]:
     from .compat import load_trusted_checkpoint
-    path = resolve_checkpoint(run_dir, selector)
+    path = resolve_checkpoint(run_dir, selector).resolve()
+    if not path.is_relative_to(run_dir.resolve()):
+        raise ValueError("Selected checkpoint is outside the declared research run.")
     if not path.is_file():
         raise FileNotFoundError(f"Run has no {selector} checkpoint: {path}")
-    return load_trusted_checkpoint(path, map_location="cpu"), path
+    payload = load_trusted_checkpoint(path, map_location="cpu")
+    saved_identity = read_json(RunLayout(run_dir).read_path("experiment_identity.json"))
+    if _canonical_sha256(payload.get("experiment_identity")) != _canonical_sha256(saved_identity):
+        raise ValueError("Selected checkpoint identity differs from the declared research run.")
+    return payload, path
 
 
 def _model_from_run_payload(payload: Mapping[str, Any], device: torch.device):
@@ -404,7 +586,8 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
 
     def __init__(self, base_provider, *, model, config, train_ids, validation_ids,
                  training_cases, validation_cases, source_payload, optimizer_contract,
-                 diagnostic=False, identity_microbatch=None, local_horizon=None):
+                 diagnostic=False, identity_microbatch=None, local_horizon=None,
+                 classic_provider_identity=None):
         self.__dict__ = base_provider.__dict__
         self.model = self.adapter = model
         self.device = next(model.parameters()).device
@@ -415,8 +598,12 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
         self._train_index_by_id = {case_id: index for index, case_id in enumerate(self.training_case_ids)}
         self._validation_index_by_id = {case_id: index for index, case_id in enumerate(self.validation_case_ids)}
         self._validation_batches_cache = None
-        # Inherited v2 methods preserve the base development objective and DEV22 semantics.
-        self.protocol = "development"
+        # Objective and batch semantics are inherited from the maintained v2
+        # provider; the classic full-data profile uses its canonical formal
+        # TRAIN600/VAL89 membership and sampling namespace.
+        self.protocol = "formal_d_full_train_v1" if classic_provider_identity is not None else "development"
+        if classic_provider_identity is not None:
+            self.validation_scope = "canonical89_exposed_original_test_excluding_0273"
         self.total_epochs = int(local_horizon or config["training"]["local_horizon"])
         self._round6_sampling_epoch_limit = _parent_age(config) + self.total_epochs
         self.microbatch_size = int(config["training"]["microbatch_cases"])
@@ -431,6 +618,8 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
         self._research_case_limit = len(train_ids) if diagnostic else None
         self._research_membership = str(config["training"]["membership"])
         self._research_normalization_mode = str(config["initialization"]["normalization_mode"])
+        self._classic_provider_identity = (None if classic_provider_identity is None else
+                                           copy.deepcopy(dict(classic_provider_identity)))
         self.sampling_dataset_id = _sampling_dataset_id(self.identity_payload())
 
     def identity_payload(self) -> Mapping[str, Any]:
@@ -443,11 +632,16 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                         "catalog_metadata_sha256", "base_manifest_sha256")
             if key in source_binding
         }
-        membership_sha = research_membership_fingerprint(
+        research_membership_sha = research_membership_fingerprint(
             dataset_identity=dataset_identity,
             training_case_ids=self.training_case_ids,
             validation_case_ids=self.validation_case_ids,
         )
+        classic_identity = self._classic_provider_identity
+        membership_sha = (classic_identity["subset_manifest_sha256"] if classic_identity is not None
+                          else research_membership_sha)
+        if not isinstance(membership_sha, str) or len(membership_sha) != 64:
+            raise ValueError("Thermal sampling identity requires a sealed membership key.")
         payload.pop("native_sampling_identity", None)
         payload.update({
             "schema": TASK_SCHEMA,
@@ -459,22 +653,35 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
             "training_case_ids_sha256": _ids_sha256(self.training_case_ids),
             "validation_case_ids": list(self.validation_case_ids),
             "validation_case_ids_sha256": _ids_sha256(self.validation_case_ids),
-            "normalization_stats_sha256": self.model.state_payload()["normalizer_key"],
+            "normalization_stats_sha256": (
+                classic_identity.get("normalization_stats_sha256") if classic_identity is not None else
+                self.model.state_payload()["normalizer_key"]
+            ),
             "case_limit_diagnostic": self._research_case_limit,
-            "validation_scope": "fixed25_v1_DEV22_exposed_original_test_subset; locked remainder excluded",
+            "validation_scope": (
+                "canonical89_exposed_original_test_excluding_0273; unexposed remainder excluded"
+                if classic_identity is not None else
+                "fixed25_v1_DEV22_exposed_original_test_subset; locked remainder excluded"
+            ),
             "source_binding": {
                 **dict(payload.get("source_binding", {})),
                 "protocol": TASK_SCHEMA,
                 "dataset_profile": self._research_membership,
                 "normalization_fit_scope": (
-                    "original TRAIN600 only" if self._research_normalization_mode == "fresh_full_train600_stats"
-                    else "inherited source TRAIN150; unchanged"
+                    "original TRAIN600 only; saved classic statistics reused" if classic_identity is not None else
+                    "original TRAIN600 only" if self._research_normalization_mode == "fresh_full_train600_stats" else
+                    "inherited source TRAIN150; unchanged"
                 ),
                 "normalization_mode": self._research_normalization_mode,
-                "original_test_targets_outside_DEV22_read": False,
+                **({"original_test_targets_outside_DEV22_read": False} if classic_identity is None else {}),
+                "original_test_targets_outside_declared_panel_read": False,
+                "declared_exposed_validation_count": len(self.validation_case_ids),
                 "locked_test_targets_read": False,
-                "research_membership_sha256": membership_sha,
-                "source_checkpoint_sha256": self._research_config["initialization"].get("source_sha256"),
+                "research_membership_sha256": research_membership_sha,
+                "source_classic_subset_manifest_sha256": membership_sha if classic_identity is not None else None,
+                "source_checkpoint_sha256": self._research_config["initialization"].get("source_sha256")
+                    or self._research_source_payload.get("classic_checkpoint_sha256")
+                    or (classic_identity or {}).get("source_binding", {}).get("source_checkpoint_sha256"),
             },
             "objective": {
                 **dict(payload.get("objective", {})),
@@ -491,7 +698,9 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "microbatch_size": self._identity_microbatch_size,
                 "primary_queries_per_case": self.primary_queries,
                 "total_epochs": self.total_epochs,
-                "optimizer": "AdamW with fresh moments and source-compatible named groups",
+                "optimizer": ("fresh AdamW formal_joint group over all active U-core parameters"
+                              if classic_identity is not None else
+                              "AdamW with fresh moments and source-compatible named groups"),
                 "optimizer_schedule": {
                     "kind": self._research_config["optimizer"]["schedule"],
                     "local_horizon_epochs": self.total_epochs,
@@ -512,7 +721,9 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "config_name": self._research_config["name"],
                 "source_arm": self._research_config["initialization"]["source_arm"],
                 "source_checkpoint": self._research_config["initialization"]["source_checkpoint"],
-                "source_checkpoint_sha256": self._research_config["initialization"].get("source_sha256"),
+                "source_checkpoint_sha256": self._research_config["initialization"].get("source_sha256")
+                    or self._research_source_payload.get("classic_checkpoint_sha256")
+                    or (classic_identity or {}).get("source_binding", {}).get("source_checkpoint_sha256"),
                 "local_horizon": self.total_epochs,
                 "training_membership": self._research_membership,
                 "normalization_mode": self._research_normalization_mode,
@@ -522,13 +733,17 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "fresh_controller_lambda0_source": self._research_config[
                     "initialization"
                 ].get("fresh_controller_lambda0_source"),
-                "exposed_validation_membership": "fixed25_v1 DEV22",
+                "exposed_validation_membership": (
+                    "classic canonical89 exposed original test panel" if classic_identity is not None else
+                    "fixed25_v1 DEV22"
+                ),
                 "locked_test_targets_read": False,
                 "diagnostic_case_limit": self._research_case_limit,
                 "execution_options": copy.deepcopy(self._research_config["execution"]["options"]),
                 "optimizer_moments": "reset on source initialization; retained only on exact in-run resume",
             },
         })
+        _restore_checkpoint_identity_metadata(self, payload)
         self.sampling_dataset_id = _sampling_dataset_id(payload)
         return payload
 
@@ -547,14 +762,15 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
             lr = float(source["schedule"]["final_lr"])
             if not math.isfinite(lr) or lr <= 0:
                 raise ValueError("Source group's terminal learning rate must be positive and finite.")
-            schedule = ScheduleSpec(
-                peak_lr=lr,
-                warmup_start_lr=lr,
-                warmup_epochs=0,
-                hold_through_epoch=self.total_epochs,
-                total_epochs=self.total_epochs + 1,
-                final_lr=lr,
-            )
+            schedule = (ScheduleSpec(**dict(source["schedule"]))
+                        if self._classic_provider_identity is not None else ScheduleSpec(
+                            peak_lr=lr,
+                            warmup_start_lr=lr,
+                            warmup_epochs=0,
+                            hold_through_epoch=self.total_epochs,
+                            total_epochs=self.total_epochs + 1,
+                            final_lr=lr,
+                        ))
             groups.append(OptimizerGroupSpec(
                 str(source["name"]), names, schedule,
                 weight_decay=float(source["weight_decay"]),
@@ -596,23 +812,34 @@ class ResearchTrainingEngine(TrainingEngine):
     """Use local history epochs with separate sampler and native model clocks."""
 
     def __init__(self, config: EngineConfig, *, device, parent_age: int, selection=None,
-                 fresh_model_schedule: Mapping[str, Any] | None = None):
+                 fresh_model_schedule: Mapping[str, Any] | None = None,
+                 execution_options: Mapping[str, Any] | None = None):
         super().__init__(config, device=device, selection=selection)
         self.parent_age = int(parent_age)
         self.fresh_model_schedule = None if fresh_model_schedule is None else dict(fresh_model_schedule)
         self.nominal_microbatch_cases = int(config.microbatch_cases)
         self.runtime_microbatch_cases = self.nominal_microbatch_cases
+        self.nominal_execution_options = _validated_execution_options(
+            _EXECUTION_OPTION_DEFAULTS if execution_options is None else execution_options,
+        )
+        self.runtime_execution_options = copy.deepcopy(self.nominal_execution_options)
         self.local_oom_retry_count = 0
         self._execution_runtime_path: Path | None = None
+        self._execution_runtime_dirty = False
 
-    def bind_execution_runtime(self, path: str | Path, *, nominal_microbatch_cases: int) -> None:
+    def bind_execution_runtime(self, path: str | Path, *, nominal_microbatch_cases: int,
+                               default_execution_options: Mapping[str, Any] | None = None) -> None:
         """Load run-local packing state without changing the sealed engine identity."""
         nominal = int(nominal_microbatch_cases)
         if nominal < 1 or nominal > self.config.effective_cases:
             raise ValueError("Nominal research microbatch must fit inside the effective batch.")
         self.nominal_microbatch_cases = nominal
         self.runtime_microbatch_cases = nominal
+        self.runtime_execution_options = _validated_execution_options(
+            self.nominal_execution_options if default_execution_options is None else default_execution_options,
+        )
         self.local_oom_retry_count = 0
+        self._execution_runtime_dirty = False
         self._execution_runtime_path = Path(path)
         if not self._execution_runtime_path.exists():
             return
@@ -623,11 +850,36 @@ class ResearchTrainingEngine(TrainingEngine):
             raise ValueError("Saved runtime packing differs from the run's nominal microbatch identity.")
         runtime = payload.get("runtime_microbatch_cases")
         retries = payload.get("local_oom_retry_count")
-        if (type(runtime) is not int or not 1 <= runtime <= nominal
+        if (type(runtime) is not int or not 1 <= runtime <= self.config.effective_cases
                 or type(retries) is not int or retries < 0):
             raise ValueError("Saved research runtime packing or retry count is malformed.")
         self.runtime_microbatch_cases = runtime
         self.local_oom_retry_count = retries
+        saved_options = payload.get("runtime_execution_options")
+        if saved_options is not None:
+            if not isinstance(saved_options, Mapping):
+                raise ValueError("Saved runtime execution options are malformed.")
+            self.runtime_execution_options = _validated_execution_options(saved_options)
+
+    def set_runtime_overrides(self, *, provider, microbatch_cases: int | None = None,
+                              execution_options: Mapping[str, Any] | None = None) -> None:
+        """Apply execution-only choices while preserving all nominal identity fields."""
+        changed = False
+        if microbatch_cases is not None:
+            if type(microbatch_cases) is not int or not 1 <= microbatch_cases <= self.config.effective_cases:
+                raise ValueError("Runtime microbatch must fit inside the effective batch.")
+            if microbatch_cases != self.runtime_microbatch_cases:
+                self.runtime_microbatch_cases = microbatch_cases
+                changed = True
+        if execution_options is not None:
+            resolved = _validated_execution_options(execution_options)
+            if resolved != self.runtime_execution_options:
+                self.runtime_execution_options = resolved
+                changed = True
+        # The inherited Thermal provider uses this only as a batch-size guard.
+        # Its sealed research identity reads _identity_microbatch_size instead.
+        provider.microbatch_size = self.runtime_microbatch_cases
+        self._execution_runtime_dirty = self._execution_runtime_dirty or changed
 
     def _write_execution_runtime(self, *, last_oom: Mapping[str, Any]) -> None:
         if self._execution_runtime_path is None:
@@ -636,14 +888,17 @@ class ResearchTrainingEngine(TrainingEngine):
             "schema": "honf_research_execution_runtime_v1",
             "nominal_microbatch_cases": self.nominal_microbatch_cases,
             "runtime_microbatch_cases": self.runtime_microbatch_cases,
+            "runtime_execution_options": copy.deepcopy(self.runtime_execution_options),
             "local_oom_retry_count": self.local_oom_retry_count,
             "last_oom": dict(last_oom),
             "updated_unix": time.time(),
         })
+
     def prepare_update_microbatches(self, provider, *, arm: str, phase: str, epoch: int,
                                    update_index: int, update_cases: Sequence[Any],
                                    sampling_dataset_id: str):
         """Use recoverable packing while preserving the exact macro case order."""
+        provider.microbatch_size = self.runtime_microbatch_cases
         if self.runtime_microbatch_cases == self.config.microbatch_cases:
             return super().prepare_update_microbatches(
                 provider, arm=arm, phase=phase, epoch=epoch, update_index=update_index,
@@ -704,6 +959,12 @@ class ResearchTrainingEngine(TrainingEngine):
         update_index = kwargs.get("update_index")
         if phase is None or arm is None or type(update_index) is not int:
             raise TypeError("Research optimizer updates require phase, arm, and macro update index.")
+        if self._execution_runtime_dirty:
+            self._write_execution_runtime(last_oom={
+                "status": "execution_only_resume_override",
+                "runtime_microbatch_cases": self.runtime_microbatch_cases,
+            })
+            self._execution_runtime_dirty = False
         original_cases = tuple(case for batch in initial_microbatches for case in batch.case_keys)
         if not original_cases:
             raise ValueError("Research optimizer macro must retain its ordered case keys for exact retry.")
@@ -757,6 +1018,7 @@ class ResearchTrainingEngine(TrainingEngine):
                         "no smaller packing is available and completed updates were retained."
                     ) from None
                 self.runtime_microbatch_cases = next_pack
+                provider.microbatch_size = next_pack
                 self.local_oom_retry_count += 1
                 attempt += 1
                 self._write_execution_runtime(last_oom={
@@ -822,6 +1084,7 @@ def _write_execution_runtime_under_lock(engine: ResearchTrainingEngine, output: 
                 "schema": "honf_research_execution_runtime_v1",
                 "nominal_microbatch_cases": engine.nominal_microbatch_cases,
                 "runtime_microbatch_cases": engine.runtime_microbatch_cases,
+                "runtime_execution_options": copy.deepcopy(engine.runtime_execution_options),
                 "local_oom_retry_count": engine.local_oom_retry_count,
                 "last_oom": dict(last_oom),
                 "updated_unix": time.time(),
@@ -855,12 +1118,29 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
                             if base.case_split_by_id[case_id] == "train")
     fixed_train150 = tuple(base.training_case_ids)
     dev_ids = tuple(development_case_ids(base.manifest, "test"))
-    if len(source_train600) != 600 or len(fixed_train150) != 150 or len(dev_ids) != 22:
-        raise ValueError("Thermal membership must resolve to original TRAIN600 and fixed25 TRAIN150/DEV22.")
-    if set(source_train600) & set(dev_ids) or any(base.case_split_by_id.get(key) != "test" for key in dev_ids):
-        raise ValueError("TRAIN and exposed DEV22 membership is not bound to disjoint source partitions.")
-    train_ids = (fixed_train150 if config["training"]["membership"] == "fixed25_train150_dev22"
-                 else source_train600)
+    classic_provider_identity = None
+    classic_mode = config["initialization"]["normalization_mode"] == "classic_train600_stats"
+    if classic_mode:
+        classic_provider_identity = checkpoint_payload["experiment_identity"]["provider_identity"]
+        classic_train = tuple(map(str, classic_provider_identity.get("training_case_ids", ())))
+        classic_validation = tuple(map(str, classic_provider_identity.get("validation_case_ids", ())))
+        if (len(source_train600) != 600 or len(classic_train) != 600 or len(classic_validation) != 89
+                or set(classic_train) != set(source_train600)
+                or set(classic_train) & set(classic_validation)
+                or any(base.case_split_by_id.get(key) != "train" for key in classic_train)
+                or any(base.case_split_by_id.get(key) != "test" for key in classic_validation)):
+            raise ValueError("Classic identity does not bind exact disjoint original TRAIN600 and exposed VAL89 IDs.")
+        train_ids = classic_train
+        dev_ids = classic_validation
+    else:
+        if len(source_train600) != 600 or len(fixed_train150) != 150 or len(dev_ids) != 22:
+            raise ValueError("Thermal membership must resolve to original TRAIN600 and fixed25 TRAIN150/DEV22.")
+        if set(source_train600) & set(dev_ids) or any(base.case_split_by_id.get(key) != "test" for key in dev_ids):
+            raise ValueError("TRAIN and exposed DEV22 membership is not bound to disjoint source partitions.")
+        train_ids = (fixed_train150 if config["training"]["membership"] == "fixed25_train150_dev22"
+                     else source_train600)
+    if classic_mode and config["training"].get("membership") != "classic_train600_exposed_val89":
+        raise ValueError("Classic identity source may only be used for the explicit classic TRAIN600/VAL89 profile.")
     if case_limit is not None:
         if case_ids is not None or not diagnostic or type(case_limit) is not int or not 1 <= case_limit < len(train_ids):
             raise ValueError("Diagnostic case-limit must select a nonempty strict subset of the configured TRAIN membership.")
@@ -922,8 +1202,13 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
         diagnostic=diagnostic,
         identity_microbatch=identity_microbatch,
         local_horizon=local_horizon,
+        classic_provider_identity=classic_provider_identity,
     )
     provider.sampling_dataset_id = _sampling_dataset_id(provider.identity_payload())
+    if classic_mode:
+        expected_sampling_id = checkpoint_payload.get("classic_sampling_dataset_id")
+        if expected_sampling_id and provider.sampling_dataset_id != expected_sampling_id:
+            raise ValueError("Fresh classic provider changed the original classic sampling dataset namespace.")
     return model, provider
 
 
@@ -965,8 +1250,54 @@ def _fresh_core_from_template(source_core, *, seed: int, execution_options: Mapp
     return core
 
 
+def _execution_options_for_run(run_dir: Path, config: Mapping[str, Any],
+                               overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    options = _validated_execution_options(config["execution"]["options"])
+    runtime_path = run_dir / "execution_runtime.json"
+    if runtime_path.is_file():
+        payload = read_json(runtime_path)
+        if payload.get("schema") != "honf_research_execution_runtime_v1":
+            raise ValueError("Research execution runtime state has an unsupported schema.")
+        saved = payload.get("runtime_execution_options")
+        if saved is not None:
+            options = _validated_execution_options(saved)
+    if overrides:
+        options.update(dict(overrides))
+    return _validated_execution_options(options)
+
+
+def _runtime_microbatch_from_file(run_dir: Path, nominal: int, effective: int) -> int:
+    runtime_path = run_dir / "execution_runtime.json"
+    if not runtime_path.is_file():
+        return int(nominal)
+    payload = read_json(runtime_path)
+    if payload.get("schema") != "honf_research_execution_runtime_v1":
+        raise ValueError("Research execution runtime state has an unsupported schema.")
+    runtime = payload.get("runtime_microbatch_cases", nominal)
+    if (payload.get("nominal_microbatch_cases") != nominal or type(runtime) is not int
+            or not 1 <= runtime <= effective):
+        raise ValueError("Saved runtime packing does not match this run's nominal/effective batch identity.")
+    return runtime
+
+
+def _apply_runtime_execution_options(model, provider, execution_options: Mapping[str, Any]) -> str:
+    """Change runtime core options while proving provider identity remains sealed."""
+    options = _validated_execution_options(execution_options)
+    before = _canonical_sha256(provider.identity_payload())
+    core = getattr(model, "core", model)
+    setter = getattr(core, "set_execution_options", None)
+    if not callable(setter):
+        raise TypeError("Loaded continuous core lacks set_execution_options().")
+    setter(**options)
+    after = _canonical_sha256(provider.identity_payload())
+    if before != after:
+        raise RuntimeError("Execution-only runtime options changed the sealed provider identity.")
+    return after
+
+
 def _build_provider_for_resume(config, checkpoint_payload, optimizer_contract,
-                               case_ids, local_horizon, diagnostic, device):
+                               case_ids, local_horizon, diagnostic, device,
+                               runtime_execution_options: Mapping[str, Any] | None = None):
     """Rebuild from this run's own checkpoint and stored group contract only."""
     model = _model_from_run_payload(checkpoint_payload, device)
     core = getattr(model, "core", model)
@@ -981,6 +1312,17 @@ def _build_provider_for_resume(config, checkpoint_payload, optimizer_contract,
         diagnostic=diagnostic,
         fit_fresh_normalizer=False,
     )
+    provider_identity = checkpoint_payload.get("experiment_identity", {}).get("provider_identity", {})
+    adapter_state = provider_identity.get("adapter_state")
+    if not isinstance(adapter_state, Mapping):
+        raise ValueError("Research checkpoint is missing its original adapter identity state.")
+    provider._research_identity_adapter_state = copy.deepcopy(dict(adapter_state))
+    model_config = provider_identity.get("model_config")
+    if not isinstance(model_config, Mapping):
+        raise ValueError("Research checkpoint is missing its original model identity config.")
+    provider._research_identity_model_config = copy.deepcopy(dict(model_config))
+    if runtime_execution_options is not None:
+        _apply_runtime_execution_options(model, provider, runtime_execution_options)
     return model, provider
 
 
@@ -992,8 +1334,11 @@ def _engine_for(config, *, device: torch.device, parent_age: int, microbatch: in
     microbatch_value = int(microbatch or training["microbatch_cases"])
     monitors = (1,) if diagnostic else tuple(range(int(training["monitor_every"]), horizon + 1,
                                                      int(training["monitor_every"])))
-    checkpoints = (1,) if diagnostic else tuple(range(int(training["checkpoint_every"]), horizon + 1,
-                                                       int(training["checkpoint_every"])))
+    declared_checkpoints = training.get("checkpoint_epochs")
+    checkpoints = ((1,) if diagnostic else tuple(int(epoch) for epoch in declared_checkpoints)
+                   if isinstance(declared_checkpoints, list) else
+                   tuple(range(int(training["checkpoint_every"]), horizon + 1,
+                               int(training["checkpoint_every"]))))
     engine_config = EngineConfig(
         seed=int(training.get("seed", 0)),
         microbatch_cases=microbatch_value,
@@ -1015,8 +1360,11 @@ def _engine_for(config, *, device: torch.device, parent_age: int, microbatch: in
         parent_age=parent_age,
         selection=SelectionPolicy(field_metric="field_score"),
         fresh_model_schedule=(config["initialization"].get("fresh_model_schedule")
-                              if config["initialization"]["normalization_mode"] == "fresh_full_train600_stats"
+                              if config["initialization"]["normalization_mode"] in (
+                                  "fresh_full_train600_stats", "classic_train600_stats",
+                              )
                               else None),
+        execution_options=config["execution"]["options"],
     )
 
 
@@ -1046,8 +1394,11 @@ def _write_run_manifest(output: Path, *, config: Mapping[str, Any], config_path:
         "training_membership": config["training"]["membership"],
         "dataset_access": {
             "training": config["training"]["membership"],
-            "validation": "fixed25_v1 DEV22 only",
+            "validation": ("classic canonical89 exposed original test panel only"
+                           if config["training"]["membership"] == "classic_train600_exposed_val89"
+                           else "fixed25_v1 DEV22 only"),
             "locked_test_targets_read": False,
+            "unexposed_original_test_targets_read": False,
             "dataset_copy_created": False,
             "persistent_dataset_cache_created": False,
         },
@@ -1071,11 +1422,14 @@ def _load_run_manifest(run_dir: str | Path) -> tuple[dict[str, Any], Path]:
 def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: Path, *,
                       identity: Mapping[str, Any], stop_after: int, arm: str,
                       resume_checkpoint: Path | None = None, allow_microbatch_change: bool = False,
+                      runtime_microbatch_cases: int | None = None,
+                      runtime_execution_options: Mapping[str, Any] | None = None,
                       permitted_devices: Sequence[str] | None = None):
     retries = 0
     active_engine = engine
     current_resume = resume_checkpoint
     original_output = output
+    pending_runtime_microbatch_override = runtime_microbatch_cases
     initial_model_state = _cpu_state_snapshot(model.state_dict())
     initial_rng_state = _cpu_state_snapshot(capture_rng_state())
     provider_state_reader = getattr(provider, "training_state_dict", None)
@@ -1087,7 +1441,18 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
                 nominal_microbatch_cases=int(getattr(
                     provider, "_identity_microbatch_size", active_engine.config.microbatch_cases,
                 )),
+                default_execution_options=getattr(
+                    active_engine, "nominal_execution_options", active_engine.runtime_execution_options,
+                ),
             )
+            active_engine.set_runtime_overrides(
+                provider=provider,
+                microbatch_cases=pending_runtime_microbatch_override,
+                execution_options=runtime_execution_options,
+            )
+            # Apply a CLI pack once. If an outer retry persists a smaller pack,
+            # the reloaded runtime state must take precedence on the next loop.
+            pending_runtime_microbatch_override = None
         previous_handlers = _install_clean_stop_handlers(output)
         try:
             return active_engine.fit(
@@ -1117,6 +1482,9 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
             ))
             current_runtime_microbatch = int(getattr(
                 active_engine, "runtime_microbatch_cases", active_engine.config.microbatch_cases,
+            ))
+            current_runtime_execution_options = copy.deepcopy(getattr(
+                active_engine, "runtime_execution_options", _EXECUTION_OPTION_DEFAULTS,
             ))
             next_microbatch = max(1, current_runtime_microbatch // 2)
             if permitted_devices:
@@ -1148,6 +1516,7 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
                     output / "execution_runtime.json", nominal_microbatch_cases=nominal_microbatch,
                 )
                 active_engine.runtime_microbatch_cases = next_microbatch
+                active_engine.runtime_execution_options = current_runtime_execution_options
                 model.to(next_device)
                 provider.device = next_device
                 current_resume = current_latest
@@ -1197,6 +1566,7 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
             )
             active_engine.nominal_microbatch_cases = nominal_microbatch
             active_engine.runtime_microbatch_cases = next_microbatch
+            active_engine.runtime_execution_options = current_runtime_execution_options
             active_engine.local_oom_retry_count = previous_retry_count
             output.mkdir(parents=True, exist_ok=False)
             failed_manifest = failed / _CONFIG_NAME
@@ -1279,6 +1649,14 @@ def _experiment_identity(config: Mapping[str, Any], provider: ResearchThermalPro
             if _parent_age(config) == 0 and int(config["initialization"]["source_parent_age"]) > 0
             else "model_weights_only; optimizer moments reset"
         ),
+        "classic_reference_identity_path": config["initialization"].get("source_identity_path"),
+        "classic_checkpoint_weights_deserialized": (
+            False if config["initialization"].get("source_kind") == "classic_identity_metadata_only" else None
+        ),
+        "fresh_architecture_config": (
+            "classic saved actual A2-D core config; init_seed=0; UnifiedJointCore constructed from config"
+            if config["initialization"].get("source_kind") == "classic_identity_metadata_only" else None
+        ),
         "fresh_controller_initialization": (
             {
                 "kind": "calibrated_lambda0_hyperparameters_with_reset_dual_state",
@@ -1286,7 +1664,9 @@ def _experiment_identity(config: Mapping[str, Any], provider: ResearchThermalPro
                 "calibration_source": config["initialization"]["fresh_controller_lambda0_source"],
                 "optimizer_moments_and_mature_dual_state_loaded": False,
             }
-            if config["initialization"]["normalization_mode"] == "fresh_full_train600_stats"
+            if config["initialization"]["normalization_mode"] in (
+                "fresh_full_train600_stats", "classic_train600_stats",
+            )
             else None
         ),
         "recipe": dict(provider_identity["recipe"]),
@@ -1313,9 +1693,9 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
         case_ids = tuple(map(str, case_ids))
         if not case_ids or len(set(case_ids)) != len(case_ids):
             raise ValueError("Diagnostic --case-id values must be a nonempty unique list.")
-    if (config["initialization"]["normalization_mode"] == "fresh_full_train600_stats"
+    if (config["initialization"]["normalization_mode"] in ("fresh_full_train600_stats", "classic_train600_stats")
             and diagnostic_only):
-        raise ValueError("Fresh full-TRAIN normalization is available only for a full-membership fit.")
+        raise ValueError("Fresh full-TRAIN profiles are available only for a full-membership fit.")
 
     output_path = Path(output).expanduser().resolve(strict=False)
     if output_path.exists() and (not output_path.is_dir() or any(output_path.iterdir())):
@@ -1336,6 +1716,11 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
     )
     if not isinstance(optimizer_contract, Sequence) or not optimizer_contract:
         raise ValueError("Source checkpoint lacks its named optimizer group schedule contract.")
+    if config["initialization"]["normalization_mode"] == "classic_train600_stats":
+        classic_group = copy.deepcopy(optimizer_contract[0])
+        classic_group["parameter_names"] = [name for name, parameter in model.named_parameters()
+                                             if parameter.requires_grad]
+        optimizer_contract = [classic_group]
 
     runtime_config = copy.deepcopy(config)
     if case_limit is not None:
@@ -1415,22 +1800,34 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
         permitted_devices=permitted,
     )
 
-def resume(run_dir: str | Path, *, device: str, additional_epochs: int,
-           devices: Sequence[str] | None = None) -> dict[str, Any]:
+def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = None,
+           stop_after_epoch: int | None = None, devices: Sequence[str] | None = None,
+           microbatch_cases: int | None = None, query_tile_size: int | None = None,
+           checkpoint: str | None = None, backend: str | None = None) -> dict[str, Any]:
     run = Path(run_dir).expanduser().resolve(strict=True)
     run_manifest, _ = _load_run_manifest(run)
     config = copy.deepcopy(run_manifest["config"])
-    if type(additional_epochs) is not int or additional_epochs < 1:
-        raise ValueError("--additional-epochs must be a positive integer.")
     permitted = _permitted_order(device, devices)
     selected_device, device_info = resolve_device(permitted[0], permitted_devices=permitted)
     storage_snapshot = verify_storage(config, output=run, estimated_bytes=0)
     payload, latest_path = _read_run_checkpoint(run, "latest")
     local_horizon = int(config["training"]["local_horizon"])
     current_epoch = int(payload["epoch"])
-    stop_after = current_epoch + additional_epochs
-    if stop_after > local_horizon:
-        raise ValueError(f"Resume would exceed local horizon {local_horizon}.")
+    stop_after = _resolve_resume_stop(
+        current_epoch=current_epoch,
+        local_horizon=local_horizon,
+        additional_epochs=additional_epochs,
+        stop_after_epoch=stop_after_epoch,
+    )
+
+    option_overrides = {}
+    if backend is not None:
+        option_overrides["backend"] = backend
+    if query_tile_size is not None:
+        option_overrides["query_tile_size"] = query_tile_size
+    if checkpoint is not None:
+        option_overrides["checkpoint"] = checkpoint
+    runtime_execution_options = _execution_options_for_run(run, config, option_overrides)
 
     runtime_config = copy.deepcopy(config)
     runtime_config["training"]["effective_batch_size"] = int(
@@ -1439,6 +1836,10 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int,
     runtime_config["training"]["microbatch_cases"] = int(
         run_manifest.get("microbatch_cases", config["training"]["microbatch_cases"]),
     )
+    if (microbatch_cases is not None
+            and (type(microbatch_cases) is not int
+                 or not 1 <= microbatch_cases <= runtime_config["training"]["effective_batch_size"])):
+        raise ValueError("--microbatch-cases must fit inside the run's effective batch.")
     diagnostic = bool(run_manifest.get("diagnostic_only"))
     optimizer_contract = run_manifest.get("optimizer_schedule_contract")
     if not isinstance(optimizer_contract, list) or not optimizer_contract:
@@ -1451,6 +1852,7 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int,
         local_horizon,
         diagnostic,
         selected_device,
+        runtime_execution_options=runtime_execution_options,
     )
     provider._identity_microbatch_size = int(
         run_manifest.get("identity_microbatch_cases", config["training"]["microbatch_cases"]),
@@ -1475,6 +1877,11 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int,
         "latest_checkpoint": str(latest_path),
         "from_epoch": current_epoch,
         "stop_after": stop_after,
+        "nominal_microbatch_cases": provider._identity_microbatch_size,
+        "runtime_microbatch_cases": (microbatch_cases if microbatch_cases is not None else
+            _runtime_microbatch_from_file(run, provider._identity_microbatch_size,
+                                          provider.effective_batch_size)),
+        "runtime_execution_options": runtime_execution_options,
         "device": device_info,
         "training_membership": config["training"]["membership"],
         "train_cases": len(provider.training_case_ids),
@@ -1489,6 +1896,8 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int,
         stop_after=stop_after,
         arm=model.architecture,
         resume_checkpoint=latest_path,
+        runtime_microbatch_cases=microbatch_cases,
+        runtime_execution_options=(runtime_execution_options if option_overrides else None),
         permitted_devices=permitted,
     )
 
@@ -1511,6 +1920,7 @@ def evaluate(run_dir: str | Path, *, device: str = "cpu", checkpoint: str = "lat
     runtime_config["training"]["microbatch_cases"] = int(
         run_manifest.get("microbatch_cases", config["training"]["microbatch_cases"]),
     )
+    runtime_execution_options = _execution_options_for_run(run, config)
     optimizer_contract = run_manifest.get("optimizer_schedule_contract")
     model, provider = _build_provider_for_resume(
         runtime_config,
@@ -1520,6 +1930,7 @@ def evaluate(run_dir: str | Path, *, device: str = "cpu", checkpoint: str = "lat
         local_horizon,
         bool(run_manifest.get("diagnostic_only")),
         resolved_device,
+        runtime_execution_options=runtime_execution_options,
     )
     provider._identity_microbatch_size = int(
         run_manifest.get("identity_microbatch_cases", config["training"]["microbatch_cases"]),
@@ -1531,6 +1942,12 @@ def evaluate(run_dir: str | Path, *, device: str = "cpu", checkpoint: str = "lat
         microbatch=runtime_config["training"]["microbatch_cases"],
         diagnostic=bool(run_manifest.get("diagnostic_only")),
     )
+    engine.bind_execution_runtime(
+        run / "execution_runtime.json",
+        nominal_microbatch_cases=provider._identity_microbatch_size,
+        default_execution_options=config["execution"]["options"],
+    )
+    engine.set_runtime_overrides(provider=provider)
     epoch = int(payload["epoch"])
     model.eval()
     metrics = engine._evaluate(model, provider, model.architecture, "joint", epoch)
@@ -1539,11 +1956,20 @@ def evaluate(run_dir: str | Path, *, device: str = "cpu", checkpoint: str = "lat
         "run": str(run),
         "checkpoint": str(checkpoint_path),
         "checkpoint_epoch": epoch,
-        "parent_training_age": _parent_age(config) + epoch,
+        "parent_training_age": (_parent_age(config) if config["initialization"].get("fresh_model_schedule")
+                                else _parent_age(config) + epoch),
+        "local_training_epoch": epoch,
+        "native_controller_epoch": (
+            _fresh_model_schedule_epoch(config, epoch)
+            if config["initialization"].get("fresh_model_schedule") else _parent_age(config) + epoch
+        ),
         "dataset": "thermal",
         "training_membership": config["training"]["membership"],
-        "partition": "fixed25_v1_DEV22_exposed",
+        "partition": ("classic_canonical89_exposed_original_test"
+                      if config["training"]["membership"] == "classic_train600_exposed_val89"
+                      else "fixed25_v1_DEV22_exposed"),
         "locked_test_targets_read": False,
+        "unexposed_original_test_targets_read": False,
         "device": device_info,
         "metrics": metrics,
         "created_unix": time.time(),
@@ -1601,7 +2027,11 @@ def assess(run_dir: str | Path, *, dataset: str = "thermal") -> dict[str, Any]:
         "latest_checkpoint": checkpoints.get("latest"),
         "best_field_checkpoint": checkpoints.get("best_by_field_mse"),
         "best_exposed_dev_review": best,
-        "validation_scope": "fixed25_v1 DEV22 only; locked TEST excluded",
+        "validation_scope": (
+            "classic canonical89 exposed original test panel only; remainder excluded"
+            if value.get("training_membership") == "classic_train600_exposed_val89"
+            else "fixed25_v1 DEV22 only; locked TEST excluded"
+        ),
         "locked_test_targets_read": False,
         "validation_reviews": validations,
         "diagnostic_notice": value.get("diagnostic_notice"),

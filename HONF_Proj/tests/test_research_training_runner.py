@@ -21,30 +21,38 @@ PRESETS = PROJECT / "configs" / "research"
 
 def test_research_presets_keep_membership_and_execution_contracts_separate():
     expected = {
-        "thermal_honf_full.json": "original_train600_fixed25_dev22",
-        "thermal_dense_full.json": "original_train600_fixed25_dev22",
-        "thermal_direct_full.json": "original_train600_fixed25_dev22",
-        "thermal_honf_dev150.json": "fixed25_train150_dev22",
-        "thermal_dense_dev150.json": "fixed25_train150_dev22",
-        "thermal_direct_dev150.json": "fixed25_train150_dev22",
+        "thermal_honf_full.json": ("original_train600_fixed25_dev22", 24, 1024, "values"),
+        "thermal_dense_full.json": ("original_train600_fixed25_dev22", 24, 1024, "values"),
+        "thermal_direct_full.json": ("original_train600_fixed25_dev22", 24, 1024, "values"),
+        "thermal_honf_dev150.json": ("fixed25_train150_dev22", 8, 512, "tile"),
+        "thermal_dense_dev150.json": ("fixed25_train150_dev22", 8, 512, "tile"),
+        "thermal_direct_dev150.json": ("fixed25_train150_dev22", 8, 512, "tile"),
     }
-    for name, membership in expected.items():
+    for name, (membership, microbatch, tile, checkpoint) in expected.items():
         config, _ = research.load_research_config(PRESETS / name)
         assert config["training"]["membership"] == membership
         assert config["execution"]["options"] == {
             "backend": "dense_weighted",
-            "query_tile_size": 512,
-            "checkpoint": "tile",
+            "query_tile_size": tile,
+            "checkpoint": checkpoint,
             "context_backend": "segment",
         }
         assert config["storage"]["output_root"].startswith("/data2/")
         assert config["training"]["effective_batch_size"] == 48
         assert config["training"]["primary_queries"] == 1024
+        assert config["training"]["microbatch_cases"] == microbatch
 
     fresh, _ = research.load_research_config(PRESETS / "thermal_honf_full_fresh_train600_normalization.json")
     assert fresh["training"]["membership"] == "original_train600_fixed25_dev22"
     assert fresh["initialization"]["normalization_mode"] == "fresh_full_train600_stats"
     assert fresh["initialization"]["fresh_model_schedule"]["ramp_epochs"] == 40
+    assert fresh["training"]["microbatch_cases"] == 24
+    assert fresh["execution"]["options"] == {
+        "backend": "dense_weighted",
+        "query_tile_size": 1024,
+        "checkpoint": "values",
+        "context_backend": "segment",
+    }
     assert fresh["initialization"]["fresh_controller_lambda0"] == {
         "M": 1.007182002067566,
         "E": 1.59217369556427,
@@ -52,6 +60,74 @@ def test_research_presets_keep_membership_and_execution_contracts_separate():
     }
     assert "U10-H" in fresh["initialization"]["fresh_controller_lambda0_source"]
     assert fresh["optimizer"]["schedule"] == "constant_source_terminal_lr"
+
+
+def test_classic_full5000_profiles_retain_formal_data_and_execution_contracts():
+    configs = [research.load_research_config(PRESETS / f"thermal_u_{arm}_full5000_v1.json")[0]
+               for arm in "dhs"]
+    assert {config["training"]["membership"] for config in configs} == {
+        "classic_train600_exposed_val89"
+    }
+    assert {config["training"]["local_horizon"] for config in configs} == {5000}
+    assert {config["training"]["microbatch_cases"] for config in configs} == {24}
+    assert {config["training"]["effective_batch_size"] for config in configs} == {48}
+    assert {config["training"]["primary_queries"] for config in configs} == {1024}
+    assert {config["training"]["seed"] for config in configs} == {0}
+    assert {tuple(config["training"]["checkpoint_epochs"]) for config in configs} == {
+        (10, 50, 100, 250, 500, 1000, 2500, 5000)
+    }
+    assert {config["initialization"]["fresh_routing_mode"] for config in configs} == {
+        "dense", "hypergraph", "direct"
+    }
+    assert {config["initialization"]["normalization_mode"] for config in configs} == {
+        "classic_train600_stats"
+    }
+    assert all(research._parent_age(config) == 0 for config in configs)
+    assert {research._fresh_model_schedule_epoch(config, 1) for config in configs} == {3001}
+    assert {research._fresh_model_schedule_epoch(config, 5000) for config in configs} == {8000}
+    for config in configs:
+        assert config["execution"]["options"] == {
+            "backend": "dense_weighted",
+            "query_tile_size": 1024,
+            "checkpoint": "values",
+            "context_backend": "segment",
+        }
+        assert config["optimizer"] == {
+            "kind": "fresh_adamw_from_classic_formal_contract",
+            "schedule": "constant_classic_formal_lr",
+        }
+        assert config["storage"]["output_root"].startswith(
+            "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_u_"
+        )
+
+
+def test_classic_fresh_models_use_metadata_only_and_common_seed0_architecture(monkeypatch):
+    from honf_runtime import compat
+
+    def forbid_checkpoint_deserialization(*args, **kwargs):
+        pytest.fail("Fresh classic initialization must not deserialize mature checkpoint weights.")
+
+    monkeypatch.setattr(compat, "load_trusted_checkpoint", forbid_checkpoint_deserialization)
+    models = {}
+    expected_routes = {"d": "dense", "h": "hypergraph", "s": "direct"}
+    for arm, route in expected_routes.items():
+        config, _ = research.load_research_config(PRESETS / f"thermal_u_{arm}_full5000_v1.json")
+        model, source_payload, _, _ = research._source_components(config, torch.device("cpu"))
+        assert model.core.routing_mode == route
+        assert model.core.get_config()["base_model_config"]["init_seed"] == 0
+        assert model.state_payload()["normalizer_key"] == (
+            "7ab3441ba2616c68224f9d829a92e2db4c59658b45d3f1acf4c535333896939b"
+        )
+        assert "model_state_dict" not in source_payload
+        assert "optimizer_state_dict" not in source_payload
+        assert source_payload["classic_sampling_dataset_id"].startswith("ThermalChannel:")
+        models[arm] = model
+    states = [{name: value.detach().cpu() for name, value in model.state_dict().items()
+               if isinstance(value, torch.Tensor)}
+              for model in models.values()]
+    common = set(states[0]) & set(states[1]) & set(states[2])
+    assert len(common) > 100
+    assert all(torch.equal(states[0][name], states[index][name]) for index in (1, 2) for name in common)
 
 
 def test_sampling_membership_fingerprint_is_shared_across_h_d_s_weights():
@@ -111,7 +187,7 @@ def test_fresh_controller_configuration_rejects_disabled_work_penalties():
         PRESETS / "thermal_honf_full_fresh_train600_normalization.json"
     )
     config["initialization"]["fresh_controller_lambda0"]["E"] = 0.0
-    with pytest.raises(ValueError, match="positive calibrated M/E/context lambda0"):
+    with pytest.raises(ValueError, match="positive calibrated strengths"):
         research._validate_research_config(config)
 
 
@@ -222,6 +298,24 @@ def test_run_manifest_is_self_contained_after_initial_source_is_gone(tmp_path):
     assert not Path(loaded["source_checkpoint"]).exists()
 
 
+def test_run_checkpoint_rejects_foreign_paths_and_mismatched_identity(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    identity = {"family": research.TASK_SCHEMA, "config_name": "thermal_u_h_full5000_v1"}
+    (run / "experiment_identity.json").write_text(json.dumps(identity))
+    checkpoint = run / "latest_model.pt"
+    torch.save({"experiment_identity": identity, "epoch": 10}, checkpoint)
+    payload, selected = research._read_run_checkpoint(run)
+    assert payload["epoch"] == 10 and selected == checkpoint
+    foreign = tmp_path / "foreign.pt"
+    torch.save({"experiment_identity": identity, "epoch": 10}, foreign)
+    with pytest.raises(ValueError, match="outside the declared research run"):
+        research._read_run_checkpoint(run, str(foreign))
+    torch.save({"experiment_identity": {**identity, "config_name": "thermal_u_d_full5000_v1"}}, checkpoint)
+    with pytest.raises(ValueError, match="identity differs"):
+        research._read_run_checkpoint(run)
+
+
 class _RetryModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -290,6 +384,60 @@ def test_first_epoch_oom_retries_from_model_and_all_rng_boundary(tmp_path, monke
         assert (tmp_path / "retry-run.oom_attempt_01" / "oom_retry_01.json").is_file()
     finally:
         research.restore_rng_state(previous_rng)
+
+
+def test_outer_oom_downshift_is_not_overwritten_by_initial_cli_microbatch(tmp_path, monkeypatch):
+    options = {
+        "backend": "dense_weighted",
+        "query_tile_size": 1024,
+        "checkpoint": "values",
+        "context_backend": "segment",
+    }
+    config = EngineConfig(
+        seed=4, microbatch_cases=8, effective_cases=48, total_epochs=10,
+        training_mode="joint", sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+    )
+
+    class _OutOfMemoryEngine(research.ResearchTrainingEngine):
+        def fit(self, model, provider, output, **kwargs):
+            del model, provider, kwargs
+            output = Path(output)
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "latest_model.pt").write_bytes(b"sealed latest checkpoint marker")
+            raise RuntimeError("CUDA out of memory: injected outer-retry boundary")
+
+    class _RetryEngine(research.ResearchTrainingEngine):
+        def fit(self, model, provider, output, **kwargs):
+            del model, kwargs
+            assert self.nominal_microbatch_cases == 8
+            assert self.runtime_microbatch_cases == 12
+            assert self.config.microbatch_cases == 8
+            assert provider.microbatch_size == 12
+            runtime = json.loads((Path(output) / "execution_runtime.json").read_text())
+            assert runtime["nominal_microbatch_cases"] == 8
+            assert runtime["runtime_microbatch_cases"] == 12
+            assert runtime["runtime_execution_options"] == options
+            return {"status": "outer_oom_downshift_retained"}
+
+    initial = _OutOfMemoryEngine(config, device="cpu", parent_age=5000, execution_options=options)
+    retry = _RetryEngine(config, device="cpu", parent_age=5000, execution_options=options)
+    model = _RetryModel()
+    provider = SimpleNamespace(
+        device=torch.device("cpu"),
+        microbatch_size=8,
+        _identity_microbatch_size=8,
+        _research_config={},
+        _research_case_limit=None,
+    )
+    monkeypatch.setattr(research, "_engine_for", lambda *args, **kwargs: retry)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    result = research._fit_with_retries(
+        initial, model, provider, tmp_path / "outer-retry",
+        identity={}, stop_after=5, arm="A2-H",
+        runtime_microbatch_cases=24,
+        runtime_execution_options=options,
+    )
+    assert result["status"] == "outer_oom_downshift_retained"
 
 
 def test_local_oom_retry_restores_the_last_complete_optimizer_macro(tmp_path, monkeypatch):
@@ -505,3 +653,137 @@ def test_clean_stop_handler_writes_a_resumable_request(tmp_path):
     request = json.loads((output / "CLEAN_STOP_REQUEST.json").read_text())
     assert request["signal"] == int(signal.SIGINT)
     assert request["request_id"]
+
+
+def test_resume_stop_supports_an_absolute_total_epoch_target():
+    assert research._resolve_resume_stop(
+        current_epoch=120, local_horizon=600, additional_epochs=None, stop_after_epoch=200,
+    ) == 200
+    assert research._resolve_resume_stop(
+        current_epoch=120, local_horizon=600, additional_epochs=8, stop_after_epoch=None,
+    ) == 128
+    with pytest.raises(ValueError, match="Specify exactly one"):
+        research._resolve_resume_stop(
+            current_epoch=120, local_horizon=600, additional_epochs=8, stop_after_epoch=200,
+        )
+    with pytest.raises(ValueError, match="greater than the current checkpoint"):
+        research._resolve_resume_stop(
+            current_epoch=200, local_horizon=600, additional_epochs=None, stop_after_epoch=200,
+        )
+
+
+def test_runtime_pack_larger_than_nominal_preserves_identity_and_query_keys(tmp_path):
+    options = {
+        "backend": "dense_weighted",
+        "query_tile_size": 512,
+        "checkpoint": "tile",
+        "context_backend": "segment",
+    }
+    engine_config = EngineConfig(
+        seed=31, microbatch_cases=8, effective_cases=48, total_epochs=10,
+        training_mode="joint", sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+    )
+    runtime_path = tmp_path / "execution_runtime.json"
+    engine = research.ResearchTrainingEngine(
+        engine_config, device="cpu", parent_age=5000, execution_options=options,
+    )
+    engine.bind_execution_runtime(
+        runtime_path, nominal_microbatch_cases=8, default_execution_options=options,
+    )
+
+    case_order = tuple(f"thermal-{index:03d}" for index in range(48))
+
+    class _BatchProvider:
+        def __init__(self):
+            self.microbatch_size = 8
+            self._identity_microbatch_size = 8
+            self.draws = {}
+
+        def make_batch(self, cases, key):
+            assert len(cases) <= self.microbatch_size
+            for case_id in cases:
+                self.draws[case_id] = tuple(map(int, key.native_indices(
+                    128, 16, case_id, "fluid", "primary",
+                )))
+            return TaskBatch(None, None, None, {"sampling_key": key}, tuple(cases))
+
+        def identity_payload(self):
+            current_options = self.core.execution_options
+            payload = {
+                "microbatch_size": self._identity_microbatch_size,
+                "model_config": {"execution_options": current_options},
+                "adapter_state": {"core_config": {"execution_options": current_options}},
+            }
+            return research._restore_checkpoint_identity_metadata(self, payload)
+
+    identity_core = _TinyCore(weight=1.0)
+    identity_core.set_execution_options(**options)
+    runtime_provider = _BatchProvider()
+    runtime_provider.core = identity_core
+    runtime_provider._research_identity_model_config = {"execution_options": options}
+    runtime_provider._research_identity_adapter_state = {
+        "core_config": {"execution_options": options},
+    }
+    identity_before = research._canonical_sha256(runtime_provider.identity_payload())
+    runtime_options = {**options, "query_tile_size": 1024, "checkpoint": "values"}
+    research._apply_runtime_execution_options(identity_core, runtime_provider, runtime_options)
+    engine.set_runtime_overrides(
+        provider=runtime_provider, microbatch_cases=24, execution_options=runtime_options,
+    )
+    runtime_batches = engine.prepare_update_microbatches(
+        runtime_provider, arm="A2-H", phase="joint", epoch=3, update_index=11,
+        update_cases=case_order, sampling_dataset_id="thermal-fixed-membership",
+    )
+    identity_after = research._canonical_sha256(runtime_provider.identity_payload())
+    assert identity_after == identity_before
+    assert identity_core.execution_options == runtime_options
+    assert [len(batch.case_keys) for batch in runtime_batches] == [24, 24]
+    assert tuple(case for batch in runtime_batches for case in batch.case_keys) == case_order
+    runtime_draws = dict(runtime_provider.draws)
+
+    nominal_engine = research.ResearchTrainingEngine(
+        engine_config, device="cpu", parent_age=5000, execution_options=options,
+    )
+    nominal_provider = _BatchProvider()
+    nominal_batches = nominal_engine.prepare_update_microbatches(
+        nominal_provider, arm="A2-H", phase="joint", epoch=3, update_index=11,
+        update_cases=case_order, sampling_dataset_id="thermal-fixed-membership",
+    )
+    assert [len(batch.case_keys) for batch in nominal_batches] == [8, 8, 8, 8, 8, 8]
+    assert tuple(case for batch in nominal_batches for case in batch.case_keys) == case_order
+    assert nominal_provider.draws == runtime_draws
+    assert sum(len(batch.case_keys) for batch in runtime_batches) == 48
+    assert sum(len(batch.case_keys) for batch in nominal_batches) == 48
+
+    engine._execution_runtime_path = runtime_path
+    engine._write_execution_runtime(last_oom={"status": "execution_override_test"})
+    saved = json.loads(runtime_path.read_text())
+    assert saved["nominal_microbatch_cases"] == 8
+    assert saved["runtime_microbatch_cases"] == 24
+    assert saved["runtime_execution_options"] == runtime_options
+    loaded_options = research._execution_options_for_run(
+        tmp_path,
+        {"execution": {"options": options}},
+    )
+    assert loaded_options == runtime_options
+
+    resumed_engine = research.ResearchTrainingEngine(
+        engine_config, device="cpu", parent_age=5000, execution_options=options,
+    )
+    resumed_engine.bind_execution_runtime(
+        runtime_path, nominal_microbatch_cases=8, default_execution_options=options,
+    )
+    resumed_provider = _BatchProvider()
+    resumed_engine.set_runtime_overrides(provider=resumed_provider)
+    assert resumed_engine.config.microbatch_cases == 8
+    assert resumed_engine.nominal_microbatch_cases == 8
+    assert resumed_engine.runtime_microbatch_cases == 24
+    assert resumed_provider.microbatch_size == 24
+    assert resumed_engine.runtime_execution_options == runtime_options
+    mismatched_engine = research.ResearchTrainingEngine(
+        engine_config, device="cpu", parent_age=5000, execution_options=options,
+    )
+    with pytest.raises(ValueError, match="nominal microbatch identity"):
+        mismatched_engine.bind_execution_runtime(
+            runtime_path, nominal_microbatch_cases=16, default_execution_options=options,
+        )
