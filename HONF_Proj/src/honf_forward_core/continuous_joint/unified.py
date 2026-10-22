@@ -16,13 +16,10 @@ class AllOpenContextPolicy(nn.Module):
 
 
 def local_input_adapter(dataset):
-    if dataset == "thermal":
-        from channelthermal.local_records import feature_contract, local_records_scene
-    elif dataset == "wind":
-        from windfarm.local_records import feature_contract, local_records_scene
-    else:
-        raise ValueError("Unified local records require an explicit thermal/wind input capability.")
-    return feature_contract, local_records_scene
+    """Legacy constructor shim; execution consumes an adapter capability."""
+    from honf_runtime.local_input_adapters import resolve_local_input_capability
+    capability = resolve_local_input_capability(dataset)
+    return lambda: dict(capability.contract), capability.transform
 
 
 class UnifiedPreparationMixin:
@@ -31,7 +28,8 @@ class UnifiedPreparationMixin:
 
     def _initialize_unified_preparation(self, dataset):
         self.input_dataset = dataset
-        contract, _ = local_input_adapter(dataset)
+        contract, transform = local_input_adapter(dataset)
+        self._local_input_transform = transform
         self.local_input_contract = contract()
         self.dropped_parent_parameter_names = tuple(
             name for name in self.state_dict() if name.split('.')[0] in SUMMARY_ROOTS)
@@ -50,7 +48,9 @@ class UnifiedPreparationMixin:
     def _context_value_policy(self):
         if self._unified_context_plan is not None:
             from .preparation import FrozenContextPolicy
-            return FrozenContextPolicy(self._unified_context_plan)
+            policy=FrozenContextPolicy(self._unified_context_plan)
+            policy.execution_backend=getattr(self,'context_execution_backend','segment')
+            return policy
         return (self._all_open_context_policy if self.routing_mode == "dense"
                 else self.router.incidence)
 
@@ -69,8 +69,7 @@ class UnifiedPreparationMixin:
             expected = self.context_depth*scene.batch_size*(scene.num_modules+scene.num_environment_tokens)**2*(self.num_heads+1)
             if expected > cap:
                 raise ValueError('Full applied context trace exceeds its element budget; use a smaller named scene panel.')
-        _, transform = local_input_adapter(self.input_dataset)
-        transformed = transform(scene)
+        transformed = self._local_input_transform(scene)
         prepared = super().prepare(transformed, **options)
         prepared.local_input_source_scene = scene
         prepared.local_input_source_versions = scene.tensor_version_stamp()
@@ -103,7 +102,15 @@ class UnifiedPreparationMixin:
         stages = tuple(cycle_trace.get("applied_context_stages", ()))
         prepared.applied_context_stages = stages
         prepared.context_work_summary = cycle_trace.get("context_work_summary")
-        prepared.context_stage_metadata = cycle_trace.get("context_stage_metadata", ())
+        metadata=cycle_trace.get("context_stage_metadata", ())
+        if metadata:
+            # One small transfer at the preparation boundary, rather than
+            # synchronizing once for every route inside both context cycles.
+            counts=torch.stack([torch.stack((row['eligible_edges'],row['positive_value_edges']))
+                                for row in metadata]).detach().cpu().tolist()
+            metadata=tuple(dict(row,eligible_edges=count[0],positive_value_edges=count[1])
+                           for row,count in zip(metadata,counts))
+        prepared.context_stage_metadata = metadata
         if self._unified_context_plan is not None:
             from .preparation import FrozenSDPAContextPlan
             prepared.context_stage_metadata=tuple(dict(row,control_origin=(

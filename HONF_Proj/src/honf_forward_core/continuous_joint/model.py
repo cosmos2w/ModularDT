@@ -26,7 +26,8 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
     schema='continuous_joint_native_v1'
     def __init__(self,base_model_config,*,routing_mode='hypergraph',native_backend='packed',
                  checkpoint_pipeline=True,query_tile_size=256,entmax_temperature=1.):
-        if routing_mode not in ('dense','hypergraph','direct') or native_backend not in ('dense','packed'):
+        if routing_mode not in ('dense','hypergraph','direct') or native_backend not in (
+                'dense','packed','source_order','segment','dense_weighted'):
             raise ValueError('Invalid continuous routing/execution capability.')
         if type(query_tile_size) is not int or query_tile_size<1 or type(checkpoint_pipeline) is not bool:
             raise ValueError('Invalid full-pipeline checkpoint settings.')
@@ -35,6 +36,9 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
             raise ValueError('Continuous native retrieval requires the original A2-D base.')
         self.routing_mode=routing_mode;self.native_backend=native_backend
         self.checkpoint_pipeline=checkpoint_pipeline;self.query_tile_size=query_tile_size
+        self.checkpoint_mode='tile' if checkpoint_pipeline else 'off'
+        self.context_execution_backend='segment'
+        self._entmax_temperature_value=float(entmax_temperature)
         self._joint_epoch=3000;self._joint_update_index=0;self._joint_macro_clock=0
         self._joint_entries=[];self._joint_route_override=None;self._continuous_frozen_plan=None
         super().__init__(**base)
@@ -49,6 +53,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         self._initialize_named_parameters()
         with torch.no_grad():self.environment_conditioning.weight.zero_()
         self.router=ContinuousRouter(self.num_heads,mode=routing_mode,temperature=entmax_temperature)
+        self._entmax_temperature_value=float(self.router.entmax_temperature)
         self.joint_budget=ContinuousBudgetState()
 
     @classmethod
@@ -64,7 +69,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         base=ContentHypergraphCoreV2.get_config(self);base['schema']=ContentHypergraphCoreV2.schema
         return dict(schema=self.schema,base_model_config=base,routing_mode=self.routing_mode,
             native_backend=self.native_backend,checkpoint_pipeline=self.checkpoint_pipeline,
-            query_tile_size=self.query_tile_size,entmax_temperature=float(self.router.entmax_temperature))
+            query_tile_size=self.query_tile_size,entmax_temperature=self._entmax_temperature_value)
     @classmethod
     def from_config(cls,config):
         c=dict(config)
@@ -83,7 +88,35 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
     def _config_key(self):
         return (tuple(sorted(ContentHypergraphCoreV2.get_config(self).items())),self.routing_mode,
             self.native_backend,self.checkpoint_pipeline,self.query_tile_size,self._joint_epoch,
-            self._joint_update_index,self._joint_macro_clock,float(self.router.entmax_temperature))
+            self._joint_update_index,self._joint_macro_clock,self._entmax_temperature_value,
+            self.checkpoint_mode,self.context_execution_backend)
+
+    def set_execution_options(self,*,backend=None,query_tile_size=None,checkpoint=None,context_backend=None):
+        """Select execution without changing trained gates or physical laws.
+
+        Change these before preparing a scene: the prepared-state key includes
+        the options so an old prepared graph cannot silently cross a change.
+        """
+        if backend is not None:
+            if backend not in ('dense','packed','source_order','segment','dense_weighted'):
+                raise ValueError('Unknown continuous execution backend.')
+            self.native_backend=backend
+        if query_tile_size is not None:
+            if type(query_tile_size) is not int or query_tile_size<1:
+                raise ValueError('Query tile size must be a positive integer.')
+            self.query_tile_size=query_tile_size
+        if checkpoint is not None:
+            if checkpoint not in ('off','tile','values'):
+                raise ValueError('Checkpoint execution must be off, values or tile.')
+            self.checkpoint_mode=checkpoint
+            self.checkpoint_pipeline=checkpoint!='off'
+        if context_backend is not None:
+            if context_backend not in ('segment','dense_weighted'):
+                raise ValueError('Unknown contextual reduction backend.')
+            self.context_execution_backend=context_backend
+        if hasattr(self,'router'):
+            self.router.incidence.execution_backend=self.context_execution_backend
+        return self
     def _captures_native_routes(self):return self.routing_mode=='hypergraph'
     def _native_capture_route_names(self):return ('mm','me','em','ee')
     def _uses_native_retrieval(self):return True
@@ -163,13 +196,14 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         # Frozen plans are scoped to the forward call. Checkpoint backward runs
         # after that scope closes, so a frozen-plan diagnostic retains its
         # bounded tile graph instead of recomputing with live routing.
-        return self.checkpoint_pipeline and torch.is_grad_enabled() and self._continuous_frozen_plan is None
+        return self.checkpoint_mode=='tile' and torch.is_grad_enabled() and self._continuous_frozen_plan is None
 
     def _read(self,kind,organization,query,qstates,gate,scores=None,return_messages=False):
         scene=organization.scene;is_m=kind=='module'
         valid=getattr(scene,kind+'_mask')
         if not is_m:valid=valid & (scene.environment_measure>0)
-        if self.routing_mode=='dense' and self._continuous_frozen_plan is None:
+        if (self.routing_mode=='dense' and self.native_backend in ('packed','dense','source_order')
+                and self._continuous_frozen_plan is None):
             # The all-open control keeps the literal e3000 parent's typed
             # normalizer and reduction order. This still executes entirely
             # inside the full query-tile checkpoint; H/S use the guarded law.
@@ -191,8 +225,9 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
             valid=valid,measure=getattr(scene,kind+'_measure'),frame_scale=organization.frame_scale,
             keys=organization.direct_source_keys if is_m else organization.joint_environment_keys,
             values=organization.direct_source_values if is_m else organization.joint_environment_values,
-            gate=gate,scores=scores,backend='dense' if self.routing_mode=='dense' else self.native_backend,
+            gate=gate,scores=scores,backend=self.native_backend,
             return_messages=return_messages,
+            checkpoint_values=self.checkpoint_mode=='values',
             reference=self._measure_references(scene,qstates.dtype)[0 if is_m else 1],
             frozen_coefficients=(None if self._continuous_frozen_plan is None else
                 self._continuous_frozen_plan.module_coefficients if is_m else self._continuous_frozen_plan.environment_coefficients))
@@ -221,6 +256,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
     def _prepare_native_decode(self,organization,query,query_states,*,trace_enabled=False):
         gates,seeds,envelope,qmask,raw_e=self._continuous_route_tile(organization,query,query_states)
         environment=self._read('environment',organization,query,query_states,gates[...,organization.scene.num_modules:],scores=raw_e)
+        environment=SimpleNamespace(**vars(environment),trace_enabled=trace_enabled)
         conditioned=query_states+self.environment_conditioning(environment.context)
         # Physical and work checkpoint regions have independent saved-tensor
         # lifetimes. A work-only VJP must never recompute or retain wide values.
@@ -241,14 +277,18 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         gates,environment,seeds,work=decode_context
         m=self._read('module',organization,query,query_states,gates[...,:organization.scene.num_modules],return_messages=return_messages)
         counts={'joint_M_'+k:v for k,v in m.counts.items()};counts.update({'joint_E_'+k:v for k,v in environment.counts.items()})
+        # M is scored once for routing, then again after E conditioning for
+        # information attention. E routing scores are reused by its reader.
+        counts['joint_pre_E_M_score_rows']=(m.counts['candidate_rows']
+            if self.routing_mode!='dense' and self._continuous_frozen_plan is None else 0)
         counts.update(fine_executed_rows=m.counts['value_rows'],fine_selected_rows=m.counts['selected_rows'],
-            fine_message_projection_rows=m.counts['value_rows'],fine_scalar_projection_rows=m.counts['scalar_projection_rows'],
+            fine_message_projection_rows=m.counts['message_projection_rows'],fine_scalar_projection_rows=m.counts['scalar_projection_rows'],
             fine_fourier_feature_entries=m.counts['fourier_entries'],fine_hidden_entries=m.counts['hidden_entries'],
             source_score_rows=m.counts['score_rows'],native_environment_consumed_ids=environment.counts['value_rows'],native_environment_metadata_ids=0)
         trace=dict(joint_hard_support=gates>0,native_hard_support=gates[...,:organization.scene.num_modules]>0,
             joint_environment_support=gates[...,organization.scene.num_modules:]>0,
             joint_environment_access=environment.alpha,joint_environment_context=environment.context,
-            joint_conditioned_query=query_states)
+            joint_conditioned_query=query_states) if return_messages or getattr(environment,'trace_enabled',False) else {}
         return SimpleNamespace(context=m.context,alpha=m.alpha,response=m.response,messages=m.messages,counts=counts,trace=trace,work=work)
 
     def _tile(self,organization,query,controls,accumulation_dtype,local_gates=None,return_affine=False):
@@ -266,10 +306,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
             temp=direct+self._local_apply(pairs,coeff,controls,query.batch_size,query.num_queries,dtype=dtype)
             if query.query_mask is not None:temp=temp*query.query_mask
         # Only fixed-size work summaries and compact physical outputs escape.
-        counts=torch.tensor([result.counts['joint_M_value_rows'],result.counts['joint_E_value_rows'],
-            result.counts['joint_M_selected_rows'],result.counts['joint_E_selected_rows'],
-            result.counts['joint_M_available_present_rows'],result.counts['joint_E_available_present_rows'],
-            result.counts['joint_M_candidate_rows'],result.counts['joint_E_candidate_rows']],device=qstates.device,dtype=torch.long)
+        counts=self._compact_execution_counts(result.counts,qstates)
         if return_affine:return field,result.response,coeff,result.work,counts
         return field,temp,result.work,counts
 
@@ -279,10 +316,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
             organization.frame_scale,self._module_measure_reference(organization.scene,qstates.dtype),
             local_gates=local_gates,execution_backend=self.reader_execution_backend)
         result=self._decode_native_values(organization,query,qstates,pairs,decode_context=ctx)
-        counts=torch.tensor([result.counts['joint_M_value_rows'],result.counts['joint_E_value_rows'],
-            result.counts['joint_M_selected_rows'],result.counts['joint_E_selected_rows'],
-            result.counts['joint_M_available_present_rows'],result.counts['joint_E_available_present_rows'],
-            result.counts['joint_M_candidate_rows'],result.counts['joint_E_candidate_rows']],device=qstates.device,dtype=torch.long)
+        counts=self._compact_execution_counts(result.counts,qstates)
         return result.response,coeff,result.work,counts
 
     def _read_for_response(self,organization,query,*,edge_gates=None,uniform_access=False,local_gates=None):
@@ -320,20 +354,35 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         direct=torch.cat(coefficients,1) if coefficients else organization.module_states.new_zeros(query.batch_size,0,organization.scene.num_modules)
         return None,direct,pairs,local_coeff,self._work_count_dict(total_counts,query)
 
+    @staticmethod
+    def _compact_execution_counts(counts,reference):
+        keys=[f'joint_{kind}_{metric}' for metric in (
+            'value_rows','selected_rows','available_present_rows','candidate_rows',
+            'message_projection_rows','head_reduction_projection_rows','scalar_projection_rows')
+            for kind in ('M','E')]
+        return torch.stack([torch.as_tensor(counts.get(key,0),device=reference.device,dtype=torch.long)
+                            for key in keys])
+
     def _work_count_dict(self,total_counts,query):
-        values=[0]*8 if total_counts is None else [int(v) for v in total_counts.detach().cpu()]
+        values=[0]*14 if total_counts is None else total_counts.detach().cpu().tolist()
+        if len(values)==8:values += [values[0],values[1],0,0,values[0] if self.thermal_response_rank else 0,0]
         result=dict(receiver_rows=query.batch_size*query.num_queries,
-            fine_executed_rows=values[0],fine_selected_rows=values[2],fine_message_projection_rows=values[0],
-            fine_scalar_projection_rows=values[0] if self.thermal_response_rank else 0,
+            fine_executed_rows=values[0],fine_selected_rows=values[2],fine_message_projection_rows=values[8],
+            fine_head_reduction_projection_rows=values[10],
+            fine_scalar_projection_rows=values[12],
             fine_fourier_feature_entries=values[0]*7*self.coordinate_dim,fine_hidden_entries=values[0]*self.local_hidden_dim,
             source_score_rows=values[6],native_environment_consumed_ids=values[1],native_environment_metadata_ids=0)
         for index,kind in enumerate(('M','E')):
             v,selected,available,candidate=values[index],values[index+2],values[index+4],values[index+6]
             result.update({'joint_'+kind+'_value_rows':v,'joint_'+kind+'_selected_rows':selected,
                 'joint_'+kind+'_available_present_rows':available,'joint_'+kind+'_candidate_rows':candidate,
-                'joint_'+kind+'_score_rows':candidate,'joint_'+kind+'_message_projection_rows':v,
-                'joint_'+kind+'_scalar_projection_rows':v if kind=='M' and self.thermal_response_rank else 0,
+                'joint_'+kind+'_score_rows':candidate,'joint_'+kind+'_message_projection_rows':values[8+index],
+                'joint_'+kind+'_hidden_value_rows':v,
+                'joint_'+kind+'_head_reduction_projection_rows':values[10+index],
+                'joint_'+kind+'_scalar_projection_rows':values[12+index],
                 'joint_'+kind+'_fourier_entries':v*7*self.coordinate_dim,'joint_'+kind+'_hidden_entries':v*self.local_hidden_dim})
+        result['joint_pre_E_M_score_rows']=(values[6]
+            if self.routing_mode!='dense' and self._continuous_frozen_plan is None else 0)
         if self.training and torch.is_grad_enabled() and self.routing_mode!='dense':
             result['continuous_work_replay_score_rows_M']=values[6]
             result['continuous_work_replay_score_rows_E']=values[7]
@@ -417,6 +466,7 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         super()._load_from_state_dict(state_dict,prefix,local_metadata,strict,missing_keys,unexpected_keys,error_msgs)
         self._joint_epoch=int(self.joint_epoch);self._joint_update_index=int(self.joint_update_index)
         self._joint_macro_clock=int(self.joint_macro_clock)
+        self._entmax_temperature_value=float(state_dict.get(prefix+'router.entmax_temperature',self.router.entmax_temperature).detach().cpu())
     def joint_begin_update(self,epoch,update_index):
         self._joint_epoch=int(epoch);self._joint_update_index=int(update_index)
         self.joint_epoch.fill_(epoch);self.joint_update_index.fill_(update_index);self.joint_begin_microbatch()

@@ -31,10 +31,17 @@ class ContinuousBudgetState(nn.Module):
         self.duals=nn.ModuleDict({k:BudgetDualState(0.,rng_identity='round10_continuous_'+k) for k in ('M','E')})
         self.register_buffer('epoch',torch.tensor(3000,dtype=torch.long))
         self.register_buffer('macro_index',torch.tensor(0,dtype=torch.long))
+        self._epoch_value=3000;self._macro_index_value=0
     def set_clock(self,epoch,update_index=0):
+        self._epoch_value=int(epoch);self._macro_index_value=int(update_index)
         self.epoch.fill_(epoch);self.macro_index.fill_(update_index)
         return self.schedule()
-    def schedule(self):return ContinuousBudgetSchedule.state_at_epoch(int(self.epoch),int(self.macro_index))
+    def schedule(self):
+        return ContinuousBudgetSchedule.state_at_epoch(self._epoch_value,self._macro_index_value)
+    def _load_from_state_dict(self,state_dict,prefix,local_metadata,strict,missing_keys,unexpected_keys,error_msgs):
+        super()._load_from_state_dict(state_dict,prefix,local_metadata,strict,missing_keys,unexpected_keys,error_msgs)
+        self._epoch_value=int(self.epoch.detach().cpu())
+        self._macro_index_value=int(self.macro_index.detach().cpu())
     def get_extra_state(self):return {'schema':ContinuousBudgetSchedule.schema}
     def set_extra_state(self,state):
         if state!={'schema':ContinuousBudgetSchedule.schema}:raise ValueError('Continuous work schema differs.')

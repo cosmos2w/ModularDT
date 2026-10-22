@@ -107,21 +107,26 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
         attended = attended.transpose(1, 2).reshape(query.shape[0], query.shape[2], attention.width)
         update = attention.output(attended) * row_present[..., None].to(attended.dtype)
         return update, coefficients.permute(0, 3, 1, 2), gates, mass
-    rows = (gates > 0).nonzero(as_tuple=False)
     batch, _, receivers, _ = query.shape
-    reduced = value.new_zeros(batch * receivers, attention.heads, attention.head_width)
-    if rows.numel():
-        b, r, d = rows.unbind(-1)
-        messages = value.permute(0, 2, 1, 3)[b, d]
-        weights = coefficients[b, r, d]
-        contribution = messages * weights[..., None]
-        reduced = reduced.index_add(0, b * receivers + r, contribution)
+    backend=getattr(policy,'execution_backend','segment')
+    if backend=='dense_weighted':
+        # Same live guarded coefficients and message mass as the packed path;
+        # no donor-edge-wide value expansion and no all-open substitution.
+        reduced=torch.einsum('brdh,bhdv->brhv',coefficients,value)
+    elif backend=='segment':
+        rows = (gates > 0).nonzero(as_tuple=False)
+        reduced = value.new_zeros(batch * receivers, attention.heads, attention.head_width)
+        if rows.numel():
+            b, r, d = rows.unbind(-1)
+            messages = value.permute(0, 2, 1, 3)[b, d]
+            weights = coefficients[b, r, d]
+            contribution = messages * weights[..., None]
+            reduced = reduced.index_add(0, b * receivers + r, contribution)
+        else:
+            # Keep an unused value path's zero gradient without reading it.
+            reduced = reduced + value.unsqueeze(0)[:0].sum()
     else:
-        # A dense zero-coefficient reduction still visits projected V in its
-        # autograd graph. Preserve its zero gradient (and AdamW state/decay)
-        # without materializing donor-edge values. Empty views also avoid
-        # reading poisoned or nonfinite values on an unused value path.
-        reduced = reduced + value.unsqueeze(0)[:0].sum()
+        raise ValueError('Unknown contextual value execution backend.')
     reduced = reduced.reshape(batch, receivers, attention.width)
     # A projection bias belongs to the donor path. Split it equally across
     # heads, so its reduced coefficient is mean per-head message mass.
@@ -145,8 +150,8 @@ def context_stage_manifest(cycle_trace):
             scene_tensor_versions=snapshot.scene_tensor_versions,
             source_state_version=snapshot.stage_identity.split('/')[0] + '/' + dict(
                 mm="boundary_M",em="after_MM_M",ee="after_EM_E",me="after_EE_FFN_E")[route],
-            eligible_edges=int(snapshot.allowed.sum().detach()),
-            positive_value_edges=int((gates > 0).sum().detach())))
+            eligible_edges=snapshot.allowed.sum().detach(),
+            positive_value_edges=(gates > 0).sum().detach()))
     return rows
 
 
