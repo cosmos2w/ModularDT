@@ -774,18 +774,26 @@ def summarize_actual_cached_endpoint_arrays(arrays: Mapping[str, Any], family_id
                 raise ValueError("Cached, fresh native, and physical endpoint axes differ.")
             if cached.shape[-1] != len(channels):
                 raise ValueError(f"Actual cached {role} endpoint has an unexpected component axis.")
+            if valid.shape == cached.shape[:-1]:
+                component_valid = np.broadcast_to(valid[..., None], cached.shape)
+            else:
+                try:
+                    component_valid = np.broadcast_to(valid, cached.shape)
+                except ValueError as error:
+                    raise ValueError("Absolute endpoint validity mask does not broadcast to role values.") from error
             component_results = {}
             for index, channel in enumerate(channels):
+                channel_valid = component_valid[..., index]
                 component_results[channel] = {
                     "units": component_units[channel],
                     "cached_K_vs_fresh_native_absolute_endpoint": _absolute_error_statistics(
-                        cached[..., index], fresh[..., index], valid,
+                        cached[..., index], fresh[..., index], channel_valid,
                     ),
                     "cached_K_vs_physical_reference_endpoint": _absolute_error_statistics(
-                        cached[..., index], reference[..., index], valid,
+                        cached[..., index], reference[..., index], channel_valid,
                     ),
                     "fresh_native_vs_physical_reference_endpoint": _absolute_error_statistics(
-                        fresh[..., index], reference[..., index], valid,
+                        fresh[..., index], reference[..., index], channel_valid,
                     ),
                 }
             aggregate_interpretation = (

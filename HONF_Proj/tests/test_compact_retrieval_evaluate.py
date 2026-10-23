@@ -227,7 +227,9 @@ def test_actual_cached_endpoint_summary_keeps_physical_components_separate() -> 
             arrays[prefix + "actual_cache_absolute"] = cached
             arrays[prefix + "fresh_native_absolute_endpoint"] = fresh
             arrays[prefix + "physical_endpoint_reference"] = reference
-            arrays["heat__" + role + "__valid"] = np.asarray([True, False, False])
+            component_valid = np.zeros(shape, dtype=bool)
+            component_valid[0, :] = True
+            arrays["heat__" + role + "__valid"] = component_valid
     summary = summarize_actual_cached_endpoint_arrays(arrays, "0318")
     assert summary["comparison_count"] == 6
     fluid = summary["comparisons"][0]
