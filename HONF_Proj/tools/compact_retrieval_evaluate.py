@@ -594,9 +594,12 @@ def summarize_cached_heat_reuse_arrays(arrays: Mapping[str, Any], family_id: str
                 valid = np.broadcast_to(valid, cached.shape)
             except ValueError as error:
                 raise ValueError("Saved physical-response mask does not broadcast to its role values.") from error
-            finite = valid & np.isfinite(cached) & np.isfinite(fresh) & np.isfinite(reference)
+            finite_values = np.isfinite(cached) & np.isfinite(fresh) & np.isfinite(reference)
+            if np.any(valid & ~finite_values):
+                raise ValueError("Fixed-layout K comparison contains nonfinite values on its physical-valid support.")
+            finite = valid
             if not finite.any():
-                raise ValueError("Fixed-layout K comparison needs nonempty finite saved response values.")
+                raise ValueError("Fixed-layout K comparison needs nonempty physical-valid saved response values.")
             channels = component_names[role]
             if cached.ndim < 1 or cached.shape[-1] != len(channels):
                 raise ValueError(f"Saved {role} response has {cached.shape[-1] if cached.ndim else 0} channels; expected {len(channels)}.")
@@ -626,6 +629,466 @@ def summarize_cached_heat_reuse_arrays(arrays: Mapping[str, Any], family_id: str
             })
     return {"schema": "round12_fixed_layout_K_reuse_components_v2", "family_id": str(family_id),
             "comparison_count": len(rows), "comparisons": rows}
+
+
+def prepare_cached_native_response(model: Any, prepared: Any) -> tuple[Any, dict[str, Any]]:
+    """Promote one baseline native preparation to retained affine response factors."""
+    import torch
+
+    promote = getattr(model, "prepare_affine_application", None)
+    if not callable(promote):
+        raise TypeError("Thermal adapter does not expose retained affine response preparation.")
+    cached = promote(prepared)
+    affine = getattr(cached, "affine_query", None)
+    if affine is None:
+        raise RuntimeError("Affine promotion returned no retained response factors.")
+
+    def tensor_inventory(value: Any) -> dict[str, Any]:
+        if torch.is_tensor(value):
+            return {"type": "Tensor", "shape": list(value.shape), "entries": int(value.numel())}
+        return {"type": type(value).__name__, "shape": None, "entries": None}
+
+    local_pairs = getattr(affine, "local_pairs", None)
+    factor_work = getattr(affine, "source_read_work", None)
+    if factor_work is not None:
+        if not isinstance(factor_work, Mapping) or any(
+            not isinstance(name, str) or type(value) is not int or value < 0
+            for name, value in factor_work.items()
+        ):
+            raise RuntimeError("Affine response preparation returned invalid source-read work counts.")
+        factor_work = dict(factor_work)
+    return cached, {
+        "cache_present": True,
+        "promotion_method": "prepare_affine_application",
+        "prepared_affine_type": type(affine).__name__,
+        "basis": tensor_inventory(getattr(affine, "basis", None)),
+        "direct_coefficients": tensor_inventory(getattr(affine, "direct_coefficients", None)),
+        "local_coefficients": tensor_inventory(getattr(affine, "local_coefficients", None)),
+        "local_pair_count": int(getattr(local_pairs, "count", 0)),
+        "factor_preparation_source_read_work": factor_work,
+    }
+
+
+def apply_cached_native_response(
+    model: Any,
+    prepared: Any,
+    physical_heat: Any,
+    *,
+    increment: bool,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Apply controls through retained factors and validate same-call work counters."""
+    import torch
+    from honf_runtime.joint_native_physics import _response_role_arrays
+
+    if getattr(prepared, "affine_query", None) is None:
+        raise ValueError("Cached Thermal response application requires promoted affine factors.")
+    apply = getattr(model, "apply_native_with_work_counts", None)
+    if not callable(apply):
+        raise TypeError("Thermal v2 adapter must expose apply_native_with_work_counts for cache accounting.")
+    output, work = apply(
+        prepared,
+        physical_heat,
+        increment=bool(increment),
+        accumulation_dtype=torch.float64,
+    )
+    if not isinstance(work, Mapping):
+        raise RuntimeError("Cached native response application omitted work counters.")
+    normalized_work: dict[str, int] = {}
+    for name, value in work.items():
+        if not isinstance(name, str) or type(value) is not int or value < 0:
+            raise RuntimeError("Cached native response returned invalid work counters.")
+        normalized_work[name] = value
+    # `direct_dense_reference_entries` describes retained A2-D coefficients
+    # consumed by the contraction. It is cached-factor application work, not
+    # a reader pass, and is expected to be nonzero for this architecture.
+    reader_keys = ("edge_rows", "edge_message_rows", "edge_access_rows", "direct_source_rows",
+                   "direct_source_message_entries", "direct_temperature_coefficient_entries",
+                   "field_head_rows")
+    unexpected_reader_work = {name: normalized_work.get(name, 0) for name in reader_keys
+                              if normalized_work.get(name, 0) != 0}
+    if unexpected_reader_work:
+        raise RuntimeError(f"Retained affine application unexpectedly repeated reader work: {unexpected_reader_work}.")
+    return _response_role_arrays(output), normalized_work
+
+
+def _absolute_error_statistics(left: Any, right: Any, valid: Any) -> dict[str, Any]:
+    import numpy as np
+
+    left_array = np.asarray(left, dtype=np.float64)
+    right_array = np.asarray(right, dtype=np.float64)
+    if left_array.shape != right_array.shape:
+        raise ValueError("Absolute cached endpoint arrays must share the same role axes.")
+    mask = np.asarray(valid, dtype=bool)
+    if mask.shape == left_array.shape[:-1]:
+        mask = mask[..., None]
+    try:
+        mask = np.broadcast_to(mask, left_array.shape)
+    except ValueError as error:
+        raise ValueError("Absolute endpoint validity mask does not broadcast to role values.") from error
+    finite_values = np.isfinite(left_array) & np.isfinite(right_array)
+    if np.any(mask & ~finite_values):
+        raise ValueError("Absolute endpoint comparison contains nonfinite values on physical-valid support.")
+    selected = left_array[mask] - right_array[mask]
+    if selected.size == 0:
+        raise ValueError("Absolute endpoint comparison has no valid finite physical entries.")
+    return {
+        "valid_values": int(selected.size),
+        "absolute_rmse": float(np.sqrt(np.mean(np.square(selected)))),
+        "absolute_mae": float(np.mean(np.abs(selected))),
+        "maximum_absolute_error": float(np.max(np.abs(selected))),
+    }
+
+
+def summarize_actual_cached_endpoint_arrays(arrays: Mapping[str, Any], family_id: str) -> dict[str, Any]:
+    """Summarize cached absolute endpoints against same-checkpoint and physical evidence."""
+    import numpy as np
+
+    component_names = {
+        "fluid_fields": ("u", "v", "p", "omega", "temperature"),
+        "interface": ("temperature", "q_proxy"),
+        "solid_temperature": ("temperature",),
+    }
+    component_units = {
+        "u": "dataset velocity", "v": "dataset velocity", "p": "dataset pressure",
+        "omega": "dataset vorticity", "temperature": "dataset temperature",
+        "q_proxy": "dataset heat-flux proxy",
+    }
+    comparisons = []
+    for heat_label in ("heat_transfer_plus", "heat_transfer_minus"):
+        for role, channels in component_names.items():
+            prefix = f"{heat_label}__{role}__"
+            required = (
+                prefix + "actual_cache_absolute",
+                prefix + "fresh_native_absolute_endpoint",
+                prefix + "physical_endpoint_reference",
+                "heat__" + role + "__valid",
+            )
+            absent = [name for name in required if name not in arrays]
+            if absent:
+                raise ValueError(f"Actual cached endpoint evidence is missing arrays: {absent}.")
+            cached = np.asarray(arrays[prefix + "actual_cache_absolute"], dtype=np.float64)
+            fresh = np.asarray(arrays[prefix + "fresh_native_absolute_endpoint"], dtype=np.float64)
+            reference = np.asarray(arrays[prefix + "physical_endpoint_reference"], dtype=np.float64)
+            valid = np.asarray(arrays["heat__" + role + "__valid"], dtype=bool)
+            if cached.shape != fresh.shape or cached.shape != reference.shape:
+                raise ValueError("Cached, fresh native, and physical endpoint axes differ.")
+            if cached.shape[-1] != len(channels):
+                raise ValueError(f"Actual cached {role} endpoint has an unexpected component axis.")
+            component_results = {}
+            for index, channel in enumerate(channels):
+                component_results[channel] = {
+                    "units": component_units[channel],
+                    "cached_K_vs_fresh_native_absolute_endpoint": _absolute_error_statistics(
+                        cached[..., index], fresh[..., index], valid,
+                    ),
+                    "cached_K_vs_physical_reference_endpoint": _absolute_error_statistics(
+                        cached[..., index], reference[..., index], valid,
+                    ),
+                    "fresh_native_vs_physical_reference_endpoint": _absolute_error_statistics(
+                        fresh[..., index], reference[..., index], valid,
+                    ),
+                }
+            aggregate_interpretation = (
+                "heterogeneous channel units; descriptive aggregate only, not a scientific scalar metric"
+                if role in ("fluid_fields", "interface")
+                else "single temperature channel in dataset-native units"
+            )
+            comparisons.append({
+                "family_id": str(family_id),
+                "heat_vector_label": heat_label,
+                "role": role,
+                "aggregate_interpretation": aggregate_interpretation,
+                "component_comparisons": component_results,
+            })
+    return {
+        "schema": "round12_actual_cached_K_absolute_endpoint_components_v1",
+        "family_id": str(family_id),
+        "comparison_count": len(comparisons),
+        "comparisons": comparisons,
+    }
+
+
+def evaluate_actual_cached_k_cli(args: argparse.Namespace) -> dict[str, Any]:
+    """Reuse a promoted native affine cache at saved TRAIN heat endpoints only."""
+    import numpy as np
+    import torch
+    from honf_runtime.joint_native_evaluation import file_sha256, write_arrays, write_json_new
+    from honf_runtime.joint_native_physics import _response_role_arrays, _response_structure
+    from honf_runtime.research_training import (
+        _load_run_manifest,
+        _model_from_run_payload,
+        _read_run_checkpoint,
+    )
+
+    run_dir = args.run_dir.resolve(strict=True)
+    run_manifest, _ = _load_run_manifest(run_dir)
+    payload, checkpoint = _read_run_checkpoint(run_dir, args.checkpoint)
+    if payload.get("workflow") != "ordinary_honf_research_train_v1":
+        raise ValueError("Actual cached-K evaluation requires a literal Thermal research checkpoint.")
+    if args.expected_epoch is not None and int(payload.get("epoch", -1)) != args.expected_epoch:
+        raise ValueError("Literal checkpoint epoch differs from the requested evidence label.")
+    config_name = str(run_manifest["config"].get("config_name", ""))
+    identity_name = str(payload["experiment_identity"].get("config_name", ""))
+    if config_name and identity_name and config_name != identity_name:
+        raise ValueError("Run manifest and selected checkpoint name different sealed research configs.")
+    arm_payload = response_payload_for_arm(payload, args.arm_label)
+    arm = str(arm_payload["experiment_identity"]["treatment"])
+
+    response_result_path = args.response_result.resolve(strict=True)
+    response_result = json.loads(response_result_path.read_text())
+    response_provenance_path = response_result_path.parent / "provenance.json"
+    if not response_provenance_path.is_file():
+        raise FileNotFoundError("Saved response replay lacks its existing provenance.json binding.")
+    response_provenance = json.loads(response_provenance_path.read_text())
+    if (response_result.get("schema") != "round9_saved_physical_response_replay_v1"
+            or response_result.get("dataset") != "thermal"
+            or int(response_result.get("completed_epoch", -1)) != int(payload["epoch"])
+            or int(response_result.get("optimizer_updates", -1)) != 0
+            or int(response_result.get("new_solver_attempts", -1)) != 0):
+        raise ValueError("Saved response results must be read-only Thermal arrays at this checkpoint epoch.")
+    if (response_provenance.get("schema") != "thermal_saved_response_replay_provenance_v1"
+            or Path(str(response_provenance.get("run_directory", ""))).resolve() != run_dir
+            or Path(str(response_provenance.get("checkpoint", ""))).resolve() != checkpoint.resolve()
+            or int(response_provenance.get("checkpoint_epoch", -1)) != int(payload["epoch"])
+            or response_provenance.get("derived_arm_label") != arm):
+        raise ValueError("Saved response provenance is not bound to this run, checkpoint, and arm.")
+
+    inventory_path = args.inventory.resolve(strict=True)
+    inventory = json.loads(inventory_path.read_text())
+    if inventory.get("schema") != "round9_existing_physical_response_inventory_v1":
+        raise ValueError("Actual cached-K evaluation requires the inventoried Round9 physical responses.")
+    inventory_families = tuple(inventory.get("thermal_families", ()))
+    if tuple(str(row.get("family_id")) for row in inventory_families) != RESPONSE_FAMILY_IDS:
+        raise ValueError("Physical response inventory differs from the exact four-family Round12 panel.")
+    result_families = {str(row.get("family_id")): row for row in response_result.get("families", ())}
+    if set(result_families) != set(RESPONSE_FAMILY_IDS) or len(response_result.get("families", ())) != len(RESPONSE_FAMILY_IDS):
+        raise ValueError("Current response replay must contain exactly the four original TRAIN families.")
+
+    output = args.output
+    if output.exists():
+        raise FileExistsError("Actual cached-K output already exists; choose a fresh evidence path.")
+    output.mkdir(parents=True)
+    model = _model_from_run_payload(payload, torch.device(args.device))
+    options = arm_payload["experiment_identity"].get("execution_options")
+    if isinstance(options, Mapping):
+        setter = getattr(model.core, "set_execution_options", None)
+        if callable(setter):
+            setter(**dict(options))
+    model.eval()
+
+    def inference_call(function, *call_args, **call_kwargs):
+        with torch.no_grad():
+            return function(*call_args, **call_kwargs)
+
+    family_summaries = []
+    for inventory_source in inventory_families:
+        family_id = str(inventory_source["family_id"])
+        replay_family = result_families[family_id]
+        source_path = Path(str(inventory_source["path"])).resolve(strict=True)
+        expected_sha = str(inventory_source["sha256"])
+        if file_sha256(source_path) != expected_sha:
+            raise ValueError(f"Physical response family {family_id} differs from its inventoried bytes.")
+        if (Path(str(replay_family.get("source_path", ""))).resolve() != source_path
+                or replay_family.get("source_sha256") != expected_sha):
+            raise ValueError(f"Saved replay family {family_id} differs from the physical inventory binding.")
+        arrays_path = (response_result_path.parent / str(replay_family["arrays"])).resolve(strict=True)
+        if file_sha256(arrays_path) != str(replay_family.get("arrays_sha256", "")):
+            raise ValueError(f"Saved response arrays for family {family_id} changed after the current replay.")
+        with np.load(source_path, allow_pickle=False) as handle:
+            atlas = {name: handle[name] for name in handle.files}
+        with np.load(arrays_path, allow_pickle=False) as handle:
+            saved = {name: handle[name] for name in handle.files}
+        labels = atlas["all_labels"].tolist()
+        if saved.get("labels", np.asarray(())).tolist() != labels:
+            raise ValueError(f"Saved response labels for family {family_id} do not match its physical atlas.")
+        if not {"baseline", "heat_transfer_plus", "heat_transfer_minus"} <= set(labels):
+            raise ValueError(f"Family {family_id} lacks an existing admissible baseline and plus/minus heat pair.")
+        baseline_index = labels.index("baseline")
+        structure, fluid, local, _ = _response_structure(atlas, baseline_index, torch.device(args.device))
+        prepared = inference_call(model.prepare_native,
+            structure, fluid, local_query_points=local, ntheta=64,
+            scene_key=(family_id, "baseline"),
+        )
+        if getattr(prepared, "affine_query", None) is not None:
+            raise RuntimeError("Fresh native reference preparation was unexpectedly pre-promoted.")
+        baseline_controls = torch.as_tensor(
+            np.asarray(atlas["heating"][baseline_index:baseline_index + 1], dtype=np.float64),
+            device=torch.device(args.device),
+        )
+        fresh_baseline = inference_call(
+            lambda: _response_role_arrays(model.apply_native(
+                prepared, baseline_controls, accumulation_dtype=torch.float64,
+            )),
+        )
+        cached_prepared, cache_evidence = inference_call(
+            prepare_cached_native_response, model, prepared,
+        )
+        cached_baseline, baseline_work = inference_call(
+            apply_cached_native_response, model, cached_prepared, baseline_controls, increment=False,
+        )
+        output_arrays: dict[str, Any] = {
+            "labels": np.asarray(labels),
+            "native_module_ids": np.asarray(atlas["active_module_ids"]),
+            "module_centers_xy": np.asarray(atlas["module_centers_xy"][baseline_index]),
+            "baseline_heat": baseline_controls.detach().cpu().numpy(),
+        }
+        for role, value in cached_baseline.items():
+            output_arrays[f"baseline__{role}__actual_cache_absolute"] = np.asarray(value, dtype=np.float64)
+            output_arrays[f"baseline__{role}__fresh_native_absolute"] = np.asarray(
+                fresh_baseline[role], dtype=np.float64,
+            )
+
+        endpoint_rows = []
+        cached_apply_work: dict[str, Any] = {}
+        for heat_label in ("heat_transfer_plus", "heat_transfer_minus"):
+            endpoint_index = labels.index(heat_label)
+            endpoint_controls = torch.as_tensor(
+                np.asarray(atlas["heating"][endpoint_index:endpoint_index + 1], dtype=np.float64),
+                device=torch.device(args.device),
+            )
+            delta_controls = endpoint_controls - baseline_controls
+            fresh_absolute = inference_call(
+                lambda: _response_role_arrays(model.apply_native(
+                    prepared, endpoint_controls, accumulation_dtype=torch.float64,
+                )),
+            )
+            cached_absolute, absolute_work = inference_call(
+                apply_cached_native_response, model, cached_prepared, endpoint_controls, increment=False,
+            )
+            cached_delta, delta_work = inference_call(
+                apply_cached_native_response, model, cached_prepared, delta_controls, increment=True,
+            )
+            cached_apply_work[heat_label] = {
+                "absolute_endpoint": absolute_work,
+                "delta_endpoint": delta_work,
+            }
+            for role in ("fluid_fields", "interface", "solid_temperature"):
+                prefix = f"{heat_label}__{role}__"
+                required = (
+                    prefix + "prediction_delta",
+                    prefix + "reference_delta",
+                    "heat__" + role + "__valid",
+                )
+                absent = [name for name in required if name not in saved]
+                if absent:
+                    raise ValueError(f"Current response replay for {family_id} is missing arrays {absent}.")
+                fresh_delta = np.asarray(saved[prefix + "prediction_delta"], dtype=np.float64)
+                reference_delta = np.asarray(saved[prefix + "reference_delta"], dtype=np.float64)
+                valid = np.asarray(saved["heat__" + role + "__valid"], dtype=bool)
+                physical_endpoint = np.asarray(atlas[role + "_values"][endpoint_index], dtype=np.float64)
+                cached_absolute_values = np.asarray(cached_absolute[role], dtype=np.float64)
+                cached_delta_values = np.asarray(cached_delta[role], dtype=np.float64)
+                fresh_absolute_values = np.asarray(fresh_absolute[role], dtype=np.float64)
+                if not (fresh_delta.shape == reference_delta.shape == cached_delta_values.shape
+                        == cached_absolute_values.shape == fresh_absolute_values.shape == physical_endpoint.shape):
+                    raise ValueError(f"Actual cache endpoint {family_id}/{heat_label}/{role} has mismatched axes.")
+                output_arrays[prefix + "promoted_increment"] = cached_delta_values
+                output_arrays[prefix + "actual_cache_absolute"] = cached_absolute_values
+                output_arrays[prefix + "fresh_native_absolute_endpoint"] = fresh_absolute_values
+                output_arrays[prefix + "prediction_delta"] = fresh_delta
+                output_arrays[prefix + "reference_delta"] = reference_delta
+                output_arrays[prefix + "physical_endpoint_reference"] = physical_endpoint
+                output_arrays["heat__" + role + "__valid"] = valid
+            endpoint_rows.append({
+                "label": heat_label,
+                "physical_heating": endpoint_controls.detach().cpu().numpy().reshape(-1).tolist(),
+                "delta_heating": delta_controls.detach().cpu().numpy().reshape(-1).tolist(),
+                "scope": "existing atlas heat vector at this fixed original TRAIN layout",
+                "fresh_native_reference_application_count": 1,
+                "cached_absolute_application_count": 1,
+                "cached_delta_application_count": 1,
+            })
+
+        family_arrays_path = output / f"family_{family_id}.npz"
+        write_arrays(family_arrays_path, output_arrays)
+        delta_summary = summarize_cached_heat_reuse_arrays(output_arrays, family_id)
+        absolute_summary = summarize_actual_cached_endpoint_arrays(output_arrays, family_id)
+        family_summaries.append({
+            "family_id": family_id,
+            "source_path": str(source_path),
+            "source_sha256": expected_sha,
+            "saved_response_arrays": str(arrays_path),
+            "actual_cache_arrays": family_arrays_path.name,
+            "cache": cache_evidence,
+            "controls": endpoint_rows,
+            "fresh_native_baseline_reference_application_count": 1,
+            "fresh_native_total_reference_application_count": 3,
+            "affine_cache_promotion_count": 1,
+            "baseline_cached_apply_work_counts": baseline_work,
+            "cached_apply_work_counts": cached_apply_work,
+            "reader_recompute_work_counts": {
+                "baseline": {key: int(baseline_work.get(key, 0)) for key in (
+                    "edge_rows", "edge_message_rows", "edge_access_rows", "direct_source_rows",
+                    "direct_source_message_entries", "direct_temperature_coefficient_entries", "field_head_rows",
+                )},
+                **{
+                    label: {
+                        apply_kind: {key: int(counts.get(key, 0)) for key in (
+                            "edge_rows", "edge_message_rows", "edge_access_rows", "direct_source_rows",
+                            "direct_source_message_entries", "direct_temperature_coefficient_entries", "field_head_rows",
+                        )}
+                        for apply_kind, counts in row.items()
+                    }
+                    for label, row in cached_apply_work.items()
+                },
+            },
+            "retained_factor_application_work_counts": {
+                "baseline": {key: int(baseline_work.get(key, 0)) for key in (
+                    "direct_dense_reference_entries", "spatial_factor_entries", "local_contraction_rows",
+                    "direct_response_contraction_rows", "edge_response_contraction_rows",
+                )},
+                **{
+                    label: {
+                        apply_kind: {key: int(counts.get(key, 0)) for key in (
+                            "direct_dense_reference_entries", "spatial_factor_entries", "local_contraction_rows",
+                            "direct_response_contraction_rows", "edge_response_contraction_rows",
+                        )}
+                        for apply_kind, counts in row.items()
+                    }
+                    for label, row in cached_apply_work.items()
+                },
+            },
+            "cached_affine_application_count": 5,
+            "cached_k_delta_comparisons": delta_summary["comparisons"],
+            "cached_absolute_endpoint_comparisons": absolute_summary["comparisons"],
+        })
+
+    result = {
+        "schema": "round12_actual_cached_native_K_reuse_v1",
+        "status": "completed_actual_retained_affine_cache_reuse",
+        "arm": arm,
+        "checkpoint_epoch": int(payload["epoch"]),
+        "run_directory": str(run_dir),
+        "checkpoint": str(checkpoint),
+        "response_result": str(response_result_path),
+        "response_inventory": str(inventory_path),
+        "response_family_ids": list(RESPONSE_FAMILY_IDS),
+        "families": family_summaries,
+        "fresh_native_reference_application_count": 12,
+        "affine_cache_promotion_count": 4,
+        "cached_affine_application_count": 20,
+        "interpretation": "Each baseline native preparation is promoted once with the maintained affine-cache API. Three fresh native reference reads per family retain baseline and plus/minus absolute endpoints; five baseline, absolute-endpoint, and delta applications per family then use retained factors. Saved fresh endpoint deltas and physical atlas endpoints are also reused for comparisons. This demonstrates fixed-layout contraction reuse only, not speedup, generated-design validity, or physical causality.",
+        "optimizer_updates": 0,
+        "new_solver_attempts": 0,
+        "TEST_or_Wind_access": False,
+        "device": str(args.device),
+    }
+    write_json_new(output / "result.json", result)
+    write_json_new(output / "provenance.json", {
+        "schema": "round12_actual_cached_native_K_reuse_provenance_v1",
+        "run_directory": str(run_dir),
+        "checkpoint": str(checkpoint),
+        "checkpoint_epoch": int(payload["epoch"]),
+        "arm": arm,
+        "response_result": str(response_result_path),
+        "response_inventory": str(inventory_path),
+        "optimizer_updates": 0,
+        "new_solver_attempts": 0,
+        "TEST_or_Wind_access": False,
+        "device": str(args.device),
+    })
+    return {"status": "completed", "arm": arm, "epoch": int(payload["epoch"]),
+            "family_count": len(family_summaries), "output": str(output.resolve())}
 
 
 def summarize_parent_heat_reuse_cli(args: argparse.Namespace) -> dict[str, Any]:
@@ -671,7 +1134,8 @@ def summarize_parent_heat_reuse_cli(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "round12_fixed_layout_K_reuse_summary_v2",
         "status": "completed_saved_response_comparison",
         "arms": arms,
-        "interpretation": "Cached affine K contraction is compared with fresh native endpoint differences for the existing heat_transfer_plus/minus vectors at each saved fixed layout. Use component_comparisons for physical interpretation; aggregate fluid-field and interface rows have heterogeneous units and are descriptive only. Absolute errors are reported because small response references make relative errors unstable.",
+        "actual_cache_demonstrated": False,
+        "interpretation": "These precision-promoted increments use saved response states whose baseline preparation was not promoted with prepare_affine_application; apply_increment therefore recomputes source readers. This summary is not evidence of retained affine-cache reuse. Use actual-cache-k results for cache-reuse evidence. Component comparisons retain physical units; heterogeneous aggregate rows are descriptive only, and absolute errors are reported because small response references make relative errors unstable.",
         "optimizer_updates": 0,
         "new_solver_attempts": 0,
         "TEST_or_Wind_access": False,
@@ -2456,9 +2920,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                          help="Existing Round10 diagnostic that authenticates and loads the saved W6 reference.")
     ranking.add_argument("--output", type=Path, required=True)
     ranking.add_argument("--device", default="cpu")
-    heat_reuse = subparsers.add_parser("heat-reuse-summary", help="Summarize cached-K versus native parent response arrays.")
+    heat_reuse = subparsers.add_parser(
+        "heat-reuse-summary",
+        help="Summarize precision-promoted saved response increments; this does not demonstrate retained-cache reuse.",
+    )
     heat_reuse.add_argument("--response-result", action="append", required=True, metavar="ARM=PATH")
     heat_reuse.add_argument("--output", type=Path, required=True)
+    actual_cache = subparsers.add_parser(
+        "actual-cache-k",
+        help="Promote one saved baseline preparation and reuse retained affine factors at its existing heat endpoints.",
+    )
+    actual_cache.add_argument("--run-dir", type=Path, required=True)
+    actual_cache.add_argument("--checkpoint", required=True, help="Run-relative selector or checkpoint filename.")
+    actual_cache.add_argument("--expected-epoch", type=int)
+    actual_cache.add_argument("--arm-label", required=True)
+    actual_cache.add_argument("--response-result", type=Path, required=True)
+    actual_cache.add_argument("--inventory", type=Path, required=True)
+    actual_cache.add_argument("--output", type=Path, required=True)
+    actual_cache.add_argument("--device", default="cpu")
     board = subparsers.add_parser("native-board", help="Run full native field evaluation on VAL89 or an explicit fixed panel.")
     board.add_argument("--run-dir", type=Path, required=True)
     board.add_argument("--checkpoint", required=True)
@@ -2499,6 +2978,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "heat-reuse-summary":
         result = summarize_parent_heat_reuse_cli(args)
+        print(json.dumps(result, sort_keys=True), flush=True)
+        return 0
+    if args.command == "actual-cache-k":
+        result = evaluate_actual_cached_k_cli(args)
         print(json.dumps(result, sort_keys=True), flush=True)
         return 0
     if args.command == "native-board":

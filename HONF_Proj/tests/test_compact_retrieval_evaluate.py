@@ -20,11 +20,14 @@ from compact_retrieval_evaluate import (
     _topology_from_organization,
     compare_native_board_pair,
     compare_native_board_pair_arrays,
+    apply_cached_native_response,
     native_response_coefficient_arrays,
+    prepare_cached_native_response,
     prepare_copy_with_disabled_group,
     response_payload_for_arm,
     resolve_native_board_case_ids,
     summarize_cached_heat_reuse_arrays,
+    summarize_actual_cached_endpoint_arrays,
     summarize_parent_heat_reuse_cli,
     summarize_compact_trace,
     summarize_native_case_rows,
@@ -209,6 +212,107 @@ def test_cached_heat_reuse_reports_absolute_errors_for_all_saved_heat_vectors() 
     assert "relative_l2" not in first["cached_K_vs_fresh_native"]
 
 
+def test_actual_cached_endpoint_summary_keeps_physical_components_separate() -> None:
+    arrays = {}
+    for label in ("heat_transfer_plus", "heat_transfer_minus"):
+        for role, channels in (("fluid_fields", 5), ("interface", 2), ("solid_temperature", 1)):
+            prefix = f"{label}__{role}__"
+            shape = (3, channels)
+            cached = np.zeros(shape, dtype=np.float64)
+            fresh = np.zeros(shape, dtype=np.float64)
+            reference = np.zeros(shape, dtype=np.float64)
+            cached[0] = np.arange(channels, dtype=np.float64) + 1.0
+            fresh[0] = np.arange(channels, dtype=np.float64)
+            reference[0] = np.arange(channels, dtype=np.float64) - 1.0
+            arrays[prefix + "actual_cache_absolute"] = cached
+            arrays[prefix + "fresh_native_absolute_endpoint"] = fresh
+            arrays[prefix + "physical_endpoint_reference"] = reference
+            arrays["heat__" + role + "__valid"] = np.asarray([True, False, False])
+    summary = summarize_actual_cached_endpoint_arrays(arrays, "0318")
+    assert summary["comparison_count"] == 6
+    fluid = summary["comparisons"][0]
+    assert "heterogeneous channel units" in fluid["aggregate_interpretation"]
+    assert fluid["component_comparisons"]["temperature"][
+        "cached_K_vs_physical_reference_endpoint"]["absolute_rmse"] == pytest.approx(2.0)
+    interface = summary["comparisons"][1]
+    assert interface["component_comparisons"]["temperature"][
+        "cached_K_vs_physical_reference_endpoint"]["absolute_rmse"] == pytest.approx(2.0)
+    assert interface["component_comparisons"]["q_proxy"][
+        "cached_K_vs_physical_reference_endpoint"]["absolute_rmse"] == pytest.approx(2.0)
+    arrays["heat_transfer_plus__fluid_fields__actual_cache_absolute"] = np.full((3, 5), np.nan)
+    with pytest.raises(ValueError, match="nonfinite values on physical-valid support"):
+        summarize_actual_cached_endpoint_arrays(arrays, "0318")
+
+
+def test_real_compact_affine_cache_reuses_factors_without_reader_recompute(monkeypatch) -> None:
+    import torch
+    from tests.test_thermal_compact_adapter import _compact_adapter
+
+    model, structure, fluid, local = _compact_adapter(12)
+    model.eval()
+    with torch.no_grad():
+        prepared = model.prepare_native(
+            structure, fluid, local_query_points=local, ntheta=16,
+            scene_key=("actual-cache-fixture",),
+        )
+    baseline = torch.full((1, 12), 0.8, dtype=torch.float64)
+    plus = torch.full((1, 12), 0.85, dtype=torch.float64)
+    minus = torch.full((1, 12), 0.75, dtype=torch.float64)
+    controls = {
+        "baseline": baseline,
+        "plus_absolute": plus,
+        "minus_absolute": minus,
+        "plus_delta": plus - baseline,
+        "minus_delta": minus - baseline,
+    }
+    fresh = {}
+    with torch.no_grad():
+        fresh["baseline"] = model.apply_native(prepared, baseline, accumulation_dtype=torch.float64)
+        fresh["plus_absolute"] = model.apply_native(prepared, plus, accumulation_dtype=torch.float64)
+        fresh["minus_absolute"] = model.apply_native(prepared, minus, accumulation_dtype=torch.float64)
+        fresh["plus_delta"] = model.apply_increment(prepared, plus - baseline, accumulation_dtype=torch.float64)
+        fresh["minus_delta"] = model.apply_increment(prepared, minus - baseline, accumulation_dtype=torch.float64)
+        cached_prepared, cache_evidence = prepare_cached_native_response(model, prepared)
+    assert cache_evidence["cache_present"] is True
+    assert cached_prepared.affine_query is not None
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Retained affine application recomputed a source reader.")
+
+    monkeypatch.setattr(model.core, "_decode_features", forbidden)
+    direct_reader = model.core.direct_reader
+    if isinstance(direct_reader, torch.nn.Module):
+        monkeypatch.setattr(direct_reader, "forward", forbidden)
+    else:
+        monkeypatch.setattr(model.core, "direct_reader", forbidden)
+
+    for label, is_increment in (
+        ("baseline", False),
+        ("plus_absolute", False),
+        ("minus_absolute", False),
+        ("plus_delta", True),
+        ("minus_delta", True),
+    ):
+        with torch.no_grad():
+            actual, work = apply_cached_native_response(
+                model, cached_prepared, controls[label], increment=is_increment,
+            )
+        expected = fresh[label]
+        for role, key in (("fluid_fields", "pred_field"),
+                          ("interface", "pred_interface"),
+                          ("solid_temperature", "pred_internal_temperature")):
+            if role == "fluid_fields":
+                expected_array = expected[key][0].detach().cpu().numpy()
+            elif role == "interface":
+                expected_array = expected[key][0].reshape(-1, 2).detach().cpu().numpy()
+            else:
+                expected_array = expected[key][0].reshape(-1, 1).detach().cpu().numpy()
+            np.testing.assert_allclose(actual[role], expected_array, rtol=0.0, atol=0.0)
+        assert work["edge_rows"] == 0
+        assert work["direct_source_rows"] == 0
+        assert work["direct_dense_reference_entries"] > 0
+
+
 def test_heat_reuse_cli_accepts_arbitrary_arms_and_recorded_epochs(tmp_path: Path) -> None:
     from types import SimpleNamespace
     import json
@@ -248,6 +352,8 @@ def test_heat_reuse_cli_accepts_arbitrary_arms_and_recorded_epochs(tmp_path: Pat
     summarize_parent_heat_reuse_cli(SimpleNamespace(response_result=response_results, output=output))
     summary = json.loads((output / "result.json").read_text())
     assert summary["schema"] == "round12_fixed_layout_K_reuse_summary_v2"
+    assert summary["actual_cache_demonstrated"] is False
+    assert "not evidence of retained affine-cache reuse" in summary["interpretation"]
     assert {arm: row["checkpoint_epoch"] for arm, row in summary["arms"].items()} == {"R0": 40, "R1": 1000}
     assert all(len(row["families"]) == 4 for row in summary["arms"].values())
 
