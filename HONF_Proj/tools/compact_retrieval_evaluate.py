@@ -534,10 +534,46 @@ def validate_w6_ranking_reference(rows: Sequence[Mapping[str, Any]], saved: Mapp
 
 
 def summarize_cached_heat_reuse_arrays(arrays: Mapping[str, Any], family_id: str) -> dict[str, Any]:
-    """Compare saved fixed-layout K contractions with fresh native endpoint deltas."""
+    """Compare saved fixed-layout K contractions with fresh endpoint deltas by physical channel."""
     import numpy as np
 
     rows = []
+    component_names = {
+        "fluid_fields": ("u", "v", "p", "omega", "temperature"),
+        "interface": ("temperature", "q_proxy"),
+        "solid_temperature": ("temperature",),
+    }
+    component_units = {
+        "u": "dataset velocity",
+        "v": "dataset velocity",
+        "p": "dataset pressure",
+        "omega": "dataset vorticity",
+        "temperature": "dataset temperature",
+        "q_proxy": "dataset heat-flux proxy",
+    }
+
+    def errors(cached_values, fresh_values, reference_values, mask):
+        valid_values = int(mask.sum())
+        if not valid_values:
+            raise ValueError("Fixed-layout K comparison has no valid component values.")
+        disagreement = cached_values[mask] - fresh_values[mask]
+        cached_error = cached_values[mask] - reference_values[mask]
+        fresh_error = fresh_values[mask] - reference_values[mask]
+
+        def stats(values):
+            return {
+                "absolute_rmse": float(np.sqrt(np.mean(np.square(values)))),
+                "absolute_mae": float(np.mean(np.abs(values))),
+                "maximum_absolute_error": float(np.max(np.abs(values))),
+            }
+
+        return {
+            "valid_values": valid_values,
+            "cached_K_vs_fresh_native": stats(disagreement),
+            "cached_K_vs_physical_reference": stats(cached_error),
+            "fresh_native_vs_physical_reference": stats(fresh_error),
+        }
+
     for label in ("heat_transfer_plus", "heat_transfer_minus"):
         for role in ("fluid_fields", "interface", "solid_temperature"):
             prefix = f"{label}__{role}__"
@@ -558,33 +594,38 @@ def summarize_cached_heat_reuse_arrays(arrays: Mapping[str, Any], family_id: str
                 valid = np.broadcast_to(valid, cached.shape)
             except ValueError as error:
                 raise ValueError("Saved physical-response mask does not broadcast to its role values.") from error
-            if not valid.any() or not np.isfinite(cached[valid]).all() or not np.isfinite(fresh[valid]).all() or not np.isfinite(reference[valid]).all():
+            finite = valid & np.isfinite(cached) & np.isfinite(fresh) & np.isfinite(reference)
+            if not finite.any():
                 raise ValueError("Fixed-layout K comparison needs nonempty finite saved response values.")
-            disagreement = cached[valid] - fresh[valid]
-            cached_error = cached[valid] - reference[valid]
-            fresh_error = fresh[valid] - reference[valid]
+            channels = component_names[role]
+            if cached.ndim < 1 or cached.shape[-1] != len(channels):
+                raise ValueError(f"Saved {role} response has {cached.shape[-1] if cached.ndim else 0} channels; expected {len(channels)}.")
+            aggregate = errors(cached, fresh, reference, finite)
+            hetero = role in ("fluid_fields", "interface")
             rows.append({
                 "family_id": str(family_id),
                 "heat_vector_label": label,
                 "role": role,
-                "valid_values": int(valid.sum()),
-                "cached_K_vs_fresh_native": {
-                    "absolute_rmse": float(np.sqrt(np.mean(np.square(disagreement)))),
-                    "absolute_mae": float(np.mean(np.abs(disagreement))),
-                    "maximum_absolute_error": float(np.max(np.abs(disagreement))),
-                },
-                "cached_K_vs_physical_reference": {
-                    "absolute_rmse": float(np.sqrt(np.mean(np.square(cached_error)))),
-                    "absolute_mae": float(np.mean(np.abs(cached_error))),
-                    "maximum_absolute_error": float(np.max(np.abs(cached_error))),
-                },
-                "fresh_native_vs_physical_reference": {
-                    "absolute_rmse": float(np.sqrt(np.mean(np.square(fresh_error)))),
-                    "absolute_mae": float(np.mean(np.abs(fresh_error))),
-                    "maximum_absolute_error": float(np.max(np.abs(fresh_error))),
+                "valid_values": aggregate["valid_values"],
+                "aggregate_interpretation": (
+                    "heterogeneous channel units; descriptive aggregate only, not a scientific scalar metric"
+                    if hetero else "single temperature channel in dataset-native units"
+                ),
+                "cached_K_vs_fresh_native": aggregate["cached_K_vs_fresh_native"],
+                "cached_K_vs_physical_reference": aggregate["cached_K_vs_physical_reference"],
+                "fresh_native_vs_physical_reference": aggregate["fresh_native_vs_physical_reference"],
+                "component_comparisons": {
+                    channel: {
+                        "units": component_units[channel],
+                        **errors(
+                            cached[..., index], fresh[..., index], reference[..., index], finite[..., index],
+                        ),
+                    }
+                    for index, channel in enumerate(channels)
                 },
             })
-    return {"family_id": str(family_id), "comparison_count": len(rows), "comparisons": rows}
+    return {"schema": "round12_fixed_layout_K_reuse_components_v2", "family_id": str(family_id),
+            "comparison_count": len(rows), "comparisons": rows}
 
 
 def summarize_parent_heat_reuse_cli(args: argparse.Namespace) -> dict[str, Any]:
@@ -594,16 +635,21 @@ def summarize_parent_heat_reuse_cli(args: argparse.Namespace) -> dict[str, Any]:
     arms: dict[str, Any] = {}
     expected_families = list(RESPONSE_FAMILY_IDS)
     if len(args.response_result) < 2:
-        raise ValueError("Fixed-layout K reuse summary needs at least U-H and U-S saved response results.")
+        raise ValueError("Fixed-layout K reuse summary needs at least two saved response results.")
     for binding in args.response_result:
         label, separator, raw_path = binding.partition("=")
-        if not separator or label not in ("U-H", "U-S") or label in arms:
-            raise ValueError("Provide unique ARM=PATH bindings for U-H and U-S response results.")
+        label = label.strip()
+        if not separator or not label or label in arms:
+            raise ValueError("Provide unique nonempty ARM=PATH bindings for saved response results.")
         result_path = Path(raw_path).resolve(strict=True)
         result = json.loads(result_path.read_text())
+        try:
+            checkpoint_epoch = int(result.get("completed_epoch", -1))
+        except (TypeError, ValueError) as error:
+            raise ValueError("K reuse source must record its completed checkpoint epoch.") from error
         if (result.get("schema") != "round9_saved_physical_response_replay_v1"
-                or result.get("dataset") != "thermal" or int(result.get("completed_epoch", -1)) != 1000):
-            raise ValueError("K reuse source must be a completed current Thermal e1000 response replay.")
+                or result.get("dataset") != "thermal" or checkpoint_epoch < 0):
+            raise ValueError("K reuse source must be a completed saved Thermal response replay with an epoch.")
         if int(result.get("optimizer_updates", -1)) != 0 or int(result.get("new_solver_attempts", -1)) != 0:
             raise ValueError("K reuse evidence must remain a saved-model read-only evaluation.")
         family_map = {str(row["family_id"]): row for row in result.get("families", ())}
@@ -617,17 +663,15 @@ def summarize_parent_heat_reuse_cli(args: argparse.Namespace) -> dict[str, Any]:
                 family_summaries.append(summarize_cached_heat_reuse_arrays(archive, family_id))
         arms[label] = {
             "response_result": str(result_path),
-            "checkpoint_epoch": int(result["completed_epoch"]),
+            "checkpoint_epoch": checkpoint_epoch,
             "families": family_summaries,
         }
-    if set(arms) != {"U-H", "U-S"}:
-        raise ValueError("Fixed-layout K reuse summary requires both U-H and U-S.")
     output = args.output
     write_json_new(output / "result.json", {
-        "schema": "round12_fixed_layout_K_reuse_summary_v1",
+        "schema": "round12_fixed_layout_K_reuse_summary_v2",
         "status": "completed_saved_response_comparison",
         "arms": arms,
-        "interpretation": "Cached affine K contraction is compared with fresh native endpoint differences for the existing heat_transfer_plus/minus vectors at each saved fixed layout; absolute errors are reported because small response references make relative errors unstable.",
+        "interpretation": "Cached affine K contraction is compared with fresh native endpoint differences for the existing heat_transfer_plus/minus vectors at each saved fixed layout. Use component_comparisons for physical interpretation; aggregate fluid-field and interface rows have heterogeneous units and are descriptive only. Absolute errors are reported because small response references make relative errors unstable.",
         "optimizer_updates": 0,
         "new_solver_attempts": 0,
         "TEST_or_Wind_access": False,
@@ -771,47 +815,163 @@ def compare_native_board_pair(before: Mapping[str, Any], after: Mapping[str, Any
     return result
 
 
-def _delta_statistics(before: Any, after: Any, *, label: str) -> dict[str, Any]:
+def _delta_statistics(
+    before: Any,
+    after: Any,
+    *,
+    label: str,
+    valid_mask: Any | None = None,
+    interpretation: str | None = None,
+) -> dict[str, Any]:
     import numpy as np
 
     left, right = _as_numpy(before).astype(np.float64), _as_numpy(after).astype(np.float64)
     if left.shape != right.shape:
         raise ValueError(f"Boundary {label} axes differ: {left.shape} versus {right.shape}.")
     finite = np.isfinite(left) & np.isfinite(right)
+    if valid_mask is not None:
+        try:
+            finite &= np.broadcast_to(np.asarray(valid_mask, dtype=bool), left.shape)
+        except ValueError as error:
+            raise ValueError(f"Boundary {label} validity mask does not broadcast to its output axes.") from error
     if not finite.any():
         raise ValueError(f"Boundary {label} has no finite shared values.")
     delta = (right - left)[finite]
-    return {"shape": list(left.shape), "finite_values": int(finite.sum()),
-            "delta_rmse": float(np.sqrt(np.mean(np.square(delta)))),
-            "delta_mae": float(np.mean(np.abs(delta))),
-            "delta_max_abs": float(np.max(np.abs(delta)))}
+    result = {"shape": list(left.shape), "finite_values": int(finite.sum()),
+              "delta_rmse": float(np.sqrt(np.mean(np.square(delta)))),
+              "delta_mae": float(np.mean(np.abs(delta))),
+              "delta_max_abs": float(np.max(np.abs(delta)))}
+    if interpretation is not None:
+        result["interpretation"] = interpretation
+    return result
+
+
+def _paired_validity_mask(before: Mapping[str, Any], after: Mapping[str, Any], name: str) -> Any:
+    import numpy as np
+
+    if name not in before or name not in after:
+        raise ValueError(f"Boundary arrays need the saved receiver mask {name!r}.")
+    left, right = np.asarray(before[name], dtype=bool), np.asarray(after[name], dtype=bool)
+    if left.shape != right.shape or not np.array_equal(left, right):
+        raise ValueError(f"Boundary receiver support {name!r} changed across the cut comparison.")
+    return left
+
+
+def _paired_interface_validity(before: Mapping[str, Any], after: Mapping[str, Any]) -> Any:
+    import numpy as np
+
+    surface = _paired_validity_mask(before, after, "interface_valid")
+    outside = _paired_validity_mask(before, after, "outside_valid")
+    if surface.shape != outside.shape:
+        raise ValueError("Boundary surface and outside receiver masks have different axes.")
+    return np.stack((surface, surface & outside), axis=-1)
+
+
+def _component_delta_statistics(
+    before: Any,
+    after: Any,
+    *,
+    label: str,
+    component_names: Sequence[str],
+    valid_mask: Any,
+) -> dict[str, Any]:
+    import numpy as np
+
+    left, right = _as_numpy(before), _as_numpy(after)
+    if left.shape != right.shape or left.ndim < 1:
+        raise ValueError(f"Boundary {label} component axes differ.")
+    if left.shape[-1] != len(component_names):
+        raise ValueError(f"Boundary {label} has {left.shape[-1]} channels, expected {len(component_names)}.")
+    try:
+        channel_mask = np.broadcast_to(np.asarray(valid_mask, dtype=bool), left.shape)
+    except ValueError as error:
+        raise ValueError(f"Boundary {label} component mask does not broadcast to its output axes.") from error
+    return {
+        name: _delta_statistics(
+            left[..., index], right[..., index], label=f"{label}.{name}",
+            valid_mask=channel_mask[..., index],
+            interpretation=f"component {name}; dataset-native output units",
+        )
+        for index, name in enumerate(component_names)
+    }
 
 
 def compare_native_board_pair_arrays(
     before: Mapping[str, Any], after: Mapping[str, Any], before_dir: Path, after_dir: Path,
 ) -> dict[str, Any]:
-    """Add direct physical-output and recomputed source-response K comparisons."""
+    """Add component-aware physical-output and recomputed source-response K comparisons."""
     import numpy as np
 
     result = compare_native_board_pair(before, after)
+    result["schema"] = "round12_compact_cut_boundary_pair_arrays_v2"
+    result["prediction_delta_metric_note"] = (
+        "Per-component prediction and response-K deltas use the saved native validity masks. "
+        "Mixed-channel aggregate rows are retained for compatibility and are descriptive only; "
+        "they are not scientific scalar metrics."
+    )
     case_deltas: dict[str, Any] = {}
-    prediction_fields = ("field_prediction", "interface_prediction", "material_prediction")
-    response_fields = ("response_K_fluid_temperature", "response_K_pred_interface",
-                       "response_K_pred_internal_temperature")
     for case_id in result["case_ids"]:
         left_path, right_path = before_dir / f"case_{case_id}.npz", after_dir / f"case_{case_id}.npz"
         if not left_path.is_file() or not right_path.is_file():
             raise FileNotFoundError(f"Boundary comparison needs both exported arrays for case {case_id}.")
         with np.load(left_path, allow_pickle=False) as left, np.load(right_path, allow_pickle=False) as right:
             row: dict[str, Any] = {"physical_outputs": {}, "response_K": {}}
-            for name in prediction_fields:
+            for name in ("field_prediction", "interface_prediction", "material_prediction",
+                         "response_K_fluid_temperature", "response_K_pred_interface",
+                         "response_K_pred_internal_temperature"):
                 if name not in left or name not in right:
-                    raise ValueError(f"Boundary case {case_id} lacks physical output array {name!r}.")
-                row["physical_outputs"][name] = _delta_statistics(left[name], right[name], label=name)
-            for name in response_fields:
-                if name not in left or name not in right:
-                    raise ValueError(f"Boundary case {case_id} lacks recomputed coefficient array {name!r}.")
-                row["response_K"][name] = _delta_statistics(left[name], right[name], label=name)
+                    group = "physical output" if name.endswith("prediction") else "recomputed coefficient"
+                    raise ValueError(f"Boundary case {case_id} lacks {group} array {name!r}.")
+            fluid_valid = _paired_validity_mask(left, right, "fluid_valid")
+            interface_valid = _paired_interface_validity(left, right)
+            material_valid = _paired_validity_mask(left, right, "material_valid")
+            physical = row["physical_outputs"]
+            physical["field_prediction"] = _delta_statistics(
+                left["field_prediction"], right["field_prediction"], label="field_prediction",
+                valid_mask=fluid_valid[..., None],
+                interpretation="heterogeneous channel units; aggregate is descriptive only, not a scientific scalar metric",
+            )
+            physical["field_prediction_by_component"] = _component_delta_statistics(
+                left["field_prediction"], right["field_prediction"], label="field_prediction",
+                component_names=("u", "v", "p", "omega", "temperature"),
+                valid_mask=fluid_valid[..., None],
+            )
+            physical["interface_prediction"] = _delta_statistics(
+                left["interface_prediction"], right["interface_prediction"], label="interface_prediction",
+                valid_mask=interface_valid,
+                interpretation="temperature and q_proxy units differ; aggregate is descriptive only, not a scientific scalar metric",
+            )
+            physical["interface_prediction_by_component"] = _component_delta_statistics(
+                left["interface_prediction"], right["interface_prediction"], label="interface_prediction",
+                component_names=("temperature", "q_proxy"), valid_mask=interface_valid,
+            )
+            physical["material_prediction"] = _delta_statistics(
+                left["material_prediction"], right["material_prediction"], label="material_prediction",
+                valid_mask=material_valid,
+                interpretation="material temperature; dataset-native output units",
+            )
+
+            response = row["response_K"]
+            response["response_K_fluid_temperature"] = _delta_statistics(
+                left["response_K_fluid_temperature"], right["response_K_fluid_temperature"],
+                label="response_K_fluid_temperature", valid_mask=fluid_valid[None, None, :, None],
+                interpretation="fluid temperature response coefficient; dataset-native temperature per unit heat",
+            )
+            response["response_K_pred_interface"] = _delta_statistics(
+                left["response_K_pred_interface"], right["response_K_pred_interface"],
+                label="response_K_pred_interface", valid_mask=interface_valid[None, None, ...],
+                interpretation="temperature and q_proxy units differ; aggregate is descriptive only, not a scientific scalar metric",
+            )
+            response["response_K_pred_interface_by_component"] = _component_delta_statistics(
+                left["response_K_pred_interface"], right["response_K_pred_interface"],
+                label="response_K_pred_interface", component_names=("temperature", "q_proxy"),
+                valid_mask=interface_valid[None, None, ...],
+            )
+            response["response_K_pred_internal_temperature"] = _delta_statistics(
+                left["response_K_pred_internal_temperature"], right["response_K_pred_internal_temperature"],
+                label="response_K_pred_internal_temperature", valid_mask=material_valid[None, None, ..., None],
+                interpretation="internal temperature response coefficient; dataset-native temperature per unit heat",
+            )
             for name in ("response_K_source_module_indices",):
                 if name not in left or name not in right or not np.array_equal(left[name], right[name]):
                     raise ValueError(f"Boundary case {case_id} response K source module axes differ.")
@@ -1625,27 +1785,71 @@ def _compact_trace_sample_arrays(
     return sample_arrays, manifest
 
 
-def _prediction_difference(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+def _native_prediction_validity(native_masks: Mapping[str, Any], name: str, output_shape: Sequence[int]) -> Any:
+    import numpy as np
+
+    if name == "pred_field":
+        mask_names = ("fluid_valid",)
+    elif name == "pred_interface":
+        mask_names = ("interface_valid", "outside_valid")
+    elif name == "pred_internal_temperature":
+        mask_names = ("material_valid",)
+    else:
+        raise ValueError(f"No physical receiver validity is defined for {name!r}.")
+    axes = tuple(output_shape[:-1])
+    masks = []
+    for mask_name in mask_names:
+        if mask_name not in native_masks:
+            raise ValueError(f"Native field deltas need the {mask_name!r} physical receiver mask.")
+        mask = _as_numpy(native_masks[mask_name]).astype(bool)
+        try:
+            mask = mask.reshape(axes)
+        except ValueError as error:
+            raise ValueError(f"Native {mask_name} mask does not match {name} axes.") from error
+        masks.append(mask)
+    if name == "pred_interface":
+        return np.stack((masks[0], masks[0] & masks[1]), axis=-1)
+    return masks[0][..., None]
+
+
+def _prediction_difference(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    *,
+    before_masks: Mapping[str, Any],
+    after_masks: Mapping[str, Any],
+) -> dict[str, Any]:
     import numpy as np
 
     result = {}
+    component_names = {
+        "pred_field": ("u", "v", "p", "omega", "temperature"),
+        "pred_interface": ("temperature", "q_proxy"),
+        "pred_internal_temperature": ("temperature",),
+    }
     for name in ("pred_field", "pred_interface", "pred_internal_temperature"):
         if name not in before or name not in after:
             continue
         left, right = _as_numpy(before[name]).astype(np.float64), _as_numpy(after[name]).astype(np.float64)
         if left.shape != right.shape:
             raise ValueError(f"Native intervention output {name!r} changed its physical axes.")
-        finite = np.isfinite(left) & np.isfinite(right)
-        if not finite.any():
-            raise ValueError(f"Native intervention output {name!r} has no finite shared values.")
-        delta = (right - left)[finite]
-        result[name] = {
-            "shape": list(left.shape),
-            "finite_values": int(finite.sum()),
-            "delta_rmse": float(np.sqrt(np.mean(np.square(delta)))),
-            "delta_mae": float(np.mean(np.abs(delta))),
-            "delta_max_abs": float(np.max(np.abs(delta))),
-        }
+        before_mask = _native_prediction_validity(before_masks, name, left.shape)
+        after_mask = _native_prediction_validity(after_masks, name, right.shape)
+        if not np.array_equal(before_mask, after_mask):
+            raise ValueError(f"Native intervention output {name!r} changed its physical receiver support.")
+        channel_labels = component_names[name]
+        if len(channel_labels) != left.shape[-1]:
+            raise ValueError(f"Native intervention output {name!r} channel count differs from its physical schema.")
+        interpretation = (
+            "heterogeneous channel units; aggregate is descriptive only, not a scientific scalar metric"
+            if len(channel_labels) > 1 else f"{channel_labels[0]}; dataset-native output units"
+        )
+        result[name] = _delta_statistics(
+            left, right, label=name, valid_mask=before_mask, interpretation=interpretation,
+        )
+        result[f"{name}_by_component"] = _component_delta_statistics(
+            left, right, label=name, component_names=channel_labels, valid_mask=before_mask,
+        )
     if not result:
         raise ValueError("Native intervention produced no comparable Thermal field outputs.")
     return result
@@ -1657,6 +1861,7 @@ def run_single_group_intervention(
     physical_heat: Any,
     trace: Mapping[str, Any],
     role_mass: Mapping[str, Any],
+    native_masks: Mapping[str, Any],
     *,
     baseline_output: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1680,7 +1885,9 @@ def run_single_group_intervention(
         baseline, baseline_work = apply(prepared, heat)
         changed, changed_work = apply(changed_prepared, heat)
     reference = baseline if baseline_output is None else baseline_output
-    repeated_difference = _prediction_difference(reference, baseline)
+    repeated_difference = _prediction_difference(
+        reference, baseline, before_masks=native_masks, after_masks=native_masks,
+    )
     changed_trace = capture_compact_trace_tiled(model, changed_prepared)
     changed_support = summarize_compact_trace(changed_trace)
     weights = _as_numpy(changed_trace["compact_group_weights"])
@@ -1711,7 +1918,9 @@ def run_single_group_intervention(
             0.0 if not valid_weights.size else float(np.abs(valid_weights.sum(axis=-1) - 1.0).max())
         ),
         "disabled_group_max_abs_query_mass": float(np.abs(weights[..., group_index]).max()),
-        "native_field_deltas_vs_baseline": _prediction_difference(baseline, changed),
+        "native_field_deltas_vs_baseline": _prediction_difference(
+            baseline, changed, before_masks=native_masks, after_masks=native_masks,
+        ),
         "baseline_repeat_deltas_vs_existing_native_prediction": repeated_difference,
         "logical_final_support_after_intervention": changed_support["rows"],
         "baseline_native_work_counts": dict(baseline_work),
@@ -1957,6 +2166,8 @@ def evaluate_native_board_cli(args: argparse.Namespace) -> dict[str, Any]:
                         batch.receivers.heat,
                         full_trace,
                         trace_summaries[case_id]["role_group_mass"],
+                        {name: arrays[name] for name in
+                         ("fluid_valid", "interface_valid", "outside_valid", "material_valid")},
                         baseline_output=prediction.native_main,
                     )
             if case_id in export_cases:

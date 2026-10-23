@@ -15,6 +15,7 @@ from compact_retrieval_evaluate import (
     TRAIN24_IDS,
     VAL89_IDS,
     _compact_trace_sample_arrays,
+    _prediction_difference,
     choose_legal_module_translation,
     _topology_from_organization,
     compare_native_board_pair,
@@ -24,6 +25,7 @@ from compact_retrieval_evaluate import (
     response_payload_for_arm,
     resolve_native_board_case_ids,
     summarize_cached_heat_reuse_arrays,
+    summarize_parent_heat_reuse_cli,
     summarize_compact_trace,
     summarize_native_case_rows,
     summarize_role_group_mass,
@@ -175,17 +177,79 @@ def test_saved_ranking_controls_bind_original_six_id_pool_tau_and_pressure_limit
 def test_cached_heat_reuse_reports_absolute_errors_for_all_saved_heat_vectors() -> None:
     arrays = {}
     for label in ("heat_transfer_plus", "heat_transfer_minus"):
-        for role in ("fluid_fields", "interface", "solid_temperature"):
-            arrays[f"{label}__{role}__promoted_increment"] = np.asarray([[1e-8, 2.0], [3.0, 4.0]])
-            arrays[f"{label}__{role}__prediction_delta"] = np.asarray([[0.0, 2.0], [3.0, 4.0]])
-            arrays[f"{label}__{role}__reference_delta"] = np.asarray([[0.0, 2.0], [3.0, 4.0]])
-            arrays[f"heat__{role}__valid"] = np.asarray([True, False])
+        arrays[f"{label}__fluid_fields__promoted_increment"] = np.asarray(
+            [[0, 0, 0, 0, 1e-8], [100, 200, 300, 400, 500]], dtype=np.float64,
+        )
+        arrays[f"{label}__fluid_fields__prediction_delta"] = np.zeros((2, 5), dtype=np.float64)
+        arrays[f"{label}__fluid_fields__reference_delta"] = np.zeros((2, 5), dtype=np.float64)
+        arrays["heat__fluid_fields__valid"] = np.asarray([True, False])
+        arrays[f"{label}__interface__promoted_increment"] = np.asarray([[1, 2], [100, 200]], dtype=np.float64)
+        arrays[f"{label}__interface__prediction_delta"] = np.zeros((2, 2), dtype=np.float64)
+        arrays[f"{label}__interface__reference_delta"] = np.zeros((2, 2), dtype=np.float64)
+        arrays["heat__interface__valid"] = np.asarray([[True, True], [False, False]])
+        arrays[f"{label}__solid_temperature__promoted_increment"] = np.asarray([[3], [30]], dtype=np.float64)
+        arrays[f"{label}__solid_temperature__prediction_delta"] = np.zeros((2, 1), dtype=np.float64)
+        arrays[f"{label}__solid_temperature__reference_delta"] = np.zeros((2, 1), dtype=np.float64)
+        arrays["heat__solid_temperature__valid"] = np.asarray([True, False])
     summary = summarize_cached_heat_reuse_arrays(arrays, "0001")
     assert summary["comparison_count"] == 6
     first = summary["comparisons"][0]
-    assert first["valid_values"] == 2
-    assert first["cached_K_vs_fresh_native"]["absolute_rmse"] == pytest.approx(1e-8 / np.sqrt(2))
+    assert first["valid_values"] == 5
+    assert "heterogeneous channel units" in first["aggregate_interpretation"]
+    assert first["cached_K_vs_fresh_native"]["absolute_rmse"] == pytest.approx(1e-8 / np.sqrt(5))
+    assert first["component_comparisons"]["temperature"]["valid_values"] == 1
+    assert first["component_comparisons"]["temperature"]["cached_K_vs_fresh_native"]["absolute_rmse"] == pytest.approx(1e-8)
+    assert first["component_comparisons"]["temperature"]["cached_K_vs_physical_reference"]["absolute_rmse"] == pytest.approx(1e-8)
+    assert first["component_comparisons"]["u"]["cached_K_vs_fresh_native"]["absolute_rmse"] == 0.0
+    interface = summary["comparisons"][1]
+    assert interface["component_comparisons"]["temperature"]["cached_K_vs_physical_reference"]["absolute_rmse"] == pytest.approx(1.0)
+    assert interface["component_comparisons"]["q_proxy"]["cached_K_vs_physical_reference"]["absolute_rmse"] == pytest.approx(2.0)
+    material = summary["comparisons"][2]
+    assert material["component_comparisons"]["temperature"]["valid_values"] == 1
     assert "relative_l2" not in first["cached_K_vs_fresh_native"]
+
+
+def test_heat_reuse_cli_accepts_arbitrary_arms_and_recorded_epochs(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    import json
+
+    response_results = []
+    for arm, epoch in (("R0", 40), ("R1", 1000)):
+        arm_dir = tmp_path / arm
+        arm_dir.mkdir()
+        families = []
+        for family_id in ("0001", "0318", "0333", "0348"):
+            arrays = {}
+            for heat_label in ("heat_transfer_plus", "heat_transfer_minus"):
+                for role, shape, valid in (
+                    ("fluid_fields", (2, 5), np.asarray([True, False])),
+                    ("interface", (2, 2), np.asarray([[True, True], [False, False]])),
+                    ("solid_temperature", (2, 1), np.asarray([True, False])),
+                ):
+                    prefix = f"{heat_label}__{role}__"
+                    arrays[prefix + "promoted_increment"] = np.zeros(shape, dtype=np.float64)
+                    arrays[prefix + "prediction_delta"] = np.zeros(shape, dtype=np.float64)
+                    arrays[prefix + "reference_delta"] = np.zeros(shape, dtype=np.float64)
+                    arrays[f"heat__{role}__valid"] = valid
+            np.savez_compressed(arm_dir / f"family_{family_id}.npz", **arrays)
+            families.append({"family_id": family_id, "arrays": f"family_{family_id}.npz"})
+        result_path = arm_dir / "response.json"
+        result_path.write_text(json.dumps({
+            "schema": "round9_saved_physical_response_replay_v1",
+            "dataset": "thermal",
+            "completed_epoch": epoch,
+            "optimizer_updates": 0,
+            "new_solver_attempts": 0,
+            "families": families,
+        }))
+        response_results.append(f"{arm}={result_path}")
+
+    output = tmp_path / "summary"
+    summarize_parent_heat_reuse_cli(SimpleNamespace(response_result=response_results, output=output))
+    summary = json.loads((output / "result.json").read_text())
+    assert summary["schema"] == "round12_fixed_layout_K_reuse_summary_v2"
+    assert {arm: row["checkpoint_epoch"] for arm, row in summary["arms"].items()} == {"R0": 40, "R1": 1000}
+    assert all(len(row["families"]) == 4 for row in summary["arms"].values())
 
 
 def test_representative_panels_are_explicit_and_exact() -> None:
@@ -556,17 +620,86 @@ def test_boundary_array_comparison_includes_physical_and_response_K_deltas(tmp_p
     after_dir.mkdir()
     for case_id in ids:
         for directory, delta in ((before_dir, 0.0), (after_dir, 1.0)):
+            field = np.zeros((2, 5), dtype=np.float32)
+            interface = np.zeros((1, 2, 2), dtype=np.float32)
+            material = np.zeros((1, 2), dtype=np.float32)
+            response_fluid = np.zeros((1, 1, 2, 1), dtype=np.float32)
+            response_interface = np.zeros((1, 1, 1, 2, 2), dtype=np.float32)
+            response_material = np.zeros((1, 1, 1, 2, 1), dtype=np.float32)
+            if delta:
+                field[:] = np.asarray([1, 2, 3, 4, 5], dtype=np.float32)
+                interface[0] = [[1, 10], [100, 20]]
+                material[0, :] = [3, 30]
+                response_fluid[0, 0, :, 0] = [4, 40]
+                response_interface[0, 0, 0] = [[5, 6], [50, 60]]
+                response_material[0, 0, 0, :, 0] = [7, 70]
             np.savez_compressed(
                 directory / f"case_{case_id}.npz",
-                field_prediction=np.full((2, 5), delta),
-                interface_prediction=np.full((1, 2), delta),
-                material_prediction=np.full((1, 1), delta),
-                response_K_fluid_temperature=np.full((1, 2, 1), delta),
-                response_K_pred_interface=np.full((1, 1, 2, 2), delta),
-                response_K_pred_internal_temperature=np.full((1, 1, 1, 1), delta),
+                field_prediction=field,
+                fluid_valid=np.asarray([True, False]),
+                interface_prediction=interface,
+                interface_valid=np.asarray([[True, True]]),
+                outside_valid=np.asarray([[False, True]]),
+                material_prediction=material,
+                material_valid=np.asarray([[True, False]]),
+                response_K_fluid_temperature=response_fluid,
+                response_K_pred_interface=response_interface,
+                response_K_pred_internal_temperature=response_material,
                 response_K_source_module_indices=np.asarray([0]),
             )
     result = compare_native_board_pair_arrays(board(0), board(1), before_dir, after_dir)
     row = result["per_case_prediction_and_response_K_deltas"][ids[0]]
-    assert row["physical_outputs"]["field_prediction"]["delta_rmse"] == pytest.approx(1.0)
-    assert row["response_K"]["response_K_fluid_temperature"]["delta_max_abs"] == pytest.approx(1.0)
+    assert row["physical_outputs"]["field_prediction"]["delta_rmse"] == pytest.approx(np.sqrt(11.0))
+    assert "descriptive only" in row["physical_outputs"]["field_prediction"]["interpretation"]
+    field_components = row["physical_outputs"]["field_prediction_by_component"]
+    assert list(field_components) == ["u", "v", "p", "omega", "temperature"]
+    assert [field_components[name]["delta_max_abs"] for name in field_components] == [1, 2, 3, 4, 5]
+    assert all(field_components[name]["finite_values"] == 1 for name in field_components)
+    interface_components = row["physical_outputs"]["interface_prediction_by_component"]
+    assert interface_components["temperature"]["finite_values"] == 2
+    assert interface_components["temperature"]["delta_max_abs"] == pytest.approx(100.0)
+    assert interface_components["q_proxy"]["finite_values"] == 1
+    assert interface_components["q_proxy"]["delta_max_abs"] == pytest.approx(20.0)
+    assert row["physical_outputs"]["material_prediction"]["finite_values"] == 1
+    assert row["response_K"]["response_K_fluid_temperature"]["finite_values"] == 1
+    assert row["response_K"]["response_K_fluid_temperature"]["delta_max_abs"] == pytest.approx(4.0)
+    response_interface = row["response_K"]["response_K_pred_interface_by_component"]
+    assert response_interface["temperature"]["finite_values"] == 2
+    assert response_interface["temperature"]["delta_max_abs"] == pytest.approx(50.0)
+    assert response_interface["q_proxy"]["finite_values"] == 1
+    assert response_interface["q_proxy"]["delta_max_abs"] == pytest.approx(60.0)
+    assert row["response_K"]["response_K_pred_internal_temperature"]["finite_values"] == 1
+    assert row["response_K"]["response_K_pred_internal_temperature"]["delta_max_abs"] == pytest.approx(7.0)
+
+
+def test_native_prediction_difference_separates_mixed_channels_and_uses_receiver_masks() -> None:
+    before = {
+        "pred_field": np.zeros((1, 2, 5), dtype=np.float32),
+        "pred_interface": np.zeros((1, 1, 2, 2), dtype=np.float32),
+        "pred_internal_temperature": np.zeros((1, 1, 2, 1), dtype=np.float32),
+    }
+    after = {
+        "pred_field": np.broadcast_to(np.asarray([1, 2, 3, 4, 5], dtype=np.float32), (1, 2, 5)).copy(),
+        "pred_interface": np.asarray([[[[1, 10], [100, 20]]]], dtype=np.float32),
+        "pred_internal_temperature": np.asarray([[[[3], [30]]]], dtype=np.float32),
+    }
+    native_masks = {
+        "fluid_valid": np.asarray([True, False]),
+        "interface_valid": np.asarray([[True, True]]),
+        "outside_valid": np.asarray([[False, True]]),
+        "material_valid": np.asarray([[True, False]]),
+    }
+    result = _prediction_difference(
+        before, after, before_masks=native_masks, after_masks=native_masks,
+    )
+    fields = result["pred_field_by_component"]
+    assert list(fields) == ["u", "v", "p", "omega", "temperature"]
+    assert [fields[name]["delta_max_abs"] for name in fields] == [1, 2, 3, 4, 5]
+    assert all(fields[name]["finite_values"] == 1 for name in fields)
+    assert "descriptive only" in result["pred_field"]["interpretation"]
+    interface = result["pred_interface_by_component"]
+    assert interface["temperature"]["finite_values"] == 2
+    assert interface["temperature"]["delta_max_abs"] == pytest.approx(100.0)
+    assert interface["q_proxy"]["finite_values"] == 1
+    assert interface["q_proxy"]["delta_max_abs"] == pytest.approx(20.0)
+    assert result["pred_internal_temperature_by_component"]["temperature"]["finite_values"] == 1
