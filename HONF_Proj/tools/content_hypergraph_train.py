@@ -528,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
     if recipe["schema"] == SCHEMA_V2:
         identity["round2_plan_sha256"] = "4138ca37dbf51fe9a28368e27a51b1e1d7fcc5f31ff327075f9d3e18d4b4234f"
     if recipe["protocol"] in SOURCE_READ_PROTOCOLS:
-        plan = PROJECT / "UpgradePlan/HONF_A2D_Fidelity_and_Sparse_Execution_Round3_Plan.md"
+        plan = PROJECT / "UpgradePlan/ThemalChannel/20261015_20261016_Round03_A2D_Sparse_Readout/20261015_162743Z_HONF_A2D_Fidelity_and_Sparse_Execution_Round3_Plan.md"
         identity["source_read_plan_sha256"] = hashlib.sha256(plan.read_bytes()).hexdigest()
         identity["source_read_authorization"] = {
             "protocol": recipe["protocol"], "variant": recipe["source_reader_variant"],

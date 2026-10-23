@@ -23,7 +23,7 @@ The opt-in [Thermal source-response interface](docs/guides/Thermal_Source_Respon
 prepares geometry-dependent temperature kernels and applies heating separately,
 with a frozen heat-independent flow reader. Its independently trained direct
 and grouped readouts, native role extraction and measured limitations are
-documented in the [consolidation and maturation report](docs/reports/_bk/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md).
+documented in the [consolidation and maturation report](docs/reports/_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md).
 
 ## 1. Quick start
 

@@ -1,6 +1,6 @@
 # Reference-Anchored HONF Development
 
-Retain a useful trained function before changing its training recipe or execution. The Run2202 compatibility loader, optional affine executor and native diagnostic APIs serve different purposes: preservation of a historical predictor, evaluation of the same computation at lower cost, and controlled investigation of learning. Their qualification and scientific findings are recorded in the [2026-10-11 consolidation report](../reports/_bk/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md).
+Retain a useful trained function before changing its training recipe or execution. The Run2202 compatibility loader, optional affine executor and native diagnostic APIs serve different purposes: preservation of a historical predictor, evaluation of the same computation at lower cost, and controlled investigation of learning. Their qualification and scientific findings are recorded in the [2026-10-11 consolidation report](../reports/_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md).
 
 ## Preserve the mature Wind function
 

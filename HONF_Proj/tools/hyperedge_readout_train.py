@@ -39,7 +39,7 @@ from honf_runtime.unified_training import (
     _sampling_dataset_id,
 )
 
-ROUND6_PLAN = PROJECT / "UpgradePlan/HONF_Round6_Hyperedge_Readout_Diagnosis_Work_Plan.md"
+ROUND6_PLAN = PROJECT / "UpgradePlan/ThemalChannel/20261016_20261017_Round06_Readout_Diagnosis/20261017_004938Z_HONF_Round6_Hyperedge_Readout_Diagnosis_Work_Plan.md"
 ROUND6_CLEAN_STOP_REQUEST = "CLEAN_STOP_REQUEST.json"
 
 

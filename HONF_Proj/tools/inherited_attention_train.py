@@ -50,7 +50,7 @@ from honf_runtime.unified_training import (
 
 WORKFLOW = "inherited_attention_joint_v1"
 SPARSE_CHILD_SCHEMA = "inherited_attention_sparse_child_v1"
-ROUND4_PLAN = PROJECT / "UpgradePlan/HONF_Round4_Attention_Inherited_Gathering_Plan.md"
+ROUND4_PLAN = PROJECT / "UpgradePlan/ThemalChannel/20261016_Round04_Inherited_Gathering/20261016_035018Z_HONF_Round4_Attention_Inherited_Gathering_Plan.md"
 ALLOWED_STOPS = (100, 500, 1000, 2500)
 EXPECTED_SAMPLING_DATASET_IDS = {
     ("thermal", IAG_PROTOCOL): "ThermalChannel:ee96482a86b5c2c5f421121319e7c812f0d0b3998ba830b5fdf2429ef50df111",

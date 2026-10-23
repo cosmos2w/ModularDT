@@ -1,6 +1,6 @@
 # Round3 source-read study protocol
 
-This opt-in study preserves the v2 A2-D contextualizer and dataset-owned native laws. `source_read_development_v1` uses fixed Thermal TRAIN150/DEV22 and Wind TRAIN72/DEV24 memberships with the successful formal samplers and objectives. These runs are new fresh comparisons; previous Wind five-role development training is historical context. The execution contract is [the Round3 plan](../../UpgradePlan/HONF_A2D_Fidelity_and_Sparse_Execution_Round3_Plan.md).
+This opt-in study preserves the v2 A2-D contextualizer and dataset-owned native laws. `source_read_development_v1` uses fixed Thermal TRAIN150/DEV22 and Wind TRAIN72/DEV24 memberships with the successful formal samplers and objectives. These runs are new fresh comparisons; previous Wind five-role development training is historical context. The execution contract is [the Round3 plan](../../UpgradePlan/ThemalChannel/20261015_20261016_Round03_A2D_Sparse_Readout/20261015_162743Z_HONF_A2D_Fidelity_and_Sparse_Execution_Round3_Plan.md).
 
 ## Identity and execution
 

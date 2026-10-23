@@ -47,7 +47,7 @@ from honf_runtime.unified_training import (
     _sampling_dataset_id,
 )
 
-ROUND5_PLAN = PROJECT / "UpgradePlan/HONF_Round5_Scene_Prepared_Moment_Hyperedges_Plan.md"
+ROUND5_PLAN = PROJECT / "UpgradePlan/ThemalChannel/20261016_Round05_Moment_Hyperedges/20261016_135059Z_HONF_Round5_Scene_Prepared_Moment_Hyperedges_Plan.md"
 
 
 def _object(path: Path, label: str) -> dict[str, Any]:

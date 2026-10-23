@@ -2,7 +2,7 @@
 
 The opt-in read plan removes absent or explicitly omitted nonlinear final source–receiver reads before the expensive source MLP. The default call still uses the historical dense path. It preserves each original source measure, source identity, nonlinear head and source-axis reduction order; it never renormalizes over retained donors. Every source/environment context route and Thermal affine temperature/interface/material read stays dense. No new model parameters, buffers, checkpoint schemas or model registry are introduced.
 
-The 2026-10-13 TRAIN deletion study did not qualify active-read omission for either primary host. Use full access for those hosts. The `selected` interface supports controlled research and numerical checks; it is not a released sparse policy or an inverse-ready derivative path. See [the experiment report](../reports/_bk/20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md) for measured bounds, preserved failures, and host identities.
+The 2026-10-13 TRAIN deletion study did not qualify active-read omission for either primary host. Use full access for those hosts. The `selected` interface supports controlled research and numerical checks; it is not a released sparse policy or an inverse-ready derivative path. See [the experiment report](../reports/_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md) for measured bounds, preserved failures, and host identities.
 
 ## Common core
 

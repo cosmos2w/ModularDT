@@ -1,5 +1,9 @@
 # HONF work-plan archive
 
+See the [23 October archive review](../docs/reports/DOCUMENT_ARCHIVE_REVIEW_20261023.md) for date/task folders, the complete path map and individual proposal/completion evidence. Round1–Round11 and the completed HET-MF pilot/readiness plan are archived; Round10/11 closure follows the user’s 23 October decision to stop further work. The Round12 plan remains unchanged. UH and US remain unexecuted proposals at the top level.
+
+## Historical archive policy through 13 October 2026
+
 Completed bounded Thermal/shared research plans are retained in `ThemalChannel`; existing WindFarm and historical `_bk` categories keep their thematic locations. The spelling `ThemalChannel` is the existing user-requested directory name. Closed work may include negative, stopped or censored results and does not imply all proposed branches were executed.
 
 The [complete document chronology and archive audit](../docs/reports/DOCUMENT_CHRONOLOGY.md) records every reviewed plan, original path, proposal/completion evidence and filename clock basis. Explicit proposal dates retain day precision; otherwise filesystem creation is labelled as a fallback rather than a proposal date. The [DeepGeoThermal quickstart](DEEPGEOTHERMAL_HONF_QUICKSTART.md) remains a current reference.

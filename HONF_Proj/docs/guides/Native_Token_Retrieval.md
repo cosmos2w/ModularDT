@@ -30,7 +30,7 @@ The primary experimental pair is conditional on the cost admission gate in the R
 
 At e500 and e501 the ordinary function is the original all-open A2-D path. Routing strength is `(epoch - 501) / 499`, clamped to `[0,1]`, reaching the sealed thresholds at e1000. Every eighth absolute epoch from e1001 through e2000 replaces sparse access with one ordinary all-open epoch. Every epoch from e2001 through e2500 uses terminal compact permissions. An all-open call at adapted weights is not an accuracy fallback unless measured separately. Exact resume must restore the epoch, original sampling state and optimizer moments as well as weights.
 
-The current Round7 study stops at its execution-opportunity gate; it does not contain mature matched trajectories or a direct-E pilot. See the [Round7 report](../reports/HONF_Native_Token_Retrieval_Round7_Report.md) for the measured evidence and limitations. Full-TRAIN fitting, TEST targets, inverse search and new physical solves are outside this family’s bounded round authorization.
+The current Round7 study stops at its execution-opportunity gate; it does not contain mature matched trajectories or a direct-E pilot. See the [Round7 report](../reports/_bk/20261017_Round07_Native_Token_Retrieval/20261017_060527Z_HONF_Native_Token_Retrieval_Round7_Report.md) for the measured evidence and limitations. Full-TRAIN fitting, TEST targets, inverse search and new physical solves are outside this family’s bounded round authorization.
 
 ## Library boundary
 
