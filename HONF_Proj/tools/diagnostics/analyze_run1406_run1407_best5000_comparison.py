@@ -41,9 +41,9 @@ DEFAULT_OUTPUT = (
 RUNS = {
     "Run 1404": RUN_ROOT / "Run_1404_20260916_092508_routing_only_pairwise",
     "Run 1406": RUN_ROOT
-    / "Run_1406_20260919_132837_low_dimensional_group_control_executor_optimized_rerun",
+    / "bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1406_20260919_132837_low_dimensional_group_control_executor_optimized_rerun",
     "Run 1407": RUN_ROOT
-    / "Run_1407_20260919_174751_phase_shared_prototype_group_control",
+    / "bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1407_20260919_174751_phase_shared_prototype_group_control",
     "Dense 1804": RUN_ROOT
     / "Run_1804_20260905_081349_dense_pairwise_field_adaptation",
 }

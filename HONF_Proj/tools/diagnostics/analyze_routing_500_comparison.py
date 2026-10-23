@@ -29,11 +29,11 @@ RUN_ROOT = PROJECT / "Trained_Results/ThermalChannel/HONF_Forward_Runs"
 DEFAULT_RUN_DIRS = {
     "1401": RUN_ROOT / "Run_1401_20260823_151126_stage7_modern_structured_context",
     "1804": RUN_ROOT / "Run_1804_20260905_081349_dense_pairwise_field_adaptation",
-    "2000": RUN_ROOT / "Run_2000_20260915_225542_routed_module_hubs",
-    "2100": RUN_ROOT / "Run_2100_20260916_002148_routed_mean_shift",
+    "2000": RUN_ROOT / "bk/04_20260915_20260918_DecoderAblation_and_Routing/Run_2000_20260915_225542_routed_module_hubs",
+    "2100": RUN_ROOT / "bk/04_20260915_20260918_DecoderAblation_and_Routing/Run_2100_20260916_002148_routed_mean_shift",
 }
 DEFAULT_BASELINE_TABLE = PROJECT / (
-    "Trained_Results/ThermalChannel/HONF_Forward_Runs/CompareModels/"
+    "Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/"
     "Stage3_Run1401_1804_1801_1802_Epoch500_90Case/tables/per_case_metrics.csv"
 )
 DEFAULT_ENDPOINTS = {

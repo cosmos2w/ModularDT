@@ -52,7 +52,7 @@ from honf_runtime.compat import load_trusted_checkpoint
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUN_ROOT = (
     PROJECT_ROOT / "Trained_Results/ThermalChannel/HONF_Forward_Runs/"
-    "Run_1509_20260928_active_packet_organization_attempt07"
+    "bk/06_20260928_20261002_PacketOrganization_and_SharedCore/Run_1509_20260928_active_packet_organization_attempt07"
 )
 DEFAULT_FREEZE = RUN_ROOT / "stage_b_c_u0200_retry04/forward_selection_frozen.json"
 DEFAULT_OUTPUT = RUN_ROOT / "inverse_frozen_heat_u0200"

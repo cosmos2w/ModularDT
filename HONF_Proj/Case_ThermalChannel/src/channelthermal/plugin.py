@@ -617,7 +617,7 @@ class ThermalChannelPlugin:
         if output_dir:
             comparison_dir = resolve_path(output_dir)
         else:
-            comparison_root = saved_root / "CompareModels"
+            comparison_root = saved_root / "bk/09_Comparisons_and_LaunchLogs/CompareModels"
             children = [path for path in comparison_root.iterdir() if path.is_dir()] if comparison_root.exists() else []
             if not children:
                 return

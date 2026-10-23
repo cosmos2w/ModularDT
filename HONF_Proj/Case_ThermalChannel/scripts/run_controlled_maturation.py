@@ -75,7 +75,7 @@ from honf_forward_core.interface_fields.input_cover_organizer import InputOnlyCo
 BASE_RUN = (
     PROJECT_ROOT
     / "Trained_Results/ThermalChannel/HONF_Forward_Runs/"
-    "Run_1509_20260928_active_packet_organization_attempt07"
+    "bk/06_20260928_20261002_PacketOrganization_and_SharedCore/Run_1509_20260928_active_packet_organization_attempt07"
 )
 DEFAULT_OUTPUT = (
     PROJECT_ROOT

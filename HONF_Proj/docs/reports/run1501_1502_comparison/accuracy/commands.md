@@ -6,9 +6,9 @@ Executed from `/home/wanglz/Desktop/src/ModularDT/HONF_Proj`:
 
 ```bash
 rtk proxy env PYTHONPATH=src:Case_ThermalChannel/src /home/wanglz/miniconda3/envs/ModularDT/bin/python -m channelthermal.workflows.compare_models \
-  --checkpoint-path Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/best_by_field_mse_model.pt \
-  --checkpoint-path Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/best_model.pt \
-  --checkpoint-path Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/best_by_field_mse_model.pt \
+  --checkpoint-path Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/best_by_field_mse_model.pt \
+  --checkpoint-path Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/best_model.pt \
+  --checkpoint-path Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/best_by_field_mse_model.pt \
   --label Run1501_best_field_e4689 \
   --label Run1501_best_total_e4877 \
   --label Run1502_best_field_e4794 \

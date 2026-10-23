@@ -22,8 +22,8 @@ PROJECT = Path(__file__).resolve().parents[2]
 STUDY = PROJECT / "diagnostics/generated/interface_operator_study/stage7_decoder_ablation"
 RUNS = {
     "1401": ("Legacy", "Run_1401_20260823_151126_stage7_modern_structured_context"),
-    "1402": ("No global", "Run_1402_20260915_174336_stage7_ablate_decoder_global"),
-    "1403": ("No global/near", "Run_1403_20260915_174336_stage7_ablate_decoder_global_near"),
+    "1402": ("No global", "bk/04_20260915_20260918_DecoderAblation_and_Routing/Run_1402_20260915_174336_stage7_ablate_decoder_global"),
+    "1403": ("No global/near", "bk/04_20260915_20260918_DecoderAblation_and_Routing/Run_1403_20260915_174336_stage7_ablate_decoder_global_near"),
     "1404": ("Routing-only", "Run_1404_20260916_092508_routing_only_pairwise"),
     "1804": ("Dense", "Run_1804_20260905_081349_dense_pairwise_field_adaptation"),
 }

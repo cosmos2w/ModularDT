@@ -7,7 +7,7 @@
   "expected_source_checkpoint_sha256": "71ed480ff0396813491c650dd11d887195174019b373fbd9a1fb25505142c066",
   "read_only_comparator": {
     "checkpoint_contract": "Run1502_epoch_4794_intact_native_checkpoint",
-    "checkpoint_relative_path": "Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/checkpoints/best_field.pt",
+    "checkpoint_relative_path": "Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/checkpoints/best_field.pt",
     "checkpoint_sha256": "08d86a573c7f7d86463bde231eb9f84a745602fca2b8f97142f39540d33a85bb"
   },
   "native_trainable_scope": "native_expanded_response_interface",

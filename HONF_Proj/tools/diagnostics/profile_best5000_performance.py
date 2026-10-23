@@ -52,8 +52,8 @@ ARCHITECTURE_NAMES = {
 }
 CHECKPOINT_DEFAULTS = {
     "1404": DEFAULT_RUN_ROOT / "Run_1404_20260916_092508_routing_only_pairwise" / "checkpoints" / "best_field.pt",
-    "1406": DEFAULT_RUN_ROOT / "Run_1406_20260919_132837_low_dimensional_group_control_executor_optimized_rerun" / "checkpoints" / "best_field.pt",
-    "1407": DEFAULT_RUN_ROOT / "Run_1407_20260919_174751_phase_shared_prototype_group_control" / "checkpoints" / "best_field.pt",
+    "1406": DEFAULT_RUN_ROOT / "bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1406_20260919_132837_low_dimensional_group_control_executor_optimized_rerun" / "checkpoints" / "best_field.pt",
+    "1407": DEFAULT_RUN_ROOT / "bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1407_20260919_174751_phase_shared_prototype_group_control" / "checkpoints" / "best_field.pt",
     "1804": DEFAULT_RUN_ROOT / "Run_1804_20260905_081349_dense_pairwise_field_adaptation" / "checkpoints" / "best_field.pt",
 }
 

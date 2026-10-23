@@ -44,16 +44,16 @@ from channelthermal.workflows.evaluate_forward import load_model, make_batch  # 
 RUN_ROOT = PROJECT_ROOT / "Trained_Results" / "ThermalChannel" / "HONF_Forward_Runs"
 DEFAULT_CHECKPOINTS = {
     "1102_best_field": RUN_ROOT
-    / "Run_1102_20260820_002237_adaptive_sparse_additive_formal"
+    / "bk/01_20260813_20260822_Foundations_and_AdaptiveSparse/Run_1102_20260820_002237_adaptive_sparse_additive_formal"
     / "best_by_field_mse_model.pt",
     "1102_latest": RUN_ROOT
-    / "Run_1102_20260820_002237_adaptive_sparse_additive_formal"
+    / "bk/01_20260813_20260822_Foundations_and_AdaptiveSparse/Run_1102_20260820_002237_adaptive_sparse_additive_formal"
     / "latest_model.pt",
     "1103_best_field": RUN_ROOT
-    / "Run_1103_20260820_095337_adaptive_sparse_additive_LR_Check"
+    / "bk/01_20260813_20260822_Foundations_and_AdaptiveSparse/Run_1103_20260820_095337_adaptive_sparse_additive_LR_Check"
     / "best_by_field_mse_model.pt",
     "1103_latest": RUN_ROOT
-    / "Run_1103_20260820_095337_adaptive_sparse_additive_LR_Check"
+    / "bk/01_20260813_20260822_Foundations_and_AdaptiveSparse/Run_1103_20260820_095337_adaptive_sparse_additive_LR_Check"
     / "latest_model.pt",
 }
 

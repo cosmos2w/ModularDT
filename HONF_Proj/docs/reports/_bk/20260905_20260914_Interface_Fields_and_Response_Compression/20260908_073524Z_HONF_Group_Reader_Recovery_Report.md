@@ -393,7 +393,7 @@ rtk proxy bash -c 'CUDA_VISIBLE_DEVICES= PYTHONPATH=src:Case_ThermalChannel/src 
 | Paired-table reduction using the existing comparators | `summarize_endpoint.py`, `endpoint/reduced_comparison.json`, `endpoint/paired_case_deltas.csv`, `endpoint/accuracy_tables.md` |
 | Exact endpoint results and selected four-anchor arrays | `endpoint/tables/`, `endpoint/debug_npz/`, `endpoint_evaluation.log` |
 
-The prior matched tables remain at `Trained_Results/ThermalChannel/HONF_Forward_Runs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case/tables/`; checkpoints and historical full-grid arrays are referenced in place.
+The prior matched tables remain at `Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case/tables/`; checkpoints and historical full-grid arrays are referenced in place.
 
 Documentation-only later sparse continuation, **not executed in this task**:
 

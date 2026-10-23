@@ -1939,7 +1939,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_args(argv)
     model_specs = resolve_model_specs(args)
-    output_root = resolve_demo_path(args.output_dir) if args.output_dir else resolve_demo_path(args.saved_root) / "CompareModels" / f"Run_{current_timestamp()}"
+    output_root = resolve_demo_path(args.output_dir) if args.output_dir else resolve_demo_path(args.saved_root) / "bk/09_Comparisons_and_LaunchLogs/CompareModels" / f"Run_{current_timestamp()}"
     paths = ensure_dirs(output_root)
     device = select_device(args.device)
     first_checkpoint, first_checkpoint_path = load_checkpoint_for_spec(

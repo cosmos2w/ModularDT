@@ -82,7 +82,7 @@ DEFAULT_SOURCE_CHECKPOINT = (
 )
 DEFAULT_FORWARD_RUN = (
     PROJECT_ROOT / "Trained_Results/ThermalChannel/HONF_Forward_Runs/"
-    "Run_1509_20260928_active_packet_organization_attempt07"
+    "bk/06_20260928_20261002_PacketOrganization_and_SharedCore/Run_1509_20260928_active_packet_organization_attempt07"
 )
 DEFAULT_G_CHECKPOINT = (
     DEFAULT_FORWARD_RUN / "checkpoints/G_u0200_training_checkpoint.pt"

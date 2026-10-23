@@ -140,7 +140,7 @@ def test_timing_deduplication_keeps_reader_and_track_b_separate() -> None:
 def test_old_sources_are_model_owned_and_dense_uses_canonical_mask(tmp_path: Path) -> None:
     project = tmp_path / "project"
     study = tmp_path / "nstage2"
-    dense_dir = project / "Trained_Results/ThermalChannel/HONF_Forward_Runs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case/debug_npz"
+    dense_dir = project / "Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case/debug_npz"
     reader_dir = project / "diagnostics/generated/interface_operator_study/group_reader_recovery/endpoint/debug_npz"
     regional_dir = project / "diagnostics/generated/interface_operator_study/regional_response/endpoint500/debug_npz"
     for directory in (dense_dir, reader_dir, regional_dir):

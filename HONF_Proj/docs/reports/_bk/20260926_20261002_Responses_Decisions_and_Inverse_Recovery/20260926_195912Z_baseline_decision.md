@@ -9,7 +9,7 @@ Each checkpoint was loaded by the maintained ThermalChannel loader with its save
 | Replay label | Exact checkpoint | SHA-256 | Epoch / architecture |
 |---|---|---|---|
 | Run1804 selected e4738 | `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1804_20260905_081349_dense_pairwise_field_adaptation/best_by_field_mse_model.pt` | `71ed480ff0396813491c650dd11d887195174019b373fbd9a1fb25505142c066` | 4738 / `dense_pairwise_field` |
-| Run1502 selected e4794 | `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/best_by_field_mse_model.pt` | `08d86a573c7f7d86463bde231eb9f84a745602fca2b8f97142f39540d33a85bb` | 4794 / `sparse_incidence_group_control_honf` |
+| Run1502 selected e4794 | `Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/best_by_field_mse_model.pt` | `08d86a573c7f7d86463bde231eb9f84a745602fca2b8f97142f39540d33a85bb` | 4794 / `sparse_incidence_group_control_honf` |
 | Run1508 selected e496 | `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1508_20260925_114332_source_conditioned_pairwise_core/best_by_field_mse_model.pt` | `57f6762091c861e9eea2d703c9ebc70470603c3c0988a7be406cc769b8af74c0` | 496 / `source_conditioned_pairwise_honf` |
 | Run1508 exact e500 | `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1508_20260925_114332_source_conditioned_pairwise_core/epoch_0500_model.pt` | `f40a16aaba1918b3befc2a4fc0d94deb0b7055bd7f103fd113482d12224549ab` | 500 / `source_conditioned_pairwise_honf` |
 

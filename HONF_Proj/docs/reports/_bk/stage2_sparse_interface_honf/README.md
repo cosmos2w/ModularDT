@@ -172,7 +172,7 @@ Operation counts are retained rows actually processed, not masked dense dimensio
 
 - Run directory: `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1802_20260905_170523_sparse_interface_honf`
 - Endpoint checkpoint: `.../epoch_0500_model.pt`; complete optimization history: `.../metrics.csv`; managed record: `.../run_manifest.json` and `.../summary.json`.
-- Comparison root: `Trained_Results/ThermalChannel/HONF_Forward_Runs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case`
+- Comparison root: `Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case`
 - Physical metrics: `tables/per_case_metrics.csv`, `tables/model_summary_metrics.csv`, and `tables/per_module_metrics.csv`.
 - Sparse/branch evidence: `tables/interaction_case_metrics.csv` and `tables/interaction_summary_metrics.csv`. Legacy organizer evidence remains separately named in `tables/hypergraph_*`; the sparse K is never placed there.
 - Measured evaluation cost: `tables/evaluation_cost_case_metrics.csv`, `tables/evaluation_cost_summary_metrics.csv`, `gpu0_phase_timing.csv`, and `gpu0_phase_timing.json`.
@@ -194,8 +194,8 @@ PYTHONPATH=src:Case_ThermalChannel/src /home/wanglz/miniconda3/envs/ModularDT/bi
   --series 'Geometry latent adaptation=Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1801_20260905_110056_geometry_latent_field_adaptation/metrics.csv' \
   --series 'Sparse interface HONF=Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1802_20260905_170523_sparse_interface_honf/metrics.csv' \
   --max-epoch 500 \
-  --output-figure Trained_Results/ThermalChannel/HONF_Forward_Runs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case/figures/training_histories.png \
-  --output-table Trained_Results/ThermalChannel/HONF_Forward_Runs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case/tables/training_history_summary.csv
+  --output-figure Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case/figures/training_histories.png \
+  --output-table Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case/tables/training_history_summary.csv
 ```
 
 Matched endpoint evaluation:
@@ -215,7 +215,7 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:Case_ThermalChannel/src /home/wanglz/minic
   --case-list docs/reports/stage1_interface_fields/development_cases.json \
   --split test --device cuda:0 --query-batch-size 32768 \
   --local-port-condition-mode predicted --return-routing-maps --save-debug-npz \
-  --output-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case
+  --output-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case
 ```
 
 Repeated synchronized sparse inference profiling:
@@ -224,7 +224,7 @@ Repeated synchronized sparse inference profiling:
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:Case_ThermalChannel/src /home/wanglz/miniconda3/envs/ModularDT/bin/python tools/profile_stage2_sparse_inference.py \
   --checkpoint Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1802_20260905_170523_sparse_interface_honf/epoch_0500_model.pt \
   --case-id 0273 --case-id 0653 --device cuda:0 --warmups 5 --repetitions 20 \
-  --output-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case
+  --output-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case
 ```
 
 The anchor figures for 0273 and 0653 contain physical predictions/errors for all models. Sparse figures additionally show every support footprint, geometric and learned memberships, unique-module degree, shared P0-port/P2-query group IDs, and query degree. The corresponding arrays are preserved in `debug_npz/`.

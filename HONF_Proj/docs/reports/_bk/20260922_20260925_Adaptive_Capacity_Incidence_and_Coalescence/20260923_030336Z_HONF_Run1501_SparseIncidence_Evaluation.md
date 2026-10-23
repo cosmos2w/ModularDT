@@ -60,7 +60,7 @@ The real prelaunch probe executed batches of 24 and 48 queries plus one AdamW up
 
 At epoch 150, the 90-case case-mean fluid relative-L2 decreased from 0.46374 to 0.22186, near-interface relative-L2 from 0.41378 to 0.23337, far-fluid relative-L2 from 0.46825 to 0.22507, internal-module-cell relative-L2 from 0.38758 to 0.15086, and fluid temperature relative-L2 from 0.51233 to 0.19172.
 
-![Recorded Run 1501 training trajectory](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/summary_figures/training_curves.png)
+![Recorded Run 1501 training trajectory](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/summary_figures/training_curves.png)
 
 ## Formation evidence
 
@@ -98,15 +98,15 @@ At epoch 500 the pooled Kq histogram is
 
 Per-case mean Kq spans 2.9082 (case 0686) to 3.6563 (case 0644), rather than collapsing to one case-independent degree. Case 0273 has mean Kq 3.5146, RM/RE 0.9235/0.7079; case 0653 has mean Kq 3.2637, RM/RE 0.7654/0.6237. Across all cases, the interior coordinate region generally has higher Kq than the normalized inlet band. These region names are descriptive coordinate bins, not causal physical regimes.
 
-![Logical support and maintained rectangular work across exact checkpoints](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/summary_figures/support_vs_rectangular_execution.png)
+![Logical support and maintained rectangular work across exact checkpoints](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/summary_figures/support_vs_rectangular_execution.png)
 
-![Per-case Kq spread across all 90 cases](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/sparse_incidence_population_epoch0500_q1024/figures/kq_case_spread.png)
+![Per-case Kq spread across all 90 cases](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/sparse_incidence_population_epoch0500_q1024/figures/kq_case_spread.png)
 
-![Representative learned hypergraph organizations for cases 0273 and 0653](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/sparse_incidence_population_epoch0500_q1024/figures/representative_hypergraph_organization__0273__0653.png)
+![Representative learned hypergraph organizations for cases 0273 and 0653](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/sparse_incidence_population_epoch0500_q1024/figures/representative_hypergraph_organization__0273__0653.png)
 
 The representative board shows source geometry, query-support Kq, sorted query-to-group weights, and source incidence side by side. Learned group IDs are permutation-ambiguous; the visualization describes organization but does not identify causal interactions.
 
-![Casewise Kq by descriptive coordinate region](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/sparse_incidence_population_epoch0500_q1024/figures/kq_case_coordinate_regions.png)
+![Casewise Kq by descriptive coordinate region](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/sparse_incidence_population_epoch0500_q1024/figures/kq_case_coordinate_regions.png)
 
 ## Matched fidelity and cost
 
@@ -134,7 +134,7 @@ At epoch 500, the exact endpoint and the explicit saved-best-total policy give:
 
 The saved-best Run1501 checkpoint beats Dense in 48/90 cases, Run1406 in 83/90, Run1404 in 90/90, and the exact Run1501 endpoint in 80/90. Its pooled fluid error is only 0.17% above Dense, while it has lower internal and temperature case-mean errors. However, it remains 2.69x slower than Dense and 1.51x slower than Run1406 in this evaluator, so it is a fidelity result rather than an acceleration result.
 
-![Exact-checkpoint accuracy and measured evaluation cost](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/summary_figures/accuracy_evolution_and_comparators.png)
+![Exact-checkpoint accuracy and measured evaluation cost](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/summary_figures/accuracy_evolution_and_comparators.png)
 
 ## Diagnostic support-selected executor
 
@@ -149,7 +149,7 @@ The predictions agree within the tested `5e-5` numerical tolerance but are not b
 
 At epoch 500, case 0273 uses 22,609 / 1,108,279 selected module/environment rows versus 98,304 / 1,572,864 rectangular rows, but the selected path is 1.2523x slower and uses 1.3186x peak memory. Case 0653 uses 31,300 / 983,631 selected rows, but is 1.0630x slower and uses 1.2522x peak memory. Maximum prediction difference across both cases is 1.29e-5.
 
-![Selected versus rectangular executor at epochs 50 and 500](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/summary_figures/selected_vs_rectangular_benchmark.png)
+![Selected versus rectangular executor at epochs 50 and 500](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/evaluations/summary_figures/selected_vs_rectangular_benchmark.png)
 
 ## Answers to the plan questions
 
@@ -165,7 +165,7 @@ At epoch 500, case 0273 uses 22,609 / 1,108,279 selected module/environment rows
 
 ## Reproducible artifacts
 
-- Managed run: `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf`
+- Managed run: `Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf`
 - Epoch-50 formation: `evaluations/sparse_incidence_population_epoch0050_q1024`
 - Epoch-150 formation: `evaluations/sparse_incidence_population_epoch0150_q1024`
 - Epoch-500 formation: `evaluations/sparse_incidence_population_epoch0500_q1024`
