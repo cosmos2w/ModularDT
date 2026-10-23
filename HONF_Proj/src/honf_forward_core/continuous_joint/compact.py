@@ -579,7 +579,8 @@ class CompactGroupRetrieval(nn.Module):
             type_count = type_count + (count > 0).to(rows)
         pair_discrepancy = distance_sum / type_count.clamp_min(1)
         probability = compact.pair_logits.sigmoid() * compact.pair_mask
-        tie = (probability * pair_discrepancy).sum(-1) / compact.pair_mask.sum(-1).clamp_min(1)
+        # Stop only tie's outer gate shortcut; capacity and soft descriptor dependence stay live.
+        tie = (probability.detach() * pair_discrepancy).sum(-1) / compact.pair_mask.sum(-1).clamp_min(1)
         present = records.present.sum(-1).to(rows)
         capacity = (present - probability.sum(-1)) / present.clamp_min(1)
         return {"tie": tie, "capacity": capacity}

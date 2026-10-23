@@ -220,14 +220,66 @@ def test_query_access_uses_q_by_k_weights_and_structural_terms_differentiate():
     components = model.structural_losses(soft, organization.joint_records)
     assert set(components) == {"tie", "capacity"}
     policy_bias = model.compatibility["M"].output.bias
-    grad = torch.autograd.grad(components["capacity"].sum(), policy_bias)[0]
+    grad = torch.autograd.grad(components["capacity"].sum(), policy_bias, retain_graph=True)[0]
     assert torch.isfinite(grad) and grad.abs() > 0
+    tie_policy_grad = torch.autograd.grad(components["tie"].sum(), policy_bias, retain_graph=True)[0]
+    assert torch.isfinite(tie_policy_grad) and tie_policy_grad.abs() > 0
+    tie_membership_grad = torch.autograd.grad(
+        components["tie"].sum(), model.route_scorers["mm"].key.weight,
+    )[0]
+    assert torch.isfinite(tie_membership_grad).all() and tie_membership_grad.count_nonzero() > 0
 
     old = entmax15(torch.zeros((1, 1, 3), dtype=torch.float64))
     merged = entmax15(torch.zeros((1, 1, 2), dtype=torch.float64))
     # Identical sibling rows do not make entmax invariant to replacing two
     # logits by one merged logit: the old pair carries 2/3 mass, the new row 1/2.
     assert not torch.isclose(old[..., :2].sum(), merged[..., :1].sum())
+
+
+def test_structural_tie_detaches_only_fixed_discrepancy_gate_and_preserves_capacity_gradient():
+    membership = torch.tensor(
+        [[[0.9, 0.3, 0.7, 0.2], [0.2, 0.8, 0.1, 0.6]]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    pair_logits = torch.tensor([[0.4]], dtype=torch.float64, requires_grad=True)
+    pair_mask = torch.tensor([[True]])
+    compact = SimpleNamespace(
+        membership=membership,
+        pair_mask=pair_mask,
+        pair_slots=torch.tensor([[[0, 1]]]),
+        pair_logits=pair_logits,
+    )
+    records = SimpleNamespace(
+        eligible=torch.ones((1, 4), dtype=torch.bool),
+        module_count=2,
+        present=torch.ones((1, 4), dtype=torch.bool),
+    )
+
+    components = CompactGroupRetrieval.structural_losses(compact, records)
+    delta = (membership[:, 0] - membership[:, 1]).abs()
+    discrepancy = 0.5 * (delta[:, :2].mean(-1) + delta[:, 2:].mean(-1))
+    probability = pair_logits.sigmoid()
+    legacy_tie_value = (probability * pair_mask * discrepancy).sum(-1) / pair_mask.sum(-1)
+    torch.testing.assert_close(components["tie"], legacy_tie_value, rtol=0, atol=0)
+
+    tie_logit_grad = torch.autograd.grad(
+        components["tie"].sum(), pair_logits, retain_graph=True, allow_unused=True,
+    )[0]
+    assert tie_logit_grad is None
+    actual_membership_grad = torch.autograd.grad(
+        components["tie"].sum(), membership, retain_graph=True,
+    )[0]
+    difference = membership.detach()[:, 0] - membership.detach()[:, 1]
+    signed_weights = difference.sign() * probability.detach() / 4
+    expected_membership_grad = torch.stack((signed_weights, -signed_weights), dim=1)
+    torch.testing.assert_close(actual_membership_grad, expected_membership_grad, rtol=0, atol=0)
+    assert torch.isfinite(actual_membership_grad).all() and actual_membership_grad.count_nonzero() > 0
+
+    capacity_grad = torch.autograd.grad(components["capacity"].sum(), pair_logits)[0]
+    expected_capacity_grad = -probability.detach() * (1 - probability.detach()) / records.present.sum()
+    torch.testing.assert_close(capacity_grad, expected_capacity_grad, rtol=1e-12, atol=1e-14)
+    assert capacity_grad.item() < 0
 
 
 def test_typed_q_to_k_scoring_matches_literal_all_k_reference_and_gradients():
@@ -362,6 +414,22 @@ def test_batch_padding_tracks_live_k_and_masks_unused_allocated_group():
     assert not compact.group_mask[1, 5]
     assert compact.group_types[1, 5] == -1
     assert compact.membership[1, 5].count_nonzero() == 0
+
+    soft = model.build(organization, alpha=0.0, cut_active=False)
+    assert torch.any(~soft.pair_mask)
+    scene_index, pair_index = (~soft.pair_mask).nonzero(as_tuple=False)[0]
+    baseline = model.structural_losses(soft, organization.joint_records)
+    changed_logits = soft.pair_logits.clone()
+    changed_logits[scene_index, pair_index] = 100.0
+    padded_logit_variant = SimpleNamespace(
+        membership=soft.membership,
+        pair_mask=soft.pair_mask,
+        pair_slots=soft.pair_slots,
+        pair_logits=changed_logits,
+    )
+    changed = model.structural_losses(padded_logit_variant, organization.joint_records)
+    for name in ("tie", "capacity"):
+        torch.testing.assert_close(changed[name], baseline[name], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("modules,environments,expected_groups", [(0, 3, 2), (3, 0, 3), (0, 0, 0)])
