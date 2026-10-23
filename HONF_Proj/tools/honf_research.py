@@ -50,6 +50,23 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--backend", choices=("segment", "dense_weighted", "source_order", "packed", "dense"),
                         help="execution-only native execution backend")
 
+    cut = commands.add_parser("activate-cut", help="activate and persist the Round12 R1 hard cut after local e40")
+    cut.add_argument("--run", required=True)
+
+    fork_common = commands.add_parser("fork-common", help="calibrate and fork Round12 R0/R1 from common local e20")
+    fork_common.add_argument("--run", required=True)
+    fork_common.add_argument("--r0-config", required=True)
+    fork_common.add_argument("--r0-output", required=True)
+    fork_common.add_argument("--r1-config", required=True)
+    fork_common.add_argument("--r1-output", required=True)
+    fork_common.add_argument("--device", required=True)
+
+    fork_terminal = commands.add_parser("fork-terminal", help="create an explicit longer-horizon R0/R1 continuation")
+    fork_terminal.add_argument("--run", required=True)
+    fork_terminal.add_argument("--output", required=True)
+    fork_terminal.add_argument("--local-horizon", required=True, type=int)
+    fork_terminal.add_argument("--device", required=True)
+
     evaluate = commands.add_parser("evaluate", help="evaluate latest, best, or an explicit checkpoint")
     evaluate.add_argument("--run", required=True)
     evaluate.add_argument("--device", default="cpu")
@@ -85,6 +102,21 @@ def main(argv: list[str] | None = None) -> int:
             query_tile_size=args.query_tile_size,
             checkpoint=args.checkpoint,
             backend=args.backend,
+        )
+    elif args.command == "activate-cut":
+        result = research.activate_round12_cut(args.run)
+    elif args.command == "fork-common":
+        result = research.fork_round12_common(
+            args.run,
+            r0_config_path=args.r0_config,
+            r0_output=args.r0_output,
+            r1_config_path=args.r1_config,
+            r1_output=args.r1_output,
+            device=args.device,
+        )
+    elif args.command == "fork-terminal":
+        result = research.fork_round12_terminal(
+            args.run, output=args.output, local_horizon=args.local_horizon, device=args.device,
         )
     elif args.command == "evaluate":
         result = research.evaluate(args.run, device=args.device, checkpoint=args.checkpoint)

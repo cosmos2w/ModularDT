@@ -62,6 +62,576 @@ def test_research_presets_keep_membership_and_execution_contracts_separate():
     assert fresh["optimizer"]["schedule"] == "constant_source_terminal_lr"
 
 
+def test_round12_presets_keep_literal_uh_lineage_cut_and_device_scope():
+    for name, role, arm in (
+        ("thermal_compact_round12_common_v1.json", "common", "common"),
+        ("thermal_compact_round12_r0_v1.json", "R0", "singleton"),
+        ("thermal_compact_round12_r1_v1.json", "R1", "merge"),
+    ):
+        config, _ = research.load_research_config(PRESETS / name)
+        assert config["initialization"]["source_arm"] == "U-H"
+        assert config["initialization"]["source_parent_age"] == 1000
+        assert config["initialization"]["source_checkpoint"].endswith(
+            "thermal_u_h_full5000_v1/checkpoints/epoch_1000_model.pt"
+        )
+        assert config["initialization"]["source_sha256"] == (
+            "2efd008f4135c7e5c7d909e0174b31e6ad5b05a058c0e68914ffc727d29134d7"
+        )
+        assert "expected_source_checkpoint_sha256" not in config["round12"]
+        assert config["execution"]["preferred_devices"] == ["cuda:2"]
+        assert config["round12"]["role"] == role
+        assert config["round12"]["compact_arm"] == arm
+        assert config["training"]["checkpoint_epochs"] == [20, 40, 100]
+        assert config["training"]["local_horizon"] == 100
+
+
+def test_round12_validator_accepts_only_declared_forward_horizon_extensions():
+    config, _ = research.load_research_config(PRESETS / "thermal_compact_round12_r1_v1.json")
+    extended = json.loads(json.dumps(config))
+    extended["training"]["local_horizon"] = 200
+    extended["training"]["checkpoint_epochs"] = [20, 40, 100, 200]
+    research._validate_research_config(extended)
+    invalid = json.loads(json.dumps(extended))
+    invalid["training"]["checkpoint_epochs"] = [20, 40, 60, 100, 200]
+    with pytest.raises(ValueError, match="checkpoints at 20/40/100"):
+        research._validate_research_config(invalid)
+
+
+def test_round12_frozen_and_new_parameter_names_map_through_adapter_prefix():
+    class Core(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.policy = nn.Parameter(torch.ones(()))
+            self.new = nn.Parameter(torch.ones(()))
+            self.compact_frozen_parameter_names = ("compact_retrieval.compatibility.policy",)
+            self.compact_parameter_migration = {"new_names": ("compact_retrieval.new",)}
+
+    class Adapter(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.core = Core()
+
+    model = Adapter()
+    model.core.compact_frozen_parameter_names = ("core.policy",)
+    model.core.compact_parameter_migration = {"new_names": ("core.new",)}
+    assert research._round12_model_parameter_names(model) == {"core.policy"}
+    assert research._round12_new_parameter_names(model) == ("core.new",)
+
+
+def _round12_compact_adapter():
+    from tests.test_thermal_compact_adapter import _compact_adapter
+
+    return _compact_adapter(12)[0]
+
+
+def _round12_migration_identity(model, config, sampling_dataset_id):
+    return {
+        "family": research.TASK_SCHEMA,
+        "config_name": config["name"],
+        "sampling_dataset_id": sampling_dataset_id,
+        "provider_identity": {
+            "adapter_state": model.state_payload(),
+            "recipe": {
+                "compact_adaptation": {
+                    "parameter_migration": model.core.compact_parameter_migration,
+                },
+            },
+        },
+    }
+
+
+def _round12_optimizer_spec(model, horizon):
+    from honf_runtime.unified_training import OptimizerGroupSpec, ScheduleSpec
+
+    rate = 3.0e-4
+    schedule = ScheduleSpec(
+        peak_lr=rate, warmup_start_lr=rate, warmup_epochs=0,
+        hold_through_epoch=horizon, total_epochs=horizon + 1, final_lr=rate,
+    )
+    return OptimizerGroupSpec(
+        "formal_joint", tuple(name for name, _ in model.named_parameters()), schedule,
+        weight_decay=1.0e-5,
+    )
+
+
+def _round12_provider_for_test(model, config, sampling_dataset_id):
+    class Provider:
+        def __init__(self):
+            self.model = model
+            self.sampling_dataset_id = sampling_dataset_id
+            self._round12_local_epoch = 0
+            self._research_config = config
+
+        def load_training_state_dict(self, state):
+            self.model.core.load_compact_state(state["compact_state"])
+
+        def training_state_dict(self):
+            return {
+                "schema": "thermal_compact_round12_provider_state_v1",
+                "base": {},
+                "compact_state": self.model.core.export_compact_state(),
+                "clocks": {
+                    **config["initialization"]["clock_mapping"],
+                    "local_epoch": int(self.model.core.compact_local_epoch),
+                    "controller_epoch": int(self.model.core.joint_epoch),
+                    "macro_update_index": int(self.model.core.joint_update_index),
+                    "joint_macro_clock": int(self.model.core.joint_macro_clock),
+                    "optimizer_updates_since_parent": int(self.model.core.joint_macro_clock) - 13000,
+                },
+            }
+
+    return Provider()
+
+
+def _round12_test_configs(tmp_path):
+    import copy
+    import hashlib
+
+    parent = tmp_path / "source" / "epoch_1000_model.pt"
+    parent.parent.mkdir(parents=True)
+    parent.write_bytes(b"temporary U-H source binding for runner tests")
+    sha = hashlib.sha256(parent.read_bytes()).hexdigest()
+    result = {}
+    for role in ("common", "r0", "r1"):
+        filename = f"thermal_compact_round12_{role}_v1.json"
+        config, _ = research.load_research_config(PRESETS / filename)
+        config = copy.deepcopy(config)
+        config["initialization"]["source_checkpoint"] = str(parent)
+        config["initialization"]["source_run_dir"] = str(parent.parent)
+        config["initialization"]["source_alias"] = str(parent)
+        config["initialization"]["source_sha256"] = sha
+        path = tmp_path / filename
+        path.write_text(json.dumps(config), encoding="utf-8")
+        result[role] = (research.load_research_config(path)[0], path)
+    return parent, sha, result
+
+
+def test_round12_restores_migration_metadata_from_ordinary_checkpoint_identity():
+    model = _round12_compact_adapter()
+    model.core.set_compact_phase(20, arm="common")
+    identity = _round12_migration_identity(model, {"name": "round12-test"}, "sample-id")
+    payload = {
+        "experiment_identity": identity,
+        "model_state_dict": model.state_dict(),
+    }
+    restored = research._model_from_run_payload(payload, torch.device("cpu"))
+    assert restored.core.compact_parameter_migration == model.core.compact_parameter_migration
+    assert set(research._round12_new_parameter_names(restored)) == {
+        f"core.{name}" for name in model.core.compact_parameter_migration["new_names"]
+    }
+
+
+def test_round12_calibration_matches_native_norm_on_each_term_participant_set():
+    native = {"tie_only": torch.tensor([3.0]), "capacity_only": torch.tensor([4.0])}
+    tie = {"tie_only": torch.tensor([2.0])}
+    capacity = {"capacity_only": torch.tensor([10.0])}
+    tie_native, tie_term, tie_coefficient = research._round12_term_gradient_calibration(
+        native, tie, 0.02,
+    )
+    cap_native, cap_term, cap_coefficient = research._round12_term_gradient_calibration(
+        native, capacity, 0.02,
+    )
+    assert (tie_native, tie_term, tie_coefficient) == pytest.approx((3.0, 2.0, 0.03))
+    assert (cap_native, cap_term, cap_coefficient) == pytest.approx((4.0, 10.0, 0.008))
+    assert research._round12_term_gradient_calibration(native, {"missing": torch.tensor([1.0])}, 0.02) == (
+        0.0, 1.0, 0.0,
+    )
+
+
+def test_round12_native_calibration_combines_task_and_existing_work_vjps():
+    parameter = nn.Parameter(torch.tensor([0.0, 0.0]))
+    parameter.grad = torch.tensor([3.0, 4.0])
+    combined = research._round12_merge_native_work_gradients(
+        {"compact": torch.tensor([1.0, 2.0])}, ("compact",), (parameter,),
+    )
+    torch.testing.assert_close(combined["compact"], torch.tensor([4.0, 6.0]))
+    parameter.grad = None
+    combined = research._round12_merge_native_work_gradients(
+        {"compact": torch.tensor([1.0, 2.0])}, ("compact",), (parameter,),
+    )
+    torch.testing.assert_close(combined["compact"], torch.tensor([1.0, 2.0]))
+
+
+def test_round12_resume41_activates_cut_before_advancing_compact_phase(monkeypatch):
+    model = _round12_compact_adapter()
+    model.core.set_compact_phase(40, arm="merge")
+    provider = SimpleNamespace(_round12_local_epoch=40)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    engine = object.__new__(research.ResearchTrainingEngine)
+    engine.controller_parent_coordinate = 4000
+    engine.fresh_model_schedule = None
+    engine.compact_arm = "merge"
+    engine.compact_cut_epoch = 40
+    engine._execution_runtime_dirty = False
+    engine.runtime_microbatch_cases = 24
+
+    def parent_update(_self, _model, _provider, _optimizer, _microbatches, *, epoch, **_kwargs):
+        assert epoch == 4041
+        assert bool(model.core.compact_cut_active)
+        assert int(model.core.compact_local_epoch) == 41
+        return {}, {}, {}, None
+
+    monkeypatch.setattr(TrainingEngine, "_run_update", parent_update)
+    batch = SimpleNamespace(case_keys=("TRAIN0006",))
+    engine._run_update(
+        model, provider, optimizer, (batch,), phase="joint", arm="A2-D",
+        epoch=41, update_index=0,
+    )
+    assert provider._round12_local_epoch == 41
+    assert all(parameter.grad is None for name, parameter in model.named_parameters()
+               if name in research._round12_model_parameter_names(model))
+
+
+def test_round12_soft_merge_keeps_both_structural_terms_in_history_input(monkeypatch):
+    model = _round12_compact_adapter()
+    model.core.set_compact_phase(20, arm="merge")
+    provider = SimpleNamespace(_round12_local_epoch=20)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    engine = object.__new__(research.ResearchTrainingEngine)
+    engine.controller_parent_coordinate = 4000
+    engine.fresh_model_schedule = None
+    engine.compact_arm = "merge"
+    engine.compact_cut_epoch = 40
+    engine._execution_runtime_dirty = False
+    engine.runtime_microbatch_cases = 24
+    losses = {"compact_tie": 0.125, "compact_capacity": 0.25}
+
+    def parent_update(_self, *_args, **_kwargs):
+        return losses, {}, {}, None
+
+    monkeypatch.setattr(TrainingEngine, "_run_update", parent_update)
+    batch = SimpleNamespace(case_keys=("TRAIN0006",))
+    result = engine._run_update(
+        model, provider, optimizer, (batch,), phase="joint", arm="A2-D",
+        epoch=21, update_index=0,
+    )
+    assert result[0] == losses
+
+    def missing_terms(_self, *_args, **_kwargs):
+        return {}, {}, {}, None
+
+    monkeypatch.setattr(TrainingEngine, "_run_update", missing_terms)
+    model.core.set_compact_phase(21, arm="merge")
+    with pytest.raises(RuntimeError, match="additive losses were not returned"):
+        engine._run_update(
+            model, provider, optimizer, (batch,), phase="joint", arm="A2-D",
+            epoch=21, update_index=1,
+        )
+
+
+def test_round12_common_fork_uses_adapted_a2_d_and_preserves_real_compact_state(tmp_path, monkeypatch):
+    import copy
+    from honf_runtime.unified_training import capture_rng_state
+    from honf_runtime.unified_training import _optimizer_spec_payload
+
+    source_path, source_sha, configs = _round12_test_configs(tmp_path)
+    common_config, _ = configs["common"]
+    model = _round12_compact_adapter()
+    model.core.set_compact_phase(20, arm="common")
+    sampling_id = common_config["round12"]["expected_parent_sampling_dataset_id"]
+    identity = _round12_migration_identity(model, common_config, sampling_id)
+    spec = _round12_optimizer_spec(model, 100)
+    optimizer_contract = [_optimizer_spec_payload(spec)]
+    checkpoint_root = tmp_path / "common20"
+    checkpoint_root.mkdir()
+    latest_path = checkpoint_root / "latest_model.pt"
+    best_path = checkpoint_root / "best_by_field_mse_model.pt"
+    latest_path.write_bytes(b"latest placeholder")
+    best_path.write_bytes(b"best placeholder")
+    compact_state = model.core.export_compact_state()
+    base_payload = {
+        "experiment_identity": identity,
+        "epoch": 20,
+        "arm": "A2-D",
+        "model_state_dict": research._cpu_state_snapshot(model.state_dict()),
+        "provider_training_state": {
+            "schema": "thermal_compact_round12_provider_state_v1",
+            "base": {},
+            "compact_state": compact_state,
+            "clocks": {**common_config["initialization"]["clock_mapping"],
+                       "local_epoch": 20, "controller_epoch": 4020,
+                       "macro_update_index": 12, "joint_macro_clock": 13260,
+                       "optimizer_updates_since_parent": 260},
+        },
+        "history": [{"epoch": epoch, "case_visits": 600, "optimizer_updates": 13}
+                    for epoch in range(1, 21)],
+        "optimizer_group_names": ["formal_joint"],
+        "optimizer_schedule_contract": optimizer_contract,
+        "optimizer_state_by_name": {
+            "groups": [{"name": "formal_joint", "parameter_names": list(spec.parameter_names)}],
+            "state": {"compact": {"exp_avg": torch.tensor([1.25]), "step": torch.tensor(260)}},
+        },
+        "rng_state": capture_rng_state(),
+        "sampler_state": {"epoch": 20, "cursor": 600},
+    }
+    best_payload = copy.deepcopy(base_payload)
+    best_payload["epoch"] = 10
+    common_best_model = _round12_compact_adapter()
+    common_best_model.core.set_compact_phase(10, arm="common")
+    best_payload["model_state_dict"] = research._cpu_state_snapshot(common_best_model.state_dict())
+    best_payload["provider_training_state"]["compact_state"] = common_best_model.core.export_compact_state()
+    best_payload["provider_training_state"]["clocks"]["local_epoch"] = 10
+    common_manifest = {
+        "config": common_config,
+        "source_checkpoint": str(source_path),
+        "source_checkpoint_sha256": source_sha,
+        "optimizer_schedule_contract": optimizer_contract,
+        "run_case_ids": None,
+        "diagnostic_only": False,
+    }
+    monkeypatch.setattr(research, "_load_run_manifest", lambda *_: (common_manifest, None))
+    monkeypatch.setattr(research, "_read_run_checkpoint", lambda _run, selector: (
+        (best_payload, best_path) if selector == "best_by_field_mse"
+        else (base_payload, latest_path)
+    ))
+    monkeypatch.setattr(research, "_round12_calibrate_structural_losses", lambda *_: {
+        "record": {"schema": "thermal_compact_structural_loss_calibration_v1",
+                   "terms": {"tie": {}, "capacity": {}}},
+        "coefficients": {"tie": 0.012, "capacity": 0.018},
+    })
+    monkeypatch.setattr(research, "verify_storage", lambda *_args, **_kwargs: {"test": True})
+    monkeypatch.setattr(research, "_estimate_run_bytes", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(research, "resolve_device", lambda _device: (torch.device("cpu"), {"device": "cpu"}))
+
+    def build_provider(config, checkpoint_payload, *_args, **_kwargs):
+        built = research._model_from_run_payload(checkpoint_payload, torch.device("cpu"))
+        return built, _round12_provider_for_test(built, config, sampling_id)
+
+    monkeypatch.setattr(research, "_build_provider_for_resume", build_provider)
+
+    def sealed_identity(config, child_model, _provider, _engine, _source, _sha):
+        assert child_model.core.compact_arm == config["round12"]["compact_arm"]
+        child_identity = _round12_migration_identity(child_model, config, sampling_id)
+        child_identity["round12_role"] = config["round12"]["role"]
+        child_identity["compact_arm"] = config["round12"]["compact_arm"]
+        return child_identity, (spec,)
+
+    monkeypatch.setattr(research, "_round12_sealed_identity", sealed_identity)
+    result = research.fork_round12_common(
+        checkpoint_root,
+        r0_config_path=configs["r0"][1], r0_output=tmp_path / "R0",
+        r1_config_path=configs["r1"][1], r1_output=tmp_path / "R1",
+        device="cpu",
+    )
+    assert result["status"] == "round12_children_forked_from_common20"
+    assert [child["optimizer_updates_preserved"] for child in result["children"]] == [260, 260]
+    monkeypatch.undo()
+    for role, arm in (("R0", "singleton"), ("R1", "merge")):
+        child_payload, _ = research._read_run_checkpoint(tmp_path / role, "latest")
+        assert child_payload["epoch"] == 20
+        assert child_payload["provider_training_state"]["compact_state"]["arm"] == arm
+        assert child_payload["provider_training_state"]["compact_state"]["cut_active"] is False
+        assert child_payload["optimizer_state_by_name"]["groups"] == base_payload["optimizer_state_by_name"]["groups"]
+        torch.testing.assert_close(
+            child_payload["optimizer_state_by_name"]["state"]["compact"]["exp_avg"],
+            base_payload["optimizer_state_by_name"]["state"]["compact"]["exp_avg"],
+        )
+        assert child_payload["sampler_state"] == base_payload["sampler_state"]
+        assert child_payload["rng_state"]["torch_cpu"].equal(base_payload["rng_state"]["torch_cpu"])
+        assert not any("sha256" in key for key in child_payload["branch_parent"])
+        best_child, _ = research._read_run_checkpoint(tmp_path / role, "best_by_field_mse")
+        assert best_child["experiment_identity"]["round12_role"] == role
+        loaded_prefix = research._model_from_run_payload(best_child, torch.device("cpu"))
+        assert loaded_prefix.core.compact_arm == "common"
+        assert int(loaded_prefix.core.compact_local_epoch) == 10
+
+
+def test_round12_cut_writes_distinct_before_and_after_states_and_restores_frozen_policy(tmp_path, monkeypatch):
+    from honf_runtime.unified_training import capture_rng_state
+
+    config, _ = research.load_research_config(PRESETS / "thermal_compact_round12_r1_v1.json")
+    model = _round12_compact_adapter()
+    model.core.set_compact_phase(40, arm="merge")
+    identity = _round12_migration_identity(
+        model, config, config["round12"]["expected_parent_sampling_dataset_id"],
+    )
+    run = tmp_path / "R1"
+    run.mkdir()
+    (run / "artifact_layout.json").write_text(json.dumps({"artifact_layout_version": 1}), encoding="utf-8")
+    layout = research.RunLayout(run)
+    layout.ensure()
+    research._atomic_json(layout.write_path("experiment_identity.json"), identity)
+    before_payload = {
+        "experiment_identity": identity,
+        "epoch": 40,
+        "arm": "A2-D",
+        "model_state_dict": research._cpu_state_snapshot(model.state_dict()),
+        "provider_training_state": {
+            "schema": "thermal_compact_round12_provider_state_v1",
+            "base": {}, "compact_state": model.core.export_compact_state(),
+            "clocks": {**config["initialization"]["clock_mapping"],
+                       "local_epoch": 40, "controller_epoch": 4040,
+                       "macro_update_index": 12, "joint_macro_clock": 13520,
+                       "optimizer_updates_since_parent": 520},
+        },
+        "optimizer_state_by_name": {"groups": [], "state": {"moment": torch.tensor([8.0])}},
+        "rng_state": capture_rng_state(),
+        "sampler_state": {"epoch": 1040, "cursor": 600},
+    }
+    torch.save(before_payload, layout.write_path("epoch_0040_model.pt"))
+    torch.save(before_payload, layout.write_path("latest_model.pt"))
+    monkeypatch.setattr(research, "_load_run_manifest", lambda *_: ({"config": config}, None))
+    monkeypatch.setattr(research, "verify_storage", lambda *_args, **_kwargs: {"test": True})
+
+    result = research.activate_round12_cut(run)
+    assert result["status"] == "round12_hard_cut_activated"
+    before, _ = research._read_run_checkpoint(run, "epoch_0040_model.pt")
+    after, _ = research._read_run_checkpoint(run, "epoch_0040_after_cut_model.pt")
+    latest, _ = research._read_run_checkpoint(run, "latest")
+    assert before["provider_training_state"]["compact_state"]["cut_active"] is False
+    assert after["provider_training_state"]["compact_state"]["cut_active"] is True
+    assert after["provider_training_state"]["compact_state"]["last_topology"] is None
+    assert latest["provider_training_state"]["compact_state"] == after["provider_training_state"]["compact_state"]
+    assert after["optimizer_state_by_name"] == before["optimizer_state_by_name"]
+    assert after["sampler_state"] == before["sampler_state"]
+    assert after["rng_state"]["torch_cpu"].equal(before["rng_state"]["torch_cpu"])
+    restored = research._model_from_run_payload(after, torch.device("cpu"))
+    frozen = research._round12_model_parameter_names(restored)
+    assert frozen
+    assert all(not parameter.requires_grad for name, parameter in restored.named_parameters() if name in frozen)
+
+
+def test_round12_terminal_fork_keeps_cut_optimizer_rng_sampler_and_native_clocks(tmp_path, monkeypatch):
+    import copy
+    import hashlib
+    from honf_runtime.unified_training import capture_rng_state
+    from honf_runtime.unified_training import _optimizer_spec_payload
+
+    source_path, source_sha, configs = _round12_test_configs(tmp_path)
+    config, _ = configs["r1"]
+    model = _round12_compact_adapter()
+    model.core.set_compact_phase(40, arm="merge")
+    model.core.activate_hard_cut()
+    model.core.set_compact_phase(100, arm="merge")
+    sampling_id = config["round12"]["expected_parent_sampling_dataset_id"]
+    identity = _round12_migration_identity(model, config, sampling_id)
+    spec100 = _round12_optimizer_spec(model, 100)
+    contract100 = [_optimizer_spec_payload(spec100)]
+    source_run = tmp_path / "R1-terminal"
+    source_run.mkdir()
+    latest_path = source_run / "latest_model.pt"
+    best_path = source_run / "best_by_field_mse_model.pt"
+    latest_path.write_bytes(b"terminal latest checkpoint placeholder")
+    best_path.write_bytes(b"terminal best checkpoint placeholder")
+    latest_payload = {
+        "experiment_identity": identity,
+        "epoch": 100,
+        "arm": "A2-D",
+        "model_state_dict": research._cpu_state_snapshot(model.state_dict()),
+        "provider_training_state": {
+            "schema": "thermal_compact_round12_provider_state_v1",
+            "base": {}, "compact_state": model.core.export_compact_state(),
+            "clocks": {**config["initialization"]["clock_mapping"],
+                       "local_epoch": 100, "controller_epoch": 4100,
+                       "macro_update_index": 12, "joint_macro_clock": 14300,
+                       "optimizer_updates_since_parent": 1300},
+        },
+        "history": [{"epoch": epoch} for epoch in range(1, 101)],
+        "optimizer_group_names": ["formal_joint"],
+        "optimizer_schedule_contract": contract100,
+        "optimizer_state_by_name": {
+            "groups": [{"name": "formal_joint", "parameter_names": list(spec100.parameter_names)}],
+            "state": {"compact": {"exp_avg": torch.tensor([3.5]), "step": torch.tensor(14300)}},
+        },
+        "rng_state": capture_rng_state(),
+        "sampler_state": {"epoch": 1100, "cursor": 600},
+    }
+    best_payload = copy.deepcopy(latest_payload)
+    best_payload["epoch"] = 50
+    calibration = {"schema": "thermal_compact_structural_loss_calibration_v1",
+                   "terms": {"tie": {}, "capacity": {}}}
+    (source_run / "round12_calibration.json").write_text(json.dumps(calibration), encoding="utf-8")
+    manifest = {
+        "config": config,
+        "source_checkpoint": str(source_path),
+        "source_checkpoint_sha256": source_sha,
+        "optimizer_schedule_contract": contract100,
+        "run_case_ids": None,
+        "diagnostic_only": False,
+    }
+    monkeypatch.setattr(research, "_load_run_manifest", lambda *_: (manifest, None))
+    monkeypatch.setattr(research, "_read_run_checkpoint", lambda _run, selector: (
+        (best_payload, best_path) if selector == "best_by_field_mse"
+        else (latest_payload, latest_path)
+    ))
+    monkeypatch.setattr(research, "verify_storage", lambda *_args, **_kwargs: {"test": True})
+    monkeypatch.setattr(research, "_estimate_run_bytes", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(research, "resolve_device", lambda _device: (torch.device("cpu"), {"device": "cpu"}))
+
+    def build_provider(child_config, checkpoint_payload, *_args, **_kwargs):
+        built = research._model_from_run_payload(checkpoint_payload, torch.device("cpu"))
+        return built, _round12_provider_for_test(built, child_config, sampling_id)
+
+    monkeypatch.setattr(research, "_build_provider_for_resume", build_provider)
+
+    def sealed_identity(child_config, child_model, _provider, _engine, _source, _sha):
+        child_identity = _round12_migration_identity(child_model, child_config, sampling_id)
+        child_identity["round12_role"] = child_config["round12"]["role"]
+        child_identity["compact_arm"] = child_config["round12"]["compact_arm"]
+        return child_identity, (_round12_optimizer_spec(child_model, child_config["training"]["local_horizon"]),)
+
+    monkeypatch.setattr(research, "_round12_sealed_identity", sealed_identity)
+    output = tmp_path / "R1-continue-200"
+    result = research.fork_round12_terminal(
+        source_run, output=output, local_horizon=200, device="cpu",
+    )
+    assert result["status"] == "round12_terminal_fork_created"
+    assert result["resume_from_local_epoch"] == 100
+    assert result["next_sampler_epoch"] == 1101
+    assert result["next_controller_epoch"] == 4101
+    assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source_sha
+    monkeypatch.undo()
+    child_payload, _ = research._read_run_checkpoint(output, "latest")
+    assert child_payload["epoch"] == 100
+    assert child_payload["provider_training_state"]["compact_state"]["cut_active"] is True
+    assert child_payload["optimizer_state_by_name"] == latest_payload["optimizer_state_by_name"]
+    assert child_payload["sampler_state"] == latest_payload["sampler_state"]
+    assert child_payload["rng_state"]["torch_cpu"].equal(latest_payload["rng_state"]["torch_cpu"])
+    assert child_payload["optimizer_schedule_contract"] != contract100
+    assert child_payload["branch_parent"]["native_clocks"] == latest_payload["provider_training_state"]["clocks"]
+    assert not any("sha256" in key for key in child_payload["branch_parent"])
+
+
+def test_round12_update_recovery_clears_structural_graph_cache_and_restores_adam_state():
+    import copy
+    from honf_runtime.unified_training import capture_rng_state
+
+    config, _ = research.load_research_config(PRESETS / "thermal_compact_round12_r1_v1.json")
+    model = _round12_compact_adapter()
+    model.core.set_compact_phase(40, arm="merge")
+    model.core.activate_hard_cut()
+    trainable_name = next(name for name, parameter in model.named_parameters() if parameter.requires_grad)
+    provider = _round12_provider_for_test(
+        model, config, config["round12"]["expected_parent_sampling_dataset_id"],
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3.0e-4)
+    trainable = next(parameter for parameter in model.parameters() if parameter.requires_grad)
+    trainable.grad = torch.ones_like(trainable)
+    optimizer.step()
+    model_state = research._cpu_state_snapshot(model.state_dict())
+    optimizer_state = copy.deepcopy(optimizer.state_dict())
+    rng_state = capture_rng_state()
+    provider_state = provider.training_state_dict()
+    model.core._compact_loss_entries = [torch.tensor(99.0, requires_grad=True)]
+    with torch.no_grad():
+        trainable.add_(5.0)
+    optimizer.state.clear()
+    torch.rand(5)
+
+    research.ResearchTrainingEngine._restore_update_boundary(
+        model, optimizer, provider, model_state, optimizer_state, rng_state,
+        provider_state,
+        provider.load_training_state_dict,
+    )
+    assert model.core._compact_loss_entries == []
+    assert optimizer.state
+    torch.testing.assert_close(trainable, model_state[trainable_name].to(trainable.device))
+    assert model.core.compact_cut_active
+    assert all(parameter.grad is None for name, parameter in model.named_parameters()
+               if name in research._round12_model_parameter_names(model))
+    assert torch.equal(capture_rng_state()["torch_cpu"], rng_state["torch_cpu"])
+
+
 def test_classic_full5000_profiles_retain_formal_data_and_execution_contracts():
     configs = [research.load_research_config(PRESETS / f"thermal_u_{arm}_full5000_v1.json")[0]
                for arm in "dhs"]
