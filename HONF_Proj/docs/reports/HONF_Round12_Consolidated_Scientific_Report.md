@@ -260,7 +260,7 @@ All checkpoints replay the unchanged TRAIN physical-reference families 0001/0318
 | Material T | 0.251169 / 0.456275 | 0.241331 / 0.4633 | 0.027274 / 0.0428217 | 0.0231933 / 0.037035 |
 | q proxy | 0.964411 / 1.66542 | 0.964213 / 1.67827 | 0.144089 / 0.287491 | 0.129252 / 0.268086 |
 
-All four primary temperature/q components meet both preservation bands on both geometry sets at compact100, and separately at 41/50/best90. The absolute units remain component-specific. Nonprimary mixed-flow median ratios for u/v/omega are 1.2498/1.1272/1.1807, exceeding the descriptive 1.10 level, while p is 1.0823; all four mixed-flow p90 ratios remain below 1.15 (1.0463/1.1175/0.9988/1.0989). Mixed v/p physical reference RMS is near 1e-10–1e-9, so relative errors of order 1e 5 are not useful accuracy scores; their absolute errors above remain visible.
+All four primary temperature/q components meet both preservation bands on both geometry sets at compact100, and separately at 41/50/best90. The absolute units remain component-specific. Nonprimary mixed-flow median ratios for u/v/omega are 1.2498/1.1272/1.1807, exceeding the descriptive 1.10 level, while p is 1.0823; all four mixed-flow p90 ratios remain below 1.15 (1.0463/1.1175/0.9988/1.0989). Mixed v/p physical reference RMS is near 1e-10–1e-9, so relative errors of order 1e5 are not useful accuracy scores; their absolute errors above remain visible.
 
 | Thermal component | Geometry rel-L2 median / p90 | <1 | Mixed rel-L2 median / p90 | <1 | Heat rel-L2 median / p90 | <1 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -309,25 +309,25 @@ The replay preserves the six M3 IDs `size_matched_random_u00_c00` through`c05`, 
 
 | Checkpoint | Objective MAE | Spearman | TP/FP/TN/FN | Selected | Saved-reference feasible | Feasible regret |
 | --- | --- | --- | --- | --- | --- | --- |
-| U-H e1000 | 0.207589 | -0.257143 | 1/0/2/3 | c 00 | True | 0.524815 |
-| U-S e1000 | 0.728951 | -0.0285714 | 4/0/2/0 | c 05 | True | 0.54532 |
-| R0-100 | 0.317005 | -0.257143 | 1/0/2/3 | c 00 | True | 0.524815 |
-| Original R1-100 | 0.62299 | -0.371429 | 4/0/2/0 | c 03 | True | 0.588267 |
-| Amended41 | 0.359706 | -0.2 | 1/0/2/3 | c 00 | True | 0.524815 |
-| Amended50 | 0.196877 | -0.257143 | 1/0/2/3 | c 00 | True | 0.524815 |
+| U-H e1000 | 0.207589 | -0.257143 | 1/0/2/3 | c00 | True | 0.524815 |
+| U-S e1000 | 0.728951 | -0.0285714 | 4/0/2/0 | c05 | True | 0.54532 |
+| R0-100 | 0.317005 | -0.257143 | 1/0/2/3 | c00 | True | 0.524815 |
+| Original R1-100 | 0.62299 | -0.371429 | 4/0/2/0 | c03 | True | 0.588267 |
+| Amended41 | 0.359706 | -0.2 | 1/0/2/3 | c00 | True | 0.524815 |
+| Amended50 | 0.196877 | -0.257143 | 1/0/2/3 | c00 | True | 0.524815 |
 | Amended90 | 0.261922 | -0.257143 | 0/0/2/4 | No feasible recommendation | — | undefined |
-| Amended100 | 0.225939 | -0.257143 | 1/0/2/3 | c 00 | True | 0.524815 |
+| Amended100 | 0.225939 | -0.257143 | 1/0/2/3 | c00 | True | 0.524815 |
 
-Compact100 lowers objective MAE0.317005→0.225939 versus R0, but Spearman stays−0.257143. It accepts onlyc 00 and rejects three physically reference-feasible alternatives. Its selected c 00 physical objective is 15.23511059; feasible c 02 is best at 14.71029556, leaving regret 0.52481503. U-S and original R1 classify all six feasibility flags correctly but still have negative objective correlations and larger regrets. Best90 predicts no feasible candidate because even its minimum pressure 0.1366783 exceeds the unchanged limit; the raw scorer’s minimum-violation fallback is not interpreted as a feasible selection. [The decision-contract audit](../../diagnostics/thermal_compact_round12_20261023/continuation_20261023_v1/assessment/candidate_decision_contract_audit.json) preserves that correction without rewriting raw historical records.
+Compact100 lowers objective MAE0.317005→0.225939 versus R0, but Spearman stays−0.257143. It accepts only c00 and rejects three physically reference-feasible alternatives. Its selected c00 physical objective is 15.23511059; feasible c02 is best at 14.71029556, leaving regret 0.52481503. U-S and original R1 classify all six feasibility flags correctly but still have negative objective correlations and larger regrets. Best90 predicts no feasible candidate because even its minimum pressure 0.1366783 exceeds the unchanged limit; the raw scorer’s minimum-violation fallback is not interpreted as a feasible selection. [The decision-contract audit](../../diagnostics/thermal_compact_round12_20261023/continuation_20261023_v1/assessment/candidate_decision_contract_audit.json) preserves that correction without rewriting raw historical records.
 
 | Candidate | Physical objective | Compact100 objective | Physical pressure | Compact100 pressure | Physical feasible | Predicted feasible |
 | --- | --- | --- | --- | --- | --- | --- |
-| c 00 | 15.2351 | 15.0405 | 0.12440362 | 0.13534665 | True | True |
-| c 01 | 14.8952 | 14.96 | 0.13650931 | 0.14821140 | False | False |
-| c 02 | 14.7103 | 15.2679 | 0.12892032 | 0.13993142 | True | False |
-| c 03 | 15.2986 | 15.0098 | 0.13044213 | 0.14008172 | True | False |
-| c 04 | 15.162 | 15.0748 | 0.14047158 | 0.15175491 | False | False |
-| c 05 | 15.2556 | 15.0929 | 0.12899755 | 0.14063212 | True | False |
+| c00 | 15.2351 | 15.0405 | 0.12440362 | 0.13534665 | True | True |
+| c01 | 14.8952 | 14.96 | 0.13650931 | 0.14821140 | False | False |
+| c02 | 14.7103 | 15.2679 | 0.12892032 | 0.13993142 | True | False |
+| c03 | 15.2986 | 15.0098 | 0.13044213 | 0.14008172 | True | False |
+| c04 | 15.162 | 15.0748 | 0.14047158 | 0.15175491 | False | False |
+| c05 | 15.2556 | 15.0929 | 0.12899755 | 0.14063212 | True | False |
 
 ## 10. Organizational savings and actual computational cost
 
