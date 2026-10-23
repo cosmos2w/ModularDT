@@ -1,5 +1,7 @@
 # Round12 tie-loss amendment and bounded feasibility check
 
+**Subsequent completed work:** The [compact recovery and validation continuation](HONF_Round12_Compact_Recovery_and_Validation_Report.md) continues the exact amended local41 state through local50 and matched local100, with separate selected-best90 evaluation. Its terminal100 compact bank recovers global priority field quality and preserves primary response-error bands, while mixed geometry responses, candidate ranking and speed remain limited. This report preserves the historical local41 feasibility scope; its one-epoch recovery and then-missing evaluations are not the final scientific status.
+
 The sibling tie loss now stops the gradient through its outer probability weight. The probability inside the live descriptor/geometry blend and the capacity term remains differentiable. This removes the demonstrated incentive to avoid tying by rejecting a mismatched pair; it changes neither the scalar loss nor predictions at fixed weights. The amendment follows the [saved-run diagnosis](HONF_Round12_Sibling_Policy_Diagnosis.md). A bounded 273-update qualification now halves the E bank, while the M policy still rejects all candidates and field recovery remains incomplete. Existing common20, R0, R1 and the literal U-H e1000 source are preserved.
 
 ## Change and tests
