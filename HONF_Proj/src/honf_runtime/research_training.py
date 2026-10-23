@@ -43,9 +43,19 @@ _CONFIG_NAME = "research_run.json"
 _EVAL_DIR = "evaluations/research"
 
 
+def _is_round12_scratch(config: Mapping[str, Any]) -> bool:
+    return config["initialization"].get("source_kind") == "scratch_compact_config"
+
+
+def _initialization_path(config: Mapping[str, Any]) -> Path:
+    value = (config["dataset"]["base_recipe_path"] if _is_round12_scratch(config)
+             else config["initialization"]["source_checkpoint"])
+    return Path(value).expanduser().resolve(strict=True)
+
+
 def _parent_age(config: Mapping[str, Any]) -> int:
     return 0 if config["initialization"]["normalization_mode"] in (
-        "fresh_full_train600_stats", "classic_train600_stats",
+        "fresh_full_train600_stats", "classic_train600_stats", "scratch_train600_stats",
     ) else int(
         config["initialization"]["source_parent_age"],
     )
@@ -177,7 +187,7 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
     execution = config["execution"]
     if training.get("membership") not in (
         "fixed25_train150_dev22", "original_train600_fixed25_dev22", "classic_train600_exposed_val89",
-        "parent_train600_exposed_val89",
+        "parent_train600_exposed_val89", "scratch_train600_exposed_val89",
     ):
         raise ValueError("Thermal membership must be fixed25 TRAIN150/DEV22, original TRAIN600/DEV22, or an inherited full TRAIN600/VAL89 panel.")
     for field in ("local_horizon", "first_segment_epochs", "effective_batch_size", "microbatch_cases",
@@ -194,10 +204,11 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
     allowed_optimizer_contracts = {
         ("fresh_adamw_from_source_groups", "constant_source_terminal_lr"),
         ("fresh_adamw_from_classic_formal_contract", "constant_classic_formal_lr"),
+        ("fresh_adamw_from_config", "constant_config_lr"),
     }
     if (optimizer.get("kind"), optimizer.get("schedule")) not in allowed_optimizer_contracts:
         raise ValueError("Research starts require a supported fresh AdamW optimizer contract.")
-    if normalization_mode in ("fresh_full_train600_stats", "classic_train600_stats"):
+    if normalization_mode in ("fresh_full_train600_stats", "classic_train600_stats", "scratch_train600_stats"):
         schedule = config["initialization"].get("fresh_model_schedule")
         if not isinstance(schedule, Mapping) or any(
                 type(schedule.get(key)) is not int or schedule[key] < 1 for key in
@@ -230,10 +241,42 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
         if type(storage.get(key)) is not int or storage[key] < 0:
             raise ValueError(f"storage.{key} must be a nonnegative integer byte count.")
     if config["initialization"].get("normalization_mode") not in (
-        "inherit_source_train150", "fresh_full_train600_stats", "classic_train600_stats",
+        "inherit_source_train150", "fresh_full_train600_stats", "classic_train600_stats", "scratch_train600_stats",
         "inherit_parent_train_stats",
     ):
         raise ValueError("Select source TRAIN150 normalization, fresh full-TRAIN600 stats, saved classic TRAIN600 stats, or inherited parent TRAIN600 stats.")
+    if _is_round12_scratch(config):
+        init, compact = config["initialization"], config.get("round12", {})
+        if (normalization_mode != "scratch_train600_stats"
+                or training.get("membership") != "scratch_train600_exposed_val89"
+                or init.get("source_parent_age") != 0
+                or any(init.get(key) is not None for key in
+                       ("source_checkpoint", "source_run_dir", "source_identity_path", "source_sha256"))
+                or init.get("fresh_routing_mode") != "hypergraph"
+                or init.get("fresh_model_schedule") != {"coordinate_start_epoch": 3000,
+                    "coordinate_span_epochs": 1000, "ramp_epochs": 1000}
+                or (optimizer.get("kind"), optimizer.get("schedule")) !=
+                    ("fresh_adamw_from_config", "constant_config_lr")):
+            raise ValueError("Scratch compact runs forbid checkpoint/parent bindings and require fresh TRAIN600/VAL89 initialization.")
+        if (compact.get("schema") != "thermal_compact_round12_v1"
+                or (compact.get("role"), compact.get("compact_arm")) != ("R1", "merge")
+                or compact.get("tie_loss_gradient") != "stop_outer_probability_v1"
+                or compact.get("shared_prefix_epochs") != 20
+                or compact.get("cut_after_local_epoch") != 40
+                or compact.get("structural_loss_scale") != 0.02
+                or compact.get("calibration_max_microbatches") != 2
+                or init.get("clock_mapping") != {"sampler_parent_epoch": 0,
+                    "controller_parent_coordinate": 3000, "parent_update_index": 0, "parent_macro_clock": 0}):
+            raise ValueError("Scratch compact runs require the amended Round12 20/40 phases and fresh clocks.")
+        checkpoints = training.get("checkpoint_epochs")
+        horizon = training["local_horizon"]
+        if (horizon != 1000 or training["first_segment_epochs"] != horizon
+                or checkpoints != [20, 40, *range(100, horizon + 1, 100)]
+                or training.get("checkpoint_every") != 100
+                or training["seed"] != 0 or training["microbatch_cases"] != 24):
+            raise ValueError("Scratch compact1000 requires the frozen full1000 schedule and 20/40/100-step milestones.")
+    elif normalization_mode == "scratch_train600_stats":
+        raise ValueError("Scratch normalization requires scratch_compact_config initialization.")
     if normalization_mode == "classic_train600_stats":
         init = config["initialization"]
         if (training.get("membership") != "classic_train600_exposed_val89"
@@ -570,8 +613,59 @@ def _round12_adaptation_source_components(config: Mapping[str, Any], device: tor
     return parent_model, source_payload, source_path, actual_sha
 
 
+def _scratch_compact_components(config: Mapping[str, Any], device: torch.device):
+    """Construct every weight from config; fit normalization on TRAIN600 only."""
+    from channelthermal.training.content_hypergraph_task_v2 import build_thermal_content_hypergraph_task_v2
+    from channelthermal.content_hypergraph import ThermalContentHypergraphAdapterV2
+    from honf_forward_core.continuous_joint.unified import UnifiedJointCore, CompactUnifiedJointCore
+
+    recipe = read_json(config["dataset"]["base_recipe_path"])
+    recipe.update(data_path=config["dataset"]["data_path"], manifest=config["dataset"]["manifest_path"])
+    if config["dataset"].get("atlas_directory"):
+        recipe["atlas_directory"] = config["dataset"]["atlas_directory"]
+    _, base, _ = build_thermal_content_hypergraph_task_v2(recipe, device="cpu")
+    if len(base.training_case_ids) != 600 or len(base.validation_case_ids) != 89:
+        raise ValueError("Scratch formal factory must provide TRAIN600 and canonical VAL89.")
+    provider_identity = copy.deepcopy(dict(base.identity_payload()))
+    state = base.model.state_payload()
+    base_config = base.model.core.get_config()
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(int(config["training"]["seed"]))
+        fresh = UnifiedJointCore(base_config, input_dataset="thermal", routing_mode="hypergraph")
+        # Copy only newly generated random tensors inside this initialization;
+        # no saved model or checkpoint enters this path.
+        core = CompactUnifiedJointCore.from_unified_parent(fresh)
+    core.set_execution_options(**config["execution"]["options"])
+    for name, value in config["initialization"]["fresh_controller_lambda0"].items():
+        core.joint_budget.duals[name].set_calibrated_lambda0(float(value))
+    if int(core.joint_epoch) != 3000 or int(core.joint_macro_clock) != 0:
+        raise RuntimeError("Scratch core must start with fresh work-controller clocks.")
+    core.set_compact_phase(0, arm="merge")
+    adapter = ThermalContentHypergraphAdapterV2(
+        state["normalization_stats"], core=core,
+        nx=state["native_grid_nx_ny"][0], ny=state["native_grid_nx_ny"][1],
+        environment_nx=state["environment_grid_nx_ny"][0],
+        environment_ny=state["environment_grid_nx_ny"][1],
+    ).to(device)
+    recipe_optimizer = recipe["optimizer"]
+    lr = float(recipe_optimizer["lr"])
+    schedule = asdict(ScheduleSpec(peak_lr=lr, warmup_start_lr=lr, warmup_epochs=0,
+        hold_through_epoch=1000, total_epochs=1001, final_lr=lr))
+    contract = [{"name": "formal_joint", "parameter_names": [
+        n for n, p in adapter.named_parameters() if p.requires_grad], "schedule": schedule,
+        "weight_decay": float(recipe_optimizer["weight_decay"]),
+        "betas": list(recipe_optimizer["betas"]), "eps": float(recipe_optimizer["eps"])}]
+    payload = {"epoch": 0, "experiment_identity": {"provider_identity": provider_identity,
+        "optimizer_schedule_contract": contract}, "compact_parameter_migration":
+        copy.deepcopy(core.compact_parameter_migration), "pretrained_weights_loaded": False}
+    path = _initialization_path(config)
+    return adapter, payload, path, sha256_file(path)
+
+
 def _source_components(config: Mapping[str, Any], device: torch.device):
     init = config["initialization"]
+    if _is_round12_scratch(config):
+        return _scratch_compact_components(config, device)
     source_path = Path(init["source_checkpoint"]).expanduser().resolve(strict=True)
     expected_sha = init.get("source_sha256")
     actual_sha = sha256_file(source_path)
@@ -796,7 +890,7 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
         self._classic_provider_identity = (None if classic_provider_identity is None else
                                            copy.deepcopy(dict(classic_provider_identity)))
         self._round12 = copy.deepcopy(dict(config.get("round12", {}))) if (
-            config["initialization"]["normalization_mode"] == "inherit_parent_train_stats"
+            config["initialization"]["normalization_mode"] in ("inherit_parent_train_stats", "scratch_train600_stats")
         ) else None
         self._round12_parent_macro_clock = int(
             config["initialization"].get("clock_mapping", {}).get("parent_macro_clock", 0)
@@ -914,6 +1008,7 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "protocol": TASK_SCHEMA,
                 "dataset_profile": self._research_membership,
                 "normalization_fit_scope": (
+                    "freshly fitted original TRAIN600 only; no pretrained model" if _is_round12_scratch(self._research_config) else
                     "inherited U-H full TRAIN600 statistics; no refit" if self._round12 is not None else
                     "original TRAIN600 only; saved classic statistics reused" if classic_identity is not None else
                     "original TRAIN600 only" if self._research_normalization_mode == "fresh_full_train600_stats" else
@@ -945,7 +1040,9 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "microbatch_size": self._identity_microbatch_size,
                 "primary_queries_per_case": self.primary_queries,
                 "total_epochs": self.total_epochs,
-                "optimizer": ("fresh AdamW source-terminal groups over the compact U-H parameter migration"
+                "optimizer": ("fresh AdamW over random compact weights"
+                              if _is_round12_scratch(self._research_config) else
+                              "fresh AdamW source-terminal groups over the compact U-H parameter migration"
                               if self._round12 is not None else
                               "fresh AdamW formal_joint group over all active U-core parameters"
                               if classic_identity is not None else
@@ -969,7 +1066,7 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "schema": RESEARCH_SCHEMA,
                 "config_name": self._research_config["name"],
                 "source_arm": self._research_config["initialization"]["source_arm"],
-                "source_checkpoint": self._research_config["initialization"]["source_checkpoint"],
+                "source_checkpoint": self._research_config["initialization"].get("source_checkpoint"),
                 "source_checkpoint_sha256": self._research_config["initialization"].get("source_sha256")
                     or self._research_source_payload.get("classic_checkpoint_sha256")
                     or (classic_identity or {}).get("source_binding", {}).get("source_checkpoint_sha256"),
@@ -1302,6 +1399,11 @@ class ResearchTrainingEngine(TrainingEngine):
         if phase is None or arm is None or type(update_index) is not int:
             raise TypeError("Research optimizer updates require phase, arm, and macro update index.")
         native_core = getattr(model, "core", model)
+        if _is_round12_scratch(getattr(provider, "_research_config", {"initialization": {}})):
+            if self._execution_runtime_path is None:
+                raise RuntimeError("Scratch phase transitions require the owned run directory.")
+            _scratch_round12_boundary(self._execution_runtime_path.parent, model, provider,
+                                      local_epoch=int(epoch), update_index=update_index, device=self.device)
         if self.compact_arm is not None:
             phase_setter = getattr(native_core, "set_compact_phase", None)
             if not callable(phase_setter):
@@ -1490,7 +1592,7 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
     else:
         recipe.pop("atlas_directory", None)
     supplied_stats = None
-    if config["initialization"]["normalization_mode"] == "inherit_parent_train_stats":
+    if config["initialization"]["normalization_mode"] in ("inherit_parent_train_stats", "scratch_train600_stats"):
         adapter_state = checkpoint_payload["experiment_identity"]["provider_identity"]["adapter_state"]
         supplied_stats = adapter_state.get("normalization_stats")
         if not isinstance(supplied_stats, Mapping):
@@ -1509,7 +1611,7 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
     dev_ids = tuple(development_case_ids(base.manifest, "test"))
     classic_provider_identity = None
     full_train_parent_mode = config["initialization"]["normalization_mode"] in (
-        "classic_train600_stats", "inherit_parent_train_stats",
+        "classic_train600_stats", "inherit_parent_train_stats", "scratch_train600_stats",
     )
     if full_train_parent_mode:
         classic_provider_identity = checkpoint_payload["experiment_identity"]["provider_identity"]
@@ -1531,6 +1633,7 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
         train_ids = (fixed_train150 if config["training"]["membership"] == "fixed25_train150_dev22"
                      else source_train600)
     expected_full_membership = (
+        "scratch_train600_exposed_val89" if _is_round12_scratch(config) else
         "classic_train600_exposed_val89"
         if config["initialization"]["normalization_mode"] == "classic_train600_stats"
         else "parent_train600_exposed_val89"
@@ -1579,7 +1682,7 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
         factory_normalizer_key = base.model.state_payload().get("normalizer_key")
         factory_train_ids = tuple(map(str, getattr(base, "training_case_ids", ())))
         factory_validation_ids = tuple(map(str, getattr(base, "validation_case_ids", ())))
-        if (factory_normalizer_key == config["round12"]["expected_parent_normalizer_key"]
+        if (factory_normalizer_key == config["round12"].get("expected_parent_normalizer_key", model.normalizer_key)
                 and set(factory_train_ids) == set(train_ids)
                 and set(factory_validation_ids) == set(dev_ids)
                 and len(base.training_cases) == len(factory_train_ids)
@@ -1783,7 +1886,7 @@ def _engine_for(config, *, device: torch.device, parent_age: int, microbatch: in
         selection=SelectionPolicy(field_metric="field_score"),
         fresh_model_schedule=(config["initialization"].get("fresh_model_schedule")
                               if config["initialization"]["normalization_mode"] in (
-                                  "fresh_full_train600_stats", "classic_train600_stats",
+                                  "fresh_full_train600_stats", "classic_train600_stats", "scratch_train600_stats",
                               )
                               else None),
         execution_options=config["execution"]["options"],
@@ -1808,8 +1911,10 @@ def _write_run_manifest(output: Path, *, config: Mapping[str, Any], config_path:
         "schema": RESEARCH_SCHEMA,
         "config": copy.deepcopy(dict(config)),
         "config_path": str(config_path),
-        "source_checkpoint": str(source_path),
-        "source_checkpoint_sha256": source_sha,
+        "source_checkpoint": None if _is_round12_scratch(config) else str(source_path),
+        "initialization_recipe": str(source_path) if _is_round12_scratch(config) else None,
+        "source_checkpoint_sha256": None if _is_round12_scratch(config) else source_sha,
+        "initialization_recipe_sha256": source_sha if _is_round12_scratch(config) else None,
         "source_alias": config["initialization"].get("source_alias", ""),
         "source_epoch": int(config["initialization"]["source_parent_age"]),
         "optimizer_moments": "fresh on source initialization; exact-run checkpoint on resume",
@@ -1827,7 +1932,7 @@ def _write_run_manifest(output: Path, *, config: Mapping[str, Any], config_path:
             "training": config["training"]["membership"],
             "validation": ("canonical89 exposed original test panel only"
                            if config["training"]["membership"] in (
-                               "classic_train600_exposed_val89", "parent_train600_exposed_val89",
+                               "classic_train600_exposed_val89", "parent_train600_exposed_val89", "scratch_train600_exposed_val89",
                            ) else "fixed25_v1 DEV22 only"),
             "locked_test_targets_read": False,
             "unexposed_original_test_targets_read": False,
@@ -2072,11 +2177,15 @@ def _experiment_identity(config: Mapping[str, Any], provider: ResearchThermalPro
         "config_sha256": _canonical_sha256(config),
         "training_membership": config["training"]["membership"],
         "normalization_mode": config["initialization"]["normalization_mode"],
-        "source_checkpoint": str(source_path),
-        "source_checkpoint_sha256": source_sha,
+        "source_checkpoint": None if _is_round12_scratch(config) else str(source_path),
+        "initialization_recipe": str(source_path) if _is_round12_scratch(config) else None,
+        "source_checkpoint_sha256": None if _is_round12_scratch(config) else source_sha,
+        "initialization_recipe_sha256": source_sha if _is_round12_scratch(config) else None,
         "source_parent_age": int(config["initialization"]["source_parent_age"]),
         "training_parent_age": _parent_age(config),
         "source_model_initialization": (
+            "fresh_random_compact_core; no checkpoint read; no pretrained weights or optimizer state"
+            if _is_round12_scratch(config) else
             "fresh_random_core_from_declared_architecture; source weights not loaded"
             if _parent_age(config) == 0 and int(config["initialization"]["source_parent_age"]) > 0
             else "model_weights_only; optimizer moments reset"
@@ -2097,7 +2206,7 @@ def _experiment_identity(config: Mapping[str, Any], provider: ResearchThermalPro
                 "optimizer_moments_and_mature_dual_state_loaded": False,
             }
             if config["initialization"]["normalization_mode"] in (
-                "fresh_full_train600_stats", "classic_train600_stats",
+                "fresh_full_train600_stats", "classic_train600_stats", "scratch_train600_stats",
             )
             else None
         ),
@@ -2125,15 +2234,15 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
         case_ids = tuple(map(str, case_ids))
         if not case_ids or len(set(case_ids)) != len(case_ids):
             raise ValueError("Diagnostic --case-id values must be a nonempty unique list.")
-    if (config["initialization"]["normalization_mode"] in ("fresh_full_train600_stats", "classic_train600_stats")
+    if (config["initialization"]["normalization_mode"] in ("fresh_full_train600_stats", "classic_train600_stats", "scratch_train600_stats")
             and diagnostic_only):
         raise ValueError("Fresh full-TRAIN profiles are available only for a full-membership fit.")
 
     output_path = Path(output).expanduser().resolve(strict=False)
-    if output_path.exists() and (not output_path.is_dir() or any(output_path.iterdir())):
+    if output_path.exists() and (_is_round12_scratch(config) or not output_path.is_dir() or any(output_path.iterdir())):
         raise FileExistsError(f"New research fits require an empty output directory: {output_path}")
-    source_path = Path(config["initialization"]["source_checkpoint"]).expanduser().resolve(strict=True)
-    source_size = source_path.stat().st_size
+    source_path = _initialization_path(config)
+    source_size = (64 * 1024**2 if _is_round12_scratch(config) else source_path.stat().st_size)
     estimate = _estimate_run_bytes(config, epochs=stop_after, source_size=source_size,
                                    diagnostic=diagnostic_only)
     peak_estimate = 2 * source_size + 256 * 1024**2
@@ -2152,7 +2261,7 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
     )
     if not isinstance(optimizer_contract, Sequence) or not optimizer_contract:
         raise ValueError("Source checkpoint lacks its named optimizer group schedule contract.")
-    if config["initialization"]["normalization_mode"] == "classic_train600_stats":
+    if config["initialization"]["normalization_mode"] in ("classic_train600_stats", "scratch_train600_stats"):
         classic_group = copy.deepcopy(optimizer_contract[0])
         classic_group["parameter_names"] = [name for name, parameter in model.named_parameters()
                                              if parameter.requires_grad]
@@ -2210,7 +2319,8 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
     print(json.dumps({
         "event": "research_run_prepared",
         "output": str(output_path),
-        "source_checkpoint": str(source_path),
+        "source_checkpoint": None if _is_round12_scratch(config) else str(source_path),
+        "initialization_recipe": str(source_path) if _is_round12_scratch(config) else None,
         "source_sha256": source_sha,
         "source_epoch": config["initialization"]["source_parent_age"],
         "selected_device": device_info,
@@ -2303,8 +2413,8 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
     identity = _experiment_identity(
         config,
         provider,
-        run_manifest["source_checkpoint"],
-        run_manifest["source_checkpoint_sha256"],
+        run_manifest.get("initialization_recipe") or run_manifest["source_checkpoint"],
+        run_manifest.get("initialization_recipe_sha256") or run_manifest["source_checkpoint_sha256"],
         diagnostic=diagnostic,
     )
     print(json.dumps({
@@ -2423,6 +2533,49 @@ def activate_round12_cut(run_dir: str | Path) -> dict[str, Any]:
         "optimizer_group_contract_preserved": True,
         "storage": storage,
     }
+
+
+def _scratch_round12_boundary(run: Path, model, provider, *, local_epoch: int,
+                              update_index: int, device: torch.device) -> None:
+    """Automatic algorithm boundaries within one new scratch fit, never a fork."""
+    if update_index != 0 or local_epoch not in (21, 41):
+        return
+    config = provider._research_config
+    core = model.core
+    if local_epoch == 21:
+        calibration_path = run / "round12_calibration.json"
+        if calibration_path.exists():
+            record = read_json(calibration_path)
+            if record.get("source_common_local_epoch") != 20:
+                raise ValueError("Scratch calibration must belong to this run's warmup20.")
+            coefficients = {name: record["terms"][name]["coefficient"] for name in ("tie", "capacity")}
+        else:
+            payload, _ = _read_run_checkpoint(run, "latest")
+            if int(payload.get("epoch", -1)) != 20:
+                raise ValueError("Scratch calibration needs this new run's local20 checkpoint.")
+            calibrated = _round12_calibrate_structural_losses(run, payload, config, device)
+            record, coefficients = calibrated["record"], calibrated["coefficients"]
+            _atomic_json(calibration_path, record)
+        core.set_compact_loss_coefficients(**coefficients)
+    elif not bool(core.compact_cut_active):
+        # TrainingEngine already owns the writer lock. Preserve the ordinary
+        # e40 checkpoint and its RNG/Adam/history/clocks; change cut state only.
+        from .unified_training import _atomic_torch_save
+        payload, _ = _read_run_checkpoint(run, "latest")
+        if int(payload.get("epoch", -1)) != 40 or int(core.compact_local_epoch) != 40:
+            raise ValueError("Scratch hard cut needs the completed pre-cut local40 state.")
+        before = RunLayout(run).read_path("epoch_0040_model.pt")
+        if not before.is_file():
+            raise FileNotFoundError("Scratch hard cut requires the retained pre-cut milestone.")
+        after = RunLayout(run).write_path("epoch_0040_after_cut_model.pt")
+        if after.exists():
+            raise FileExistsError("Scratch after-cut checkpoint already exists; refusing to overwrite it.")
+        core.activate_hard_cut()
+        changed = copy.deepcopy(dict(payload))
+        changed["model_state_dict"] = _cpu_state_snapshot(model.state_dict())
+        changed["provider_training_state"]["compact_state"] = copy.deepcopy(core.export_compact_state())
+        _atomic_torch_save(after, changed)
+        _atomic_torch_save(RunLayout(run).write_path("latest_model.pt"), changed)
 
 
 def _round12_new_parameter_names(model) -> tuple[str, ...]:
