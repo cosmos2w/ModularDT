@@ -1683,6 +1683,7 @@ def _geometry_native_scalar(
     fixed_fluid_mask: Any,
     expected_fluid_support: Any | None = None,
     need_gradient: bool = False,
+    capture_trace_before_gradient: bool = False,
 ):
     import torch
     import numpy as np
@@ -1711,11 +1712,17 @@ def _geometry_native_scalar(
     if not bool(torch.isfinite(scalar).detach().cpu()):
         raise ValueError("Translated fixed exterior-fluid mean-temperature probe is nonfinite.")
     grad = None
+    trace = None
+    if capture_trace_before_gradient:
+        if not need_gradient:
+            raise ValueError("A pre-gradient compact trace is only valid for an autodiff geometry probe.")
+        trace = capture_compact_trace_cpu(model, prepared)
     if need_gradient:
         grad = torch.autograd.grad(scalar, offset, allow_unused=False)[0]
         if not bool(torch.isfinite(grad).detach().all().cpu()):
             raise ValueError("Translated native geometry autodiff is nonfinite.")
-    return scalar, _topology_from_organization(prepared.organization), grad, prepared, support
+    result = (scalar, _topology_from_organization(prepared.organization), grad, prepared, support)
+    return result + (trace,) if capture_trace_before_gradient else result
 
 
 def _numeric_delta(left: Any, right: Any) -> dict[str, Any] | None:
@@ -1909,9 +1916,10 @@ def _geometry_probe_one_case(model: Any, batch: Any, case_id: str) -> dict[str, 
     offset = torch.tensor(nominal, device=batch.receivers.fluid_xy.device,
                           dtype=batch.receivers.fluid_xy.dtype, requires_grad=True)
     with torch.enable_grad():
-        scalar, topology, autodiff, translated_prepared, support_check = _geometry_native_scalar(
+        scalar, topology, autodiff, translated_prepared, support_check, translated_trace = _geometry_native_scalar(
             model, batch, translation, offset, fixed_fluid_mask=fixed_mask,
             expected_fluid_support=valid_support, need_gradient=True,
+            capture_trace_before_gradient=True,
         )
     h_sweep = []
     for fraction in (1.0, 0.5, 0.25, 0.125):
@@ -1946,8 +1954,7 @@ def _geometry_probe_one_case(model: Any, batch: Any, case_id: str) -> dict[str, 
     # Quote the largest fixed-topology step as the primary represented FD;
     # retain the full decreasing h sweep to expose FP32 cancellation behavior.
     primary_fd = h_sweep[0]
-    base_trace = capture_compact_trace_tiled(model, base_prepared)
-    translated_trace = capture_compact_trace_tiled(model, translated_prepared)
+    base_trace = capture_compact_trace_cpu(model, base_prepared)
     routing_comparison = _routing_geometry_comparison(
         base_trace, base_prepared, translated_trace, translated_prepared, valid_support,
     )
@@ -2173,6 +2180,18 @@ def capture_compact_trace_tiled(model: Any, prepared: Any) -> dict[str, Any]:
     return {
         **static,
         **{name: torch.cat(values, dim=1) for name, values in chunks.items()},
+    }
+
+
+def capture_compact_trace_cpu(model: Any, prepared: Any) -> dict[str, Any]:
+    """Capture a live compact trace before backward, then release its GPU storage."""
+    import torch
+
+    with torch.no_grad():
+        trace = capture_compact_trace_tiled(model, prepared)
+    return {
+        name: value.detach().cpu() if torch.is_tensor(value) else value
+        for name, value in trace.items()
     }
 
 
