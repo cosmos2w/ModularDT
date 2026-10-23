@@ -233,11 +233,13 @@ class ThermalContentHypergraphAdapter(nn.Module):
                     or base_core_config.get("schema") != "content_hypergraph_core_v2"
                     or base_core_config.get("architecture") != "A2-D"):
                 raise ValueError("Thermal base adapter accepts only the explicit no-E budgeted A2-D capability.")
-        elif core_config_value.get("schema") in ("continuous_joint_native_v1","unified_continuous_joint_native_v1"):
+        elif core_config_value.get("schema") in ("continuous_joint_native_v1", "unified_continuous_joint_native_v1", "compact_unified_joint_v1"):
             from honf_forward_core.continuous_joint.model import ContinuousJointCore
             from honf_forward_core.continuous_joint.unified import UnifiedJointCore
             if core_config_value.get('schema')=='unified_continuous_joint_native_v1':
                 from honf_forward_core.continuous_joint.unified import UnifiedJointCore as ContinuousJointCore
+            elif core_config_value.get('schema') == 'compact_unified_joint_v1':
+                from honf_forward_core.continuous_joint.unified import CompactUnifiedJointCore as ContinuousJointCore
             if not isinstance(core,ContinuousJointCore):raise TypeError('Continuous capability requires ContinuousJointCore.')
             base_core_config=ContinuousJointCore.validate_config(core_config_value)
         elif core_config_value.get("schema") == "joint_native_hypergraph_v1":
@@ -931,11 +933,13 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             native_schema = config.get("schema") == "native_retrieval_core_v1"
             budgeted_schema = config.get("schema") == "native_budgeted_dispatch_v2"
             joint_schema = config.get("schema") == "joint_native_hypergraph_v1"
-            continuous_schema = config.get("schema") in ("continuous_joint_native_v1","unified_continuous_joint_native_v1")
+            continuous_schema = config.get("schema") in ("continuous_joint_native_v1", "unified_continuous_joint_native_v1", "compact_unified_joint_v1")
             if continuous_schema:
                 from honf_forward_core.continuous_joint.model import ContinuousJointCore
                 if config.get('schema')=='unified_continuous_joint_native_v1':
                     from honf_forward_core.continuous_joint.unified import UnifiedJointCore as ContinuousJointCore
+                elif config.get('schema') == 'compact_unified_joint_v1':
+                    from honf_forward_core.continuous_joint.unified import CompactUnifiedJointCore as ContinuousJointCore
                 base_config = ContinuousJointCore.validate_config(config)
                 config_type = ContinuousJointCore
             elif joint_schema:
@@ -990,12 +994,14 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
         native_schema = core_config_value.get("schema") == "native_retrieval_core_v1"
         budgeted_schema = core_config_value.get("schema") == "native_budgeted_dispatch_v2"
         joint_schema = core_config_value.get("schema") == "joint_native_hypergraph_v1"
-        continuous_schema = core_config_value.get("schema") in ("continuous_joint_native_v1","unified_continuous_joint_native_v1")
+        continuous_schema = core_config_value.get("schema") in ("continuous_joint_native_v1", "unified_continuous_joint_native_v1", "compact_unified_joint_v1")
         if continuous_schema:
             from honf_forward_core.continuous_joint.model import ContinuousJointCore
             if not isinstance(core,ContinuousJointCore):raise TypeError('Continuous capability requires ContinuousJointCore.')
             if core_config_value.get('schema')=='unified_continuous_joint_native_v1':
                 from honf_forward_core.continuous_joint.unified import UnifiedJointCore as ContinuousJointCore
+            elif core_config_value.get('schema') == 'compact_unified_joint_v1':
+                from honf_forward_core.continuous_joint.unified import CompactUnifiedJointCore as ContinuousJointCore
             dimensions_config=ContinuousJointCore.validate_config(core_config_value)
         elif joint_schema:
             from honf_forward_core.joint_native.model import JointNativeCore
@@ -1113,10 +1119,12 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             from honf_forward_core.native_retrieval.budgeted_core import BudgetedNativeCore
 
             core = BudgetedNativeCore.from_config(core_config)
-        elif core_config.get("schema") in ("continuous_joint_native_v1","unified_continuous_joint_native_v1"):
+        elif core_config.get("schema") in ("continuous_joint_native_v1", "unified_continuous_joint_native_v1", "compact_unified_joint_v1"):
             from honf_forward_core.continuous_joint.model import ContinuousJointCore
             if core_config.get('schema')=='unified_continuous_joint_native_v1':
                 from honf_forward_core.continuous_joint.unified import UnifiedJointCore as ContinuousJointCore
+            elif core_config.get('schema') == 'compact_unified_joint_v1':
+                from honf_forward_core.continuous_joint.unified import CompactUnifiedJointCore as ContinuousJointCore
             core = ContinuousJointCore.from_config(core_config)
         elif core_config.get("schema") == "joint_native_hypergraph_v1":
             from honf_forward_core.joint_native.model import JointNativeCore

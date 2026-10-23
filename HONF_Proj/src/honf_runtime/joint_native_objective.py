@@ -12,6 +12,7 @@ class JointMacroObjective:
         self.capable=callable(getattr(core,'joint_begin_update',None))
         self.enabled=self.capable
         self.residuals={};self.gradients={};self.denominators={};self.controller={};self.telemetry={}
+        self.additive_values={};self.additive_gradients={};self.additive_denominators={}
         self.parameters=tuple(dict.fromkeys(p for g in optimizer.param_groups for p in g['params'] if p.requires_grad)) if self.capable else ()
         if self.enabled:
             needed=('joint_begin_microbatch','joint_microbatch_result','joint_constraint_duals','joint_after_update')
@@ -55,6 +56,28 @@ class JointMacroObjective:
             if not torch.is_tensor(controller) or controller.numel()!=1:
                 raise ValueError('Joint controller numerator must be a detached scalar.')
             self.controller.setdefault(typed,[]).append(controller.detach().reshape(()))
+        # Scene-level structural terms have their own exact case denominator.
+        # Accumulate their VJPs before the native task backward frees this
+        # microbatch, then apply the mean once over the complete macro. They do
+        # not enter the work hinge or its replayed gradients.
+        additive=result.get('additive_losses',{})
+        if not isinstance(additive,Mapping):
+            raise TypeError('Joint additive losses must be a named mapping.')
+        for name,row in additive.items():
+            if not isinstance(name,str) or not name or not isinstance(row,Mapping):
+                raise ValueError('Joint additive losses require named numerator/count rows.')
+            value=row.get('numerator');count=row.get('denominator')
+            if (not torch.is_tensor(value) or value.numel()!=1 or not value.requires_grad
+                    or type(count) is not int or count<1 or not torch.isfinite(value.detach())):
+                raise ValueError('Joint additive loss requires a finite differentiable numerator and positive case count.')
+            gradients=torch.autograd.grad(value,self.parameters,retain_graph=True,allow_unused=True)
+            current=self.additive_gradients.setdefault(name,{})
+            for parameter,gradient in zip(self.parameters,gradients):
+                if gradient is not None:
+                    if parameter in current:current[parameter].add_(gradient.detach())
+                    else:current[parameter]=gradient.detach().clone()
+            self.additive_values.setdefault(name,[]).append(value.detach().reshape(()))
+            self.additive_denominators[name]=self.additive_denominators.get(name,0)+count
         for name,value in result.get('telemetry',{}).items():
             if torch.is_tensor(value):value=float(value.detach().cpu())
             if type(value) not in (int,float) or not math.isfinite(value):raise ValueError('Invalid joint telemetry.')
@@ -82,7 +105,16 @@ class JointMacroObjective:
             self.work[f'joint_constraint_residual_{typed}']=float(residual.cpu())
             self.work[f'joint_case_requests_{typed}']=denominator
             self.controller_residuals[typed]=torch.stack(self.controller[typed]).sum()/denominator
+        for name,values in self.additive_values.items():
+            denominator=self.additive_denominators[name]
+            for parameter,gradient in self.additive_gradients[name].items():
+                contribution=gradient/denominator
+                if parameter.grad is None:parameter.grad=contribution
+                else:parameter.grad.add_(contribution)
+            self.losses[name]=float((torch.stack(values).sum()/denominator).cpu())
+            self.work[name+'_case_requests']=denominator
         self.gradients.clear()
+        self.additive_gradients.clear()
 
     def after_update(self):
         if self.capable:self.core.joint_after_update(self.epoch,self.update_index,self.controller_residuals)

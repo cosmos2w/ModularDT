@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -26,7 +27,7 @@ from ..content_hypergraph import (
     THERMAL_CONTENT_NATIVE_LAW_CONTRACT_V2,
     ThermalContentHypergraphAdapterV2,
 )
-from ..data.datasets import fit_global_normalizer
+from ..data.datasets import H5Normalizer, fit_global_normalizer
 from ..data.development_split import development_case_ids, read_case_catalog
 from .content_hypergraph_task import (
     THERMAL_CONTENT_FULL_TRAIN_DATASET,
@@ -553,8 +554,9 @@ def build_thermal_content_hypergraph_task_v2(
     recipe: Mapping[str, Any],
     *,
     device: torch.device | str = "cpu",
+    normalization_stats: Mapping[str, Any] | None = None,
 ) -> tuple[ThermalContentHypergraphAdapterV2, ThermalContentHypergraphTaskV2, Mapping[str, Any]]:
-    """Build Thermal A2-D/A2-H6 for fixed25, the H6 follow-up, or formal A2-D."""
+    """Build Thermal A2-D/A2-H6, optionally reusing saved H5 normalization stats."""
     if not isinstance(recipe, Mapping) or recipe.get("schema") != THERMAL_CONTENT_RECIPE_V2_SCHEMA:
         raise ValueError("Thermal v2 builder requires schema=content_hypergraph_recipe_v2.")
     formal = recipe.get("protocol") == FORMAL_PROTOCOL
@@ -673,7 +675,17 @@ def build_thermal_content_hypergraph_task_v2(
                 "manifest_sha256": _stable_sha256(followup_manifest),
             }
 
-    normalizer = fit_global_normalizer(data_path, train_ids)
+    if normalization_stats is None:
+        normalizer = fit_global_normalizer(data_path, train_ids)
+        normalization_source = "TRAIN-only H5Normalizer fit_global_normalizer"
+    else:
+        if not isinstance(normalization_stats, Mapping) or not normalization_stats:
+            raise ValueError("Supplied Thermal normalization_stats must be a nonempty saved-statistics mapping.")
+        normalizer = H5Normalizer({
+            str(key): np.asarray(value, dtype=np.float32)
+            for key, value in normalization_stats.items()
+        })
+        normalization_source = "supplied saved H5Normalizer statistics (no refit)"
     training_cases = _read_selected_cases(
         data_path, train_ids, split="train", normalizer=normalizer, include_grid=False,
     )
@@ -708,7 +720,7 @@ def build_thermal_content_hypergraph_task_v2(
         "manifest_path": None if manifest_path is None else str(manifest_path),
         "base_manifest_sha256": base_manifest_sha256,
         "protocol": protocol,
-        "normalization_source": "TRAIN-only H5Normalizer fit_global_normalizer",
+        "normalization_source": normalization_source,
         "response_family_sources": [
             {"family_id": str(item["family_id"]), "sha256": str(item["source_sha256"])}
             for item in train_families

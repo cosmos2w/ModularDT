@@ -157,12 +157,28 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         _,_,envelope,qmask,_=self._continuous_route_tile(organization,query,self._query_states(organization,query))
         work=compact_work(gates,envelope,organization.joint_records,qmask,self.joint_budget.schedule()['delta'])
         m=self._read('module',organization,query,qstates,gates[...,:organization.scene.num_modules])
-        result=dict(gates=gates,seeds=seeds,module_ids=organization.scene.module_ids,
+        compact_trace=hasattr(organization, 'compact_groups')
+        result=dict(gates=gates,seeds=None if compact_trace else seeds,module_ids=organization.scene.module_ids,
             environment_ids=organization.scene.environment_ids,query_ids=query.query_ids,
+            local_module_envelope=envelope,
             environment_access=e.alpha,environment_context=e.context,conditioned_query=qstates,
             module_access=m.alpha,source_coefficients=m.response,compact_work=work,
             module_work_counts=dict(m.counts),environment_work_counts=dict(e.counts),
             value_execution_backend='dense_ME' if self.routing_mode=='dense' else self.native_backend)
+        if compact_trace:
+            compact=organization.compact_groups
+            query_valid_mask=(query.query_mask if query.query_mask is not None
+                              else torch.ones(gates.shape[:2],device=gates.device,dtype=torch.bool))
+            result.update(compact_group_weights=seeds,compact_membership=compact.membership,
+                compact_group_mask=compact.group_mask,compact_group_types=compact.group_types,
+                compact_group_controls=compact.controls,compact_group_centroids=compact.centroids,
+                compact_group_lengths=compact.lengths,compact_group_extents=compact.extents,
+                compact_live_K=compact.live_counts,compact_allocated_K=compact.allocated_count,
+                compact_lineage=tuple(row.as_dict() for row in compact.topology),
+                query_valid_mask=query_valid_mask,
+                original_record_present=organization.joint_records.present,
+                original_record_eligible=organization.joint_records.eligible,
+                original_record_count=organization.joint_records.present.sum(-1))
         if hasattr(organization,'continuous_incidence'):result['incidence']=organization.continuous_incidence
         return result
 
@@ -244,6 +260,14 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         elif self.routing_mode=='dense':
             gates=(organization.joint_records.eligible[:,None]&qmask[...,None]).to(query_states)
             seeds=None;raw_e=None
+        elif hasattr(organization, 'compact_groups'):
+            # The compact route scores Q against live K controls and applies
+            # the direct K-by-N membership matrix. Original E information
+            # scores remain the legitimate first physical read.
+            raw_e=raw_scores(self.environment_reader,query,query_states,scene.environment_coordinates,
+                scene.environment_characteristic_lengths,organization.frame_scale,organization.joint_environment_keys)
+            gates,seeds,_group_logits=self.compact_retrieval.query_access(
+                organization.compact_groups,organization,query,query_states,envelope,qmask)
         else:
             raw_m=raw_scores(self.direct_reader,query,query_states,scene.module_coordinates,
                 scene.module_characteristic_lengths,organization.frame_scale,organization.direct_source_keys)
@@ -279,8 +303,12 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
         counts={'joint_M_'+k:v for k,v in m.counts.items()};counts.update({'joint_E_'+k:v for k,v in environment.counts.items()})
         # M is scored once for routing, then again after E conditioning for
         # information attention. E routing scores are reused by its reader.
+        compact_route=hasattr(organization, 'compact_groups') and self._continuous_frozen_plan is None
         counts['joint_pre_E_M_score_rows']=(m.counts['candidate_rows']
-            if self.routing_mode!='dense' and self._continuous_frozen_plan is None else 0)
+            if self.routing_mode!='dense' and self._continuous_frozen_plan is None and not compact_route else 0)
+        counts['joint_pre_E_group_score_rows']=(
+            query.batch_size * query.num_queries * organization.compact_groups.score_slot_count
+            if compact_route else 0)
         counts.update(fine_executed_rows=m.counts['value_rows'],fine_selected_rows=m.counts['selected_rows'],
             fine_message_projection_rows=m.counts['message_projection_rows'],fine_scalar_projection_rows=m.counts['scalar_projection_rows'],
             fine_fourier_feature_entries=m.counts['fourier_entries'],fine_hidden_entries=m.counts['hidden_entries'],
@@ -360,12 +388,14 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
             'value_rows','selected_rows','available_present_rows','candidate_rows',
             'message_projection_rows','head_reduction_projection_rows','scalar_projection_rows')
             for kind in ('M','E')]
+        keys += ['joint_pre_E_M_score_rows','joint_pre_E_group_score_rows']
         return torch.stack([torch.as_tensor(counts.get(key,0),device=reference.device,dtype=torch.long)
                             for key in keys])
 
     def _work_count_dict(self,total_counts,query):
-        values=[0]*14 if total_counts is None else total_counts.detach().cpu().tolist()
-        if len(values)==8:values += [values[0],values[1],0,0,values[0] if self.thermal_response_rank else 0,0]
+        values=[0]*16 if total_counts is None else total_counts.detach().cpu().tolist()
+        if len(values)==8:values += [values[0],values[1],0,0,values[0] if self.thermal_response_rank else 0,0,0,0]
+        elif len(values)==14:values += [0,0]
         result=dict(receiver_rows=query.batch_size*query.num_queries,
             fine_executed_rows=values[0],fine_selected_rows=values[2],fine_message_projection_rows=values[8],
             fine_head_reduction_projection_rows=values[10],
@@ -381,8 +411,8 @@ class ContinuousJointCore(ContentHypergraphCoreV2):
                 'joint_'+kind+'_head_reduction_projection_rows':values[10+index],
                 'joint_'+kind+'_scalar_projection_rows':values[12+index],
                 'joint_'+kind+'_fourier_entries':v*7*self.coordinate_dim,'joint_'+kind+'_hidden_entries':v*self.local_hidden_dim})
-        result['joint_pre_E_M_score_rows']=(values[6]
-            if self.routing_mode!='dense' and self._continuous_frozen_plan is None else 0)
+        result['joint_pre_E_M_score_rows']=values[14]
+        result['joint_pre_E_group_score_rows']=values[15]
         if self.training and torch.is_grad_enabled() and self.routing_mode!='dense':
             result['continuous_work_replay_score_rows_M']=values[6]
             result['continuous_work_replay_score_rows_E']=values[7]

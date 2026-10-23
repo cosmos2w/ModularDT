@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+import copy
+from ..native_retrieval.contracts import tensor_versions
 
 SUMMARY_ROOTS = ("scene_summary_net", "module_scene_projection", "environment_scene_projection",
                  "module_scene_gate", "environment_scene_gate")
@@ -91,16 +93,11 @@ class UnifiedPreparationMixin:
         # Original record storage is reusable; no legacy hard graph or fresh
         # calibration is run for unified retrieval.
         prepared = JointNativeCore._finalize_native_preparation(self, organization, cycle_trace)
+        prepared.applied_context_stages = tuple(cycle_trace.get("applied_context_stages", ()))
         if self.routing_mode == 'hypergraph':
             capture = {name:cycle_trace[name+'_native_route_snapshot'] for name in self._native_capture_route_names()}
-            prepared.continuous_incidence,prepared.continuous_typed_incidence = applied_native_directory(
-                capture,prepared.joint_records)
-            from ..native_retrieval.contracts import tensor_versions
-            if cycle_trace.get("applied_context_stages"):
-                prepared.continuous_capture = capture
-            prepared.continuous_incidence_versions = tensor_versions(prepared.continuous_incidence)
-        stages = tuple(cycle_trace.get("applied_context_stages", ()))
-        prepared.applied_context_stages = stages
+            self._build_unified_retrieval(prepared, capture)
+        stages = prepared.applied_context_stages
         prepared.context_work_summary = cycle_trace.get("context_work_summary")
         metadata=cycle_trace.get("context_stage_metadata", ())
         if metadata:
@@ -135,6 +132,14 @@ class UnifiedPreparationMixin:
                 p["positive_value_edges"] for p in prepared.context_stage_metadata if p['route'] == route)
         return prepared
 
+    def _build_unified_retrieval(self, prepared, capture):
+        """Build the legacy unified directory unless a child overrides it."""
+        prepared.continuous_incidence, prepared.continuous_typed_incidence = applied_native_directory(
+            capture, prepared.joint_records)
+        from ..native_retrieval.contracts import tensor_versions
+        if getattr(prepared, "applied_context_stages", ()):
+            prepared.continuous_capture = capture
+        prepared.continuous_incidence_versions = tensor_versions(prepared.continuous_incidence)
 
     @torch.no_grad()
     def capture_unified_context_plan(self,scene,*,max_elements=None):
@@ -351,3 +356,338 @@ class UnifiedJointCore(UnifiedPreparationMixin, ContinuousJointCore):
         model.parent_initialization_inventory = inventory
         model.train(parent.training)
         return model
+
+
+class CompactUnifiedJointCore(UnifiedJointCore):
+    """Unified U-H encoder with direct compact group retrieval."""
+
+    schema = "compact_unified_joint_v1"
+    compact_state_schema = "compact_unified_groups_state_v1"
+    _COMPACT_ARMS = {"common": 0, "singleton": 1, "merge": 2}
+
+    def __init__(self, base_model_config, *, input_dataset, input_capability="local_records_context_v1",
+                 input_contract_sha256=None, **options):
+        super().__init__(base_model_config, input_dataset=input_dataset,
+                         input_capability=input_capability,
+                         input_contract_sha256=input_contract_sha256, **options)
+        if self.routing_mode != "hypergraph":
+            raise ValueError("Compact U-H retrieval requires the applied hypergraph encoder.")
+        from .compact import CompactGroupRetrieval
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(self._stable_seed("compact_group_retrieval"))
+            self.compact_retrieval = CompactGroupRetrieval(
+                width=self.context_dim, heads=self.num_heads, coordinate_dim=self.coordinate_dim,
+                module_feature_dim=self.module_input_dim,
+                environment_feature_dim=self.environment_input_dim,
+                operating_feature_dim=self.operating_input_dim,
+            )
+        self.register_buffer("compact_local_epoch", torch.zeros((), dtype=torch.long))
+        self.register_buffer("compact_arm_code", torch.zeros((), dtype=torch.long))
+        self.register_buffer("compact_cut_active", torch.zeros((), dtype=torch.bool))
+        self.register_buffer("compact_policy_frozen", torch.zeros((), dtype=torch.bool))
+        self.register_buffer("compact_tie_loss_coefficient", torch.zeros(()))
+        self.register_buffer("compact_capacity_loss_coefficient", torch.zeros(()))
+        # The inherited per-record dispatchers are retired by compact Q-to-K
+        # routing. Keep their tensors for strict checkpoint compatibility, but
+        # exclude them from every compact optimizer, including from_config loads.
+        for parameter in self.router.dispatch_parameters.parameters():
+            parameter.requires_grad_(False)
+        for parameter in self.router.direct_parameters.parameters():
+            parameter.requires_grad_(False)
+        self._compact_loss_entries = []
+        self._last_compact_topology = None
+        self.compact_parameter_migration = dict(copied_names=[], new_names=[], dropped_names=[],
+                                                optimizer_excluded_names=[], state_dropped_names=[],
+                                                cloned_route_and_reader_names=[])
+
+    @classmethod
+    def validate_config(cls, config):
+        return super().validate_config(config)
+
+    @classmethod
+    def from_unified_parent(cls, parent):
+        """Fork compact retrieval from one complete U-H state without resetting clocks."""
+        if type(parent) is not UnifiedJointCore or parent.routing_mode != "hypergraph":
+            raise ValueError("Compact initialization requires a non-compact unified parent.")
+        config = parent.get_config()
+        model = cls(
+            config["base_model_config"], input_dataset=parent.input_dataset,
+            input_capability=parent.input_capability,
+            input_contract_sha256=parent.local_input_contract["sha256"],
+            routing_mode=parent.routing_mode, native_backend=parent.native_backend,
+            checkpoint_pipeline=parent.checkpoint_pipeline,
+            query_tile_size=parent.query_tile_size,
+            entmax_temperature=parent._entmax_temperature_value,
+        ).to(next(parent.parameters()))
+        source, target = parent.state_dict(), model.state_dict()
+        copied = sorted(set(source) & set(target))
+        for name in copied:
+            if (torch.is_tensor(source[name]) and torch.is_tensor(target[name])
+                    and source[name].shape != target[name].shape):
+                raise ValueError(f"U-H parent tensor shape differs for {name}.")
+            target[name] = source[name] if torch.is_tensor(source[name]) else copy.deepcopy(source[name])
+        model.load_state_dict(target, strict=True)
+        cloned = model.compact_retrieval.initialize_from_parent(parent)
+        dropped = sorted(name for name, _ in parent.named_parameters()
+                         if name.startswith(("router.dispatch_parameters.", "router.direct_parameters.")))
+        parent_parameters = dict(parent.named_parameters())
+        model_parameters = dict(model.named_parameters())
+        for name in dropped:
+            model_parameters[name].requires_grad_(False)
+        model.compact_parameter_migration = dict(
+            copied_names=sorted(name for name in parent_parameters if name in model_parameters),
+            new_names=sorted(name for name in model_parameters if name.startswith("compact_retrieval.")),
+            # The parameter tensors remain in state_dict for strict compatibility;
+            # these names are dropped from optimizer state/participation only.
+            dropped_names=dropped,
+            optimizer_excluded_names=dropped,
+            state_dropped_names=[],
+            cloned_route_and_reader_names=cloned["copied_from_parent"],
+        )
+        model.train(parent.training)
+        # train() changes module modes but preserves the explicit optimizer exclusion.
+        for name in dropped:
+            model_parameters[name].requires_grad_(False)
+        return model
+
+    @property
+    def compact_arm(self):
+        code = int(self.compact_arm_code.detach().cpu())
+        for name, value in self._COMPACT_ARMS.items():
+            if value == code:
+                return name
+        raise RuntimeError("Saved compact arm code is invalid.")
+
+    @property
+    def compact_alpha(self):
+        if self.compact_arm != "merge" or bool(self.compact_cut_active.detach().cpu()):
+            return 0.0
+        epoch = int(self.compact_local_epoch.detach().cpu())
+        if 21 <= epoch <= 40:
+            return (epoch - 20) / 20.0
+        return 0.0
+
+    def set_compact_phase(self, local_epoch, arm="common"):
+        if type(local_epoch) is not int or local_epoch < 0:
+            raise ValueError("Compact local epoch must be a nonnegative integer.")
+        if arm not in self._COMPACT_ARMS:
+            raise ValueError("Compact arm must be common, singleton, or merge.")
+        current_epoch = int(self.compact_local_epoch.detach().cpu())
+        cut_active = bool(self.compact_cut_active.detach().cpu())
+        policy_frozen = bool(self.compact_policy_frozen.detach().cpu())
+        if cut_active != policy_frozen:
+            raise ValueError("Compact hard-cut activation and policy-freeze state must agree.")
+        if local_epoch < current_epoch:
+            raise ValueError("Compact local epoch cannot move backward.")
+        if cut_active and arm != "merge":
+            raise ValueError("A hard-cut compact state can only resume on the merge arm.")
+        if not cut_active and arm == "merge" and local_epoch > 40:
+            raise ValueError("The merge arm must activate its hard cut after local epoch 40.")
+        self.compact_local_epoch.fill_(local_epoch)
+        self.compact_arm_code.fill_(self._COMPACT_ARMS[arm])
+        return self.compact_alpha
+
+    def set_compact_loss_coefficients(self, tie, capacity):
+        values = (float(tie), float(capacity))
+        if any(not torch.isfinite(torch.tensor(value)).item() or value < 0 for value in values):
+            raise ValueError("Compact structural loss coefficients must be finite and nonnegative.")
+        self.compact_tie_loss_coefficient.fill_(values[0])
+        self.compact_capacity_loss_coefficient.fill_(values[1])
+
+    def set_compact_loss_weights(self, tie, capacity):
+        self.set_compact_loss_coefficients(tie, capacity)
+
+    @property
+    def compact_frozen_parameter_names(self):
+        """Policy optimizer names to remove with their moments at hard cut."""
+        return tuple(sorted(name for name, _ in self.named_parameters()
+                            if name.startswith("compact_retrieval.compatibility.")))
+
+    def activate_hard_cut(self):
+        if bool(self.compact_cut_active.detach().cpu()):
+            if not bool(self.compact_policy_frozen.detach().cpu()):
+                raise ValueError("Compact hard-cut activation and policy-freeze state must agree.")
+            return
+        if self.compact_arm != "merge" or int(self.compact_local_epoch.detach().cpu()) != 40:
+            raise ValueError("The learned cut activates after the merge arm's local epoch 40 update.")
+        self.compact_cut_active.fill_(True)
+        self.compact_policy_frozen.fill_(True)
+        # A cached pre-cut topology describes only the previous soft scene;
+        # never serialize it as the active/archive mapping after the transition.
+        self._last_compact_topology = None
+        for parameter in self.compact_retrieval.compatibility.parameters():
+            parameter.requires_grad_(False)
+            parameter.grad = None
+
+    def _build_unified_retrieval(self, prepared, capture):
+        prepared.compact_groups = self.compact_retrieval.build(
+            prepared, alpha=self.compact_alpha,
+            cut_active=bool(self.compact_cut_active.detach().cpu()),
+        )
+        self._last_compact_topology = [row.as_dict() for row in prepared.compact_groups.topology]
+        prepared.compact_group_versions = self._compact_group_versions(prepared.compact_groups)
+
+    @staticmethod
+    def _compact_group_versions(compact):
+        tensors = [
+            compact.membership, compact.group_mask, compact.group_types,
+            compact.controls, compact.centroids, compact.lengths, compact.extents,
+            compact.pair_logits, compact.pair_mask, compact.pair_slots,
+        ]
+        for metadata in (compact.bank_group_indices, compact.bank_group_masks):
+            if metadata is not None:
+                tensors.extend(metadata)
+        return tensor_versions(*tensors)
+
+    def _config_key(self):
+        return (*super()._config_key(), int(self.compact_local_epoch.detach().cpu()),
+                int(self.compact_arm_code.detach().cpu()), bool(self.compact_cut_active.detach().cpu()),
+                bool(self.compact_policy_frozen.detach().cpu()))
+
+    def _validate_prepared_state(self, organization):
+        super()._validate_prepared_state(organization)
+        if not hasattr(organization, "compact_groups"):
+            raise ValueError("Compact organization is missing its live group retrieval state.")
+        current = self._compact_group_versions(organization.compact_groups)
+        if current != organization.compact_group_versions:
+            raise ValueError("Prepared compact membership or controls changed after preparation.")
+
+    def prepare(self, scene, *, include_compact_loss=True, **options):
+        prepared = super().prepare(scene, **options)
+        if (include_compact_loss and self.training and torch.is_grad_enabled()
+                and self.compact_alpha > 0 and not self.compact_cut_active):
+            raw_scene = prepared.local_input_source_scene
+            scene_key = raw_scene.scene_key
+            if scene_key == ("original_train_response",):
+                return prepared
+            if not isinstance(scene_key, (tuple, list)) or len(scene_key) != raw_scene.batch_size:
+                keys = tuple((repr(scene_key), index) for index in range(raw_scene.batch_size))
+            else:
+                keys = tuple(repr(key) for key in scene_key)
+            components = self.compact_structural_loss_components(prepared)
+            self._compact_loss_entries.append((keys, components))
+        return prepared
+
+    def compact_structural_loss_components(self, organization):
+        compact = getattr(organization, "compact_groups", organization)
+        records = getattr(organization, "joint_records", None)
+        if records is None:
+            raise ValueError("Compact structural losses require a prepared organization.")
+        return self.compact_retrieval.structural_losses(compact, records)
+
+    def joint_begin_microbatch(self):
+        super().joint_begin_microbatch()
+        self._compact_loss_entries = []
+
+    def joint_microbatch_result(self):
+        result = super().joint_microbatch_result()
+        alpha = self.compact_alpha
+        if alpha <= 0 or bool(self.compact_cut_active.detach().cpu()):
+            self._compact_loss_entries = []
+            return result
+        cases = {}
+        for keys, components in self._compact_loss_entries:
+            for index, key in enumerate(keys):
+                cases[key] = (components["tie"][index], components["capacity"][index])
+        if cases:
+            zero = next(self.compact_retrieval.parameters()).sum() * 0
+            tie = sum((row[0] for row in cases.values()), zero)
+            capacity = sum((row[1] for row in cases.values()), zero)
+            result["additive_losses"] = {
+                "compact_tie": {
+                    "numerator": alpha * self.compact_tie_loss_coefficient.to(tie) * tie,
+                    "denominator": len(cases),
+                },
+                "compact_capacity": {
+                    "numerator": alpha * self.compact_capacity_loss_coefficient.to(capacity) * capacity,
+                    "denominator": len(cases),
+                },
+            }
+        else:
+            result["additive_losses"] = {}
+        self._compact_loss_entries = []
+        return result
+
+    @torch.no_grad()
+    def describe_compact_organization(self, organization):
+        self.validate_prepared_state(organization)
+        compact = organization.compact_groups
+        return dict(
+            membership=compact.membership, group_mask=compact.group_mask,
+            group_types=compact.group_types, controls=compact.controls,
+            centroids=compact.centroids, lengths=compact.lengths, extents=compact.extents,
+            live_K=compact.live_counts, allocated_K=compact.allocated_count,
+            lineage=tuple(row.as_dict() for row in compact.topology),
+            original_record_ids=organization.joint_records.ids,
+            original_module_states=organization.module_states,
+            original_environment_states=organization.environment_states,
+            local_input_source_scene=organization.local_input_source_scene,
+        )
+
+    def export_compact_state(self, organization=None):
+        topology = self._last_compact_topology
+        if organization is not None:
+            compact = getattr(organization, "compact_groups", None)
+            if compact is None:
+                raise ValueError("Cannot export topology from a non-compact organization.")
+            topology = [row.as_dict() for row in compact.topology]
+        return dict(
+            schema=self.compact_state_schema,
+            local_epoch=int(self.compact_local_epoch.detach().cpu()),
+            arm=self.compact_arm,
+            cut_active=bool(self.compact_cut_active.detach().cpu()),
+            policy_frozen=bool(self.compact_policy_frozen.detach().cpu()),
+            tie_loss_coefficient=float(self.compact_tie_loss_coefficient.detach().cpu()),
+            capacity_loss_coefficient=float(self.compact_capacity_loss_coefficient.detach().cpu()),
+            cut_rule=self.compact_retrieval.CUT_RULE,
+            topology_rule=self.compact_retrieval.TOPOLOGY_RULE,
+            last_topology=topology,
+        )
+
+    def load_compact_state(self, state):
+        required = {"schema", "local_epoch", "arm", "cut_active", "policy_frozen",
+                    "tie_loss_coefficient", "capacity_loss_coefficient", "cut_rule", "topology_rule"}
+        if not isinstance(state, dict) or not required.issubset(state):
+            raise ValueError("Compact checkpoint state is incomplete.")
+        if state["schema"] != self.compact_state_schema:
+            raise ValueError("Compact checkpoint state schema differs.")
+        if state["cut_rule"] != self.compact_retrieval.CUT_RULE or state["topology_rule"] != self.compact_retrieval.TOPOLOGY_RULE:
+            raise ValueError("Compact checkpoint topology or cut rule differs.")
+        local_epoch = state["local_epoch"]
+        arm = state["arm"]
+        cut_active = bool(state["cut_active"])
+        policy_frozen = bool(state["policy_frozen"])
+        if cut_active != policy_frozen:
+            raise ValueError("Compact checkpoint cut_active and policy_frozen fields must agree.")
+        if cut_active and (arm != "merge" or int(local_epoch) < 40):
+            raise ValueError("A compact hard-cut checkpoint must be the merge arm at local epoch 40 or later.")
+        if not cut_active and arm == "merge" and int(local_epoch) > 40:
+            raise ValueError("An uncut merge checkpoint cannot resume after local epoch 40.")
+        self.set_compact_phase(int(local_epoch), arm)
+        self.set_compact_loss_coefficients(state["tie_loss_coefficient"], state["capacity_loss_coefficient"])
+        if cut_active:
+            self.activate_hard_cut()
+        self._last_compact_topology = state.get("last_topology")
+        return self
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                      missing_keys, unexpected_keys, error_msgs)
+        if hasattr(self, "compact_policy_frozen"):
+            for parameter in self.router.dispatch_parameters.parameters():
+                parameter.requires_grad_(False)
+            for parameter in self.router.direct_parameters.parameters():
+                parameter.requires_grad_(False)
+            cut_active = bool(self.compact_cut_active.detach().cpu())
+            frozen = bool(self.compact_policy_frozen.detach().cpu())
+            arm_code = int(self.compact_arm_code.detach().cpu())
+            epoch = int(self.compact_local_epoch.detach().cpu())
+            if cut_active != frozen:
+                error_msgs.append("compact_cut_active and compact_policy_frozen state must agree")
+            if cut_active and (arm_code != self._COMPACT_ARMS["merge"] or epoch < 40):
+                error_msgs.append("a compact hard-cut state must be merge arm at local epoch 40 or later")
+            if not cut_active and arm_code == self._COMPACT_ARMS["merge"] and epoch > 40:
+                error_msgs.append("an uncut compact merge state cannot have local epoch greater than 40")
+            for parameter in self.compact_retrieval.compatibility.parameters():
+                parameter.requires_grad_(not frozen)
