@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 from torch import nn
 
 from honf_forward_core.content_hypergraph import QueryBatch, SceneBatch
 from honf_forward_core.contextual_organization import ContextualOrganizationJointCore
 from honf_runtime.contextual_frontier_organization import (
-    decode_receiver_roles,
+    _bounded_query_subset,
+    _masked_rms,
     compare_reprepared_source_change,
+    decode_receiver_roles,
     evaluate_common_e_only_quality,
+    evaluate_organization,
     fixed_train_panel,
     inspect_prepared,
     measure_native_cost,
@@ -254,3 +262,185 @@ def test_native_cost_separates_prepare_decode_backward_without_optimizer_steps()
     assert result["reference_decode"]["mean_ms"] >= 0
     assert result["backward"]["mean_ms"] >= 0
     assert result["cuda_memory"] is None
+
+
+def test_evaluate_organization_runs_full_native_counterfactuals_and_restores_state(monkeypatch) -> None:
+    torch.manual_seed(91)
+    core = _core()
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.core = core
+            self.architecture = "J-H"
+
+        def apply_native_with_work_counts(self, native, heat):
+            del heat
+            decoded = self.core.decode(native.organization, native.query_batch)
+            fields = decoded.joint_fields
+            pred_field = torch.cat((fields[..., :3], fields[..., :1] * 0.0, fields[..., 3:4]), dim=-1)
+            module_count = int(native.stencils["surface"].valid.shape[1])
+            surface_row = fields.mean(dim=1)
+            interface_values = torch.stack((surface_row[:, 3], surface_row[:, 0]), dim=-1)
+            pred_interface = interface_values[:, None, None, :].expand(-1, module_count, 2, -1).contiguous()
+            material = surface_row[:, 3, None, None, None].expand(-1, module_count, 3, 1).contiguous()
+            return {
+                "pred_field": pred_field,
+                "pred_interface": pred_interface,
+                "pred_internal_temperature": material,
+            }, dict(decoded.work_counts)
+
+    model = Model()
+
+    def make_batch(case_id: str, module_count: int):
+        source_scene = _scene()
+        mask = torch.zeros_like(source_scene.module_mask)
+        mask[:, :module_count] = True
+        scene = replace(source_scene, module_mask=mask, scene_key=case_id)
+        points = torch.tensor([[[0.15, 0.0], [0.5, 0.0], [1.0, 0.0], [1.5, 0.0],
+                                [4.8, 0.0], [5.2, 0.0]]])
+        targets = SimpleNamespace(
+            case_ids=(case_id,),
+            field_targets=torch.zeros((1, points.shape[1], 5)),
+            point_weights=torch.ones((1, points.shape[1])),
+            interface_target=torch.zeros((1, 4, 2, 2)),
+            interface_valid_mask=torch.ones((1, 4, 2)),
+            material_targets=torch.zeros((1, 4, 3)),
+        )
+        receivers = SimpleNamespace(heat=torch.ones((1, 4)), fluid_xy=points)
+        return SimpleNamespace(case_keys=(case_id,), scene_inputs=scene, receivers=receivers, targets=targets)
+
+    class Provider:
+        training_case_ids = ("train-m2", "train-m3", "train-m4")
+        training_cases = tuple(
+            {"case_id": case_id, "structure": {"module_present": [1.0] * count}}
+            for case_id, count in zip(training_case_ids, (2, 3, 4), strict=True)
+        )
+        manifest = {"manifest_sha256": "fixed-test-manifest"}
+
+        def native_evaluation_batches(self, *, split, case_keys, microbatch_size):
+            assert split == "train" and microbatch_size == 1
+            counts = {"train-m2": 2, "train-m3": 3, "train-m4": 4}
+            for case_id in case_keys:
+                yield make_batch(case_id, counts[case_id])
+
+        def predict_native(self, current_model, scene_inputs, receivers, architecture, phase, *, epoch):
+            assert current_model is model and architecture == "J-H" and phase == "joint" and epoch == 25
+            query = QueryBatch(
+                coordinates=receivers.fluid_xy,
+                scene_key=scene_inputs.scene_key,
+                coordinate_frame_key=scene_inputs.coordinate_frame_key,
+            )
+            organization = current_model.core.prepare(scene_inputs)
+            query_count = int(query.coordinates.shape[1])
+            native = SimpleNamespace(
+                organization=organization,
+                query_batch=query,
+                scene_key=scene_inputs.scene_key,
+                union=SimpleNamespace(unique_counts=torch.tensor([query_count])),
+                stencils={
+                    "fluid": SimpleNamespace(valid=torch.ones((1, query_count), dtype=torch.bool)),
+                    "surface": SimpleNamespace(valid=torch.ones((1, 4, 2), dtype=torch.bool)),
+                    "outside": SimpleNamespace(valid=torch.ones((1, 4, 2), dtype=torch.bool)),
+                    "material": SimpleNamespace(valid=torch.ones((1, 4, 3), dtype=torch.bool)),
+                },
+                source_present=scene_inputs.module_mask,
+            )
+            output, work = current_model.apply_native_with_work_counts(native, receivers.heat)
+            prediction = SimpleNamespace(native_prepared=native, native_main=output, work=work)
+            return prediction, {"work": work}
+
+        def validation_metrics(self, predictions, targets, auxiliary):
+            del predictions, auxiliary
+            case_id = targets.case_ids[0]
+            return {"case_rows": [{
+                "case_id": case_id,
+                "module_count": int(targets.interface_valid_mask.shape[1]),
+                "flow_rmse": {"u": 1.0, "v": 1.0, "p": 1.0, "omega": 1.0},
+                "roles": {
+                    "temperature_fluid": {"rmse": 1.0},
+                    "temperature_surface": {"rmse": 1.0},
+                    "temperature_material": {"rmse": 1.0},
+                },
+                "q_proxy_rmse": 1.0,
+            }]}
+
+    provider = Provider()
+    payload = {
+        "arm": "J-H", "epoch": 25, "checkpoint_path": "fixture-checkpoint",
+        "experiment_identity": {"provider_identity": {"recipe": {"storage": {
+            "minimum_free_headroom_bytes": 0,
+        }}}},
+    }
+    monkeypatch.setattr(
+        "honf_runtime.contextual_frontier_evaluation.load_contextual_checkpoint",
+        lambda checkpoint, device: (model, provider, payload),
+    )
+
+    data2 = Path("/data2")
+    assert data2.is_dir() and os.path.ismount(data2)
+    test_root = Path("/data2/wanglz/ModularDT/diagnostics/round12_2_execution_20261024")
+    test_root.mkdir(parents=True, exist_ok=True)
+    free_before = shutil.disk_usage(test_root).free
+    assert free_before > 128 * 1024**2 + 1024**3
+    old_clock = (int(core.organization_epoch), int(core.organization_update))
+    old_modes = {module: module.training for module in model.modules()}
+    try:
+        with tempfile.TemporaryDirectory(prefix="organization-cpu-test-", dir=test_root) as temporary:
+            output = Path(temporary) / "organization-evaluation"
+            result = evaluate_organization("unused-checkpoint", "cpu", output, max_cases=3)
+            saved = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+            assert result["status"] == "completed"
+            assert saved["train_panel"]["case_ids"] == ["train-m2", "train-m3", "train-m4"]
+            assert saved["detail_module_count_strata"] == [2, 3, 4]
+            assert len(saved["scenes"]) == 3
+            for scene in saved["scenes"]:
+                assert scene["original_source_payloads"]["module"]["record_ids_and_context_key_value_arrays_retained"]
+                assert scene["trace_query_selection"]["selected_rows"] <= 256
+                assert scene["trace_query_selection"]["coverage_fraction"] == 1.0
+                for bank_name in ("module", "environment"):
+                    candidates = scene["banks"][bank_name]["selected_candidates"]
+                    assert candidates and all(row["status"] == "completed" for row in candidates)
+                    assert all(0.0 <= row["stop_probability"] <= 1.0 for row in candidates)
+                    assert "temperature_material" in candidates[0]["per_field_output_changes"]
+                    assert "parent_stop_vs_descendant_change_over_baseline_rmse" in (
+                        candidates[0]["per_field_output_changes"]["temperature_material"]
+                    )
+                    endpoint = candidates[0]["per_field_output_changes"]["temperature_material_endpoint_maxima"]
+                    assert endpoint["finite_modules"] == endpoint["active_modules"]
+                    assert len(endpoint["per_module"]) == scene["module_count"]
+            with np.load(output / "arrays.npz", allow_pickle=False) as arrays:
+                assert "scene_00__module_source_value_slots_all_slots" in arrays
+                assert arrays["scene_00__module_source_slot_ids"].shape == (4,)
+                assert any("parent_stop__module_source_local_rows" in name for name in arrays.files)
+            assert result["write"]["total_bytes"] <= 128 * 1024**2
+    finally:
+        assert (int(core.organization_epoch), int(core.organization_update)) == old_clock
+        assert {module: module.training for module in model.modules()} == old_modes
+        assert shutil.disk_usage(test_root).free >= free_before - 128 * 1024**2
+        if not any(test_root.iterdir()):
+            test_root.rmdir()
+
+
+def test_bounded_trace_query_subset_remaps_packed_local_pairs_and_keeps_fixed_denominators() -> None:
+    count = 513
+    query = QueryBatch(
+        coordinates=torch.zeros((1, count, 2)),
+        query_mask=torch.ones((1, count), dtype=torch.bool),
+        query_ids=torch.arange(count).reshape(1, count),
+        local_batch_indices=torch.zeros((4,), dtype=torch.long),
+        local_query_indices=torch.tensor([0, 1, 511, 512]),
+        local_module_indices=torch.tensor([2, 3, 4, 5]),
+        local_weights=torch.ones((4,)),
+        scene_key="trace-subset",
+    )
+    subset, original_rows = _bounded_query_subset(query, limit=256)
+    assert subset.coordinates.shape == (1, 256, 2)
+    assert original_rows[0] == 0 and original_rows[-1] == 512
+    assert subset.local_batch_indices.tolist() == [0, 0]
+    assert subset.local_query_indices.tolist() == [0, 255]
+    assert subset.local_module_indices.tolist() == [2, 5]
+    value, count, finite = _masked_rms(
+        np.asarray([1.0, np.nan, 3.0]), np.asarray([True, True, True])
+    )
+    assert value is None and count == 3 and not finite

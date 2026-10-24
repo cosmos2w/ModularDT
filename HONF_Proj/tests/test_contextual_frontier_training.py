@@ -239,7 +239,7 @@ def test_runner_uses_maintained_engine_and_saves_standard_runlayout(tmp_path: Pa
     assert providers[0].wall_clock_budget == (output.resolve(), 43200, 600)
 
 
-@pytest.mark.parametrize("command", ("train-contextual", "resume-contextual"))
+@pytest.mark.parametrize("command", ("train-contextual", "resume-contextual", "evaluate-contextual"))
 def test_cli_exposes_contextual_frontier_commands(command: str) -> None:
     result = subprocess.run(
         [sys.executable, str(PROJECT / "tools" / "honf_research.py"), command, "--help"],

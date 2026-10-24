@@ -10,6 +10,19 @@ The governing [Round12-2 plan](../../UpgradePlan/HONF_Round12-2_Contextual_Adapt
 
 The new adapter learns $(u,v,p,T)$ jointly and derives native omega, surface/material temperature, q proxy and original-module endpoint maxima using existing physical observation code. Prescribed heat retains original source-column order and enters M features before attention. E inputs omit nearest-module/occupancy heuristics, and operating inputs omit module-count/density heuristics. Changing heat or geometry requires a complete new preparation. Fixed complete inputs can reuse context, forest and frontier across receiver roles/query chunks; the old exact affine application cache does not apply.
 
+The plan's Section3.1 makes the generality correction explicit: original source IDs identify physical input axes, not a mandatory E-by-source coefficient allocation. Both banks carry shared contextual information and neither is dedicated to a particular output field. This removes the old affine-path restriction on E-only reads while leaving a measured question of regional information capacity. A shared trunk alone establishes neither correct multiphysics coupling nor physical source independence. In particular, the simplified Thermal references cannot establish fidelity to coupling mechanisms absent from their data.
+
+## Initial scientific launch record
+
+The two separate scratch runs were launched at approximately19:11 UTC on24 October2026 from commit `082cdcc`, with the frozen recipes and the initial absolute endpoint100. The one immediate startup check confirmed TRAIN150/DEV22 and physicalGPU0 selection for both, with no startup exception. These records establish launch only; no later log, GPU, epoch or checkpoint polling is used to infer learning progress.
+
+| Arm | Recipe | Ignored run directory | Persistent session | Python PID at startup |
+| --- | --- | --- | --- | --- |
+| J-D | [joint leaf control](../../configs/research/thermal_contextual_frontier_jd_dev_v1.json) | [thermal_contextual_frontier_jd_dev_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_contextual_frontier_jd_dev_v1) | `r122_jd100_gpu0_20261024` |1280793 |
+| J-H | [learned contextual frontier](../../configs/research/thermal_contextual_frontier_jh_dev_v1.json) | [thermal_contextual_frontier_jh_dev_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_contextual_frontier_jh_dev_v1) | `r122_jh100_gpu0_20261024` |1280798 |
+
+Both new processes expose only GPU UUID `GPU-233fcd85-5c6a-6212-3f44-655252afec70` and use maintained `train-contextual --device cuda:0 --devices cuda:0 --epochs 100`; future resumes must preserve their new one-stream RNG visibility. They share GPU0 without touching protected GPU1/GPU2 jobs. Full commands, DATA2-resolved paths, log names and the single startup receipt are retained in the [execution evidence directory](../../diagnostics/round12_2_execution_20261024). No existing checkpoint initializes either arm. Initial endpoints are review points; learning completion and the conditional full-data decision remain pending.
+
 ## Qualification measurements
 
 | Executed boundary | Input | Measured result | Interpretation |

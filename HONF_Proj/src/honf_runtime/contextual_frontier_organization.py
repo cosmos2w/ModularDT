@@ -6,6 +6,7 @@ causality or end-to-end speed.
 """
 from __future__ import annotations
 
+import copy
 import io
 import json
 import math
@@ -16,14 +17,18 @@ import tempfile
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-
 SCHEMA = "contextual_frontier_organization_evidence_v1"
+_ORGANIZATION_EVALUATION_MAX_CASES = 24
+_ORGANIZATION_EVALUATION_DETAIL_SCENES = 4
+_ORGANIZATION_TRACE_QUERY_LIMIT = 256
+_ORGANIZATION_EVALUATION_MAX_BYTES = 128 * 1024**2
 _FIELD_CHANNELS = (("u", 0), ("v", 1), ("p", 2), ("omega", 3), ("temperature", 4))
 
 
@@ -984,17 +989,17 @@ def measure_native_cost(
             allocated_baseline.append(baseline)
         prepared, prepare_ms = _time_call(prepare, resolved_device)
         records["prepare"].append(prepare_ms)
-        output, decode_ms = _time_call(lambda: decode(prepared), resolved_device)
+        output, decode_ms = _time_call(lambda prepared=prepared: decode(prepared), resolved_device)
         records["decode"].append(decode_ms)
         if reference is not None:
-            reference_output, reference_ms = _time_call(lambda: reference(prepared), resolved_device)
+            reference_output, reference_ms = _time_call(lambda prepared=prepared: reference(prepared), resolved_device)
             records["reference"].append(reference_ms)
             del reference_output
         if loss is not None:
             objective = loss(output)
             if not torch.is_tensor(objective) or objective.numel() != 1 or not objective.requires_grad:
                 raise ValueError("loss(output) must be one differentiable scalar.")
-            _, backward_ms = _time_call(lambda: objective.backward(), resolved_device)
+            _, backward_ms = _time_call(lambda objective=objective: objective.backward(), resolved_device)
             records["backward"].append(backward_ms)
             del objective
         if resolved_device.type == "cuda":
@@ -1088,3 +1093,817 @@ def write_evidence_bundle(
         "free_bytes_before": free_before, "free_bytes_after": free_after,
         "minimum_free_headroom_bytes": minimum_free_headroom_bytes,
     }
+
+
+def _detail_train_cases(panel: Mapping[str, Any], *, limit: int) -> tuple[list[str], list[int]]:
+    """Choose a small input-only representative set and expose omitted strata."""
+    case_ids = [str(value) for value in panel["case_ids"]]
+    counts = {str(key): int(value) for key, value in panel["module_count_by_case"].items()}
+    strata = sorted({counts[case_id] for case_id in case_ids})
+    if len(strata) > limit:
+        selected_strata = [strata[int(index)] for index in np.linspace(0, len(strata) - 1, num=limit).round()]
+    else:
+        selected_strata = strata
+    chosen = []
+    for count in selected_strata:
+        chosen.append(next(case_id for case_id in case_ids if counts[case_id] == count))
+    for case_id in case_ids:
+        if len(chosen) >= limit:
+            break
+        if case_id not in chosen:
+            chosen.append(case_id)
+    chosen_counts = [counts[case_id] for case_id in chosen]
+    return chosen, chosen_counts
+
+
+def _bounded_query_subset(query: Any, *, limit: int) -> tuple[Any, np.ndarray]:
+    """Take an input-order-spread valid receiver subset and remap packed local pairs."""
+    if query.coordinates.ndim != 3 or query.coordinates.shape[0] != 1:
+        raise ValueError("Bounded contextual trace selection requires a single native scene.")
+    query_count = int(query.coordinates.shape[1])
+    if query.query_mask is None:
+        valid = torch.arange(query_count, device=query.coordinates.device, dtype=torch.long)
+    else:
+        valid = torch.nonzero(query.query_mask[0], as_tuple=False).reshape(-1)
+    if not valid.numel():
+        raise ValueError("Cannot trace a native receiver union with no valid queries.")
+    if valid.numel() > limit:
+        positions = np.linspace(0, int(valid.numel()) - 1, num=limit).round().astype(np.int64)
+        selected = valid.index_select(0, torch.as_tensor(positions, device=valid.device, dtype=torch.long))
+    else:
+        selected = valid
+    old_to_new = torch.full((query_count,), -1, device=query.coordinates.device, dtype=torch.long)
+    old_to_new[selected] = torch.arange(selected.numel(), device=selected.device, dtype=torch.long)
+
+    def sliced(value: torch.Tensor | None) -> torch.Tensor | None:
+        return None if value is None else value.index_select(1, selected)
+
+    packed = (query.local_batch_indices, query.local_query_indices,
+              query.local_module_indices, query.local_weights)
+    if any(value is not None for value in packed):
+        if not all(value is not None for value in packed):
+            raise ValueError("Native query has incomplete packed local-pair metadata.")
+        keep = (query.local_batch_indices == 0) & (old_to_new[query.local_query_indices.long()] >= 0)
+        local_batch = query.local_batch_indices[keep]
+        local_query = old_to_new[query.local_query_indices[keep].long()]
+        local_module = query.local_module_indices[keep]
+        local_weights = query.local_weights[keep]
+    else:
+        local_batch = local_query = local_module = local_weights = None
+    subset = replace(
+        query,
+        coordinates=sliced(query.coordinates),
+        features=sliced(query.features),
+        query_mask=sliced(query.query_mask),
+        query_ids=sliced(query.query_ids),
+        local_batch_indices=local_batch,
+        local_query_indices=local_query,
+        local_module_indices=local_module,
+        local_weights=local_weights,
+    )
+    return subset, _numpy(selected).astype(np.int64, copy=False)
+
+
+def _remap_inspection_query_rows(arrays: dict[str, np.ndarray], original_rows: np.ndarray) -> None:
+    for name, values in tuple(arrays.items()):
+        if name.endswith((
+            "_group_record_route_query_index", "_query_source_index", "_read_query_index",
+        )) or name == "local_pair_query_index":
+            if values.size:
+                arrays[name] = original_rows[values.astype(np.int64, copy=False)]
+
+
+def _native_with_query(prepared_native: Any, query: Any) -> Any:
+    if hasattr(prepared_native, "__dataclass_fields__"):
+        return replace(prepared_native, query_batch=query)
+    result = copy.copy(prepared_native)
+    result.query_batch = query
+    return result
+
+
+def _masked_rms(
+    values: np.ndarray,
+    reference_mask: np.ndarray,
+    *,
+    weights: np.ndarray | None = None,
+    equal_modules: bool = False,
+) -> tuple[float | None, int, bool]:
+    """Use a fixed physical denominator; any nonfinite prediction invalidates it."""
+    count = int(reference_mask.sum())
+    if count == 0:
+        return None, 0, True
+    if not np.isfinite(values[reference_mask]).all():
+        return None, count, False
+    if weights is not None:
+        local_weights = weights * reference_mask
+        denominator = float(local_weights.sum())
+        return (math.sqrt(float(np.sum(np.square(values) * local_weights) / denominator))
+                if denominator > 0 else None), count, True
+    if equal_modules:
+        module_mse = [float(np.mean(np.square(values[index, reference_mask[index]], dtype=np.float64)))
+                      for index in range(values.shape[0]) if reference_mask[index].any()]
+        return (math.sqrt(float(np.mean(module_mse))) if module_mse else None), count, True
+    return math.sqrt(float(np.mean(np.square(values[reference_mask], dtype=np.float64)))), count, True
+
+
+def _native_output_changes(
+    baseline: Any,
+    parent_stop: Any,
+    descendants: Any,
+    batch: Any,
+    metric_rows: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Measure full native output deltas on the provider's shared physical masks."""
+    base_output = baseline.native_main
+    coarse_output = parent_stop.native_main
+    fine_output = descendants.native_main
+    base_prepared = baseline.native_prepared
+    target = batch.targets
+
+    def metric_rmse(row: Mapping[str, Any], role: str) -> float | None:
+        if role in ("u", "v", "p", "omega"):
+            result = row["flow_rmse"][role]
+        elif role.startswith("temperature_"):
+            result = row["roles"][role]["rmse"]
+        elif role == "q_proxy":
+            result = row["q_proxy_rmse"]
+        else:
+            raise KeyError(role)
+        value = float(result)
+        return value if math.isfinite(value) else None
+
+    def ratio(change: float | None, baseline_rmse: float | None) -> float | None:
+        return change / max(baseline_rmse, 1e-12) if change is not None and baseline_rmse is not None else None
+
+    changes: dict[str, Any] = {}
+    field_names = (("u", 0), ("v", 1), ("p", 2), ("omega", 3), ("temperature_fluid", 4))
+    base_field = _numpy(base_output["pred_field"])[0].astype(np.float64, copy=False)
+    coarse_field = _numpy(coarse_output["pred_field"])[0].astype(np.float64, copy=False)
+    fine_field = _numpy(fine_output["pred_field"])[0].astype(np.float64, copy=False)
+    target_field = _numpy(target.field_targets)[0].astype(np.float64, copy=False)
+    fluid_valid = _numpy(base_prepared.stencils["fluid"].valid)[0].astype(bool, copy=False)
+    point_weights = _numpy(target.point_weights)[0].astype(np.float64, copy=False)
+    for role, channel in field_names:
+        mask = fluid_valid & (point_weights > 0) & np.isfinite(target_field[:, channel])
+        role_row = {
+            "baseline_native_rmse": metric_rmse(metric_rows["baseline"], role),
+            "parent_stop_native_rmse": metric_rmse(metric_rows["parent_stop"], role),
+            "descendant_native_rmse": metric_rmse(metric_rows["descendant"], role),
+            "valid_rows": int(mask.sum()),
+            "mask": "shared fluid stencil validity, positive provider point weight, and finite target; prediction nonfinites invalidate the component",
+        }
+        finite_all = all(np.isfinite(values[mask]).all() for values in (
+            base_field[:, channel], coarse_field[:, channel], fine_field[:, channel]
+        ))
+        role_row["all_predictions_finite_on_reference_mask"] = bool(finite_all)
+        for label, left, right in (
+            ("parent_stop_vs_baseline", coarse_field[:, channel], base_field[:, channel]),
+            ("descendant_vs_baseline", fine_field[:, channel], base_field[:, channel]),
+            ("parent_stop_vs_descendant", coarse_field[:, channel], fine_field[:, channel]),
+        ):
+            baseline_rmse = role_row["baseline_native_rmse"]
+            rms, _count, finite = _masked_rms(left - right, mask, weights=point_weights)
+            if not finite:
+                rms = None
+            role_row[f"{label}_change_rms"] = rms
+            role_row[f"{label}_change_over_baseline_rmse"] = ratio(rms, baseline_rmse)
+        changes[role] = role_row
+
+    base_interface = _numpy(base_output["pred_interface"])[0].astype(np.float64, copy=False)
+    coarse_interface = _numpy(coarse_output["pred_interface"])[0].astype(np.float64, copy=False)
+    fine_interface = _numpy(fine_output["pred_interface"])[0].astype(np.float64, copy=False)
+    interface_target = _numpy(target.interface_target)[0].astype(np.float64, copy=False)
+    present = _numpy(base_prepared.source_present)[0].astype(bool, copy=False)
+    interface_valid = _numpy(target.interface_valid_mask)[0] > 0.5
+    surface_valid = _numpy(base_prepared.stencils["surface"].valid).reshape(base_interface.shape[:-1]).astype(bool)
+    outside_valid = _numpy(base_prepared.stencils["outside"].valid).reshape(base_interface.shape[:-1]).astype(bool)
+    for role, channel, geometric_mask in (
+        ("temperature_surface", 0, surface_valid),
+        ("q_proxy", 1, surface_valid & outside_valid),
+    ):
+        mask = (
+            present[:, None] & geometric_mask & interface_valid
+            & np.isfinite(interface_target[..., channel])
+        )
+        role_row = {
+            "baseline_native_rmse": metric_rmse(metric_rows["baseline"], role),
+            "parent_stop_native_rmse": metric_rmse(metric_rows["parent_stop"], role),
+            "descendant_native_rmse": metric_rmse(metric_rows["descendant"], role),
+            "valid_rows": int(mask.sum()),
+            "active_modules": int(np.any(mask, axis=1).sum()),
+            "mask": "shared native surface/outside geometry, source-present slots, and finite target; prediction nonfinites invalidate the component",
+            "reduction": "equal mean over active modules, then square root; matches maintained native role reduction",
+        }
+        finite_all = all(np.isfinite(values[..., channel][mask]).all() for values in (
+            base_interface, coarse_interface, fine_interface
+        ))
+        role_row["all_predictions_finite_on_reference_mask"] = bool(finite_all)
+        for label, left, right in (
+            ("parent_stop_vs_baseline", coarse_interface[..., channel], base_interface[..., channel]),
+            ("descendant_vs_baseline", fine_interface[..., channel], base_interface[..., channel]),
+            ("parent_stop_vs_descendant", coarse_interface[..., channel], fine_interface[..., channel]),
+        ):
+            rms, _count, finite = _masked_rms(left - right, mask, equal_modules=True)
+            if not finite:
+                rms = None
+            baseline_rmse = role_row["baseline_native_rmse"]
+            role_row[f"{label}_change_rms"] = rms
+            role_row[f"{label}_change_over_baseline_rmse"] = ratio(rms, baseline_rmse)
+        changes[role] = role_row
+
+    base_material = _numpy(base_output["pred_internal_temperature"])[0, ..., 0].astype(np.float64, copy=False)
+    coarse_material = _numpy(coarse_output["pred_internal_temperature"])[0, ..., 0].astype(np.float64, copy=False)
+    fine_material = _numpy(descendants.native_main["pred_internal_temperature"])[0, ..., 0].astype(np.float64, copy=False)
+    material_target = _numpy(target.material_targets)[0].astype(np.float64, copy=False)
+    material_valid = _numpy(base_prepared.stencils["material"].valid).reshape(material_target.shape).astype(bool)
+    material_mask = (
+        present[:, None] & material_valid & np.isfinite(material_target)
+    )
+    role = "temperature_material"
+    role_row = {
+        "baseline_native_rmse": metric_rmse(metric_rows["baseline"], role),
+        "parent_stop_native_rmse": metric_rmse(metric_rows["parent_stop"], role),
+        "descendant_native_rmse": metric_rmse(metric_rows["descendant"], role),
+        "valid_rows": int(material_mask.sum()),
+        "active_modules": int(np.any(material_mask, axis=1).sum()),
+        "mask": "shared native material geometry, source-present slots, and finite target; prediction nonfinites invalidate the component",
+        "reduction": "equal mean over active modules, then square root; matches maintained native role reduction",
+    }
+    finite_all = all(np.isfinite(values[material_mask]).all() for values in (
+        base_material, coarse_material, fine_material
+    ))
+    role_row["all_predictions_finite_on_reference_mask"] = bool(finite_all)
+    for label, left, right in (
+        ("parent_stop_vs_baseline", coarse_material, base_material),
+        ("descendant_vs_baseline", fine_material, base_material),
+        ("parent_stop_vs_descendant", coarse_material, fine_material),
+    ):
+        rms, _count, finite = _masked_rms(left - right, material_mask, equal_modules=True)
+        if not finite:
+            rms = None
+        baseline_rmse = role_row["baseline_native_rmse"]
+        role_row[f"{label}_change_rms"] = rms
+        role_row[f"{label}_change_over_baseline_rmse"] = ratio(rms, baseline_rmse)
+    changes[role] = role_row
+    endpoint_rows = []
+    endpoint_reference_errors = []
+    endpoint_deltas: dict[str, list[float]] = {
+        "parent_stop_vs_baseline": [], "descendant_vs_baseline": [], "parent_stop_vs_descendant": [],
+    }
+    endpoint_nonfinite_modules = []
+    for module in range(material_mask.shape[0]):
+        active = material_mask[module]
+        if not active.any():
+            continue
+        reference_values = material_target[module, active]
+        source_values = base_material[module, active]
+        parent_values = coarse_material[module, active]
+        descendant_values = fine_material[module, active]
+        all_finite = all(np.isfinite(values).all() for values in (
+            reference_values, source_values, parent_values, descendant_values
+        ))
+        if not all_finite:
+            endpoint_nonfinite_modules.append(module)
+            endpoint_rows.append({"module_index": module, "valid_rows": int(active.sum()), "finite": False})
+            continue
+        target_max = float(np.max(reference_values))
+        baseline_max = float(np.max(source_values))
+        parent_max = float(np.max(parent_values))
+        descendant_max = float(np.max(descendant_values))
+        baseline_error = baseline_max - target_max
+        parent_error = parent_max - target_max
+        descendant_error = descendant_max - target_max
+        endpoint_reference_errors.append(baseline_error)
+        deltas = {
+            "parent_stop_vs_baseline": parent_max - baseline_max,
+            "descendant_vs_baseline": descendant_max - baseline_max,
+            "parent_stop_vs_descendant": parent_max - descendant_max,
+        }
+        for name, value in deltas.items():
+            endpoint_deltas[name].append(value)
+        endpoint_rows.append({
+            "module_index": module,
+            "valid_rows": int(active.sum()),
+            "finite": True,
+            "target_max": target_max,
+            "baseline_predicted_max": baseline_max,
+            "parent_stop_predicted_max": parent_max,
+            "descendant_predicted_max": descendant_max,
+            "baseline_endpoint_error": baseline_error,
+            "parent_stop_endpoint_error": parent_error,
+            "descendant_endpoint_error": descendant_error,
+            **{f"{name}_maximum_change": value for name, value in deltas.items()},
+        })
+    endpoint_rmse = (
+        math.sqrt(float(np.mean(np.square(endpoint_reference_errors))))
+        if endpoint_reference_errors and not endpoint_nonfinite_modules else None
+    )
+    endpoint_row: dict[str, Any] = {
+        "baseline_native_endpoint_rmse": endpoint_rmse,
+        "baseline_native_material_rmse": metric_rmse(metric_rows["baseline"], "temperature_material"),
+        "active_modules": len(endpoint_rows),
+        "finite_modules": int(len(endpoint_rows) - len(endpoint_nonfinite_modules)),
+        "nonfinite_modules": endpoint_nonfinite_modules,
+        "per_module": endpoint_rows,
+        "mask": "all source-present material receivers with valid native material geometry and finite targets; any nonfinite prediction invalidates endpoint RMS",
+        "maximum_definition": "separate prediction and target maxima over every valid full-native material receiver for each module",
+    }
+    for name, values in endpoint_deltas.items():
+        change = None if endpoint_nonfinite_modules or not values else math.sqrt(float(np.mean(np.square(values))))
+        endpoint_row[f"{name}_change_rms"] = change
+        endpoint_row[f"{name}_change_over_baseline_endpoint_rmse"] = ratio(change, endpoint_rmse)
+        endpoint_row[f"{name}_change_over_baseline_material_rmse"] = ratio(
+            change, endpoint_row["baseline_native_material_rmse"]
+        )
+    changes["temperature_material_endpoint_maxima"] = endpoint_row
+    return changes
+
+
+def _compact_actual_support(
+    core: Any,
+    organization: Any,
+    query: Any,
+    *,
+    array_prefix: str,
+    original_query_rows: np.ndarray,
+    full_query_count: int,
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    """Capture sparse query-to-group/source support from an executed trace."""
+    with torch.no_grad():
+        output = core.decode(organization, query, return_trace=True)
+    if not isinstance(output.trace, Mapping):
+        raise RuntimeError("The core returned no actual trace for an intervention decode.")
+    arrays: dict[str, np.ndarray] = {}
+    bank_receipts = {}
+    query_count = int(query.coordinates.shape[1])
+    for bank_name, banks in (("module", organization.module_banks), ("environment", organization.environment_banks)):
+        bank = banks[0]
+        trace = output.trace
+        source = trace[f"{bank_name}_source_read_attention"][0]
+        source_queries = source.get("edge_query_rows")
+        source_rows = source.get("edge_source_rows")
+        if source_queries is None:
+            source_queries = torch.empty((0,), dtype=torch.long, device=query.coordinates.device)
+        if source_rows is None:
+            source_rows = torch.empty((0,), dtype=torch.long, device=query.coordinates.device)
+        if source_queries.numel() != source_rows.numel():
+            raise RuntimeError("Executed source-read trace has misaligned query/source rows.")
+        group_access = trace[f"{bank_name}_group_access"][0]
+        group_query, group_index = torch.nonzero(group_access > 0, as_tuple=True)
+        routes = trace[f"{bank_name}_query_gates"][0]
+        local_ids = tuple(bank.forest.original_ids) if bank.forest is not None else ()
+        prefix = f"{array_prefix}__{bank_name}"
+        query_rows_subset = _numpy(source_queries).astype(np.int64, copy=False)
+        query_rows_np = original_query_rows[query_rows_subset]
+        source_rows_np = _numpy(source_rows).astype(np.int64, copy=False)
+        arrays[f"{prefix}_source_query_rows"] = query_rows_np
+        arrays[f"{prefix}_source_local_rows"] = source_rows_np
+        group_query_rows = original_query_rows[_numpy(group_query).astype(np.int64, copy=False)]
+        arrays[f"{prefix}_group_access_query_rows"] = group_query_rows
+        arrays[f"{prefix}_group_access_group_rows"] = _numpy(group_index).astype(np.int64, copy=False)
+        arrays[f"{prefix}_group_access_values"] = _numpy(group_access[group_query, group_index]).astype(np.float32, copy=False)
+        route_query_subset = _numpy(routes["query_indices"]).astype(np.int64, copy=False)
+        arrays[f"{prefix}_group_record_route_query_rows"] = original_query_rows[route_query_subset]
+        route_local = _numpy(routes["record_local_indices"]).astype(np.int64, copy=False)
+        arrays[f"{prefix}_group_record_route_local_rows"] = route_local
+        arrays[f"{prefix}_group_record_route_gates"] = _numpy(routes["gate_values"]).astype(np.float32, copy=False)
+        read_weight = source.get("weights")
+        arrays[f"{prefix}_source_read_head_weights"] = (
+            np.empty((0, 0), dtype=np.float32) if read_weight is None
+            else _numpy(read_weight).astype(np.float32, copy=False)
+        )
+        read_ids = [local_ids[int(row)] for row in source_rows_np]
+        id_by_json = {json.dumps(_plain(value), sort_keys=True, ensure_ascii=False): _plain(value)
+                      for value in read_ids}
+        selected_ids = [id_by_json[key] for key in sorted(id_by_json)]
+        bank_receipts[bank_name] = {
+            "present_records": int(bank.present_count),
+            "live_groups": int(bank.live_count),
+            "source_read_edges": int(source_rows_np.size),
+            "unique_source_records_read": int(np.unique(source_rows_np).size),
+            "source_read_query_rows": int(np.unique(query_rows_np).size),
+            "source_read_empty": bool(source_rows_np.size == 0),
+            "group_access_edges": int(group_query.numel()),
+            "group_access_query_rows": int(torch.unique(group_query).numel()),
+            "group_record_route_edges": int(routes["query_indices"].numel()),
+            "group_access_empty": bool(group_query.numel() == 0),
+            "selected_source_ids": selected_ids,
+            "trace_query_rows": query_count,
+            "full_native_query_rows": int(full_query_count),
+            "trace_coverage_fraction": query_count / max(1, int(full_query_count)),
+            "decode_work_counts": {str(key): int(value) for key, value in output.work_counts.items()},
+        }
+    return {"banks": bank_receipts, "decode_work_counts": {str(k): int(v) for k, v in output.work_counts.items()}}, arrays
+
+
+def _original_record_payload_arrays(core: Any, organization: Any) -> dict[str, np.ndarray]:
+    """Retain every source slot, immutable ID, encoded key, and projected value."""
+    scene = organization.scene
+    arrays: dict[str, np.ndarray] = {}
+    for bank_name, states, keys, ids, mask, value_layer in (
+        ("module", organization.module_states[0], organization.module_keys[0], scene.module_ids[0],
+         scene.module_mask[0], core.module_value),
+        ("environment", organization.environment_states[0], organization.environment_keys[0],
+         scene.environment_ids[0], scene.environment_mask[0], core.environment_value),
+    ):
+        arrays[f"{bank_name}_source_slot_ids"] = _id_strings([_numpy(ids[index]).item() for index in range(ids.shape[0])])
+        arrays[f"{bank_name}_source_slot_present"] = _numpy(mask).astype(np.bool_, copy=False)
+        arrays[f"{bank_name}_source_context_states_all_slots"] = _numpy(states)
+        arrays[f"{bank_name}_source_keys_all_slots"] = _numpy(keys)
+        with torch.no_grad():
+            arrays[f"{bank_name}_source_value_slots_all_slots"] = _numpy(value_layer(states))
+    return arrays
+
+
+def _native_metric_row(provider: Any, predictions: Any, batch: Any, auxiliary: Any) -> dict[str, Any]:
+    metrics = provider.validation_metrics(predictions, batch.targets, auxiliary)
+    rows = list(metrics.get("case_rows", ()))
+    case_id = str(batch.case_keys[0])
+    if len(rows) != 1 or str(rows[0].get("case_id")) != case_id:
+        raise ValueError("Maintained native metric provider must return one aligned row for each full native scene.")
+    return dict(rows[0])
+
+
+def _native_with_organization(prepared_native: Any, organization: Any) -> Any:
+    if hasattr(prepared_native, "__dataclass_fields__"):
+        return replace(prepared_native, organization=organization)
+    result = copy.copy(prepared_native)
+    result.organization = organization
+    return result
+
+
+def _prediction_with_native(predictions: Any, native_prepared: Any, native_main: Any, work: Any) -> Any:
+    if hasattr(predictions, "__dataclass_fields__"):
+        values = {"native_prepared": native_prepared, "native_main": native_main}
+        if "work" in getattr(predictions, "__dataclass_fields__", {}):
+            values["work"] = work
+        return replace(predictions, **values)
+    result = copy.copy(predictions)
+    result.native_prepared = native_prepared
+    result.native_main = native_main
+    result.work = work
+    return result
+
+
+def _candidate_nodes(bank: Any, *, limit: int) -> tuple[list[int], np.ndarray]:
+    if bank.forest is None:
+        return [], np.empty((0,), dtype=np.int64)
+    depths = _depths(bank.forest)
+    internal = [int(index) for index in bank.forest.internal_indices]
+    if not internal:
+        return [], depths
+    ordered = sorted(internal, key=lambda index: (
+        int(depths[index]), json.dumps(_plain(bank.forest.nodes[index].ancestry_ids), sort_keys=True), index
+    ))
+    selected = [ordered[0]]
+    if limit > 1 and len(ordered) > 1 and ordered[-1] != ordered[0]:
+        selected.append(ordered[-1])
+    return selected[:limit], depths
+
+
+def evaluate_organization(
+    checkpoint: str | Path,
+    device: str | torch.device,
+    output: str | Path,
+    max_cases: int = 24,
+) -> dict[str, Any]:
+    """Evaluate executed contextual organization interventions on a fixed TRAIN panel.
+
+    The complete selected-TRAIN panel is retained in the receipt for every M
+    stratum. Full native predictions, traces, and at most two legal internal
+    node interventions per bank are detailed for up to four input-selected
+    scenes. The baseline forest and encoded records are reused for both sides
+    of each parent-stop/descendant comparison; no optimization is performed.
+    """
+    if type(max_cases) is not int or not 1 <= max_cases <= _ORGANIZATION_EVALUATION_MAX_CASES:
+        raise ValueError(f"max_cases must be an integer from 1 to {_ORGANIZATION_EVALUATION_MAX_CASES}.")
+    data2 = Path("/data2")
+    if not data2.is_dir() or not os.path.ismount(data2):
+        raise RuntimeError("/data2 is not mounted; refusing to run organization evaluation.")
+    output_path = Path(output).expanduser().resolve(strict=False)
+    output_parent = output_path.parent.resolve(strict=True)
+    workspace_root = (data2 / "wanglz/ModularDT").resolve(strict=True)
+    if not output_parent.is_relative_to(workspace_root) or output_parent.stat().st_dev != data2.stat().st_dev:
+        raise ValueError("Organization evaluation output must be beneath the mounted /data2 workspace.")
+    if output_path.exists():
+        raise FileExistsError(output_path)
+    preflight_free_bytes = int(shutil.disk_usage(output_parent).free)
+    from .contextual_frontier_evaluation import load_contextual_checkpoint
+
+    resolved_device = torch.device(device)
+    model, provider, payload = load_contextual_checkpoint(checkpoint, resolved_device)
+    identity = payload.get("experiment_identity", {})
+    provider_identity = identity.get("provider_identity", {}) if isinstance(identity, Mapping) else {}
+    recipe = provider_identity.get("recipe", {}) if isinstance(provider_identity, Mapping) else {}
+    recipe_storage = recipe.get("storage", {}) if isinstance(recipe, Mapping) else {}
+    minimum_headroom = int(recipe_storage.get("minimum_free_headroom_bytes", 1024**3))
+    if preflight_free_bytes - _ORGANIZATION_EVALUATION_MAX_BYTES < minimum_headroom:
+        raise OSError("Organization evaluation output budget would breach /data2 minimum free-space headroom.")
+    checkpoint_epoch = int(payload.get("epoch", payload.get("current_epoch", 0)))
+    arm = str(payload.get("arm", getattr(model, "architecture", "")))
+    if arm not in {"J-D", "J-H"} or getattr(model, "architecture", arm) != arm:
+        raise ValueError("Maintained organization evaluation requires a matching J-D or J-H checkpoint.")
+    if not hasattr(model, "core") or not callable(getattr(model, "apply_native_with_work_counts", None)):
+        raise TypeError("Loaded checkpoint must expose the maintained joint native adapter and contextual core.")
+    core = model.core
+    if checkpoint_epoch < 1:
+        raise ValueError("Maintained contextual checkpoint must identify a positive absolute epoch.")
+    panel = fixed_train_panel(provider, max_cases=max_cases)
+    detail_ids, detail_counts = _detail_train_cases(panel, limit=_ORGANIZATION_EVALUATION_DETAIL_SCENES)
+    old_clock = (int(core.organization_epoch), int(core.organization_update))
+    old_modes = {module: bool(module.training) for module in model.modules()}
+    arrays: dict[str, np.ndarray] = {}
+    detailed_scenes = []
+    native_batch_ids = []
+    try:
+        model.eval()
+        core.set_organization_clock(checkpoint_epoch, 0)
+        batches = provider.native_evaluation_batches(
+            split="train", case_keys=detail_ids, microbatch_size=1
+        )
+        for scene_index, batch in enumerate(batches):
+            case_keys = tuple(map(str, batch.case_keys))
+            if len(case_keys) != 1 or case_keys[0] != detail_ids[scene_index]:
+                raise ValueError("Full native TRAIN provider changed the fixed input-selected scene order.")
+            case_id = case_keys[0]
+            if tuple(map(str, batch.targets.case_ids)) != (case_id,):
+                raise ValueError("Full native TRAIN receivers and targets have different source IDs.")
+            with torch.no_grad():
+                predictions, auxiliary = provider.predict_native(
+                    model, batch.scene_inputs, batch.receivers, arm, "joint", epoch=checkpoint_epoch,
+                )
+            native = predictions.native_prepared
+            organization = native.organization
+            if organization.scene.batch_size != 1 or _plain(organization.scene_key) != _plain(native.scene_key):
+                raise ValueError("Full native prepared context must be the exact one-case receiver scene.")
+            if _plain(native.query_batch.scene_key) != _plain(native.scene_key):
+                raise ValueError("Full native query union does not share the selected TRAIN source ID.")
+            baseline_row = _native_metric_row(provider, predictions, batch, auxiliary)
+            trace_query, trace_query_rows = _bounded_query_subset(
+                native.query_batch, limit=_ORGANIZATION_TRACE_QUERY_LIMIT
+            )
+            trace_native = _native_with_query(native, trace_query)
+            trace_receipt, trace_arrays = inspect_prepared(model, trace_native)
+            _remap_inspection_query_rows(trace_arrays, trace_query_rows)
+            trace_arrays["trace_query_original_rows"] = trace_query_rows
+            trace_arrays["trace_query_original_coordinates"] = _numpy(
+                native.query_batch.coordinates[0, trace_query_rows]
+            ).astype(np.float32, copy=False)
+            if native.query_batch.query_ids is None:
+                trace_query_ids = trace_query_rows
+            else:
+                trace_query_ids = _numpy(native.query_batch.query_ids[0, trace_query_rows])
+            trace_arrays["trace_query_original_ids"] = _id_strings(
+                [_plain(value) for value in np.asarray(trace_query_ids).reshape(-1)]
+            )
+            trace_receipt["trace_scope"] = "input-order-spread subset of at most 256 valid native-union query rows; full native output and work counters remain complete"
+            trace_receipt["trace_query_count"] = int(trace_query_rows.size)
+            trace_receipt["full_native_query_rows"] = int(native.query_batch.coordinates.shape[1])
+            trace_receipt["trace_query_coverage_fraction"] = (
+                int(trace_query_rows.size) / max(1, int(native.query_batch.coordinates.shape[1]))
+            )
+            # Edge-wise repeated string IDs are recoverable by joining local rows
+            # to the retained original source-slot ID arrays below.
+            for key in ("module_query_source_record_id", "environment_query_source_record_id"):
+                trace_arrays.pop(key, None)
+            prefix = f"scene_{scene_index:02d}"
+            arrays.update({f"{prefix}__{key}": value for key, value in trace_arrays.items()})
+            source_arrays = _original_record_payload_arrays(core, organization)
+            arrays.update({f"{prefix}__{key}": value for key, value in source_arrays.items()})
+            scene_interventions = []
+            bank_details = {}
+            for bank_name, banks in (("module", organization.module_banks), ("environment", organization.environment_banks)):
+                bank = banks[0]
+                chosen_nodes, candidate_depths = _candidate_nodes(bank, limit=2)
+                candidate_total = 0 if bank.forest is None else len(bank.forest.internal_indices)
+                candidate_rows = []
+                for node_id in chosen_nodes:
+                    node = bank.forest.nodes[node_id]
+                    frontier = bank.frontier
+                    policy = core.frontier_policies[bank_name]
+                    temperature = float(policy.temperature_for_epoch(checkpoint_epoch))
+                    stop_probability = float(torch.sigmoid(frontier.stop_logits[node_id] / temperature).detach().cpu())
+                    candidate = {
+                        "node_id": int(node_id),
+                        "identity": _plain(node.identity),
+                        "ancestry_ids": [_plain(value) for value in node.ancestry_ids],
+                        "ancestry_size": len(node.ancestry_ids),
+                        "depth": int(candidate_depths[node_id]),
+                        "stop_probability": stop_probability,
+                        "baseline_frontier_selected": int(node_id) in set(map(int, frontier.node_indices)),
+                    }
+                    try:
+                        with torch.no_grad():
+                            parent_organization = core.intervene_frontier(
+                                organization, bank_name, 0, int(node_id), stop=True
+                            )
+                            descendant_organization = core.intervene_frontier(
+                                organization, bank_name, 0, int(node_id), stop=False
+                            )
+                        parent_bank = (parent_organization.module_banks if bank_name == "module"
+                                       else parent_organization.environment_banks)[0]
+                        descendant_bank = (descendant_organization.module_banks if bank_name == "module"
+                                           else descendant_organization.environment_banks)[0]
+                        source_payload_unchanged = (
+                            torch.equal(parent_bank.context_states, bank.context_states)
+                            and torch.equal(descendant_bank.context_states, bank.context_states)
+                            and torch.equal(parent_bank.keys, bank.keys)
+                            and torch.equal(descendant_bank.keys, bank.keys)
+                            and torch.equal(
+                                getattr(core, f"{bank_name}_value")(parent_bank.context_states),
+                                getattr(core, f"{bank_name}_value")(bank.context_states),
+                            )
+                            and torch.equal(
+                                getattr(core, f"{bank_name}_value")(descendant_bank.context_states),
+                                getattr(core, f"{bank_name}_value")(bank.context_states),
+                            )
+                            and torch.equal(parent_bank.scene_rows, bank.scene_rows)
+                            and torch.equal(descendant_bank.scene_rows, bank.scene_rows)
+                            and tuple(parent_bank.forest.original_ids) == tuple(bank.forest.original_ids)
+                            and tuple(descendant_bank.forest.original_ids) == tuple(bank.forest.original_ids)
+                        )
+                        if not source_payload_unchanged:
+                            raise RuntimeError("Frontier intervention changed original encoded source records or slots.")
+                        parent_native = _native_with_organization(native, parent_organization)
+                        descendant_native = _native_with_organization(native, descendant_organization)
+                        if parent_native.query_batch is not native.query_batch or descendant_native.query_batch is not native.query_batch:
+                            raise RuntimeError("Intervention changed the complete native query/receiver union.")
+                        with torch.no_grad():
+                            parent_main, parent_work = model.apply_native_with_work_counts(
+                                parent_native, batch.receivers.heat
+                            )
+                            descendant_main, descendant_work = model.apply_native_with_work_counts(
+                                descendant_native, batch.receivers.heat
+                            )
+                        parent_prediction = _prediction_with_native(
+                            predictions, parent_native, parent_main, parent_work
+                        )
+                        descendant_prediction = _prediction_with_native(
+                            predictions, descendant_native, descendant_main, descendant_work
+                        )
+                        parent_auxiliary = {"work": parent_work}
+                        descendant_auxiliary = {"work": descendant_work}
+                        parent_metric = _native_metric_row(provider, parent_prediction, batch, parent_auxiliary)
+                        descendant_metric = _native_metric_row(
+                            provider, descendant_prediction, batch, descendant_auxiliary
+                        )
+                        per_field = _native_output_changes(
+                            predictions,
+                            parent_prediction,
+                            descendant_prediction,
+                            batch,
+                            {"baseline": baseline_row, "parent_stop": parent_metric,
+                             "descendant": descendant_metric},
+                        )
+                        parent_trace, parent_trace_arrays = _compact_actual_support(
+                            core, parent_organization, trace_query,
+                            array_prefix=f"{prefix}__{bank_name}__node_{node_id}__parent_stop",
+                            original_query_rows=trace_query_rows,
+                            full_query_count=int(native.query_batch.coordinates.shape[1]),
+                        )
+                        descendant_trace, descendant_trace_arrays = _compact_actual_support(
+                            core, descendant_organization, trace_query,
+                            array_prefix=f"{prefix}__{bank_name}__node_{node_id}__descendant",
+                            original_query_rows=trace_query_rows,
+                            full_query_count=int(native.query_batch.coordinates.shape[1]),
+                        )
+                        arrays.update(parent_trace_arrays)
+                        arrays.update(descendant_trace_arrays)
+                        candidate.update({
+                            "status": "completed",
+                            "parent_stop_K": int(parent_bank.live_count),
+                            "descendant_K": int(descendant_bank.live_count),
+                            "parent_stop_frontier_ids": [[_plain(value) for value in row]
+                                                          for row in parent_bank.frontier.ancestry_ids],
+                            "descendant_frontier_ids": [[_plain(value) for value in row]
+                                                         for row in descendant_bank.frontier.ancestry_ids],
+                            "original_source_ids_and_encoded_slots_preserved": True,
+                            "complete_native_query_union_reused": True,
+                            "parent_stop_native_metrics": parent_metric,
+                            "descendant_native_metrics": descendant_metric,
+                            "per_field_output_changes": per_field,
+                            "parent_stop_actual_support": parent_trace,
+                            "descendant_actual_support": descendant_trace,
+                            "native_work_counts": {
+                                "parent_stop": {str(key): int(value) for key, value in parent_work.items()},
+                                "descendant": {str(key): int(value) for key, value in descendant_work.items()},
+                            },
+                        })
+                    except Exception as exc:
+                        candidate["status"] = "failed"
+                        candidate["failure"] = {"type": type(exc).__name__, "message": str(exc)}
+                    candidate_rows.append(candidate)
+                depth_histogram = {}
+                if bank.forest is not None:
+                    for node_id in bank.forest.internal_indices:
+                        depth = int(candidate_depths[int(node_id)])
+                        depth_histogram[str(depth)] = depth_histogram.get(str(depth), 0) + 1
+                bank_details[bank_name] = {
+                    "present_records_N": int(bank.present_count),
+                    "baseline_live_K": int(bank.live_count),
+                    "expected_K": None if bank.frontier is None else float(bank.frontier.expected_K.detach().cpu()),
+                    "expected_K_fraction": (
+                        None if bank.frontier is None or not bank.present_count else
+                        float(bank.frontier.expected_K.detach().cpu()) / int(bank.present_count)
+                    ),
+                    "frontier_log_probability": (
+                        None if bank.frontier is None else float(bank.frontier.log_prob.detach().cpu())
+                    ),
+                    "baseline_frontier_node_ids": [] if bank.frontier is None else list(map(int, bank.frontier.node_indices)),
+                    "candidate_internal_node_count": candidate_total,
+                    "candidate_depth_histogram": depth_histogram,
+                    "selected_candidate_count": len(chosen_nodes),
+                    "selected_candidate_coverage": (len(chosen_nodes) / candidate_total if candidate_total else None),
+                    "selected_candidates": candidate_rows,
+                }
+                scene_interventions.extend({"bank": bank_name, **row} for row in candidate_rows)
+            prepared_work = {str(key): int(value) for key, value in organization.work_counts.items()}
+            native_work = getattr(predictions, "work", None) or {}
+            detailed_scenes.append({
+                "case_id": case_id,
+                "module_count": int(detail_counts[scene_index]),
+                "scene_key": _plain(organization.scene_key),
+                "native_query_rows": int(native.query_batch.coordinates.shape[1]),
+                "trace_query_selection": {
+                    "limit": _ORGANIZATION_TRACE_QUERY_LIMIT,
+                    "selected_rows": int(trace_query_rows.size),
+                    "coverage_fraction": trace_receipt["trace_query_coverage_fraction"],
+                    "selection_rule": "valid receiver rows spread evenly in immutable native-union order; input-only",
+                    "query_support_arrays_indexed_by_original_native_union_row": True,
+                },
+                "native_union_rows": int(native.union.unique_counts.sum().item()),
+                "native_prepare_work_counts": prepared_work,
+                "native_prediction_work_counts": {str(key): int(value) for key, value in native_work.items()},
+                "instrumented_trace_decode_replay": trace_receipt["decode_work_counts"],
+                "baseline_native_metrics": baseline_row,
+                "original_source_payloads": {
+                    bank_name: {
+                        "all_source_slots": int(source_arrays[f"{bank_name}_source_slot_ids"].size),
+                        "present_source_records": int(source_arrays[f"{bank_name}_source_slot_present"].sum()),
+                        "record_ids_and_context_key_value_arrays_retained": True,
+                        "value_slots_shape": list(source_arrays[f"{bank_name}_source_value_slots_all_slots"].shape),
+                    }
+                    for bank_name in ("module", "environment")
+                },
+                "baseline_trace": trace_receipt,
+                "banks": bank_details,
+                "interventions": scene_interventions,
+            })
+            native_batch_ids.append(case_id)
+        if tuple(native_batch_ids) != tuple(detail_ids):
+            raise ValueError("Full native TRAIN evaluator did not return every selected scene exactly once.")
+    finally:
+        core.set_organization_clock(*old_clock)
+        for module, was_training in old_modes.items():
+            module.training = was_training
+
+    detailed_strata = sorted({int(value) for value in detail_counts})
+    panel_strata = sorted(int(value) for value in panel["by_module_count"])
+    failure_count = sum(
+        row.get("status") != "completed"
+        for scene in detailed_scenes for row in scene["interventions"]
+    )
+    receipt = {
+        "schema": "contextual_frontier_organization_native_evaluation_v1",
+        "status": "completed_with_failures" if failure_count else "completed",
+        "intervention_failure_count": int(failure_count),
+        "checkpoint": str(payload.get("checkpoint_path", Path(checkpoint).expanduser())),
+        "checkpoint_arm": arm,
+        "checkpoint_epoch": checkpoint_epoch,
+        "device": str(resolved_device),
+        "train_panel": panel,
+        "detail_case_ids": detail_ids,
+        "detail_scene_limit": _ORGANIZATION_EVALUATION_DETAIL_SCENES,
+        "detail_module_count_strata": detailed_strata,
+        "panel_module_count_strata_not_detailed": [value for value in panel_strata if value not in detailed_strata],
+        "selection_boundary": "The fixed TRAIN panel is input-only and stratum-covering; full native work is limited to up to four representatives selected from that panel by module count. No uncovered detailed stratum is implied to have been evaluated.",
+        "scenes": detailed_scenes,
+        "intervention_contract": {
+            "maximum_internal_nodes_per_bank_per_scene": 2,
+            "comparison": "same encoded scene and forest; force parent node stop versus force its descendant frontier; rerun the complete native adapter for identical receiver roles",
+            "intervention_node_selection": "shallowest and deepest distinct legal internal nodes, deterministic ties by immutable ancestry IDs and node index; input-only",
+            "candidate_probabilities_are_descriptive_only": True,
+            "K_is_not_an_accuracy_or_quality_measure": True,
+            "source_record_ids_keys_and_projected_value_slots_are_retained": True,
+            "causal_claim": False,
+            "memory_reduction_claim": False,
+            "native_role_changes": "Per-field output RMS is measured for parent-stop versus baseline, descendant versus baseline, and parent-stop versus descendant on shared complete native physical masks, with each normalized by baseline native RMSE.",
+        },
+        "output_budget": {
+            "maximum_payload_bytes": _ORGANIZATION_EVALUATION_MAX_BYTES,
+            "minimum_free_headroom_bytes": minimum_headroom,
+            "pre_evaluation_free_bytes": preflight_free_bytes,
+            "estimated_peak_new_disk_bytes": _ORGANIZATION_EVALUATION_MAX_BYTES,
+            "filesystem": str(data2),
+        },
+        "interpretation": "Measured full-native sensitivity to executed contextual frontier interventions on this bounded fixed TRAIN panel; support changes are observed model information flow, not physical causality or standalone success.",
+    }
+    json.dumps(receipt, sort_keys=True, allow_nan=False)
+    written = write_evidence_bundle(
+        output_path,
+        receipt,
+        arrays,
+        max_output_bytes=_ORGANIZATION_EVALUATION_MAX_BYTES,
+        minimum_free_headroom_bytes=minimum_headroom,
+    )
+    return {**receipt, "write": written}

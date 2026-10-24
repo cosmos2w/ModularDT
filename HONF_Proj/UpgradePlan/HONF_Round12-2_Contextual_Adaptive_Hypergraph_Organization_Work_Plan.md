@@ -41,7 +41,7 @@ Use actual prepare/decode execution, backward passes, save/reload and existing p
 | Original Round12 R1 local100 | Candidate/policy/cut implementation executed, but accepted no pairs. | K=N; its selected-best80 is a singleton predictor reference. |
 | Amended compact local100 | E192→96; actual K<N; the same terminal checkpoint passes four global temperature/peak preservation bands and useful heat-response checks. | All E siblings accepted and all M siblings rejected; geometry/mixed-response and candidate-ranking limitations remain. Dense final values still execute at100%. |
 | Scratch tie-stop v1 | Fresh initialization; clean stop at467 with full recoverable history. | Its epoch40 cut accepted neither bank. Do not transfer amended inherited-run E contraction to this scratch run. |
-| Soft-only scratch v2 | Full joint training without a hard cut, bankwise calibration and existing-reference geometry supervision. | K=N by design. Saved progress and routine validation are not compact-model or terminal-response qualification. |
+| Soft-only scratch v2 | Joint predictor/policy optimization without a hard cut, bankwise calibration and existing-reference geometry supervision. | Still uses the old affine Thermal physics factorization; joint optimization does not mean a joint physical-field architecture. K=N by design. Saved progress and routine validation are not compact-model or terminal-response qualification. |
 
 The compact100 predictor/response/cost and negative decision findings are consolidated in [R12]. In particular, objective Spearman correlation is−0.257143 and feasible regret0.524815 on the saved candidate pool; this is not reliable inverse design. No result from that checkpoint establishes a v2 result or a joint-field Round12-2 result.
 
@@ -107,6 +107,8 @@ $$
 
 All unknown fields are outputs of a shared physical representation. Separate output coordinates, unit-dependent loss scales and case-owned observable operators remain appropriate; separate universal causal pathways or a prescribed heat-affine decoder do not. No ground-truth field is fed to the encoder, and a shared multi-output trunk is not evidence that the network has learned correct cross-field coupling. In a genuinely coupled case, that claim needs references in which relevant controls alter several fields; the simplified Thermal case cannot establish general buoyancy or other absent coupling.
 
+The present implementation provides implicit coupling through shared contextual/query states and joint gradients. It does not explicitly iterate estimated velocity, temperature or other field-state tokens, and should not be described as doing so. Generality also does not require identical receiver support or an identical final projection for every physical channel: different fields may require different spatial information while reusing the same organization and contextual records. The initial shared reader/head is a controlled baseline. Introduce field-conditioned reading or iterative latent field exchange only if a later measured coupled-physics failure justifies that separately named change; no such extension is part of the current training recipe.
+
 At a fixed legal topology, an E-only output may retain source sensitivity through ordinary context:
 
 $$
@@ -118,6 +120,8 @@ $$
 $$
 
 The second term includes changes of contextual memberships, descriptors and query access; discrete graph/frontier changes require separate finite probes. Thus no explicit E-by-source coefficient table is necessary. Immutable original input columns still identify which module was changed and permit full-model AD/finite-difference validation; retaining these identities does not require allocating one response-factor column per source inside every E value. Changing controls invalidates prepared context and organization, so the old exactly reusable affine response cache is deliberately relinquished.
+
+This requires changing the information path, not merely concatenating outputs or giving the old branches a common final head. If heat remains absent from the contextual inputs and reaches prediction only after retrieval through a separate affine application, removing the coefficient route would remove the source dependence rather than solve it. Conversely, prescribed heat entering the original records is a valid control input; supplying an unknown target temperature or reference flow as if it were available at inference would be leakage. Keep this distinction explicit in adapters and qualifications.
 
 There remains a capacity question: the selected E states and routing controls must carry the response information needed in the proposed query region. At a fixed topology and with all relevant paths collected in $R_E$, the local derivative factorization $J_{F,h}=J_{F,R_E}J_{R_E,h}$ has rank at most $\dim R_E$. Reading a few finite-dimensional states therefore does not guarantee arbitrary independent-source responses everywhere. This is a conditional information bound, not a demand that latent channels reproduce the original source-column count: useful regional responses may have much lower effective rank, and different queries may select different states. Functional intervention, field errors and original-control response tests decide sufficiency; neither architectural sharing nor sparse access alone decides it.
 

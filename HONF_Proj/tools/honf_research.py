@@ -97,6 +97,14 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--device", default="cpu")
     evaluate.add_argument("--checkpoint", default="latest")
 
+    evaluate_contextual = commands.add_parser(
+        "evaluate-contextual", help="evaluate an explicit joint-frontier checkpoint without training",
+    )
+    evaluate_contextual.add_argument("--checkpoint", required=True)
+    evaluate_contextual.add_argument("--device", required=True)
+    evaluate_contextual.add_argument("--output", required=True)
+    evaluate_contextual.add_argument("--kind", choices=("native", "responses", "organization"), required=True)
+
     assess = commands.add_parser("assess", help="summarize history and available checkpoints")
     assess.add_argument("--run", required=True)
     assess.add_argument("--dataset", default="thermal")
@@ -166,6 +174,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "evaluate":
         result = research.evaluate(args.run, device=args.device, checkpoint=args.checkpoint)
+    elif args.command == "evaluate-contextual":
+        if args.kind == "native":
+            from honf_runtime.contextual_frontier_evaluation import evaluate_native as evaluate
+        elif args.kind == "responses":
+            from honf_runtime.contextual_frontier_responses import evaluate_responses as evaluate
+        else:
+            from honf_runtime.contextual_frontier_organization import evaluate_organization as evaluate
+        result = evaluate(args.checkpoint, args.device, args.output)
     else:
         result = research.assess(args.run, dataset=args.dataset)
     if isinstance(result, dict):
