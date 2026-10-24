@@ -33,3 +33,7 @@ The release provides predictor targets and a frozen root-disjoint split; predict
 ## Retention
 
 Retain the frozen plan, exact approval, all source cases and shards, append-only solver and attempt ledgers, selected PDF masters and small Markdown raster companions, and completion receipts. The temporary staging directory was empty at closeout; no source cases or necessary intermediate evidence were removed. The home `Dataset` directory stays real because it contains tracked schemas and documentation; its ignored `formal_standard` link points to the full `/data2` release.
+
+### Retention amendment: 2026-10-24
+
+The retention paragraph above records the original release closeout. Following explicit cleanup approval, the 73 raw and 73 processed packaged shards were retired after every stored array and membership was checked against the retained FP64 originals and current standalone Standard training archive. All original source cases, plans, approvals, ledgers, figures, and original completion/packing receipts remain retained. The original packing counts and timings are historical measurements. See the [current storage index](../Dataset/README.md) and [cleanup receipt](../Dataset/readiness/receipts/tidy_20261024_v1/cleanup_receipt.json) for the current retention state and the exact verified removal list.

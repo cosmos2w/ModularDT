@@ -41,6 +41,7 @@ def pack_case(root: Path, state_id: str, grid: int, *, compression: str = "lzf")
         return {"path": str(target), "bytes": target.stat().st_size,
                 "sha256": sha256_file(target), "reused": True}
     temporary = root / "temporary" / f"{state_id}_n{grid}.{os.getpid()}.processed.tmp"
+    temporary.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(temporary, "w") as handle:
         handle.attrs["input_sha256"] = input_hash
         handle.attrs["solver_sha256"] = solver_hash

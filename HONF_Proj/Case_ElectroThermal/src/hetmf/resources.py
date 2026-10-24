@@ -80,7 +80,11 @@ def require_exclusive_gpu2() -> dict:
 
 
 def link_dataset(root: Path, case_dir: Path, *, replace_owned_links: bool = False) -> dict:
-    """Create ignored browsing links without replacing user files or foreign links."""
+    """Expose the historical pilot through one unambiguous browsing link.
+
+    Pilot subfolders stay beneath ``Dataset/pilot``. Legacy top-level aliases
+    are retired separately after their readers and ownership are checked.
+    """
     root = require_owned_root(root)
     if not root.is_dir():
         raise FileNotFoundError(root)
@@ -92,12 +96,7 @@ def link_dataset(root: Path, case_dir: Path, *, replace_owned_links: bool = Fals
         raise ValueError("Dataset must be the case-local real directory")
     ownership = root / "receipts" / "browsing_links.json"
     old = json.loads(ownership.read_text()) if ownership.is_file() else {}
-    targets = {"pilot": root, "raw": root / "raw", "processed": root / "processed",
-               "figures": root / "figures", "catalogues": root / "inputs"}
-    if any(not p.is_dir() for p in targets.values()):
-        raise FileNotFoundError("all target subdirectories must exist before linking")
-    if (root / "manifest.json").is_file():
-        targets["links/active_manifest.json"] = root / "manifest.json"
+    targets = {"pilot": root}
     made = {}
     for name, target in targets.items():
         dest = dataset / name

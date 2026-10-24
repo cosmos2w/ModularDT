@@ -31,9 +31,11 @@ def test_link_helper_idempotent_and_refuses_foreign_dangling_link(tmp_path, monk
     (case / "Dataset").mkdir(parents=True)
     (case / "pyproject.toml").touch()
     first = link_dataset(root, case)
+    assert first == {"pilot": str(root)}
+    assert sorted(p.name for p in (case / "Dataset").iterdir()) == ["pilot"]
     assert link_dataset(root, case) == first
-    (case / "Dataset" / "raw").unlink()
-    (case / "Dataset" / "raw").symlink_to(tmp_path / "missing")
+    (case / "Dataset" / "pilot").unlink()
+    (case / "Dataset" / "pilot").symlink_to(tmp_path / "missing")
     with pytest.raises(FileExistsError):
         link_dataset(root, case, replace_owned_links=True)
 

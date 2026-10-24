@@ -23,11 +23,11 @@ GPU2 was shared with an existing `flame` process under the user's explicit concu
 
 The finite-volume solve uses harmonic internal-face transmissibilities, insulating exterior faces, and unique-face resistive Joule losses partitioned by the two half-cell resistances. Current and energy balances are recalculated from stored arrays, while the 4 × 4 contact rule normalizes every finite-area footprint to unit discrete mass. The 2 × 2 rule reached a `1.52e-4` pre-normalization mass error on the four-case check, and the 4 × 4 footprint differed from 8 × 8 by at most `2.88e-5` relative L2; the 4 × 4 rule remains the pilot policy.
 
-![R05 saved material fields, potential, current, temperature, heat sources, and terminal currents](../Dataset/figures/R05_n96.png)
+![R05 saved material fields, potential, current, temperature, heat sources, and terminal currents](../Dataset/pilot/figures/R05_n96.png)
 
 R05 is a native-96 representative with four contacts and dimensionless targets; its saved current sum is approximately `-4.55e-15`, supplied electrical power is about `1.55`, and the temperature hotspot lies near the upper right contacts. This visually inspected page uses reconstructed cell current for display while conservation uses native face fluxes.
 
-![Refinement, conservation, complete CPU time, and measured byte forecast](../Dataset/figures/pilot_numerical_cost_board.png)
+![Refinement, conservation, complete CPU time, and measured byte forecast](../Dataset/pilot/figures/pilot_numerical_cost_board.png)
 
 The twelve-case maximum 96²-to-192² potential error is `0.00202`, the largest stored thermal residual is `1.82e-11`, the 256-state complete CPU mean is `0.0606` seconds per native-96 case, and the plotted storage includes both retained raw per-case sources and planned raw shards. The board is a compact view of the saved numerical diagnostics, not a continuum convergence proof.
 
@@ -47,11 +47,11 @@ The twelve-case maximum 96²-to-192² potential error is `0.00202`, the largest 
 
 **Next step.** Keep the measured terminal matrices, quartet fields, and numerical floors as organizer evaluation targets. Before claiming useful sparse routing on a later model, measure actual selected and full-access execution, field fidelity, and intervention response on the same frozen cases.
 
-![Physical terminal response matrices and controlled quartet interaction fractions](../Dataset/figures/physical_responses.png)
+![Physical terminal response matrices and controlled quartet interaction fractions](../Dataset/pilot/figures/physical_responses.png)
 
 The native-96 R02/R05/R10 terminal matrices show signed, approximately symmetric physical coupling rather than thresholded graph labels; Q01/Q02/Q03 reach interaction fractions near `1e-3`, while Q04/Q05 are near `1e-6` or smaller. The log plot displays exact zeros at a labelled plotting floor and is not a learned-support map.
 
-![Q02 voltage-pair four-solve potential and temperature interaction](../Dataset/figures/quartet_Q02_n96.png)
+![Q02 voltage-pair four-solve potential and temperature interaction](../Dataset/pilot/figures/quartet_Q02_n96.png)
 
 Q02 has potential interaction `4.40e-16` relative to endpoint scale and temperature interaction `0.00195`, consistent with voltage-linear electrical response and quadratic Joule heating at fixed geometry. All four endpoint fields and the difference-of-differences were rendered from saved native-96 arrays.
 
@@ -63,7 +63,7 @@ Q02 has potential interaction `4.40e-16` relative to endpoint scale and temperat
 
 **Next step.** Define explicit current, hotspot, manufacturability, and out-of-distribution constraints before running inverse experiments, and preserve every attempted sample and physical solve outcome.
 
-![Thermal-only material changes and unchanged electrical parent potential](../Dataset/figures/R02_R08_R09_electrical_null_n96.png)
+![Thermal-only material changes and unchanged electrical parent potential](../Dataset/pilot/figures/R02_R08_R09_electrical_null_n96.png)
 
 R02/R08/R09 alter thermal `kappa` and/or `beta` with the same electrical input, and the saved native-96 potential difference is exactly zero while temperature fields change. This is a controlled null for the one-way coupling law, not an optimized inverse design.
 
@@ -83,9 +83,9 @@ The compact/standard/expanded selected-plot allowances are about 75/132/227 seco
 
 ## Formal gate, provenance, and retained figures
 
-The compact, standard, and expanded input-only plan hashes are `cdffb87e9effdf5fcef331839e50b2dbe26dbadfc4f2ed5ed16ead4c127c1ae4`, `a94ddd9e0374fb9a971f4856944b2f8cc475749db6b2f797cddccbd3afa29e6b`, and `f7f25efd5194cdec7dcc16d94ada30c2d92027e4334a21928e5531935df2ae99`. Every profile passed `generate --dry-run` with zero physical solves and zero writes; a non-dry-run invocation without an approval record was rejected. The pilot plan hash is `e1cfcb37c073ecf95422c4479ac45d0598ebcd47e90b5dd46784b472679e56d9`, and its source file SHA-256 is `52839fca8593b496b349c1bd1c9bb2a62b8d066ec3bfd3f181717e5b9ab3b94b`. See [generation guide](HETMF_GENERATION_GUIDE.md) for the approval-bound command and [local pilot manifest](../Dataset/links/active_manifest.json) for the exact payload inventory.
+The compact, standard, and expanded input-only plan hashes are `cdffb87e9effdf5fcef331839e50b2dbe26dbadfc4f2ed5ed16ead4c127c1ae4`, `a94ddd9e0374fb9a971f4856944b2f8cc475749db6b2f797cddccbd3afa29e6b`, and `f7f25efd5194cdec7dcc16d94ada30c2d92027e4334a21928e5531935df2ae99`. Every profile passed `generate --dry-run` with zero physical solves and zero writes; a non-dry-run invocation without an approval record was rejected. The pilot plan hash is `e1cfcb37c073ecf95422c4479ac45d0598ebcd47e90b5dd46784b472679e56d9`, and its source file SHA-256 is `52839fca8593b496b349c1bd1c9bb2a62b8d066ec3bfd3f181717e5b9ab3b94b`. See [generation guide](HETMF_GENERATION_GUIDE.md) for the approval-bound command and [local pilot manifest](../Dataset/pilot/manifest.json) for the exact payload inventory.
 
-The key PDF masters are [R05 fields](../Dataset/figures/R05_n96.pdf), [numerical and cost board](../Dataset/figures/pilot_numerical_cost_board.pdf), [physical responses](../Dataset/figures/physical_responses.pdf), [Q02 quartet](../Dataset/figures/quartet_Q02_n96.pdf), and [thermal null](../Dataset/figures/R02_R08_R09_electrical_null_n96.pdf); the remaining representative and quartet PDF masters are in the same ignored `/data2` figure directory. The selected small raster companions above exist only for direct Markdown embedding. All generated plans, arrays, diagnostics, logs, figures, and receipts remain under `/data2/wanglz/ModularDT/datasets/hetmf/pilots/pilot_20261017_v1`; `Dataset/` contains safe ignored browsing symlinks, and generated data is not committed to Git.
+The key PDF masters are [R05 fields](../Dataset/pilot/figures/R05_n96.pdf), [numerical and cost board](../Dataset/pilot/figures/pilot_numerical_cost_board.pdf), [physical responses](../Dataset/pilot/figures/physical_responses.pdf), [Q02 quartet](../Dataset/pilot/figures/quartet_Q02_n96.pdf), and [thermal null](../Dataset/pilot/figures/R02_R08_R09_electrical_null_n96.pdf); the remaining representative and quartet PDF masters are in the same ignored `/data2` figure directory. The selected small raster companions above exist only for direct Markdown embedding. All generated plans, arrays, diagnostics, logs, figures, and receipts remain under `/data2/wanglz/ModularDT/datasets/hetmf/pilots/pilot_20261017_v1`; `Dataset/` contains safe ignored browsing symlinks, and generated data is not committed to Git.
 
 Round cleanup removed 75 verified disposable files totaling 16,657,593 logical bytes, plus 13 pytest-only symlinks: one failed FP32 raw export (294,474 bytes), 23 superseded/redundant figure exports (6,053,227 bytes), 17 temporary benchmark/test/shard files (9,926,134 bytes), and 34 ignored source bytecode files (383,758 bytes). Exact inode, link, size, and duplicate-file hash allowlists and deletion receipts remain under the ignored `receipts/` directory. The protected raw, processed, input, figure, and diagnostic inventories were unchanged across temporary cleanup; the final payload manifest lists 320 raw files (234,945,519 logical bytes), 286 processed files (59,477,068 bytes), 31 selected figure files (6,142,251 bytes), and the three input-only formal plans. The verified `/data2` ext4 mount UUID is `a47e4da3-3b56-40a7-baba-b675eeb0e999`; the closeout free-space snapshot was 3,380,965,335,040 bytes, above the 50 GiB minimum headroom, under the pilot's 15 GiB retained plus 5 GiB temporary hard budget.
 

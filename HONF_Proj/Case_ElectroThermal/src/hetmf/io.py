@@ -96,6 +96,7 @@ def write_case_atomic(root: Path, scene: dict, solution: dict, *, grid: int,
                 "raw_sha256": sha256_file(target), "reused": True}
     arrays = _stored_arrays(solution, field_dtype)
     temporary = root / "temporary" / f"{state_id}_n{grid}.{os.getpid()}.h5.tmp"
+    temporary.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(temporary, "w") as handle:
         handle.attrs["state_id"] = state_id
         handle.attrs["input_sha256"] = input_hash

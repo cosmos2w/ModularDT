@@ -20,8 +20,8 @@
     "plan_hash": "a94ddd9e0374fb9a971f4856944b2f8cc475749db6b2f797cddccbd3afa29e6b",
     "approval_hash": "96b9a45e0f7ea1057ad59f58a34b4bb84097e72e1167f1508caae1d638536da2",
     "accepted_states": 4608,
-    "raw_shards": 73,
-    "processed_shards": 73,
+    "raw_shards": 0,
+    "processed_shards": 0,
     "root": "/data2/wanglz/ModularDT/datasets/hetmf/releases/standard_20261017_v1",
     "integrity_receipt": "/data2/wanglz/ModularDT/datasets/hetmf/releases/standard_20261017_v1/diagnostics/formal_pack_receipt.json",
     "native_grid": 96,
@@ -32,6 +32,14 @@
       "file_sha256": "27fdd728622ba10f902fa8716d54078984c315397dcf1ab9b8e7b260c545ea74",
       "payload_sha256": "8ae7dfb62e76ed1654910131fa8db23853beac351bae5b694b3e7062d100399f",
       "normalization_train_membership_sha256": "854a4183c90e06639bbb473aeaf37a1276d13d976041214b726b0b1e4c47d952"
+    },
+    "legacy_shard_retirement": {
+      "date": "2026-10-24",
+      "raw_shards_removed": 73,
+      "processed_shards_removed": 73,
+      "verified_states": 4608,
+      "removed_payload_bytes": 3293749386,
+      "receipt": "/data2/wanglz/ModularDT/datasets/hetmf/readiness/readiness_20261018_v1/receipts/tidy_20261024_v1/cleanup_receipt.json"
     }
   },
   "formal_expanded": {
