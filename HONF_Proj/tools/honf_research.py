@@ -33,6 +33,15 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--case-limit", type=int)
     train.add_argument("--case-id", action="append", dest="case_ids")
 
+    train_contextual = commands.add_parser(
+        "train-contextual", help="start one Thermal contextual-frontier joint run",
+    )
+    train_contextual.add_argument("--config", required=True)
+    train_contextual.add_argument("--device", required=True, help="visible device ordinal, e.g. cuda:0 or cpu")
+    train_contextual.add_argument("--devices", nargs="+", help="optional permitted fallback/preference list")
+    train_contextual.add_argument("--epochs", type=int, help="local stop; defaults to the configured first segment")
+    train_contextual.add_argument("--output", required=True)
+
     qualify = commands.add_parser("qualify-softonly", help="bounded no-retained-training soft-only qualification")
     qualify.add_argument("--config", required=True)
     qualify.add_argument("--device", required=True)
@@ -56,6 +65,15 @@ def _parser() -> argparse.ArgumentParser:
                         help="execution-only activation-checkpoint mode")
     resume.add_argument("--backend", choices=("segment", "dense_weighted", "source_order", "packed", "dense"),
                         help="execution-only native execution backend")
+
+    resume_contextual = commands.add_parser(
+        "resume-contextual", help="continue a contextual-frontier run from its latest complete checkpoint",
+    )
+    resume_contextual.add_argument("--run", required=True)
+    resume_contextual.add_argument("--device", required=True)
+    resume_contextual.add_argument("--devices", nargs="+")
+    resume_contextual.add_argument("--stop-after-epoch", type=int, required=True,
+                                   help="absolute local epoch to reach")
 
     cut = commands.add_parser("activate-cut", help="activate and persist the Round12 R1 hard cut after local e40")
     cut.add_argument("--run", required=True)
@@ -98,6 +116,15 @@ def main(argv: list[str] | None = None) -> int:
             case_ids=args.case_ids,
             diagnostic_only=args.diagnostic_only,
         )
+    elif args.command == "train-contextual":
+        from honf_runtime.contextual_frontier_training import train_contextual_frontier
+        result = train_contextual_frontier(
+            args.config,
+            device=args.device,
+            devices=args.devices,
+            epochs=args.epochs,
+            output=args.output,
+        )
     elif args.command == "qualify-softonly":
         from honf_runtime.thermal_soft_organization import qualify_softonly
         result = qualify_softonly(args.config, args.device, args.output)
@@ -113,6 +140,14 @@ def main(argv: list[str] | None = None) -> int:
             query_tile_size=args.query_tile_size,
             checkpoint=args.checkpoint,
             backend=args.backend,
+        )
+    elif args.command == "resume-contextual":
+        from honf_runtime.contextual_frontier_training import resume_contextual_frontier
+        result = resume_contextual_frontier(
+            args.run,
+            device=args.device,
+            devices=args.devices,
+            stop_after_epoch=args.stop_after_epoch,
         )
     elif args.command == "activate-cut":
         result = research.activate_round12_cut(args.run)

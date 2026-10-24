@@ -10,6 +10,8 @@ The separately authorized scratch revision now preserves v1 through a maintained
 
 A separate 24 October organizer visualization supplement in Section6 compares explicit U-H and Run1404 epoch2500 checkpoints, with Run1404 epoch5000 as a separate mature reference. It adds input-selected scene/query evidence for the native hypergraph underlying the compact-retrieval question. It does not replace the U-H epoch1000 adaptation parent, evaluate current training progress, or supply a new compact100/v2 field, response or decision result.
 
+The subsequently authorized [Round12-2 contextual joint-field development](HONF_Round12-2_Contextual_Organization_Development_Report.md) is a separately initialized, matched TRAIN150/exposed DEV22 campaign. It changes the input/field law as well as organization and therefore uses its own J-D control. Its qualification and later learning evidence must not be read as a revision of the explicit compact100 results below.
+
 ## Conclusions and decisions
 
 | Area | Measured conclusion | Decision |

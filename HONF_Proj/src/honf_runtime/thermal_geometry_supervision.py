@@ -289,12 +289,12 @@ def _component_names(roles: Mapping[str, ResponseBlock]) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _component_scales(pairs: Sequence[GeometryResponsePair]) -> tuple[dict[str, float], dict[str, Any]]:
-    expected = Counter({family: len(SINGLE_GEOMETRY_LABELS) for family in TRAIN_GEOMETRY_FAMILIES})
+def _component_scales(pairs: Sequence[GeometryResponsePair], family_ids=TRAIN_GEOMETRY_FAMILIES) -> tuple[dict[str, float], dict[str, Any]]:
+    expected = Counter({family: len(SINGLE_GEOMETRY_LABELS) for family in family_ids})
     observed = Counter(pair.family_id for pair in pairs)
-    if observed != expected or len(pairs) != _GEOMETRY_PAIR_COUNT:
+    if observed != expected or len(pairs) != len(family_ids) * len(SINGLE_GEOMETRY_LABELS):
         raise ValueError("Geometry scales require exactly four single-difference labels per declared TRAIN family.")
-    expected_pairs = {(family, label) for family in TRAIN_GEOMETRY_FAMILIES for label in SINGLE_GEOMETRY_LABELS}
+    expected_pairs = {(family, label) for family in family_ids for label in SINGLE_GEOMETRY_LABELS}
     if {(pair.family_id, pair.label) for pair in pairs} != expected_pairs:
         raise ValueError("Geometry scales cannot include substituted, repeated, mixed, or development labels.")
     first_roles = pairs[0].roles
@@ -329,7 +329,7 @@ def _component_scales(pairs: Sequence[GeometryResponsePair]) -> tuple[dict[str, 
             "floor": _MIN_SCALE,
             "pair_count": len(pair_squared_means[name]),
             "valid_scalar_counts_by_pair": pair_counts[name],
-            "basis_families": list(TRAIN_GEOMETRY_FAMILIES),
+            "basis_families": list(family_ids),
             "basis_labels": list(SINGLE_GEOMETRY_LABELS),
         }
     return scales, details
@@ -345,22 +345,22 @@ def _normalize_atlas_source(source: Any) -> Any:
     return source
 
 
-def _resolve_atlas_paths(source: Any) -> tuple[Path, ...]:
+def _resolve_atlas_paths(source: Any, family_ids=TRAIN_GEOMETRY_FAMILIES) -> tuple[Path, ...]:
     source = _normalize_atlas_source(source)
     if isinstance(source, Mapping):
-        if tuple(source.keys()) != TRAIN_GEOMETRY_FAMILIES:
-            raise ValueError(f"Geometry atlas mappings must use exactly the ordered keys {TRAIN_GEOMETRY_FAMILIES}.")
-        paths = tuple(Path(source[family]) for family in TRAIN_GEOMETRY_FAMILIES)
+        if tuple(source.keys()) != family_ids:
+            raise ValueError(f"Geometry atlas mappings must use exactly the ordered keys {family_ids}.")
+        paths = tuple(Path(source[family]) for family in family_ids)
     elif isinstance(source, (str, Path)):
         root = Path(source).expanduser()
         family_root = root / "families" if (root / "families").is_dir() else root
-        paths = tuple(family_root / f"train_{family}_responses.npz" for family in TRAIN_GEOMETRY_FAMILIES)
+        paths = tuple(family_root / f"train_{family}_responses.npz" for family in family_ids)
     else:
         paths = tuple(Path(path).expanduser() for path in source)
-        if len(paths) != len(TRAIN_GEOMETRY_FAMILIES):
+        if len(paths) != len(family_ids):
             raise ValueError("Geometry supervision requires exactly four existing TRAIN atlas NPZ files.")
     resolved = tuple(path.resolve(strict=True) for path in paths)
-    if len(set(resolved)) != len(TRAIN_GEOMETRY_FAMILIES):
+    if len(set(resolved)) != len(family_ids):
         raise ValueError("Each TRAIN geometry family must have a distinct atlas file.")
     return resolved
 
@@ -374,12 +374,14 @@ def _read_embedded_family_metadata(atlas_path: Path) -> dict[str, Any]:
     return value
 
 
-def _build_pair_index(source: str | Path | Sequence[str | Path] | Mapping[str, str | Path]):
-    paths = _resolve_atlas_paths(source)
+def _build_pair_index(source: str | Path | Sequence[str | Path] | Mapping[str, str | Path], family_ids=TRAIN_GEOMETRY_FAMILIES):
+    if not family_ids or len(set(family_ids)) != len(family_ids) or not set(family_ids).issubset(TRAIN_GEOMETRY_FAMILIES):
+        raise ValueError("Response gradients require a nonempty subset of original TRAIN anchors.")
+    paths = _resolve_atlas_paths(source, family_ids)
     pairs: list[GeometryResponsePair] = []
     family_rows = []
     physical_families = set()
-    for expected_anchor, atlas_path in zip(TRAIN_GEOMETRY_FAMILIES, paths, strict=True):
+    for expected_anchor, atlas_path in zip(family_ids, paths, strict=True):
         metadata_path = atlas_path.with_suffix(".json")
         if not metadata_path.is_file():
             raise FileNotFoundError(f"Geometry atlas metadata companion is missing: {metadata_path}.")
@@ -601,6 +603,7 @@ def _pair_panel_loss(
                 local_query_points=local_tensor,
                 ntheta=ntheta,
                 scene_key=("thermal_geometry_response", pair.family_id, pair.label, schedule_index, chunk_index, label),
+                **({"physical_heat": heat} if getattr(model, "requires_control_in_prepare", False) else {}),
             )
             output = model.apply_native(prepared, heat)
             if not isinstance(output, Mapping):
@@ -714,6 +717,7 @@ class GeometrySupervision:
         ntheta: int = 16,
         fluid_chunk_size: int | None = None,
         seed: int = 0,
+        family_ids: Sequence[str] = TRAIN_GEOMETRY_FAMILIES,
     ) -> None:
         if type(fluid_queries) is not int or fluid_queries < 1:
             raise ValueError("fluid_queries must be a positive bounded receiver count.")
@@ -733,9 +737,10 @@ class GeometrySupervision:
             raise ValueError("fluid_chunk_size must be a positive integer.")
         if type(seed) is not int:
             raise ValueError("seed must be an integer.")
-        self._pairs, family_rows = _build_pair_index(atlas_directory)
+        self.family_ids = tuple(family_ids)
+        self._pairs, family_rows = _build_pair_index(atlas_directory, self.family_ids)
         self._pair_by_key = {(pair.family_id, pair.label): pair for pair in self._pairs}
-        self.scales, scale_metadata = _component_scales(self._pairs)
+        self.scales, scale_metadata = _component_scales(self._pairs, self.family_ids)
         self.fluid_queries = int(fluid_queries)
         self.local_queries_per_module = int(local_queries_per_module)
         self.ntheta = int(ntheta)
@@ -744,7 +749,7 @@ class GeometrySupervision:
         self._metadata = {
             "schema": "thermal_geometry_response_supervision_v1",
             "source": "existing original-TRAIN physical response atlas NPZ/JSON; no solver calls",
-            "training_families": list(TRAIN_GEOMETRY_FAMILIES),
+            "training_families": list(self.family_ids),
             "development_families_excluded_from_gradients": list(DEVELOPMENT_GEOMETRY_FAMILIES),
             "physical_reference_family_ids": [row["physical_family_id"] for row in family_rows],
             "family_inventory": list(family_rows),
@@ -793,7 +798,7 @@ class GeometrySupervision:
         if calibration:
             return tuple(self._pair_by_key[(family, SINGLE_GEOMETRY_LABELS[
                 (offset + index) % len(SINGLE_GEOMETRY_LABELS)])]
-                for offset, family in enumerate(TRAIN_GEOMETRY_FAMILIES))
+                for offset, family in enumerate(self.family_ids))
         return (self._pairs[index % len(self._pairs)],)
 
     def loss(

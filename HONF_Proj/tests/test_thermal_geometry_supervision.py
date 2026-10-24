@@ -182,6 +182,7 @@ class _DifferentiableNativeAdapter(nn.Module):
 
 def _supervisor(pairs, *, chunk_size=8):
     supervisor = GeometrySupervision.__new__(GeometrySupervision)
+    supervisor.family_ids = TRAIN_GEOMETRY_FAMILIES
     supervisor._pairs = tuple(pairs)
     supervisor._pair_by_key = {(pair.family_id, pair.label): pair for pair in pairs}
     supervisor.scales = _scales()
@@ -256,7 +257,7 @@ def test_provider_atlas_source_and_material_query_alias(monkeypatch):
     provider = SimpleNamespace(atlas_directory="atlas-root")
     assert _normalize_atlas_source(provider) == "atlas-root"
     assert _normalize_atlas_source("atlas-root") == "atlas-root"
-    monkeypatch.setattr(geometry_module, "_build_pair_index", lambda source: (pairs, family_rows))
+    monkeypatch.setattr(geometry_module, "_build_pair_index", lambda source, family_ids=TRAIN_GEOMETRY_FAMILIES: (pairs, family_rows))
     supervisor = GeometrySupervision(provider, material_queries_per_module=3)
     assert supervisor.local_queries_per_module == 3
 
