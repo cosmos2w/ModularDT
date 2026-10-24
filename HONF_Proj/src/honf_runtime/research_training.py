@@ -2417,7 +2417,7 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
 
 def _extend_execution_horizon(engine: ResearchTrainingEngine, horizon: int, provider=None) -> None:
     """Extend execution/review clocks while leaving provider and LR schedules sealed."""
-    if provider is not None:
+    if provider is not None and hasattr(provider, "_round6_sampling_epoch_limit"):
         provider._round6_sampling_epoch_limit = _parent_age(provider._research_config) + horizon
     if horizon <= engine.config.total_epochs:
         return
