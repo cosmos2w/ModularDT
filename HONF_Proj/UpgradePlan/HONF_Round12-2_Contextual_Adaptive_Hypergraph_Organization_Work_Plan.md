@@ -1,6 +1,6 @@
 # Round 12-2 — Transformer-context adaptive hypergraph organization for a joint physical neural field
 
-**Prepared:** 24 October 2026. **Status:** design and next-execution guidance; no new model implementation, qualification, training or solver campaign is reported here. **Reviewed checkout:** `agent/honf-core-next`, `b871877`, with unrelated workspace changes preserved. **Scope:** one general HONF organization capability, initially qualified on existing ThermalChannel data. Existing U-H, scratch v1, soft-only v2, controls and historical failures remain immutable scientific lineages.
+**Prepared:** 24 October 2026. **Status:** original design with the subsequent authorized implementation and qualification recorded in Section19; scientific learning validation remains pending. **Original design checkout:** `agent/honf-core-next`, `b871877`, with unrelated workspace changes preserved. **Scope:** one general HONF organization capability, initially qualified on existing ThermalChannel data. Existing U-H, scratch v1, soft-only v2, controls and historical failures remain immutable scientific lineages.
 
 The proposed model lets a jointly learned physical field organize its Transformer-contextualized records into reusable retrieval groups. Candidate relationships depend on contextual function as well as geometry; a reversible learned frontier determines the actual number of groups; each receiver reads a structured subset of original values. An upstream receiver may use only nearby E values in its final read when those contextual values suffice. Original physical records, controls and identities remain available throughout.
 
@@ -92,6 +92,47 @@ The new input capability is provisionally `joint_physical_records_context_v1`. T
 Shared latent state permits learned multiphysics interaction; it is not a PDE solver or a guarantee of physical coupling fidelity. Likewise, separate final output columns are normal multi-output prediction, not independent physical encoders. Case-owned operators such as native curl and q-proxy may impose useful consistency without splitting the core into independent physics predictors.
 
 Unknown physical fields are not supplied as inputs. The initial joint model learns their coupled mapping through common contextual/query states and gradients from all native outputs; it does not claim an explicit iterative PDE solve or force fictitious coupling into the simplified Thermal references. Retaining or losing the old exact-law guarantees is a measurable tradeoff, not a claim that architectural generality automatically improves this dataset's accuracy.
+
+### 3.1 Design clarification: joint physics removes an affine-path restriction, not the information requirement
+
+The user's objection is accepted as a core design correction: the origin of a supervised quantity does not justify a universal separation of temperature learning from flow learning. The old Thermal architecture solves a restricted case by construction: geometry/operating inputs prepare heat-independent flow and an original-source-resolved linear temperature operator, and heat is applied afterward. Under that contract, a final reader that discards M must obtain the missing heat coefficients through another explicit route. That requirement belongs to the old factorization; it is not a definition of an HONF environment record or a general condition for E-only prediction. Preserve the historical implementation as a useful structured reference rather than exporting its assumptions into the new core.
+
+For general prescribed controls $b=(h,\ldots)$ and physical records $X$, the selected model is
+
+$$
+Z=\operatorname{Enc}_{\theta}(X,b),\qquad
+\widehat{\mathbf F}(q)=\operatorname{Dec}_{\theta}\!\left(q,\operatorname{Read}_{\theta}(q,Z,\mathcal H_{\theta}(Z,X))\right),\qquad
+\mathbf F=(u,v,p,T,\ldots).
+$$
+
+All unknown fields are outputs of a shared physical representation. Separate output coordinates, unit-dependent loss scales and case-owned observable operators remain appropriate; separate universal causal pathways or a prescribed heat-affine decoder do not. No ground-truth field is fed to the encoder, and a shared multi-output trunk is not evidence that the network has learned correct cross-field coupling. In a genuinely coupled case, that claim needs references in which relevant controls alter several fields; the simplified Thermal case cannot establish general buoyancy or other absent coupling.
+
+At a fixed legal topology, an E-only output may retain source sensitivity through ordinary context:
+
+$$
+\frac{\partial\widehat{\mathbf F}(q)}{\partial h_i}
+=\frac{\partial\widehat{\mathbf F}}{\partial Z_E^{\rm read}}
+\frac{\partial Z_E^{\rm read}}{\partial h_i}
++\left.\frac{\partial\widehat{\mathbf F}}{\partial h_i}\right|_{\rm organization/access},
+\qquad Z_E=\operatorname{Enc}_{E,\theta}(X_M(h),X_E,b_{\setminus h}).
+$$
+
+The second term includes changes of contextual memberships, descriptors and query access; discrete graph/frontier changes require separate finite probes. Thus no explicit E-by-source coefficient table is necessary. Immutable original input columns still identify which module was changed and permit full-model AD/finite-difference validation; retaining these identities does not require allocating one response-factor column per source inside every E value. Changing controls invalidates prepared context and organization, so the old exactly reusable affine response cache is deliberately relinquished.
+
+There remains a capacity question: the selected E states and routing controls must carry the response information needed in the proposed query region. At a fixed topology and with all relevant paths collected in $R_E$, the local derivative factorization $J_{F,h}=J_{F,R_E}J_{R_E,h}$ has rank at most $\dim R_E$. Reading a few finite-dimensional states therefore does not guarantee arbitrary independent-source responses everywhere. This is a conditional information bound, not a demand that latent channels reproduce the original source-column count: useful regional responses may have much lower effective rank, and different queries may select different states. Functional intervention, field errors and original-control response tests decide sufficiency; neither architectural sharing nor sparse access alone decides it.
+
+Accordingly, the universal core owns joint contextual information exchange and structured original-record retrieval. The case adapter owns physical units, masks, boundary controls, conservation/constitutive tests and any justified problem-specific penalties. Preserve known Thermal heat-linearity and heat-independent-flow references as accuracy tests, while reporting any loss of those properties rather than baking them into all future HONF tasks. Joint training can suffer gradient competition or use spurious shortcuts and need not improve this simplified dataset. Likewise, E-only final retrieval still includes the earlier M-to-E encoder work and does not imply source independence, causality, compression or end-to-end acceleration.
+
+| Question | U-H / soft-only v2 restricted Thermal path | Round12-2 joint physical path |
+| --- | --- | --- |
+| When prescribed heat is used | Applied to a prepared original-source response operator | Enters each original M record before contextual attention |
+| What distinguishes M/E | Record roles, plus the restrictions inherited from the affine heat path | Physical record roles only; neither bank is assigned to a particular output field |
+| What an E-only query needs | An explicit compatible route for the otherwise absent source response | Sufficient learned E context and routing; no mandatory coefficient-table representation |
+| What original source identity guarantees | Correspondence of affine columns to physical modules | Correspondence of prescribed input axes and measured complete-model responses to physical modules |
+| What heat changes invalidate | The old contract permits exact linear application from fixed preparation | Context, candidate forest/frontier and query access may change; complete preparation is required |
+| What is exact by architecture | Case-specific heat superposition and heat-independent flow | Joint mapping and record identity; physical response laws require measurement |
+
+Contextual policies may now react to moving modules even when raw E coordinates and boundary features remain fixed, because $Z_E$ changes through attention. That removes the old input-only E policy's layout-independence, but does not guarantee that the learned E groups will be selective or that M will coarsen. Similarly, geometry-response improvement requires correct spatial sensitivity, receiver correspondence and sufficiently informative supervision; replacing an affine head alone cannot supply those. Report candidate coverage, functional sharing changes and native/response failures to distinguish capacity, optimization and organization problems.
 
 ## 4. Selected architecture and alternatives
 
@@ -541,6 +582,8 @@ Fixed illustrative cases retain their original meanings: TRAIN0003/0048/0138/022
 This section records the subsequent execution request; it supersedes the earlier proposal-only launch restrictions and the initial ten-GPU-hour projection without changing historical results. The user authorized a matched J-D/J-H development comparison through at most2000 absolute epochs per arm, followed only when supported by measured organizer progress by up to two separately initialized TRAIN600/canonical exposed VAL89 scratch100 screens. The2000 limit is a ceiling, not a target. Review100 first, then choose a justified bounded continuation or a negative-result closeout. Keep GPU0 primary, GPU1 optional only when ownership/capacity permit, and exclude GPU2 from this campaign.
 
 The implemented joint Thermal primitive vector is $(u,v,p,T)$ from one trunk. Prescribed original-column heat enters each M record before the shared Transformer; raw E features are normalized coordinates and four boundary distances, and operating features omit handcrafted module count/density. Native observation code derives $\omega$, surface/material temperatures, q proxy and module endpoint maxima using the established grid union, curl and interpolation. Temperature inverse normalization includes the selected-TRAIN mean. E-only final access therefore needs no universal E-by-source affine coefficient bank; it retains a possible M-to-context-to-E dependency and requires complete re-preparation after heat changes. No exact heat-linear or heat-independent-flow constraint is part of this class.
+
+The executed encoder reuses the maintained geometry-aware `StagedContextCycleV2` exchanges in MM→EM→EE→ME order with dense allowed-record attention. It does not implement the earlier Section5 proposal to apply U-H's learned contextual incidence inside those exchanges. Both J-D and J-H share this same encoder, so their matched comparison concerns the new frontier rather than attribution of the joint-encoder change to U-H. Dense encoder work remains in every preparation and must be included in cost reporting; a learned decoder frontier is not encoder sparsification.
 
 The development recipes are [J-D](../configs/research/thermal_contextual_frontier_jd_dev_v1.json) and [J-H](../configs/research/thermal_contextual_frontier_jh_dev_v1.json). They use the maintained fixed25 TRAIN150/exposed DEV22 membership and selected-TRAIN normalization, seed0, Q1024, effective48/micro24, constant AdamW3e-4/WD1e-5, an absolute2000-epoch master horizon, initial stop100, and the existing TrainingEngine/clean-stop/checkpoint mechanisms. Independent typed policies use contextual descriptors. Joint normal training remains fully trainable; no permanent cut or policy freeze is introduced.
 
