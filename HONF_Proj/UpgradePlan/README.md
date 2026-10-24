@@ -1,5 +1,7 @@
 # HONF work-plan archive
 
+Current follow-up: [Round12-2 — Transformer-context adaptive hypergraph organization for a joint physical neural field](HONF_Round12-2_Contextual_Adaptive_Hypergraph_Organization_Work_Plan.md). This is a design and next-execution plan, not a new training launch; it preserves existing U-H/v2 and makes the joint-field generality boundary explicit.
+
 See the [23 October archive review](../docs/reports/_bk/20261024_Report_Navigation/DOCUMENT_ARCHIVE_REVIEW_20261023.md) for date/task folders, the complete path map and individual proposal/completion evidence. Round1–Round11 and the completed HET-MF pilot/readiness plan are archived; Round10/11 closure follows the user’s 23 October decision to stop further work. The Round12 plan remains unchanged. UH and US remain unexecuted proposals at the top level.
 
 ## Historical archive policy through 13 October 2026
