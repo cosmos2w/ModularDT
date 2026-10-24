@@ -700,6 +700,50 @@ def test_classic_fresh_models_use_metadata_only_and_common_seed0_architecture(mo
     assert all(torch.equal(states[0][name], states[index][name]) for index in (1, 2) for name in common)
 
 
+def test_legacy_u_identity_omits_inactive_round12_fields_and_keeps_strict_resume(monkeypatch):
+    from honf_runtime.unified_training import _resume_identity_amendment
+
+    config, _ = research.load_research_config(PRESETS / "thermal_u_h_full5000_v1.json")
+    monkeypatch.setattr(research.ThermalContentHypergraphTaskV2, "identity_payload", lambda self: {})
+    provider = object.__new__(research.ResearchThermalProvider)
+    provider.__dict__.update(
+        training_case_ids=("0001", "0002"), validation_case_ids=("0003",),
+        _classic_provider_identity={"subset_manifest_sha256": "a" * 64,
+                                    "normalization_stats_sha256": "b" * 64},
+        _research_case_limit=None, _research_membership=config["training"]["membership"],
+        _research_normalization_mode=config["initialization"]["normalization_mode"],
+        _research_config=config, _research_source_payload={}, _round12=None,
+        protocol="formal_d_full_train_v1", validation_scope="canonical89_exposed",
+        seed=0, total_epochs=5000, effective_batch_size=48, _identity_microbatch_size=24,
+        primary_queries=1024,
+    )
+    payload = provider.identity_payload()
+    assert "compact_adaptation" not in payload["recipe"]
+    identity = research._experiment_identity(config, provider, "/classic/source.pt", "c" * 64,
+                                             diagnostic=False)
+    assert "initialization_recipe" not in identity
+    assert "initialization_recipe_sha256" not in identity
+    assert "compact_adaptation" not in identity["recipe"]
+    assert _resume_identity_amendment(identity, json.loads(json.dumps(identity))) is None
+    changed = json.loads(json.dumps(identity))
+    changed["normalization_mode"] = "different_training_statistics"
+    with pytest.raises(ValueError, match="identity.*differs"):
+        _resume_identity_amendment(identity, changed)
+
+
+@pytest.mark.parametrize("name", ["thermal_compact_round12_r1_v1.json",
+                                 "thermal_compact_tiestop_full1000_scratch_v1.json"])
+def test_round12_initialization_identity_layout_is_unchanged(name):
+    config, _ = research.load_research_config(PRESETS / name)
+    provider = SimpleNamespace(identity_payload=lambda: {"recipe": {"compact_adaptation": {"role": "R1"}}})
+    identity = research._experiment_identity(config, provider, "/declared/source", "d" * 64,
+                                             diagnostic=False)
+    assert identity["recipe"]["compact_adaptation"] == {"role": "R1"}
+    scratch = config["initialization"]["source_kind"] == "scratch_compact_config"
+    assert identity["initialization_recipe"] == ("/declared/source" if scratch else None)
+    assert identity["initialization_recipe_sha256"] == ("d" * 64 if scratch else None)
+
+
 def test_sampling_membership_fingerprint_is_shared_across_h_d_s_weights():
     train_ids = ("0001", "0002", "0003")
     dev_ids = ("0277", "0279")

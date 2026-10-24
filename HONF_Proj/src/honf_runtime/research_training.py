@@ -1099,6 +1099,9 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 }),
             },
         })
+        # Pre-Round12 identities omitted inactive compact metadata entirely.
+        if self._round12 is None:
+            payload["recipe"].pop("compact_adaptation", None)
         _restore_checkpoint_identity_metadata(self, payload)
         self.sampling_dataset_id = _sampling_dataset_id(payload)
         return payload
@@ -2167,7 +2170,7 @@ def _move_failed_attempt(source: Path, destination: Path):
 def _experiment_identity(config: Mapping[str, Any], provider: ResearchThermalProvider,
                          source_path: str | Path, source_sha: str, *, diagnostic: bool) -> dict[str, Any]:
     provider_identity = dict(provider.identity_payload())
-    return {
+    identity = {
         "schema": RESEARCH_SCHEMA,
         "family": TASK_SCHEMA,
         "workflow": "ordinary_honf_research_train_v1",
@@ -2215,6 +2218,11 @@ def _experiment_identity(config: Mapping[str, Any], provider: ResearchThermalPro
         "diagnostic_only": diagnostic,
         "diagnostic_case_limit": len(provider.training_case_ids) if diagnostic else None,
     }
+    if not config.get("round12"):
+        # Preserve the original U schema under the strict resume check.
+        identity.pop("initialization_recipe")
+        identity.pop("initialization_recipe_sha256")
+    return identity
 
 
 def train(config_path: str | Path, *, device: str, output: str | Path,
