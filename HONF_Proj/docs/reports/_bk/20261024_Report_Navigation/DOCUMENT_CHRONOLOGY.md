@@ -14,150 +14,150 @@ Only durable Markdown in UpgradePlan is newly eligible for Git; numerical data, 
 
 | Document | Prior location | Status | Proposal / declared report date | Completion date / publication bound | Filename timestamp basis |
 | --- | --- | --- | --- | --- | --- |
-| [20260817_232236Z_HONF_Forward_Upgrade_Codex_Goal_Plan.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260817_232236Z_HONF_Forward_Upgrade_Codex_Goal_Plan.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Forward_Upgrade_Codex_Goal_Plan.md` | completed_implementation | Unknown; see dated evidence below | 2026-08-17 | 2026-08-17T23:22:36+00:00; file_creation_not_proposal |
-| [20260820_205643Z_HONF_Stage4_Goal_Mode_Upgrade_Plan.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260820_205643Z_HONF_Stage4_Goal_Mode_Upgrade_Plan.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Stage4_Goal_Mode_Upgrade_Plan.md` | completed_implementation | Unknown; see dated evidence below | 2026-08-20 | 2026-08-20T20:56:43+00:00; file_creation_not_proposal |
-| [20260821_154650Z_HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_154650Z_HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md` | completed_evaluation | Unknown; see dated evidence below | Unknown | 2026-08-21T15:46:50+00:00; file_creation_not_proposal |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `HONF_Proj/UpgradePlan/_bk/Stage5_SoftOrganization_Evaluation.md` | completed_evaluation | Unknown; see dated evidence below | Unknown | 2026-08-21T16:22:59+00:00; file_creation_not_proposal |
-| [20260822_160818Z_Stage6_Fixed_Role_Consistent_GoalMode.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260822_160818Z_Stage6_Fixed_Role_Consistent_GoalMode.md) | `HONF_Proj/UpgradePlan/_bk/Stage6_Fixed_Role_Consistent_GoalMode.md` | completed_bounded | Unknown; see dated evidence below | Unknown | 2026-08-22T16:08:18+00:00; file_creation_not_proposal |
-| [20260823_184332Z_Stage7_GoalModePlan.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_184332Z_Stage7_GoalModePlan.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_GoalModePlan.md` | completed_implementation | Unknown; see dated evidence below | Unknown | 2026-08-23T18:43:32+00:00; file_creation_not_proposal |
-| [20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_Modern_Structured_Context_GoalMode.md` | completed_readiness | Unknown; see dated evidence below | Unknown | 2026-08-23T19:07:08+00:00; file_creation_not_proposal |
-| [20260823_193541Z_Stage7_StageSummary.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_StageSummary.md` | historical_reference | Unknown; see dated evidence below | Unknown | 2026-08-23T19:35:41+00:00; file_creation_not_proposal |
-| [20260823_193824Z_Stage7_Clean_Up.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193824Z_Stage7_Clean_Up.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_Clean_Up.md` | historical_unexecuted | Unknown; see dated evidence below | Unknown | 2026-08-23T19:38:24+00:00; file_creation_not_proposal |
-| [20260824_121515Z_Stage7_Model_Enhance.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260824_121515Z_Stage7_Model_Enhance.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_Model_Enhance.md` | completed_bounded | Unknown; see dated evidence below | Unknown | 2026-08-24T12:15:15+00:00; file_creation_not_proposal |
-| [20260903_035248Z_HONF_Case_Adaptive_Forward_RevisePlan.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260903_035248Z_HONF_Case_Adaptive_Forward_RevisePlan.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Case_Adaptive_Forward_RevisePlan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-03 | 2026-09-03T03:52:48+00:00; file_creation_not_proposal |
-| [20260903_035356Z_HONF_Case_Adaptive_Forward_Model.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260903_035356Z_HONF_Case_Adaptive_Forward_Model.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Case_Adaptive_Forward_Model.md` | historical_reference | Unknown; see dated evidence below | Unknown | 2026-09-03T03:53:56+00:00; file_creation_not_proposal |
-| [20260904_160116Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260904_160116Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-04 | 2026-09-04T16:01:16+00:00; file_creation_not_proposal |
-| [20260904_193826Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260904_193826Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md` | superseded | Unknown; see dated evidence below | Unknown | 2026-09-04T19:38:26+00:00; file_creation_not_proposal |
-| [20260905_114308Z_HONF_Sparse_Interface_Operators_Three_Stage_Plan.md](../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260905_114308Z_HONF_Sparse_Interface_Operators_Three_Stage_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Sparse_Interface_Operators_Three_Stage_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-09 | 2026-09-05T11:43:08+00:00; file_creation_not_proposal |
-| [20260908_033930Z_HONF_Group_Pathway_Recovery_NextStep_Plan.md](../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260908_033930Z_HONF_Group_Pathway_Recovery_NextStep_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Group_Pathway_Recovery_NextStep_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-09 | 2026-09-08T03:39:30+00:00; file_creation_not_proposal |
-| [20260910_130240Z_HONF_Regional_Response_Compression_Development_Plan.md](../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260910_130240Z_HONF_Regional_Response_Compression_Development_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Regional_Response_Compression_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-10T13:02:40+00:00; file_creation_not_proposal |
-| [20260913_045340Z_HONF_WindFarm_Forward_Training_Plan.md](../../UpgradePlan/WindFarm/20260913_20260915_WindFarm_Forward_Baselines/20260913_045340Z_HONF_WindFarm_Forward_Training_Plan.md) | `HONF_Proj/UpgradePlan/WindFarm/HONF_WindFarm_Forward_Training_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-15T02:45:00Z (published record) | 2026-09-13T04:53:40+00:00; file_creation_not_proposal |
-| [DEEPGEOTHERMAL_HONF_QUICKSTART.md](../../UpgradePlan/DEEPGEOTHERMAL_HONF_QUICKSTART.md) | `HONF_Proj/UpgradePlan/DEEPGEOTHERMAL_HONF_QUICKSTART.md` | reference_current | Unknown; see dated evidence below | Unknown | 2026-09-16T02:06:52+00:00; file_creation_not_proposal |
-| [20260916_020749Z_HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_020749Z_HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-19T20:44:08Z (published record) | 2026-09-16T02:07:49+00:00; file_creation_not_proposal |
-| [20260916_020750Z_HONF_Runs_2000_2100_2200_Mathematical_Design.md](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_020750Z_HONF_Runs_2000_2100_2200_Mathematical_Design.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Runs_2000_2100_2200_Mathematical_Design.md` | historical_reference | Unknown; see dated evidence below | Unknown | 2026-09-16T02:07:50+00:00; file_creation_not_proposal |
-| [20260916_021042Z_dynamic_sparse_hypergraph_routing.md](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_021042Z_dynamic_sparse_hypergraph_routing.md) | `HONF_Proj/UpgradePlan/_bk/dynamic_sparse_hypergraph_routing.md` | historical_reference | Unknown; see dated evidence below | Unknown | 2026-09-16T02:10:42+00:00; file_creation_not_proposal |
-| [20260916_130712Z_HONF_Run1404_Routing_Only_Pairwise_Plan.md](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_130712Z_HONF_Run1404_Routing_Only_Pairwise_Plan.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Run1404_Routing_Only_Pairwise_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-16 | 2026-09-16T13:07:12+00:00; file_creation_not_proposal |
-| [20260917_214401Z_HONF_Routing_Next_Phase_Sparse_Execution_Plan.md](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260917_214401Z_HONF_Routing_Next_Phase_Sparse_Execution_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Routing_Next_Phase_Sparse_Execution_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-19T20:44:08Z (published record) | 2026-09-17T21:44:01+00:00; file_creation_not_proposal |
-| [20260919_115917Z_HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_115917Z_HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md` | completed_bounded | Unknown; see dated evidence below | Unknown | 2026-09-19T11:59:17+00:00; file_creation_not_proposal |
-| [20260919_152028Z_HONF_Run1406_Low_Dimensional_Group_Control_Plan.md](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_152028Z_HONF_Run1406_Low_Dimensional_Group_Control_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1406_Low_Dimensional_Group_Control_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-20T20:16:05Z (published record) | 2026-09-19T15:20:28+00:00; file_creation_not_proposal |
-| [20260919_164944Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_164944Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-20T20:16:05Z (published record) | 2026-09-19T16:49:44+00:00; file_creation_not_proposal |
-| [20260920_164530Z_HONF_Next_Generation_Sparse_Quadrature_Design.md](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_164530Z_HONF_Next_Generation_Sparse_Quadrature_Design.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Next_Generation_Sparse_Quadrature_Design.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-23T14:02:38Z (published record) | 2026-09-20T16:45:30+00:00; file_creation_not_proposal |
-| [20260922_154728Z_HONF_Case_Budgeted_Dynamic_K_Development_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_154728Z_HONF_Case_Budgeted_Dynamic_K_Development_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Case_Budgeted_Dynamic_K_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-22T16:55:25Z (published record) | 2026-09-22T15:47:28+00:00; file_creation_not_proposal |
-| [20260922_172450Z_HONF_Run1409_DenseToSparse_Rescue_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_172450Z_HONF_Run1409_DenseToSparse_Rescue_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1409_DenseToSparse_Rescue_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T17:24:50+00:00; file_creation_not_proposal |
-| [20260922_205715Z_HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_205715Z_HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T20:57:15+00:00; file_creation_not_proposal |
-| [20260922_225827Z_HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_225827Z_HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T22:58:27+00:00; file_creation_not_proposal |
-| [20260923_004226Z_HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_004226Z_HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T00:42:26+00:00; file_creation_not_proposal |
-| [20260923_034108Z_HONF_Run1501_Maturation_and_Run1502_Development_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_034108Z_HONF_Run1501_Maturation_and_Run1502_Development_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1501_Maturation_and_Run1502_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T03:41:08+00:00; file_creation_not_proposal |
-| [20260923_040850Z_HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_040850Z_HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T04:08:50+00:00; file_creation_not_proposal |
-| [20260923_143521Z_HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_143521Z_HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T14:35:21+00:00; file_creation_not_proposal |
-| [20260924_122620Z_HONF_Run1503_Reversible_Edge_Coalescence_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_122620Z_HONF_Run1503_Reversible_Edge_Coalescence_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1503_Reversible_Edge_Coalescence_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T12:26:20+00:00; file_creation_not_proposal |
-| [20260924_150357Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_150357Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T15:03:57+00:00; file_creation_not_proposal |
-| [20260924_220002Z_HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220002Z_HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:00:02+00:00; file_creation_not_proposal |
-| [20260925_031136Z_HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_031136Z_HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T03:11:36+00:00; file_creation_not_proposal |
-| [20260925_141220Z_HONF_NextRound_Source_Conditioned_Core_Plan.md](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_141220Z_HONF_NextRound_Source_Conditioned_Core_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_NextRound_Source_Conditioned_Core_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T14:12:20+00:00; file_creation_not_proposal |
-| [20260926_033300Z_HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_033300Z_HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-26T06:49:22Z (published record) | 2026-09-26T03:33:00+00:00; file_creation_not_proposal |
-| [20260926_150153Z_HONF_Decision_Aware_Dynamic_K_Work_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_150153Z_HONF_Decision_Aware_Dynamic_K_Work_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Decision_Aware_Dynamic_K_Work_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-26T19:59:12Z (published record) | 2026-09-26T15:01:53+00:00; file_creation_not_proposal |
-| [20260926_222431Z_HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_222431Z_HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-27T02:26:32Z (published record) | 2026-09-26T22:24:31+00:00; file_creation_not_proposal |
-| [20260927_035918Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_035918Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-27 | 2026-09-27T03:59:18+00:00; file_creation_not_proposal |
-| [20260927_150205Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_150205Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md` | completed_bounded | Unknown; see dated evidence below | 27 September 2026 | 2026-09-27T15:02:05+00:00; file_creation_not_proposal |
-| [20260929_154850Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_154850Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T13:26:48Z (published record) | 2026-09-29T15:48:50+00:00; file_creation_not_proposal |
-| [20261002_164639Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_164639Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-02 | 2026-10-02T16:46:39+00:00; file_creation_not_proposal |
-| [20261002_191148Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_191148Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-02 | 2026-10-02T19:11:48+00:00; file_creation_not_proposal |
-| [20261003_005614Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_005614Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-04T03:03:00Z (published record) | 2026-10-03T00:56:14+00:00; file_creation_not_proposal |
-| [20261004_041750Z_HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_041750Z_HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-04 | 2026-10-04T04:17:50+00:00; file_creation_not_proposal |
-| [20261004_130422Z_HONF_Tree_Lite_Execution_and_Maturation_Plan.md](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_130422Z_HONF_Tree_Lite_Execution_and_Maturation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Tree_Lite_Execution_and_Maturation_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T04:44:28Z (published record) | 2026-10-04T13:04:22+00:00; file_creation_not_proposal |
-| [20261005_032908Z_HONF_Native_Context_Organizer_Confirmation_Plan.md](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_032908Z_HONF_Native_Context_Organizer_Confirmation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Native_Context_Organizer_Confirmation_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-05 | 2026-10-05T03:29:08+00:00; file_creation_not_proposal |
-| [20261005_161914Z_HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_161914Z_HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | 5 October 2026 | 2026-10-05T16:19:14+00:00; file_creation_not_proposal |
-| [20261005_210242Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_210242Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T23:50:07Z (published record) | 2026-10-05T21:02:42+00:00; file_creation_not_proposal |
-| [20261006_012537Z_HONF_Response_Competent_Forward_Refinement_Plan.md](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_012537Z_HONF_Response_Competent_Forward_Refinement_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Response_Competent_Forward_Refinement_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T04:00:05Z (published record) | 2026-10-06T01:25:37+00:00; file_creation_not_proposal |
-| [20261006_145638Z_HONF_Dependency_Correct_Forward_Interface_Plan.md](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_145638Z_HONF_Dependency_Correct_Forward_Interface_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Dependency_Correct_Forward_Interface_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T15:42:29Z (published record) | 2026-10-06T14:56:38+00:00; file_creation_not_proposal |
-| [20261006_170023Z_HONF_Response_Operator_Consolidation_and_Maturation_Plan.md](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_170023Z_HONF_Response_Operator_Consolidation_and_Maturation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Response_Operator_Consolidation_and_Maturation_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-06 | 2026-10-06T17:00:23+00:00; file_creation_not_proposal |
-| [20261007_154446Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_154446Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-07T19:44:30Z (published record) | 2026-10-07T15:44:46+00:00; file_creation_not_proposal |
-| [20260912_HONF_NStage2_Model_Development_and_Validation_Plan.md](../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_HONF_NStage2_Model_Development_and_Validation_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_NStage2_Model_Development_and_Validation_Plan.md` | completed_bounded | 2026-09-12 | 2026-09-14 | 20260912; explicit_proposal_date |
-| [20260919_HONF_Run1407_Phase_Shared_Routing_Development_Plan.md](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_HONF_Run1407_Phase_Shared_Routing_Development_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1407_Phase_Shared_Routing_Development_Plan.md` | completed_bounded | 19 September 2026 | 19 September 2026 | 20260919; explicit_proposal_date |
-| [20260928_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260928_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md` | completed_bounded | 28 September 2026 | Exact time unknown; closed by 2026-09-29T19:35:42Z (published record) | 20260928; explicit_proposal_date |
+| [20260817_232236Z_HONF_Forward_Upgrade_Codex_Goal_Plan.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260817_232236Z_HONF_Forward_Upgrade_Codex_Goal_Plan.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Forward_Upgrade_Codex_Goal_Plan.md` | completed_implementation | Unknown; see dated evidence below | 2026-08-17 | 2026-08-17T23:22:36+00:00; file_creation_not_proposal |
+| [20260820_205643Z_HONF_Stage4_Goal_Mode_Upgrade_Plan.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260820_205643Z_HONF_Stage4_Goal_Mode_Upgrade_Plan.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Stage4_Goal_Mode_Upgrade_Plan.md` | completed_implementation | Unknown; see dated evidence below | 2026-08-20 | 2026-08-20T20:56:43+00:00; file_creation_not_proposal |
+| [20260821_154650Z_HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_154650Z_HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md` | completed_evaluation | Unknown; see dated evidence below | Unknown | 2026-08-21T15:46:50+00:00; file_creation_not_proposal |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `HONF_Proj/UpgradePlan/_bk/Stage5_SoftOrganization_Evaluation.md` | completed_evaluation | Unknown; see dated evidence below | Unknown | 2026-08-21T16:22:59+00:00; file_creation_not_proposal |
+| [20260822_160818Z_Stage6_Fixed_Role_Consistent_GoalMode.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260822_160818Z_Stage6_Fixed_Role_Consistent_GoalMode.md) | `HONF_Proj/UpgradePlan/_bk/Stage6_Fixed_Role_Consistent_GoalMode.md` | completed_bounded | Unknown; see dated evidence below | Unknown | 2026-08-22T16:08:18+00:00; file_creation_not_proposal |
+| [20260823_184332Z_Stage7_GoalModePlan.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_184332Z_Stage7_GoalModePlan.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_GoalModePlan.md` | completed_implementation | Unknown; see dated evidence below | Unknown | 2026-08-23T18:43:32+00:00; file_creation_not_proposal |
+| [20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_Modern_Structured_Context_GoalMode.md` | completed_readiness | Unknown; see dated evidence below | Unknown | 2026-08-23T19:07:08+00:00; file_creation_not_proposal |
+| [20260823_193541Z_Stage7_StageSummary.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_StageSummary.md` | historical_reference | Unknown; see dated evidence below | Unknown | 2026-08-23T19:35:41+00:00; file_creation_not_proposal |
+| [20260823_193824Z_Stage7_Clean_Up.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193824Z_Stage7_Clean_Up.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_Clean_Up.md` | historical_unexecuted | Unknown; see dated evidence below | Unknown | 2026-08-23T19:38:24+00:00; file_creation_not_proposal |
+| [20260824_121515Z_Stage7_Model_Enhance.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260824_121515Z_Stage7_Model_Enhance.md) | `HONF_Proj/UpgradePlan/_bk/Stage7_Model_Enhance.md` | completed_bounded | Unknown; see dated evidence below | Unknown | 2026-08-24T12:15:15+00:00; file_creation_not_proposal |
+| [20260903_035248Z_HONF_Case_Adaptive_Forward_RevisePlan.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260903_035248Z_HONF_Case_Adaptive_Forward_RevisePlan.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Case_Adaptive_Forward_RevisePlan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-03 | 2026-09-03T03:52:48+00:00; file_creation_not_proposal |
+| [20260903_035356Z_HONF_Case_Adaptive_Forward_Model.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260903_035356Z_HONF_Case_Adaptive_Forward_Model.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Case_Adaptive_Forward_Model.md` | historical_reference | Unknown; see dated evidence below | Unknown | 2026-09-03T03:53:56+00:00; file_creation_not_proposal |
+| [20260904_160116Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260904_160116Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-04 | 2026-09-04T16:01:16+00:00; file_creation_not_proposal |
+| [20260904_193826Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260904_193826Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md` | superseded | Unknown; see dated evidence below | Unknown | 2026-09-04T19:38:26+00:00; file_creation_not_proposal |
+| [20260905_114308Z_HONF_Sparse_Interface_Operators_Three_Stage_Plan.md](../../../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260905_114308Z_HONF_Sparse_Interface_Operators_Three_Stage_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Sparse_Interface_Operators_Three_Stage_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-09 | 2026-09-05T11:43:08+00:00; file_creation_not_proposal |
+| [20260908_033930Z_HONF_Group_Pathway_Recovery_NextStep_Plan.md](../../../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260908_033930Z_HONF_Group_Pathway_Recovery_NextStep_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Group_Pathway_Recovery_NextStep_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-09 | 2026-09-08T03:39:30+00:00; file_creation_not_proposal |
+| [20260910_130240Z_HONF_Regional_Response_Compression_Development_Plan.md](../../../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260910_130240Z_HONF_Regional_Response_Compression_Development_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Regional_Response_Compression_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-10T13:02:40+00:00; file_creation_not_proposal |
+| [20260913_045340Z_HONF_WindFarm_Forward_Training_Plan.md](../../../../UpgradePlan/WindFarm/20260913_20260915_WindFarm_Forward_Baselines/20260913_045340Z_HONF_WindFarm_Forward_Training_Plan.md) | `HONF_Proj/UpgradePlan/WindFarm/HONF_WindFarm_Forward_Training_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-15T02:45:00Z (published record) | 2026-09-13T04:53:40+00:00; file_creation_not_proposal |
+| [DEEPGEOTHERMAL_HONF_QUICKSTART.md](../../../../UpgradePlan/DEEPGEOTHERMAL_HONF_QUICKSTART.md) | `HONF_Proj/UpgradePlan/DEEPGEOTHERMAL_HONF_QUICKSTART.md` | reference_current | Unknown; see dated evidence below | Unknown | 2026-09-16T02:06:52+00:00; file_creation_not_proposal |
+| [20260916_020749Z_HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_020749Z_HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-19T20:44:08Z (published record) | 2026-09-16T02:07:49+00:00; file_creation_not_proposal |
+| [20260916_020750Z_HONF_Runs_2000_2100_2200_Mathematical_Design.md](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_020750Z_HONF_Runs_2000_2100_2200_Mathematical_Design.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Runs_2000_2100_2200_Mathematical_Design.md` | historical_reference | Unknown; see dated evidence below | Unknown | 2026-09-16T02:07:50+00:00; file_creation_not_proposal |
+| [20260916_021042Z_dynamic_sparse_hypergraph_routing.md](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_021042Z_dynamic_sparse_hypergraph_routing.md) | `HONF_Proj/UpgradePlan/_bk/dynamic_sparse_hypergraph_routing.md` | historical_reference | Unknown; see dated evidence below | Unknown | 2026-09-16T02:10:42+00:00; file_creation_not_proposal |
+| [20260916_130712Z_HONF_Run1404_Routing_Only_Pairwise_Plan.md](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_130712Z_HONF_Run1404_Routing_Only_Pairwise_Plan.md) | `HONF_Proj/UpgradePlan/_bk/HONF_Run1404_Routing_Only_Pairwise_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-16 | 2026-09-16T13:07:12+00:00; file_creation_not_proposal |
+| [20260917_214401Z_HONF_Routing_Next_Phase_Sparse_Execution_Plan.md](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260917_214401Z_HONF_Routing_Next_Phase_Sparse_Execution_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Routing_Next_Phase_Sparse_Execution_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-19T20:44:08Z (published record) | 2026-09-17T21:44:01+00:00; file_creation_not_proposal |
+| [20260919_115917Z_HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_115917Z_HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md` | completed_bounded | Unknown; see dated evidence below | Unknown | 2026-09-19T11:59:17+00:00; file_creation_not_proposal |
+| [20260919_152028Z_HONF_Run1406_Low_Dimensional_Group_Control_Plan.md](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_152028Z_HONF_Run1406_Low_Dimensional_Group_Control_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1406_Low_Dimensional_Group_Control_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-20T20:16:05Z (published record) | 2026-09-19T15:20:28+00:00; file_creation_not_proposal |
+| [20260919_164944Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_164944Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-20T20:16:05Z (published record) | 2026-09-19T16:49:44+00:00; file_creation_not_proposal |
+| [20260920_164530Z_HONF_Next_Generation_Sparse_Quadrature_Design.md](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_164530Z_HONF_Next_Generation_Sparse_Quadrature_Design.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Next_Generation_Sparse_Quadrature_Design.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-23T14:02:38Z (published record) | 2026-09-20T16:45:30+00:00; file_creation_not_proposal |
+| [20260922_154728Z_HONF_Case_Budgeted_Dynamic_K_Development_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_154728Z_HONF_Case_Budgeted_Dynamic_K_Development_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Case_Budgeted_Dynamic_K_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-22T16:55:25Z (published record) | 2026-09-22T15:47:28+00:00; file_creation_not_proposal |
+| [20260922_172450Z_HONF_Run1409_DenseToSparse_Rescue_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_172450Z_HONF_Run1409_DenseToSparse_Rescue_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1409_DenseToSparse_Rescue_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T17:24:50+00:00; file_creation_not_proposal |
+| [20260922_205715Z_HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_205715Z_HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T20:57:15+00:00; file_creation_not_proposal |
+| [20260922_225827Z_HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_225827Z_HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T22:58:27+00:00; file_creation_not_proposal |
+| [20260923_004226Z_HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_004226Z_HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T00:42:26+00:00; file_creation_not_proposal |
+| [20260923_034108Z_HONF_Run1501_Maturation_and_Run1502_Development_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_034108Z_HONF_Run1501_Maturation_and_Run1502_Development_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1501_Maturation_and_Run1502_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T03:41:08+00:00; file_creation_not_proposal |
+| [20260923_040850Z_HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_040850Z_HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T04:08:50+00:00; file_creation_not_proposal |
+| [20260923_143521Z_HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_143521Z_HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T14:35:21+00:00; file_creation_not_proposal |
+| [20260924_122620Z_HONF_Run1503_Reversible_Edge_Coalescence_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_122620Z_HONF_Run1503_Reversible_Edge_Coalescence_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1503_Reversible_Edge_Coalescence_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T12:26:20+00:00; file_creation_not_proposal |
+| [20260924_150357Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_150357Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T15:03:57+00:00; file_creation_not_proposal |
+| [20260924_220002Z_HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220002Z_HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:00:02+00:00; file_creation_not_proposal |
+| [20260925_031136Z_HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_031136Z_HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T03:11:36+00:00; file_creation_not_proposal |
+| [20260925_141220Z_HONF_NextRound_Source_Conditioned_Core_Plan.md](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_141220Z_HONF_NextRound_Source_Conditioned_Core_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_NextRound_Source_Conditioned_Core_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T14:12:20+00:00; file_creation_not_proposal |
+| [20260926_033300Z_HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_033300Z_HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-26T06:49:22Z (published record) | 2026-09-26T03:33:00+00:00; file_creation_not_proposal |
+| [20260926_150153Z_HONF_Decision_Aware_Dynamic_K_Work_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_150153Z_HONF_Decision_Aware_Dynamic_K_Work_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Decision_Aware_Dynamic_K_Work_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-26T19:59:12Z (published record) | 2026-09-26T15:01:53+00:00; file_creation_not_proposal |
+| [20260926_222431Z_HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_222431Z_HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-27T02:26:32Z (published record) | 2026-09-26T22:24:31+00:00; file_creation_not_proposal |
+| [20260927_035918Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_035918Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-09-27 | 2026-09-27T03:59:18+00:00; file_creation_not_proposal |
+| [20260927_150205Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_150205Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md` | completed_bounded | Unknown; see dated evidence below | 27 September 2026 | 2026-09-27T15:02:05+00:00; file_creation_not_proposal |
+| [20260929_154850Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_154850Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T13:26:48Z (published record) | 2026-09-29T15:48:50+00:00; file_creation_not_proposal |
+| [20261002_164639Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_164639Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-02 | 2026-10-02T16:46:39+00:00; file_creation_not_proposal |
+| [20261002_191148Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_191148Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-02 | 2026-10-02T19:11:48+00:00; file_creation_not_proposal |
+| [20261003_005614Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_005614Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-04T03:03:00Z (published record) | 2026-10-03T00:56:14+00:00; file_creation_not_proposal |
+| [20261004_041750Z_HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_041750Z_HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-04 | 2026-10-04T04:17:50+00:00; file_creation_not_proposal |
+| [20261004_130422Z_HONF_Tree_Lite_Execution_and_Maturation_Plan.md](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_130422Z_HONF_Tree_Lite_Execution_and_Maturation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Tree_Lite_Execution_and_Maturation_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T04:44:28Z (published record) | 2026-10-04T13:04:22+00:00; file_creation_not_proposal |
+| [20261005_032908Z_HONF_Native_Context_Organizer_Confirmation_Plan.md](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_032908Z_HONF_Native_Context_Organizer_Confirmation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Native_Context_Organizer_Confirmation_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-05 | 2026-10-05T03:29:08+00:00; file_creation_not_proposal |
+| [20261005_161914Z_HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_161914Z_HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md` | completed_bounded | Unknown; see dated evidence below | 5 October 2026 | 2026-10-05T16:19:14+00:00; file_creation_not_proposal |
+| [20261005_210242Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_210242Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T23:50:07Z (published record) | 2026-10-05T21:02:42+00:00; file_creation_not_proposal |
+| [20261006_012537Z_HONF_Response_Competent_Forward_Refinement_Plan.md](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_012537Z_HONF_Response_Competent_Forward_Refinement_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Response_Competent_Forward_Refinement_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T04:00:05Z (published record) | 2026-10-06T01:25:37+00:00; file_creation_not_proposal |
+| [20261006_145638Z_HONF_Dependency_Correct_Forward_Interface_Plan.md](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_145638Z_HONF_Dependency_Correct_Forward_Interface_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Dependency_Correct_Forward_Interface_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T15:42:29Z (published record) | 2026-10-06T14:56:38+00:00; file_creation_not_proposal |
+| [20261006_170023Z_HONF_Response_Operator_Consolidation_and_Maturation_Plan.md](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_170023Z_HONF_Response_Operator_Consolidation_and_Maturation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Response_Operator_Consolidation_and_Maturation_Plan.md` | completed_bounded | Unknown; see dated evidence below | 2026-10-06 | 2026-10-06T17:00:23+00:00; file_creation_not_proposal |
+| [20261007_154446Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_154446Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md` | completed_bounded | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-07T19:44:30Z (published record) | 2026-10-07T15:44:46+00:00; file_creation_not_proposal |
+| [20260912_HONF_NStage2_Model_Development_and_Validation_Plan.md](../../../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_HONF_NStage2_Model_Development_and_Validation_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_NStage2_Model_Development_and_Validation_Plan.md` | completed_bounded | 2026-09-12 | 2026-09-14 | 20260912; explicit_proposal_date |
+| [20260919_HONF_Run1407_Phase_Shared_Routing_Development_Plan.md](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_HONF_Run1407_Phase_Shared_Routing_Development_Plan.md) | `HONF_Proj/UpgradePlan/ThemalChannel/HONF_Run1407_Phase_Shared_Routing_Development_Plan.md` | completed_bounded | 19 September 2026 | 19 September 2026 | 20260919; explicit_proposal_date |
+| [20260928_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260928_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md` | completed_bounded | 28 September 2026 | Exact time unknown; closed by 2026-09-29T19:35:42Z (published record) | 20260928; explicit_proposal_date |
 ## Reports and supporting documents
 
 | Document | Prior location | Status | Proposal / declared report date | Completion date / publication bound | Filename timestamp basis |
 | --- | --- | --- | --- | --- | --- |
-| [README.md](run1503_v3_organizer_diagnostics/effective_k/README.md) | `HONF_Proj/docs/reports/run1503_v3_organizer_diagnostics/effective_k/README.md` | ignored_local_diagnostics_index | Unknown; see dated evidence below | Unknown | Unknown; No Git timestamp; stable support filename |
-| [README.md](_bk/stage1_interface_fields/README.md) | `HONF_Proj/docs/reports/_bk/stage1_interface_fields/README.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-05T20:50:03Z; Git first recorded commit, UTC; not experiment completion |
-| [README.md](_bk/stage2_sparse_interface_honf/README.md) | `HONF_Proj/docs/reports/_bk/stage2_sparse_interface_honf/README.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-05T23:56:00Z; Git first recorded commit, UTC; not experiment completion |
-| [20260906_052330Z_HONF_Interface_Study_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260906_052330Z_HONF_Interface_Study_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Interface_Study_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-06T05:23:30Z; Git first recorded commit, UTC; not experiment completion |
-| [20260908_073524Z_HONF_Group_Reader_Recovery_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260908_073524Z_HONF_Group_Reader_Recovery_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Group_Reader_Recovery_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-08T07:35:24Z; Git first recorded commit, UTC; not experiment completion |
-| [20260909_043914Z_HONF_Epoch2500_Comparison_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260909_043914Z_HONF_Epoch2500_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Epoch2500_Comparison_Report.md` | completed_bounded_assessment | 2026-09-09 | 2026-09-09 | 2026-09-09T04:39:14Z; Git first recorded commit, UTC; not experiment completion |
-| [20260909_221909Z_HONF_Epoch5000_Comparison_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260909_221909Z_HONF_Epoch5000_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Epoch5000_Comparison_Report.md` | completed_bounded_assessment | 2026-09-09 | 2026-09-09 | 2026-09-09T22:19:09Z; Git first recorded commit, UTC; not experiment completion |
-| [20260910_144112Z_HONF_Regional_Response_Compression_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260910_144112Z_HONF_Regional_Response_Compression_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Regional_Response_Compression_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-10T14:41:12Z; Git first recorded commit, UTC; not experiment completion |
-| [20260912_041053Z_HONF_Five_Model_Epoch5000_Comparison_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_041053Z_HONF_Five_Model_Epoch5000_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Five_Model_Epoch5000_Comparison_Report.md` | completed_bounded_assessment | 2026-09-12 | 2026-09-12 | 2026-09-12T04:10:53Z; Git first recorded commit, UTC; not experiment completion |
-| [20260912_172548Z_HONF_NStage2_Comparison_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_NStage2_Comparison_Report.md` | completed_bounded_assessment | 2026-09-14 | 2026-09-14 | 2026-09-12T17:25:48Z; Git first recorded commit, UTC; not experiment completion |
-| [20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md](_bk/20260913_20260915_WindFarm_Forward_Baselines/20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md) | `HONF_Proj/docs/reports/windfarm_forward_2500_comparison/WINDFARM_FORWARD_2500_COMPARISON.md` | completed_comparative_report | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-15T02:45:00Z (published record) | 2026-09-15T02:45:00Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Dynamic_Sparse_Routing_Comparison_Report.md` | historical_partial_superseded | Unknown; see dated evidence below | Unknown | 2026-09-16T04:20:45Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_042045Z_HONF_Routing_Run2000_Epoch500_Handoff.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Routing_Run2000_Epoch500_Handoff.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Run2000_Epoch500_Handoff.md` | historical_handoff_superseded | Unknown; see dated evidence below | Unknown | 2026-09-16T04:20:45Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_042045Z_HONF_Routing_Run2000_Epoch500_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Routing_Run2000_Epoch500_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Run2000_Epoch500_Report.md` | historical_partial_superseded | Unknown; see dated evidence below | Unknown | 2026-09-16T04:20:45Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_042137Z_HONF_Stage7_Decoder_Context_Ablation_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042137Z_HONF_Stage7_Decoder_Context_Ablation_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Stage7_Decoder_Context_Ablation_Report.md` | completed_bounded_assessment | 2026-09-16 | 2026-09-16 | 2026-09-16T04:21:37Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_044526Z_HONF_Routing_Run2100_Epoch500_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_044526Z_HONF_Routing_Run2100_Epoch500_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Run2100_Epoch500_Report.md` | historical_interim_superseded | Unknown; see dated evidence below | Unknown | 2026-09-16T04:45:26Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_131839Z_HONF_Routing_Memory_Diagnostics.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_131839Z_HONF_Routing_Memory_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Memory_Diagnostics.md` | completed_bounded_assessment | 2026-09-16 | 2026-09-16 | 2026-09-16T13:18:39Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1404_Routing_Only_Pairwise_Report.md` | completed_bounded_assessment | 2026-09-16 | 2026-09-16 | 2026-09-16T14:21:30Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_211504Z_HONF_Routing_Four_Run_500_Comparison.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_211504Z_HONF_Routing_Four_Run_500_Comparison.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Four_Run_500_Comparison.md` | completed_bounded_assessment | 2026-09-16 | 2026-09-16 | 2026-09-16T21:15:04Z; Git first recorded commit, UTC; not experiment completion |
-| [20260916_215851Z_HONF_Routing_Execution_Optimization_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_215851Z_HONF_Routing_Execution_Optimization_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Execution_Optimization_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-19T20:44:08Z (published record) | 2026-09-16T21:58:51Z; Git first recorded commit, UTC; not experiment completion |
-| [20260917_201432Z_HONF_Routing_Epoch2500_Comparative_Evaluation.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260917_201432Z_HONF_Routing_Epoch2500_Comparative_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Epoch2500_Comparative_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-19T20:44:08Z (published record) | 2026-09-17T20:14:32Z; Git first recorded commit, UTC; not experiment completion |
-| [20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Sparse_Execution_Next_Phase_Report.md` | historical_interim_superseded | Unknown; see dated evidence below | Unknown | 2026-09-18T14:20:31Z; Git first recorded commit, UTC; not experiment completion |
-| [20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Group_Control_Development_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-20T20:16:05Z (published record) | 2026-09-19T16:14:28Z; Git first recorded commit, UTC; not experiment completion |
-| [20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-20T20:16:05Z (published record) | 2026-09-19T17:39:16Z; Git first recorded commit, UTC; not experiment completion |
-| [20260919_194226Z_HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_194226Z_HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-23T14:02:38Z (published record) | 2026-09-19T19:42:26Z; Git first recorded commit, UTC; not experiment completion |
-| [20260919_204408Z_HONF_Run1406_Epoch500_Comparative_Evaluation.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_204408Z_HONF_Run1406_Epoch500_Comparative_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Epoch500_Comparative_Evaluation.md` | completed_bounded_assessment | 2026-09-19 | 2026-09-19 | 2026-09-19T20:44:08Z; Git first recorded commit, UTC; not experiment completion |
-| [20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1407_Phase_Shared_Routing_Report.md` | historical_milestone_with_continuation_superseded | 2026-09-19 | Unknown | 2026-09-19T22:19:56Z; Git first recorded commit, UTC; not experiment completion |
-| [20260920_140238Z_HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_140238Z_HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md` | completed_bounded_assessment | 2026-09-20 | 2026-09-20 | 2026-09-20T14:02:38Z; Git first recorded commit, UTC; not experiment completion |
-| [20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-23T14:02:38Z (published record) | 2026-09-20T19:23:23Z; Git first recorded commit, UTC; not experiment completion |
-| [20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md) | `HONF_Proj/docs/reports/HONF_Case_Budgeted_Dynamic_K_Evaluation.md` | closed_negative_gate | Unknown; see dated evidence below | Unknown | 2026-09-22T16:55:25Z; Git first recorded commit, UTC; not experiment completion |
-| [20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1409_DenseToSparse_Rerun_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T20:20:22Z; Git first recorded commit, UTC; not experiment completion |
-| [20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1409_OccupancyAdaptive_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T22:25:13Z; Git first recorded commit, UTC; not experiment completion |
-| [20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1500_MassCompetitive_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T00:06:19Z; Git first recorded commit, UTC; not experiment completion |
-| [20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1501_SparseIncidence_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T03:03:36Z; Git first recorded commit, UTC; not experiment completion |
-| [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1501_Executor_and_Run1502_Development.md` | completed_bounded_work_with_later_continuation_unverified | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T05:07:54Z; Git first recorded commit, UTC; not experiment completion |
-| [20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/HONF_1404_1804_1501_1502_Mature_Comparison.md` | completed_comparative_report | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [accuracy_findings.md](run1501_1502_comparison/accuracy/accuracy_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/accuracy_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [commands.md](run1501_1502_comparison/accuracy/commands.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/commands.md` | reproduction_commands | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [commands.md](run1501_1502_comparison/cost/commands.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/commands.md` | reproduction_commands | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [cost_findings.md](run1501_1502_comparison/cost/cost_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/cost_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [README.md](run1501_1502_comparison/cost/superseded/README.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/superseded/README.md` | superseded_support_index | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [routing_findings.md](run1501_1502_comparison/routing_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/routing_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1503_v2_Reversible_Edge_Coalescence.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
-| [20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
-| [20260924_220635Z_HONF_Run1505_E500_Organizer_Diagnostics.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1505_E500_Organizer_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1505_E500_Organizer_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
-| [20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T00:21:04Z; Git first recorded commit, UTC; not experiment completion |
-| [20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T05:31:04Z; Git first recorded commit, UTC; not experiment completion |
-| [20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Source_Conditioned_Core_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T15:41:20Z; Git first recorded commit, UTC; not experiment completion |
-| [20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md) | `HONF_Proj/docs/reports/HONF_Interaction_Response_and_Inverse_Design_Study.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-26T06:49:22Z (published record) | 2026-09-26T06:49:22Z; Git first recorded commit, UTC; not experiment completion |
-| [20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md) | `HONF_Proj/docs/reports/HONF_Decision_Aware_Dynamic_K_Study.md` | closed_negative_gate | Unknown; see dated evidence below | Unknown | 2026-09-26T19:59:12Z; Git first recorded commit, UTC; not experiment completion |
-| [20260926_195912Z_HONF_Thermal_Physical_Interaction_Evidence.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Thermal_Physical_Interaction_Evidence.md) | `HONF_Proj/docs/reports/_bk/HONF_Thermal_Physical_Interaction_Evidence.md` | completed_bounded_phases_with_explicit_unspent_scope | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-26T19:59:12Z; Git first recorded commit, UTC; not experiment completion |
-| [20260926_195912Z_baseline_decision.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_baseline_decision.md) | `HONF_Proj/docs/reports/_bk/baseline_decision.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-26T19:59:12Z; Git first recorded commit, UTC; not experiment completion |
-| [20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md) | `HONF_Proj/docs/reports/HONF_Native_Recovery_and_Adaptive_Interaction_Study.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-27T02:26:32Z (published record) | 2026-09-27T00:46:08Z; Git first recorded commit, UTC; not experiment completion |
-| [20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md) | `HONF_Proj/docs/reports/HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md` | completed_bounded_round | As of 2026-09-27. The matched R1 response pair, 24-row directed G2 search, two bounded G5 fits and their frozen-split G6 reviews are complete. A conditional two-layout native-grid check and the packed-control execution review are recorded below. The later matched joint-forward maturation run is reported separately in HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md. | Exact time unknown; closed by 2026-09-27T22:18:22Z (published record) | 2026-09-27T10:16:09Z; Git first recorded commit, UTC; not experiment completion |
-| [20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md) | `HONF_Proj/docs/reports/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md` | completed_bounded_round | Status: bounded implementation, matched forward runs, endpoint reviews and one train-only child-support remedy complete on agent/honf-core-next, 27 September 2026 (28 September UTC). This report follows UpgradePlan/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md. Results below are retained only after execution; no planned training result is implied by an implementation or startup check. | Exact time unknown; closed by 2026-09-28T00:58:48Z (published record) | 2026-09-27T20:49:04Z; Git first recorded commit, UTC; not experiment completion |
-| [20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md) | `HONF_Proj/docs/reports/HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md` | completed_bounded_study | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-29T19:35:42Z (published record) | 2026-09-29T11:58:06Z; Git first recorded commit, UTC; not experiment completion |
-| [20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md) | `HONF_Proj/docs/reports/HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md` | closed_resource_censored_study | Unknown; see dated evidence below | Unknown | 2026-10-02T13:26:48Z; Git first recorded commit, UTC; not experiment completion |
-| [20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md) | `HONF_Proj/docs/reports/HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md` | completed_bounded_round | The first substantive inspection was **2026-10-02 16:50:11 UTC**. The working branch is agent/honf-core-next, with evidence baseline b55dd28. Wind ran on physical **GPU1**, UUID GPU-3ceda40c-fd5c-4b88-6c47-b3301711571e; Thermal ran on physical **GPU2**, UUID GPU-f6a4ddbb-ad44-5ef5-0421-eecf7120df39, using the **ModularDT** environment and explicit cuda:1/cuda:2. GPU0 was not used by this round. Native work overlapped across the two authorized lanes. | Exact time unknown; closed by 2026-10-02T18:33:37Z (published record) | 2026-10-02T18:33:37Z; Git first recorded commit, UTC; not experiment completion |
-| [20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md) | `HONF_Proj/docs/reports/HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md` | completed_bounded_round | First substantive inspection: **2026-10-02 19:14:00 UTC (15:14 EDT)**. Science stops by 00:14Z and delivery by 01:14Z on October 3 (20:14/21:14 EDT on October 2). Last GPU1 process ends 23:08:29Z (bound rounded up to :30); last GPU2 regression ends 21:57:25Z. No GPU work follows. All science completes before the five-hour cutoff, leaving the final hour fully available for closeout. The aggregate cap is verified through conservative lane ownership rather than incomplete per-process sums. | Exact time unknown; closed by 2026-10-02T23:46:47Z (published record) | 2026-10-02T23:31:29Z; Git first recorded commit, UTC; not experiment completion |
-| [20261003_014201Z_HONF_Shared_Core_Alignment.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_014201Z_HONF_Shared_Core_Alignment.md) | `HONF_Proj/docs/reports/HONF_Shared_Core_Alignment.md` | completed_implementation_reference | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-03T04:37:05Z (published record) | 2026-10-03T01:42:01Z; Git first recorded commit, UTC; not experiment completion |
-| [20261003_014201Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_014201Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md) | `HONF_Proj/docs/reports/HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md` | superseded_historical_campaign_log | **2026-10-04 02:27:21.276168 UTC**. Native RunStore ended at 02:27:21.341304 with; Native continued the same Run 2201 from exact 500 to exact 1000, preserving its optimizer, four RNG streams, frozen Stage-A, normalization, calibration, common policy 2 from epoch 101 and 5000-epoch schedule horizon. The native run manifest records natural completion at **2026-10-03 14:20:48.261619 UTC, exit 0**; the periodic watcher observes the exited state at 14:21:13.441692, 25.180073 s later. These are distinct timestamps. Independent read-only selections retain exact 1000, field-selected 962 (age 38), and T-selected 996 (age 4); the stage 500 / 456 / 492 copies remain unchanged. Exact 1000 has 181 active AdamW states at 13000 updates, 543 finite state tensors and 109 Stage-A tensors unchanged versus 500 / 850. All 1000 epochs retain 600 training cases/13 optimizer boundaries/614400 primary field queries, plus 90 validation cases/92160 queries. The first 100 inactive response-loss CSV entries remain blank; all 900 active entries are finite. Full state audit, exit provenance, immutable selection receipt. | Unknown | 2026-10-03T01:42:01Z; Git first recorded commit, UTC; not experiment completion |
-| [20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md) | `HONF_Proj/docs/reports/HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md` | completed_stopped_campaign | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-04T03:03:00Z (published record) | 2026-10-04T03:03:00Z; Git first recorded commit, UTC; not experiment completion |
-| [20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md) | `HONF_Proj/docs/reports/HONF_Tree_Faithfulness_Fixed25_Development_Report.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-04T09:15:19Z (published record) | 2026-10-04T09:15:19Z; Git first recorded commit, UTC; not experiment completion |
-| [20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md) | `HONF_Proj/docs/reports/HONF_Tree_Lite_Execution_and_Maturation_Report.md` | completed_bounded_round_with_followup | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T04:44:28Z (published record) | 2026-10-05T00:03:28Z; Git first recorded commit, UTC; not experiment completion |
-| [20261005_052824Z_HONF_Native_Context_100_Epoch_Review.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_052824Z_HONF_Native_Context_100_Epoch_Review.md) | `HONF_Proj/docs/reports/HONF_Native_Context_100_Epoch_Review.md` | completed_historical_milestone | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T10:56:06Z (published record) | 2026-10-05T05:28:24Z; Git first recorded commit, UTC; not experiment completion |
-| [20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md) | `HONF_Proj/docs/reports/HONF_Native_Context_Organizer_Confirmation_Report.md` | completed_development_experiment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T10:56:06Z (published record) | 2026-10-05T10:56:06Z; Git first recorded commit, UTC; not experiment completion |
-| [20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md) | `HONF_Proj/docs/reports/HONF_Lean_Interaction_Reset_Development_Report.md` | completed_development_experiment | Completed measured development experiment, 5 October 2026. We made Global-C's redundant one-group reader cheaper and tested whether a new source-group control residual earns useful receiver-dependent organization. Both arms continued the same selected-data Global-C e500 for 500 additional epochs. Tensor-H improves mean fluid/surface/material temperature RMSE by 19.95%/12.05%/11.26% against matched G-fast, while pressure worsens 21.26% and all four flow-channel means worsen. It costs 26.63% more per complete epoch. Receiver-mean access is effectively interchangeable with learned receiver access on the fixed-four intervention panel, so meaningful receiver-specific utility was not demonstrated. | Exact time unknown; closed by 2026-10-05T18:50:23Z (published record) | 2026-10-05T18:50:23Z; Git first recorded commit, UTC; not experiment completion |
-| [20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md) | `HONF_Proj/docs/reports/HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T23:50:07Z (published record) | 2026-10-05T23:17:03Z; Git first recorded commit, UTC; not experiment completion |
-| [20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md) | `HONF_Proj/docs/reports/HONF_Response_Competent_Forward_Refinement_Report.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T04:00:05Z (published record) | 2026-10-06T04:00:05Z; Git first recorded commit, UTC; not experiment completion |
-| [20261006_141642Z_HONF_Two_Week_Milestone_Review_2026-10-06.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_141642Z_HONF_Two_Week_Milestone_Review_2026-10-06.md) | `HONF_Proj/docs/reports/HONF_Two_Week_Milestone_Review_2026-10-06.md` | completed_retrospective_review | **Review period: 22 September–6 October 2026.** The work over these two weeks changed the question from “can fewer hyperedges reproduce the field?” to “can an organized forward model preserve the physical changes that an inverse decision needs?” It introduced real source-pair accounting, response references, stronger controls, a fairer development budget, representation and derivative audits, and explicit source–receiver interaction controls. Several of these are durable advances. They have not yet produced a broadly accurate, demonstrably fast replacement for the established forward models or a trustworthy continuous inverse model. | Exact time unknown; closed by 2026-10-06T18:26:30Z (published record) | 2026-10-06T14:16:42Z; Git first recorded commit, UTC; not experiment completion |
+| [README.md](../../run1503_v3_organizer_diagnostics/effective_k/README.md) | `HONF_Proj/docs/reports/run1503_v3_organizer_diagnostics/effective_k/README.md` | ignored_local_diagnostics_index | Unknown; see dated evidence below | Unknown | Unknown; No Git timestamp; stable support filename |
+| [README.md](../stage1_interface_fields/README.md) | `HONF_Proj/docs/reports/_bk/stage1_interface_fields/README.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-05T20:50:03Z; Git first recorded commit, UTC; not experiment completion |
+| [README.md](../stage2_sparse_interface_honf/README.md) | `HONF_Proj/docs/reports/_bk/stage2_sparse_interface_honf/README.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-05T23:56:00Z; Git first recorded commit, UTC; not experiment completion |
+| [20260906_052330Z_HONF_Interface_Study_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260906_052330Z_HONF_Interface_Study_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Interface_Study_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-06T05:23:30Z; Git first recorded commit, UTC; not experiment completion |
+| [20260908_073524Z_HONF_Group_Reader_Recovery_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260908_073524Z_HONF_Group_Reader_Recovery_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Group_Reader_Recovery_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-08T07:35:24Z; Git first recorded commit, UTC; not experiment completion |
+| [20260909_043914Z_HONF_Epoch2500_Comparison_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260909_043914Z_HONF_Epoch2500_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Epoch2500_Comparison_Report.md` | completed_bounded_assessment | 2026-09-09 | 2026-09-09 | 2026-09-09T04:39:14Z; Git first recorded commit, UTC; not experiment completion |
+| [20260909_221909Z_HONF_Epoch5000_Comparison_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260909_221909Z_HONF_Epoch5000_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Epoch5000_Comparison_Report.md` | completed_bounded_assessment | 2026-09-09 | 2026-09-09 | 2026-09-09T22:19:09Z; Git first recorded commit, UTC; not experiment completion |
+| [20260910_144112Z_HONF_Regional_Response_Compression_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260910_144112Z_HONF_Regional_Response_Compression_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Regional_Response_Compression_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-10T14:41:12Z; Git first recorded commit, UTC; not experiment completion |
+| [20260912_041053Z_HONF_Five_Model_Epoch5000_Comparison_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260912_041053Z_HONF_Five_Model_Epoch5000_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Five_Model_Epoch5000_Comparison_Report.md` | completed_bounded_assessment | 2026-09-12 | 2026-09-12 | 2026-09-12T04:10:53Z; Git first recorded commit, UTC; not experiment completion |
+| [20260912_172548Z_HONF_NStage2_Comparison_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_NStage2_Comparison_Report.md` | completed_bounded_assessment | 2026-09-14 | 2026-09-14 | 2026-09-12T17:25:48Z; Git first recorded commit, UTC; not experiment completion |
+| [20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md](../20260913_20260915_WindFarm_Forward_Baselines/20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md) | `HONF_Proj/docs/reports/windfarm_forward_2500_comparison/WINDFARM_FORWARD_2500_COMPARISON.md` | completed_comparative_report | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-15T02:45:00Z (published record) | 2026-09-15T02:45:00Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Dynamic_Sparse_Routing_Comparison_Report.md` | historical_partial_superseded | Unknown; see dated evidence below | Unknown | 2026-09-16T04:20:45Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_042045Z_HONF_Routing_Run2000_Epoch500_Handoff.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Routing_Run2000_Epoch500_Handoff.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Run2000_Epoch500_Handoff.md` | historical_handoff_superseded | Unknown; see dated evidence below | Unknown | 2026-09-16T04:20:45Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_042045Z_HONF_Routing_Run2000_Epoch500_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Routing_Run2000_Epoch500_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Run2000_Epoch500_Report.md` | historical_partial_superseded | Unknown; see dated evidence below | Unknown | 2026-09-16T04:20:45Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_042137Z_HONF_Stage7_Decoder_Context_Ablation_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042137Z_HONF_Stage7_Decoder_Context_Ablation_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Stage7_Decoder_Context_Ablation_Report.md` | completed_bounded_assessment | 2026-09-16 | 2026-09-16 | 2026-09-16T04:21:37Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_044526Z_HONF_Routing_Run2100_Epoch500_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_044526Z_HONF_Routing_Run2100_Epoch500_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Run2100_Epoch500_Report.md` | historical_interim_superseded | Unknown; see dated evidence below | Unknown | 2026-09-16T04:45:26Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_131839Z_HONF_Routing_Memory_Diagnostics.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_131839Z_HONF_Routing_Memory_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Memory_Diagnostics.md` | completed_bounded_assessment | 2026-09-16 | 2026-09-16 | 2026-09-16T13:18:39Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1404_Routing_Only_Pairwise_Report.md` | completed_bounded_assessment | 2026-09-16 | 2026-09-16 | 2026-09-16T14:21:30Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_211504Z_HONF_Routing_Four_Run_500_Comparison.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_211504Z_HONF_Routing_Four_Run_500_Comparison.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Four_Run_500_Comparison.md` | completed_bounded_assessment | 2026-09-16 | 2026-09-16 | 2026-09-16T21:15:04Z; Git first recorded commit, UTC; not experiment completion |
+| [20260916_215851Z_HONF_Routing_Execution_Optimization_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_215851Z_HONF_Routing_Execution_Optimization_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Execution_Optimization_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-19T20:44:08Z (published record) | 2026-09-16T21:58:51Z; Git first recorded commit, UTC; not experiment completion |
+| [20260917_201432Z_HONF_Routing_Epoch2500_Comparative_Evaluation.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260917_201432Z_HONF_Routing_Epoch2500_Comparative_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Epoch2500_Comparative_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-19T20:44:08Z (published record) | 2026-09-17T20:14:32Z; Git first recorded commit, UTC; not experiment completion |
+| [20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Routing_Sparse_Execution_Next_Phase_Report.md` | historical_interim_superseded | Unknown; see dated evidence below | Unknown | 2026-09-18T14:20:31Z; Git first recorded commit, UTC; not experiment completion |
+| [20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Group_Control_Development_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-20T20:16:05Z (published record) | 2026-09-19T16:14:28Z; Git first recorded commit, UTC; not experiment completion |
+| [20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-20T20:16:05Z (published record) | 2026-09-19T17:39:16Z; Git first recorded commit, UTC; not experiment completion |
+| [20260919_194226Z_HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_194226Z_HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-23T14:02:38Z (published record) | 2026-09-19T19:42:26Z; Git first recorded commit, UTC; not experiment completion |
+| [20260919_204408Z_HONF_Run1406_Epoch500_Comparative_Evaluation.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_204408Z_HONF_Run1406_Epoch500_Comparative_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Epoch500_Comparative_Evaluation.md` | completed_bounded_assessment | 2026-09-19 | 2026-09-19 | 2026-09-19T20:44:08Z; Git first recorded commit, UTC; not experiment completion |
+| [20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1407_Phase_Shared_Routing_Report.md` | historical_milestone_with_continuation_superseded | 2026-09-19 | Unknown | 2026-09-19T22:19:56Z; Git first recorded commit, UTC; not experiment completion |
+| [20260920_140238Z_HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_140238Z_HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md` | completed_bounded_assessment | 2026-09-20 | 2026-09-20 | 2026-09-20T14:02:38Z; Git first recorded commit, UTC; not experiment completion |
+| [20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-23T14:02:38Z (published record) | 2026-09-20T19:23:23Z; Git first recorded commit, UTC; not experiment completion |
+| [20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md) | `HONF_Proj/docs/reports/HONF_Case_Budgeted_Dynamic_K_Evaluation.md` | closed_negative_gate | Unknown; see dated evidence below | Unknown | 2026-09-22T16:55:25Z; Git first recorded commit, UTC; not experiment completion |
+| [20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1409_DenseToSparse_Rerun_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T20:20:22Z; Git first recorded commit, UTC; not experiment completion |
+| [20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1409_OccupancyAdaptive_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-22T22:25:13Z; Git first recorded commit, UTC; not experiment completion |
+| [20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1500_MassCompetitive_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T00:06:19Z; Git first recorded commit, UTC; not experiment completion |
+| [20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1501_SparseIncidence_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T03:03:36Z; Git first recorded commit, UTC; not experiment completion |
+| [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1501_Executor_and_Run1502_Development.md` | completed_bounded_work_with_later_continuation_unverified | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T05:07:54Z; Git first recorded commit, UTC; not experiment completion |
+| [20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/HONF_1404_1804_1501_1502_Mature_Comparison.md` | completed_comparative_report | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [accuracy_findings.md](../../run1501_1502_comparison/accuracy/accuracy_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/accuracy_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [commands.md](../../run1501_1502_comparison/accuracy/commands.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/commands.md` | reproduction_commands | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [commands.md](../../run1501_1502_comparison/cost/commands.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/commands.md` | reproduction_commands | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [cost_findings.md](../../run1501_1502_comparison/cost/cost_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/cost_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [README.md](../../run1501_1502_comparison/cost/superseded/README.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/superseded/README.md` | superseded_support_index | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [routing_findings.md](../../run1501_1502_comparison/routing_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/routing_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1503_v2_Reversible_Edge_Coalescence.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
+| [20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
+| [20260924_220635Z_HONF_Run1505_E500_Organizer_Diagnostics.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1505_E500_Organizer_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1505_E500_Organizer_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
+| [20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T00:21:04Z; Git first recorded commit, UTC; not experiment completion |
+| [20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T05:31:04Z; Git first recorded commit, UTC; not experiment completion |
+| [20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Source_Conditioned_Core_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-25T15:41:20Z; Git first recorded commit, UTC; not experiment completion |
+| [20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md) | `HONF_Proj/docs/reports/HONF_Interaction_Response_and_Inverse_Design_Study.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-26T06:49:22Z (published record) | 2026-09-26T06:49:22Z; Git first recorded commit, UTC; not experiment completion |
+| [20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md) | `HONF_Proj/docs/reports/HONF_Decision_Aware_Dynamic_K_Study.md` | closed_negative_gate | Unknown; see dated evidence below | Unknown | 2026-09-26T19:59:12Z; Git first recorded commit, UTC; not experiment completion |
+| [20260926_195912Z_HONF_Thermal_Physical_Interaction_Evidence.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Thermal_Physical_Interaction_Evidence.md) | `HONF_Proj/docs/reports/_bk/HONF_Thermal_Physical_Interaction_Evidence.md` | completed_bounded_phases_with_explicit_unspent_scope | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-26T19:59:12Z; Git first recorded commit, UTC; not experiment completion |
+| [20260926_195912Z_baseline_decision.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_baseline_decision.md) | `HONF_Proj/docs/reports/_bk/baseline_decision.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-26T19:59:12Z; Git first recorded commit, UTC; not experiment completion |
+| [20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md) | `HONF_Proj/docs/reports/HONF_Native_Recovery_and_Adaptive_Interaction_Study.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-27T02:26:32Z (published record) | 2026-09-27T00:46:08Z; Git first recorded commit, UTC; not experiment completion |
+| [20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md) | `HONF_Proj/docs/reports/HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md` | completed_bounded_round | As of 2026-09-27. The matched R1 response pair, 24-row directed G2 search, two bounded G5 fits and their frozen-split G6 reviews are complete. A conditional two-layout native-grid check and the packed-control execution review are recorded below. The later matched joint-forward maturation run is reported separately in HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md. | Exact time unknown; closed by 2026-09-27T22:18:22Z (published record) | 2026-09-27T10:16:09Z; Git first recorded commit, UTC; not experiment completion |
+| [20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md) | `HONF_Proj/docs/reports/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md` | completed_bounded_round | Status: bounded implementation, matched forward runs, endpoint reviews and one train-only child-support remedy complete on agent/honf-core-next, 27 September 2026 (28 September UTC). This report follows UpgradePlan/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md. Results below are retained only after execution; no planned training result is implied by an implementation or startup check. | Exact time unknown; closed by 2026-09-28T00:58:48Z (published record) | 2026-09-27T20:49:04Z; Git first recorded commit, UTC; not experiment completion |
+| [20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md) | `HONF_Proj/docs/reports/HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md` | completed_bounded_study | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-29T19:35:42Z (published record) | 2026-09-29T11:58:06Z; Git first recorded commit, UTC; not experiment completion |
+| [20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md) | `HONF_Proj/docs/reports/HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md` | closed_resource_censored_study | Unknown; see dated evidence below | Unknown | 2026-10-02T13:26:48Z; Git first recorded commit, UTC; not experiment completion |
+| [20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md) | `HONF_Proj/docs/reports/HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md` | completed_bounded_round | The first substantive inspection was **2026-10-02 16:50:11 UTC**. The working branch is agent/honf-core-next, with evidence baseline b55dd28. Wind ran on physical **GPU1**, UUID GPU-3ceda40c-fd5c-4b88-6c47-b3301711571e; Thermal ran on physical **GPU2**, UUID GPU-f6a4ddbb-ad44-5ef5-0421-eecf7120df39, using the **ModularDT** environment and explicit cuda:1/cuda:2. GPU0 was not used by this round. Native work overlapped across the two authorized lanes. | Exact time unknown; closed by 2026-10-02T18:33:37Z (published record) | 2026-10-02T18:33:37Z; Git first recorded commit, UTC; not experiment completion |
+| [20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md) | `HONF_Proj/docs/reports/HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md` | completed_bounded_round | First substantive inspection: **2026-10-02 19:14:00 UTC (15:14 EDT)**. Science stops by 00:14Z and delivery by 01:14Z on October 3 (20:14/21:14 EDT on October 2). Last GPU1 process ends 23:08:29Z (bound rounded up to :30); last GPU2 regression ends 21:57:25Z. No GPU work follows. All science completes before the five-hour cutoff, leaving the final hour fully available for closeout. The aggregate cap is verified through conservative lane ownership rather than incomplete per-process sums. | Exact time unknown; closed by 2026-10-02T23:46:47Z (published record) | 2026-10-02T23:31:29Z; Git first recorded commit, UTC; not experiment completion |
+| [20261003_014201Z_HONF_Shared_Core_Alignment.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_014201Z_HONF_Shared_Core_Alignment.md) | `HONF_Proj/docs/reports/HONF_Shared_Core_Alignment.md` | completed_implementation_reference | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-03T04:37:05Z (published record) | 2026-10-03T01:42:01Z; Git first recorded commit, UTC; not experiment completion |
+| [20261003_014201Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_014201Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md) | `HONF_Proj/docs/reports/HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md` | superseded_historical_campaign_log | **2026-10-04 02:27:21.276168 UTC**. Native RunStore ended at 02:27:21.341304 with; Native continued the same Run 2201 from exact 500 to exact 1000, preserving its optimizer, four RNG streams, frozen Stage-A, normalization, calibration, common policy 2 from epoch 101 and 5000-epoch schedule horizon. The native run manifest records natural completion at **2026-10-03 14:20:48.261619 UTC, exit 0**; the periodic watcher observes the exited state at 14:21:13.441692, 25.180073 s later. These are distinct timestamps. Independent read-only selections retain exact 1000, field-selected 962 (age 38), and T-selected 996 (age 4); the stage 500 / 456 / 492 copies remain unchanged. Exact 1000 has 181 active AdamW states at 13000 updates, 543 finite state tensors and 109 Stage-A tensors unchanged versus 500 / 850. All 1000 epochs retain 600 training cases/13 optimizer boundaries/614400 primary field queries, plus 90 validation cases/92160 queries. The first 100 inactive response-loss CSV entries remain blank; all 900 active entries are finite. Full state audit, exit provenance, immutable selection receipt. | Unknown | 2026-10-03T01:42:01Z; Git first recorded commit, UTC; not experiment completion |
+| [20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md) | `HONF_Proj/docs/reports/HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md` | completed_stopped_campaign | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-04T03:03:00Z (published record) | 2026-10-04T03:03:00Z; Git first recorded commit, UTC; not experiment completion |
+| [20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md) | `HONF_Proj/docs/reports/HONF_Tree_Faithfulness_Fixed25_Development_Report.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-04T09:15:19Z (published record) | 2026-10-04T09:15:19Z; Git first recorded commit, UTC; not experiment completion |
+| [20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md) | `HONF_Proj/docs/reports/HONF_Tree_Lite_Execution_and_Maturation_Report.md` | completed_bounded_round_with_followup | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T04:44:28Z (published record) | 2026-10-05T00:03:28Z; Git first recorded commit, UTC; not experiment completion |
+| [20261005_052824Z_HONF_Native_Context_100_Epoch_Review.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_052824Z_HONF_Native_Context_100_Epoch_Review.md) | `HONF_Proj/docs/reports/HONF_Native_Context_100_Epoch_Review.md` | completed_historical_milestone | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T10:56:06Z (published record) | 2026-10-05T05:28:24Z; Git first recorded commit, UTC; not experiment completion |
+| [20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md) | `HONF_Proj/docs/reports/HONF_Native_Context_Organizer_Confirmation_Report.md` | completed_development_experiment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T10:56:06Z (published record) | 2026-10-05T10:56:06Z; Git first recorded commit, UTC; not experiment completion |
+| [20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md) | `HONF_Proj/docs/reports/HONF_Lean_Interaction_Reset_Development_Report.md` | completed_development_experiment | Completed measured development experiment, 5 October 2026. We made Global-C's redundant one-group reader cheaper and tested whether a new source-group control residual earns useful receiver-dependent organization. Both arms continued the same selected-data Global-C e500 for 500 additional epochs. Tensor-H improves mean fluid/surface/material temperature RMSE by 19.95%/12.05%/11.26% against matched G-fast, while pressure worsens 21.26% and all four flow-channel means worsen. It costs 26.63% more per complete epoch. Receiver-mean access is effectively interchangeable with learned receiver access on the fixed-four intervention panel, so meaningful receiver-specific utility was not demonstrated. | Exact time unknown; closed by 2026-10-05T18:50:23Z (published record) | 2026-10-05T18:50:23Z; Git first recorded commit, UTC; not experiment completion |
+| [20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md) | `HONF_Proj/docs/reports/HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-05T23:50:07Z (published record) | 2026-10-05T23:17:03Z; Git first recorded commit, UTC; not experiment completion |
+| [20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md) | `HONF_Proj/docs/reports/HONF_Response_Competent_Forward_Refinement_Report.md` | completed_bounded_round | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T04:00:05Z (published record) | 2026-10-06T04:00:05Z; Git first recorded commit, UTC; not experiment completion |
+| [20261006_141642Z_HONF_Two_Week_Milestone_Review_2026-10-06.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_141642Z_HONF_Two_Week_Milestone_Review_2026-10-06.md) | `HONF_Proj/docs/reports/HONF_Two_Week_Milestone_Review_2026-10-06.md` | completed_retrospective_review | **Review period: 22 September–6 October 2026.** The work over these two weeks changed the question from “can fewer hyperedges reproduce the field?” to “can an organized forward model preserve the physical changes that an inverse decision needs?” It introduced real source-pair accounting, response references, stronger controls, a fairer development budget, representation and derivative audits, and explicit source–receiver interaction controls. Several of these are durable advances. They have not yet produced a broadly accurate, demonstrably fast replacement for the established forward models or a trustworthy continuous inverse model. | Exact time unknown; closed by 2026-10-06T18:26:30Z (published record) | 2026-10-06T14:16:42Z; Git first recorded commit, UTC; not experiment completion |
 | [README.md](README.md) | `HONF_Proj/docs/reports/README.md` | maintained_index | Unknown; see dated evidence below | Unknown | 2026-10-06T14:16:42Z; Git first recorded commit, UTC; not experiment completion |
-| [20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md) | `HONF_Proj/docs/reports/HONF_Dependency_Correct_Forward_Interface_Report.md` | completed_bounded_result | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T15:42:29Z (published record) | 2026-10-06T15:42:29Z; Git first recorded commit, UTC; not experiment completion |
-| [20261006_154229Z_HONF_Dependency_Correct_Source_Audit.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Source_Audit.md) | `HONF_Proj/docs/reports/HONF_Dependency_Correct_Source_Audit.md` | completed_source_audit | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T15:42:29Z (published record) | 2026-10-06T15:42:29Z; Git first recorded commit, UTC; not experiment completion |
-| [20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md) | `HONF_Proj/docs/reports/HONF_Response_Operator_Consolidation_and_Maturation_Report.md` | completed_bounded_round | All GPU jobs completed successfully. At 2026-10-06 19:04 UTC, the round ledger records **1.427512 aggregate GPU-associated process-hours** (5139.045 s) and **2.057 elapsed hours** since the 17:01:11 UTC goal start, within the 12/8-hour ceilings. Final CPU report/upload closeout follows this timestamp and does not add GPU work. Outer process receipts include import, loading, computation, monitoring, writing and exit; actual PIDs are counted once. Initial inner-only fit receipts receive a conservative 2-second import/exit charge, and the early D-sep1500 native check receives a conservative 60-second charge. The GPU-associated ledger includes training, every CUDA evaluation, the three cost jobs, and the extra direct2200 evaluation dispatched before terminal selection was known. That extra result is retained under its literal age; final direct2500 was measured separately. CPU response evaluations and checkpoint-gradient probes are reported separately. Two CPU preparation integration failures were fixed before sealing; there were zero failed GPU jobs. | Exact time unknown; closed by 2026-10-06T19:25:20Z (published record) | 2026-10-06T19:16:13Z; Git first recorded commit, UTC; not experiment completion |
-| [20261007_031743Z_HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_031743Z_HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md) | `HONF_Proj/docs/reports/HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md` | completed_formal_comparison | **Completed comparison, updated 2026-10-07.** The new system replaces the classical predicted-port/local-surrogate/refinement chain with an ordinary dependency-separated flow predictor (D-sep, Run3901) and a source-resolved thermal response model (R-Direct, Run3902). Both fresh full-TRAIN stages completed 5,000 epochs. This report compares that composed system with HONF1401, Dense1804 and sparse-incidence HONF1502, reorganizing the saved evidence into four presentation themes. The models exchange advantages: R-Direct is faster and improves streamwise velocity and mean surface temperature; Dense1804 remains stronger on absolute fluid temperature and several difficult tails. The revision adds no training, model evaluation or reference solves. | Exact time unknown; closed by 2026-10-07T18:44:04Z (published record) | 2026-10-07T03:17:43Z; Git first recorded commit, UTC; not experiment completion |
-| [20261007_035824Z_Thermal_RDirect_Formal5000_Launch_20261007.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_035824Z_Thermal_RDirect_Formal5000_Launch_20261007.md) | `HONF_Proj/docs/reports/Thermal_RDirect_Formal5000_Launch_20261007.md` | superseded_launch_handoff | Unknown; see dated evidence below | Unknown | 2026-10-07T03:58:24Z; Git first recorded commit, UTC; not experiment completion |
-| [20261007_152137Z_HONF_RDirect_Historical_Readiness_Assessment.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_152137Z_HONF_RDirect_Historical_Readiness_Assessment.md) | `HONF_Proj/docs/reports/_bk/HONF_RDirect_Historical_Readiness_Assessment.md` | historical_readiness_superseded | Unknown; see dated evidence below | Unknown | 2026-10-07T15:21:37Z; Git first recorded commit, UTC; not experiment completion |
-| [20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md) | `HONF_Proj/docs/reports/HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md` | completed_bounded_round | **Bounded development study, 7 October 2026 — final report.** This round extracts the actual source/environment context computation and geometric receiver reads into shared code. Thermal uses the retained affine heating reader; a fresh Wind model uses source-wise nonlinear messages followed by a nonlinear velocity head. The datasets execute the same implementation with different weights, input transforms and output laws. Native Thermal extraction, zero benchmark temperature offset, heating units and the triangular flow-to-temperature dependency remain Thermal-owned. | Exact time unknown; closed by 2026-10-07T19:44:30Z (published record) | 2026-10-07T19:44:30Z; Git first recorded commit, UTC; not experiment completion |
+| [20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md) | `HONF_Proj/docs/reports/HONF_Dependency_Correct_Forward_Interface_Report.md` | completed_bounded_result | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T15:42:29Z (published record) | 2026-10-06T15:42:29Z; Git first recorded commit, UTC; not experiment completion |
+| [20261006_154229Z_HONF_Dependency_Correct_Source_Audit.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Source_Audit.md) | `HONF_Proj/docs/reports/HONF_Dependency_Correct_Source_Audit.md` | completed_source_audit | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-06T15:42:29Z (published record) | 2026-10-06T15:42:29Z; Git first recorded commit, UTC; not experiment completion |
+| [20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md) | `HONF_Proj/docs/reports/HONF_Response_Operator_Consolidation_and_Maturation_Report.md` | completed_bounded_round | All GPU jobs completed successfully. At 2026-10-06 19:04 UTC, the round ledger records **1.427512 aggregate GPU-associated process-hours** (5139.045 s) and **2.057 elapsed hours** since the 17:01:11 UTC goal start, within the 12/8-hour ceilings. Final CPU report/upload closeout follows this timestamp and does not add GPU work. Outer process receipts include import, loading, computation, monitoring, writing and exit; actual PIDs are counted once. Initial inner-only fit receipts receive a conservative 2-second import/exit charge, and the early D-sep1500 native check receives a conservative 60-second charge. The GPU-associated ledger includes training, every CUDA evaluation, the three cost jobs, and the extra direct2200 evaluation dispatched before terminal selection was known. That extra result is retained under its literal age; final direct2500 was measured separately. CPU response evaluations and checkpoint-gradient probes are reported separately. Two CPU preparation integration failures were fixed before sealing; there were zero failed GPU jobs. | Exact time unknown; closed by 2026-10-06T19:25:20Z (published record) | 2026-10-06T19:16:13Z; Git first recorded commit, UTC; not experiment completion |
+| [20261007_031743Z_HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_031743Z_HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md) | `HONF_Proj/docs/reports/HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md` | completed_formal_comparison | **Completed comparison, updated 2026-10-07.** The new system replaces the classical predicted-port/local-surrogate/refinement chain with an ordinary dependency-separated flow predictor (D-sep, Run3901) and a source-resolved thermal response model (R-Direct, Run3902). Both fresh full-TRAIN stages completed 5,000 epochs. This report compares that composed system with HONF1401, Dense1804 and sparse-incidence HONF1502, reorganizing the saved evidence into four presentation themes. The models exchange advantages: R-Direct is faster and improves streamwise velocity and mean surface temperature; Dense1804 remains stronger on absolute fluid temperature and several difficult tails. The revision adds no training, model evaluation or reference solves. | Exact time unknown; closed by 2026-10-07T18:44:04Z (published record) | 2026-10-07T03:17:43Z; Git first recorded commit, UTC; not experiment completion |
+| [20261007_035824Z_Thermal_RDirect_Formal5000_Launch_20261007.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_035824Z_Thermal_RDirect_Formal5000_Launch_20261007.md) | `HONF_Proj/docs/reports/Thermal_RDirect_Formal5000_Launch_20261007.md` | superseded_launch_handoff | Unknown; see dated evidence below | Unknown | 2026-10-07T03:58:24Z; Git first recorded commit, UTC; not experiment completion |
+| [20261007_152137Z_HONF_RDirect_Historical_Readiness_Assessment.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_152137Z_HONF_RDirect_Historical_Readiness_Assessment.md) | `HONF_Proj/docs/reports/_bk/HONF_RDirect_Historical_Readiness_Assessment.md` | historical_readiness_superseded | Unknown; see dated evidence below | Unknown | 2026-10-07T15:21:37Z; Git first recorded commit, UTC; not experiment completion |
+| [20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md) | `HONF_Proj/docs/reports/HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md` | completed_bounded_round | **Bounded development study, 7 October 2026 — final report.** This round extracts the actual source/environment context computation and geometric receiver reads into shared code. Thermal uses the retained affine heating reader; a fresh Wind model uses source-wise nonlinear messages followed by a nonlinear velocity head. The datasets execute the same implementation with different weights, input transforms and output laws. Native Thermal extraction, zero benchmark temperature offset, heating units and the triangular flow-to-temperature dependency remain Thermal-owned. | Exact time unknown; closed by 2026-10-07T19:44:30Z (published record) | 2026-10-07T19:44:30Z; Git first recorded commit, UTC; not experiment completion |
 
 ## Per-document evidence and uncertainty
 
@@ -165,7 +165,7 @@ Evidence quotes describe the pre-archive texts. Linked documents preserve their 
 
 ### DEEPGEOTHERMAL_HONF_QUICKSTART.md
 
-[Current document](../../UpgradePlan/DEEPGEOTHERMAL_HONF_QUICKSTART.md). Status: `reference_current`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/DEEPGEOTHERMAL_HONF_QUICKSTART.md). Status: `reference_current`. Filename basis: file_creation_not_proposal.
 
 Evidence: Coworker/AI onboarding guide; no completed DeepGeoThermal study claimed. Keep root.; .
 
@@ -173,9 +173,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260928_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md). Status: `completed_bounded`. Filename basis: explicit_proposal_date.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260928_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Plan.md). Status: `completed_bounded`. Filename basis: explicit_proposal_date.
 
-Matched closeout/reference: [20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md).
+Matched closeout/reference: [20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md: related report/reference for this campaign; # HONF active organization and frozen inverse reuse study; Report first committed 2026-09-29T07:58:06-04:00 (publication evidence, NOT exact completion).
 
@@ -183,9 +183,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_154850Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_154850Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md).
+Matched closeout/reference: [20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md: related report/reference for this campaign; > **Selected forward weights are frozen; Wind selected inverse sampling is complete and Thermal selected inverse sampling was resource-censored.** Wind G/P are selected at u4910. Thermal G/P are frozen at u1300 as a research-only endpoint: the unchanged runner could not reserve the matched u1301–u1400 block inside the Thermal lane limit. The selected Thermal inverse trained for 32 updates per arm, but two bounded sample-only attempts ended before a condition was complete. The last attempt was stopped when the user requested prompt wrap-up. No selected Thermal terminal sample or forward score exists. Exact attempt and charge records are preserved in the ignored local handoff.; Report first committed 2026-10-02T09:26:48-04:00 (publication evidence, NOT exact completion).
 
@@ -193,9 +193,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Decision_Aware_Dynamic_K_Work_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_150153Z_HONF_Decision_Aware_Dynamic_K_Work_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_150153Z_HONF_Decision_Aware_Dynamic_K_Work_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md).
+Matched closeout/reference: [20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Decision_Aware_Dynamic_K_Study.md: related report/reference for this campaign; # HONF decision-aware dynamic-K study; Report first committed 2026-09-26T15:59:12-04:00 (publication evidence, NOT exact completion).
 
@@ -203,9 +203,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Dependency_Correct_Forward_Interface_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_145638Z_HONF_Dependency_Correct_Forward_Interface_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_145638Z_HONF_Dependency_Correct_Forward_Interface_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md).
+Matched closeout/reference: [20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Dependency_Correct_Forward_Interface_Report.md: related report/reference for this campaign; # Dependency-correct ThermalChannel forward interface — measured bounded result; Report first committed 2026-10-06T11:42:15-04:00 (publication evidence, NOT exact completion).
 
@@ -213,9 +213,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_191148Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_191148Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md).
+Matched closeout/reference: [20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md: related report/reference for this campaign; Implemented and trained three matched comparisons: a directional versus legacy-summary Wind organizer, a broader Thermal value-weight correction, and fresh graph versus dense inverse models using bounded clean coordinates and velocity prediction. These are opt-in additions. Historical maturation runs, the epsilon sampler, checkpoints, and production policies remain available. This round used stored references and made **zero new Thermal or Wind reference solves**.; Report first committed 2026-10-02T19:31:29-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md:215: First substantive inspection: **2026-10-02 19:14:00 UTC (15:14 EDT)**. Science stops by 00:14Z and delivery by 01:14Z on October 3 (20:14/21:14 EDT on October 2). Last GPU1 process ends 23:08:29Z (bound rounded up to :30); last GPU2 regression ends 21:57:25Z. No GPU work follows. All science completes before the five-hour cutoff, leaving the final hour fully available for closeout. The aggregate cap is verified through conservative lane ownership rather than incomplete per-process sums..
 
@@ -223,9 +223,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_150205Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_150205Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md).
+Matched closeout/reference: [20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md: related report/reference for this campaign; # HONF fidelity-budgeted joint forward maturation study; Report first committed 2026-09-27T16:49:04-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md:3: Status: bounded implementation, matched forward runs, endpoint reviews and one train-only child-support remedy complete on agent/honf-core-next, 27 September 2026 (28 September UTC). This report follows UpgradePlan/HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Plan.md. Results below are retained only after execution; no planned training result is implied by an implementation or startup check..
 
@@ -233,9 +233,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_164639Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_164639Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md).
+Matched closeout/reference: [20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md: related report/reference for this campaign; This round separates useful source filtering from useful receiver grouping, and physical-weight adaptation from source-access error. We reused Wind u4910 and Thermal u1300 evidence, added a six-case Wind replay, tested one matched 40-update Thermal correction, and completed four frozen Wind inverse trails. The historical maturation runs and deployment thresholds are preserved. No new reference or CFD solves were performed.; Report first committed 2026-10-02T14:33:37-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md:21: The first substantive inspection was **2026-10-02 16:50:11 UTC**. The working branch is agent/honf-core-next, with evidence baseline b55dd28. Wind ran on physical **GPU1**, UUID GPU-3ceda40c-fd5c-4b88-6c47-b3301711571e; Thermal ran on physical **GPU2**, UUID GPU-f6a4ddbb-ad44-5ef5-0421-eecf7120df39, using the **ModularDT** environment and explicit cuda:1/cuda:2. GPU0 was not used by this round. Native work overlapped across the two authorized lanes..
 
@@ -243,9 +243,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_033300Z_HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_033300Z_HONF_Interaction_Evidence_and_Inverse_Design_Work_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md).
+Matched closeout/reference: [20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Interaction_Response_and_Inverse_Design_Study.md: related report/reference for this campaign; For a fixed set of heated modules in the ThermalChannel benchmark, which identified module-position changes jointly affect a named fluid-field, surface-flux, or solid-temperature receiver, and does that measured organization help choose a feasible position update? Heating, radii, module identities, and operating context stay fixed during the primary position task. The response-factor model predicts the *change* from an accepted baseline; it is a local model, not a cold-start absolute-field HONF replacement.; Report first committed 2026-09-26T02:49:22-04:00 (publication evidence, NOT exact completion).
 
@@ -253,9 +253,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_161914Z_HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_161914Z_HONF_Lean_Interaction_Reset_and_Costed_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md).
+Matched closeout/reference: [20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Lean_Interaction_Reset_Development_Report.md: related report/reference for this campaign; Completed measured development experiment, 5 October 2026. We made Global-C's redundant one-group reader cheaper and tested whether a new source-group control residual earns useful receiver-dependent organization. Both arms continued the same selected-data Global-C e500 for 500 additional epochs. Tensor-H improves mean fluid/surface/material temperature RMSE by 19.95%/12.05%/11.26% against matched G-fast, while pressure worsens 21.26% and all four flow-channel means worsen. It costs 26.63% more per complete epoch. Receiver-mean access is effectively interchangeable with learned receiver access on the fixed-four intervention panel, so meaningful receiver-specific utility was not demonstrated.; Report first committed 2026-10-05T14:50:23-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/HONF_Lean_Interaction_Reset_Development_Report.md:3: Completed measured development experiment, 5 October 2026. We made Global-C's redundant one-group reader cheaper and tested whether a new source-group control residual earns useful receiver-dependent organization. Both arms continued the same selected-data Global-C e500 for 500 additional epochs. Tensor-H improves mean fluid/surface/material temperature RMSE by 19.95%/12.05%/11.26% against matched G-fast, while pressure worsens 21.26% and all four flow-channel means worsen. It costs 26.63% more .
 
@@ -263,9 +263,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Native_Context_Organizer_Confirmation_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_032908Z_HONF_Native_Context_Organizer_Confirmation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_032908Z_HONF_Native_Context_Organizer_Confirmation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md).
+Matched closeout/reference: [20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Native_Context_Organizer_Confirmation_Report.md: related report/reference for this campaign; Tree-C and Global-C restore native coarse and local physical context beside source-resolved fine interactions. Both fresh models completed 500 development epochs and selected their literal 500 weights. Tree adds receiver-dependent collective organization; Global uses a trained global collective control with full eligible fine access. Restoring context removes a confound in the earlier Tree/Pair/Fine comparison. It does not uniquely explain those older errors.; Report first committed 2026-10-05T06:56:06-04:00 (publication evidence, NOT exact completion); HONF_Proj/UpgradePlan/HONF_Native_Context_Organizer_Confirmation_Plan.md:402-406 explicit completed execution record.
 
@@ -273,9 +273,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_222431Z_HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_222431Z_HONF_Native_Recovery_and_Adaptive_Interaction_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md).
+Matched closeout/reference: [20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Native_Recovery_and_Adaptive_Interaction_Study.md: related report/reference for this campaign; **Status:** bounded native response, WindFarm cover and inverse reviews are complete. The organizer target remained unavailable under measured native costs; the physical and inverse observations below are measured.; Report first committed 2026-09-26T20:46:08-04:00 (publication evidence, NOT exact completion).
 
@@ -283,9 +283,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_210242Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_210242Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md).
+Matched closeout/reference: [20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md: related report/reference for this campaign; **Predictor:** both interfaces completed 500 fit epochs. At matched 500, H-joint improves u/v/pressure means6.41%/1.48%/1.16% versus H-add, but fluid/material temperature slightly worsen; selected H-joint fit 100 also loses all three thermal means to selected H-add fit 300. H-joint retains9.81%/11.28%/14.17% thermal gains versus G-fast, with pressure 4.86% worse. Keep the measured tradeoffs; no uniform superiority or formal promotion follows.; Report first committed 2026-10-05T19:17:03-04:00 (publication evidence, NOT exact completion).
 
@@ -293,9 +293,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_035918Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_035918Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md).
+Matched closeout/reference: [20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md: related report/reference for this campaign; # HONF Receiver-Local Interface and Decision Recovery Study; Report first committed 2026-09-27T06:16:09-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md:3: As of 2026-09-27. The matched R1 response pair, 24-row directed G2 search, two bounded G5 fits and their frozen-split G6 reviews are complete. A conditional two-layout native-grid check and the packed-control execution review are recorded below. The later matched joint-forward maturation run is reported separately in HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md..
 
@@ -303,9 +303,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Response_Competent_Forward_Refinement_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_012537Z_HONF_Response_Competent_Forward_Refinement_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_012537Z_HONF_Response_Competent_Forward_Refinement_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md).
+Matched closeout/reference: [20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Response_Competent_Forward_Refinement_Report.md: related report/reference for this campaign; # HONF response-competent forward refinement: measured development report; Report first committed 2026-10-06T00:00:05-04:00 (publication evidence, NOT exact completion).
 
@@ -313,9 +313,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Response_Operator_Consolidation_and_Maturation_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_170023Z_HONF_Response_Operator_Consolidation_and_Maturation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_170023Z_HONF_Response_Operator_Consolidation_and_Maturation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md).
+Matched closeout/reference: [20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Response_Operator_Consolidation_and_Maturation_Report.md: related report/reference for this campaign; The forward interface now prepares a learned temperature-response operator from the complete layout and prescribed environment, then applies physical heating separately. Two independently trained readouts use the same encoder and near-source architectures and common initialization, then update separate weights: R-direct evaluates individual far-source coefficients; R-group represents them through source memberships and signed receiver functions. Both compose with one frozen, heat-independent D-sep flow reader. The protected Run3801 thermal predictor remains unchanged.; Report first committed 2026-10-06T15:16:13-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/HONF_Response_Operator_Consolidation_and_Maturation_Report.md:218: All GPU jobs completed successfully. At 2026-10-06 19:04 UTC, the round ledger records **1.427512 aggregate GPU-associated process-hours** (5139.045 s) and **2.057 elapsed hours** since the 17:01:11 UTC goal start, within the 12/8-hour ceilings. Final CPU report/upload closeout follows this timestamp and does not add GPU work. Outer process receipts include import, loading, computation, monitoring, writing and exit; actual PIDs are counted once. Initial inner-only fit receipts receive a conserva.
 
@@ -323,9 +323,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_005614Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_005614Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md).
+Matched closeout/reference: [20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md: related report/reference for this campaign; The campaign put three learned interaction organizers into the native Thermal model and compared them with two fresh controls. All five completed genuine 500-epoch training. The organizers produced different, measurable interactions, but they did not improve the main physical errors over the controls or make subset execution faster. Inverse experiments established execution and conditioning readiness, with mixed one-step outcomes; they did not establish inverse-design quality or generative diversity.; Report first committed 2026-10-03T23:03:00-04:00 (publication evidence, NOT exact completion).
 
@@ -333,9 +333,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_154446Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_154446Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md).
+Matched closeout/reference: [20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md: related report/reference for this campaign; **Bounded development study, 7 October 2026 — final report.** This round extracts the actual source/environment context computation and geometric receiver reads into shared code. Thermal uses the retained affine heating reader; a fresh Wind model uses source-wise nonlinear messages followed by a nonlinear velocity head. The datasets execute the same implementation with different weights, input transforms and output laws. Native Thermal extraction, zero benchmark temperature offset, heating units and the triangular flow-to-temperature dependency remain Thermal-owned.; Report first committed 2026-10-07T15:44:30-04:00 (publication evidence, NOT exact completion).
 
@@ -343,9 +343,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_041750Z_HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_041750Z_HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md).
+Matched closeout/reference: [20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Tree_Faithfulness_Fixed25_Development_Report.md: related report/reference for this campaign; This round made the Tree receiver index and its structural objective depend on physical measures, separated collective-control donors from all-source planning, and trained a strong direct-pair control with the same fine backbone and source-local inputs. Fresh Tree-L stopped at 100 epochs; Tree-F and Pair-F completed the reviewed matched 200-epoch stage. A fresh Run1804-like dense architecture completed all 1,000 selected-data epochs. The candidate plan permits at most 500 epochs, but that ceiling is not a requirement to spend the allowance.; Report first committed 2026-10-04T05:15:19-04:00 (publication evidence, NOT exact completion); HONF_Proj/UpgradePlan/HONF_Tree_Faithfulness_and_Response_Transfer_Development_Plan.md:25 explicit completed execution record.
 
@@ -353,9 +353,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Tree_Lite_Execution_and_Maturation_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_130422Z_HONF_Tree_Lite_Execution_and_Maturation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_130422Z_HONF_Tree_Lite_Execution_and_Maturation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md).
+Matched closeout/reference: [20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Tree_Lite_Execution_and_Maturation_Report.md: related report/reference for this campaign; Tree now projects its collective controls before expanding them over receivers, skips unrequested inference diagnostics, and trains its organizer with local soft reductions around one hard physical pass. The completed fixed-quarter campaign trained Tree and Pair through 1,000 epochs and a fresh full-access Fine control through 500. The unchanged field-error selector chooses epoch 900 for both Tree and Pair. All final organizer, response and inverse measurements use those selected weights.; Report first committed 2026-10-04T20:03:28-04:00 (publication evidence, NOT exact completion).
 
@@ -363,9 +363,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Case_Budgeted_Dynamic_K_Development_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_154728Z_HONF_Case_Budgeted_Dynamic_K_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_154728Z_HONF_Case_Budgeted_Dynamic_K_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md).
+Matched closeout/reference: [20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md).
 
 Evidence: HONF_Proj/docs/reports/HONF_Case_Budgeted_Dynamic_K_Evaluation.md: related report/reference for this campaign; **Checkpoint policy:** exact epoch 50 for Run 1409, Run 1406, Dense Run 1804, and routing-only Run 1404. All four checkpoints were evaluated on the same 90 test cases, at 8,192 field queries per case with predicted ports. Run 1409 was trained once from scratch on GPU 0 and stopped at epoch 50. The separately saved best-field checkpoint is also epoch 50. No epoch-500 Run 1409 result exists.; Report first committed 2026-09-22T12:55:25-04:00 (publication evidence, NOT exact completion).
 
@@ -373,9 +373,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Group_Pathway_Recovery_NextStep_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260908_033930Z_HONF_Group_Pathway_Recovery_NextStep_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260908_033930Z_HONF_Group_Pathway_Recovery_NextStep_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260908_073524Z_HONF_Group_Reader_Recovery_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260908_073524Z_HONF_Group_Reader_Recovery_Report.md).
+Matched closeout/reference: [20260908_073524Z_HONF_Group_Reader_Recovery_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260908_073524Z_HONF_Group_Reader_Recovery_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Group_Reader_Recovery_Report.md: related report/reference for this campaign; Completed continuation (2026-09-09): see the exact epoch-5,000 comparison. Dense leads overall reconstruction; Reader retains numerical group activity but its relative field deficit grows. The original 500-epoch recovery findings remain unchanged.; Report first committed 2026-09-08T03:35:24-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/_bk/HONF_Group_Reader_Recovery_Report.md:3: Completed continuation (2026-09-09): see the exact epoch-5,000 comparison. Dense leads overall reconstruction; Reader retains numerical group activity but its relative field deficit grows. The original 500-epoch recovery findings remain unchanged.; HONF_Proj/docs/reports/_bk/HONF_Group_Reader_Recovery_Report.md:5: Follow-up (2026-09-09): the exact epoch-2,500 comparison updates the later-training ranking and thermal conclusions. The measurements and causal findings below remain the epoch-500 closeout evidence..
 
@@ -383,9 +383,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_NStage2_Model_Development_and_Validation_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_HONF_NStage2_Model_Development_and_Validation_Plan.md). Status: `completed_bounded`. Filename basis: explicit_proposal_date.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_HONF_NStage2_Model_Development_and_Validation_Plan.md). Status: `completed_bounded`. Filename basis: explicit_proposal_date.
 
-Matched closeout/reference: [20260912_172548Z_HONF_NStage2_Comparison_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md).
+Matched closeout/reference: [20260912_172548Z_HONF_NStage2_Comparison_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_NStage2_Comparison_Report.md: related report/reference for this campaign; **Status:** both NStage2 candidates completed the authorized 5,000-epoch continuation. This is the current history and maturity assessment as of 2026-09-14. It uses the exact epoch-5,000 checkpoint and a separately recorded best-field checkpoint for each of the seven runs, full-grid evaluation on 90 cases, the all-epoch history exports, and the final isolated execution artifacts. The epoch-500 assessment is retained verbatim below for provenance and is not the current endpoint conclusion.; Report first committed 2026-09-12T13:25:48-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/_bk/HONF_NStage2_Comparison_Report.md:5: **Status:** both NStage2 candidates completed the authorized 5,000-epoch continuation. This is the current history and maturity assessment as of 2026-09-14. It uses the exact epoch-5,000 checkpoint and a separately recorded best-field checkpoint for each of the seven runs, full-grid evaluation on 90 cases, the all-epoch history exports, and the final isolated execution artifacts. The epoch-500 assessment is retained verbatim below for provenance and is not the current endpoint conclusion.; HONF_Proj/docs/reports/_bk/HONF_NStage2_Comparison_Report.md:325: **Status:** complete at the authorized epoch-500 endpoints, 2026-09-12. Both runs exited successfully. Exact endpoints, separately saved-best checkpoints, formal phase/influence probes, matched GPU0 timing, and offline figure validation are complete. No continuation was launched..
 
@@ -393,9 +393,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_NextRound_Source_Conditioned_Core_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_141220Z_HONF_NextRound_Source_Conditioned_Core_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_141220Z_HONF_NextRound_Source_Conditioned_Core_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md).
+Matched closeout/reference: [20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Source_Conditioned_Core_Diagnostics.md: related report/reference for this campaign; # Source-conditioned fine core: Run 1507 specialization and bounded retraining; Report first committed 2026-09-25T11:41:20-04:00 (publication evidence, NOT exact completion).
 
@@ -403,9 +403,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Next_Generation_Sparse_Quadrature_Design.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_164530Z_HONF_Next_Generation_Sparse_Quadrature_Design.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_164530Z_HONF_Next_Generation_Sparse_Quadrature_Design.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md).
+Matched closeout/reference: [20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md: related report/reference for this campaign; The fresh run learned continuously and did not collapse. Its sample locations and within-group weights matter to the frozen model. However, the exact epoch-500 candidate is worse than Run 1406, Run 1407, and Dense 1804 on the main 90-case fluid, near-interface, vorticity, temperature, and heat-flux measures. More importantly, the theoretical reduction from 192 environmental tokens to 24 sample sites did **not** produce a measured speedup: synchronized full and prepared-P2 latency are slower than every mature comparator. Run 1408 therefore stops at 500 epochs. There was no sweep, second candidate, or 5000-epoch continuation.; Report first committed 2026-09-20T15:23:23-04:00 (publication evidence, NOT exact completion).
 
@@ -413,9 +413,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Regional_Response_Compression_Development_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260910_130240Z_HONF_Regional_Response_Compression_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260910_130240Z_HONF_Regional_Response_Compression_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260910_144112Z_HONF_Regional_Response_Compression_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260910_144112Z_HONF_Regional_Response_Compression_Report.md).
+Matched closeout/reference: [20260910_144112Z_HONF_Regional_Response_Compression_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260910_144112Z_HONF_Regional_Response_Compression_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Regional_Response_Compression_Report.md: related report/reference for this campaign; Run 1806 completed its single from-scratch, GPU-0 training through **exactly epoch 500**. The native regional model is a promising early partial compression: its 90-case pooled normalized fluid MSE is **0.00864838**, 4.19% below matched Dense 1804 at 500, and removing its regional P1/P2 reads worsens ground-truth field error on every anchor. Measured environmental-update and geometry-read rows fall fourfold, with lower inference memory and useful large-shape speed gains.; Report first committed 2026-09-10T10:41:12-04:00 (publication evidence, NOT exact completion).
 
@@ -423,9 +423,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Routing_Next_Phase_Sparse_Execution_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260917_214401Z_HONF_Routing_Next_Phase_Sparse_Execution_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260917_214401Z_HONF_Routing_Next_Phase_Sparse_Execution_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md).
+Matched closeout/reference: [20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Routing_Sparse_Execution_Next_Phase_Report.md: related report/reference for this campaign; Implementation and bounded execution measurements are complete. Run 2002; Report first committed 2026-09-18T10:20:31-04:00 (publication evidence, NOT exact completion).
 
@@ -433,7 +433,7 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_115917Z_HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_115917Z_HONF_Run1405_Fixed_Group_Conditioned_Interaction_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
 Evidence: HONF_Run1406_Low_Dimensional_Group_Control_Plan.md:55 and Section1 supplied Run1405 closeout; early1405 result completed; no independent replay performed while planning.; .
 
@@ -441,9 +441,9 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_164944Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_164944Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md).
+Matched closeout/reference: [20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md: related report/reference for this campaign; The exact Run-1406 executor optimization is implemented at commit; Report first committed 2026-09-19T13:39:16-04:00 (publication evidence, NOT exact completion).
 
@@ -451,9 +451,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1406_Low_Dimensional_Group_Control_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_152028Z_HONF_Run1406_Low_Dimensional_Group_Control_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_152028Z_HONF_Run1406_Low_Dimensional_Group_Control_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md).
+Matched closeout/reference: [20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1406_Group_Control_Development_Report.md: related report/reference for this campaign; - The implementation used the clean source commit f7751bad3666c551075963d00ab055dac2873629; follow-up comparison diagnostics were corrected in 0987605 and completed in 5d3d24c without changing trained parameters or field outputs.; Report first committed 2026-09-19T12:14:28-04:00 (publication evidence, NOT exact completion).
 
@@ -461,9 +461,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1407_Phase_Shared_Routing_Development_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_HONF_Run1407_Phase_Shared_Routing_Development_Plan.md). Status: `completed_bounded`. Filename basis: explicit_proposal_date.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_HONF_Run1407_Phase_Shared_Routing_Development_Plan.md). Status: `completed_bounded`. Filename basis: explicit_proposal_date.
 
-Matched closeout/reference: [20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md).
+Matched closeout/reference: [20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1407_Phase_Shared_Routing_Report.md: related report/reference for this campaign; # Run 1407 Phase-Shared Routing Report; Report first committed 2026-09-19T18:19:56-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/_bk/HONF_Run1407_Phase_Shared_Routing_Report.md:3: Date: 19 September 2026  .
 
@@ -471,9 +471,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1409_DenseToSparse_Rescue_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_172450Z_HONF_Run1409_DenseToSparse_Rescue_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_172450Z_HONF_Run1409_DenseToSparse_Rescue_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md).
+Matched closeout/reference: [20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1409_DenseToSparse_Rerun_Evaluation.md: related report/reference for this campaign; **Status:** completed through the planned epoch-150 hardening point; stopped; Report first committed 2026-09-22T16:20:22-04:00 (publication evidence, NOT exact completion).
 
@@ -481,9 +481,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_205715Z_HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_205715Z_HONF_Run1409_OccupancyAdaptive_Geometric_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md).
+Matched closeout/reference: [20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1409_OccupancyAdaptive_Evaluation.md: related report/reference for this campaign; **Decision:** stop the fresh candidate at epoch 50 and retain rectangular; Report first committed 2026-09-22T18:25:13-04:00 (publication evidence, NOT exact completion).
 
@@ -491,9 +491,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_225827Z_HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_225827Z_HONF_Run1500_MassCompetitive_Adaptive_Hypergraph_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md).
+Matched closeout/reference: [20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1500_MassCompetitive_Evaluation.md: related report/reference for this campaign; Run 1500 is a faithful, trainable implementation of mass-competitive group selection, but the fresh epoch-50 result does **not** form a case-dependent discrete hypergraph. Every one of the 90 test cases selects exactly two of the twelve registered prototypes, and they are always prototype IDs 0 and 5. The two surviving groups are spatially coherent and their continuous weights vary, but discrete capacity has collapsed to a fixed two-group representation.; Report first committed 2026-09-22T20:06:19-04:00 (publication evidence, NOT exact completion).
 
@@ -501,9 +501,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1501_Maturation_and_Run1502_Development_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_034108Z_HONF_Run1501_Maturation_and_Run1502_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_034108Z_HONF_Run1501_Maturation_and_Run1502_Development_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md).
+Matched closeout/reference: [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1501_Executor_and_Run1502_Development.md: related report/reference for this campaign; ## Decision summary; Report first committed 2026-09-23T01:07:54-04:00 (publication evidence, NOT exact completion).
 
@@ -511,9 +511,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_040850Z_HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_040850Z_HONF_Run1501_Parallel_and_Run1502_Development_Plan_FINAL.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md).
+Matched closeout/reference: [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1501_Executor_and_Run1502_Development.md: related report/reference for this campaign; ## Decision summary; Report first committed 2026-09-23T01:07:54-04:00 (publication evidence, NOT exact completion).
 
@@ -521,9 +521,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_004226Z_HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_004226Z_HONF_Run1501_SparseIncidence_Adaptive_HONF_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md).
+Matched closeout/reference: [20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1501_SparseIncidence_Evaluation.md: related report/reference for this campaign; ## Decision summary; Report first committed 2026-09-22T23:03:36-04:00 (publication evidence, NOT exact completion).
 
@@ -531,9 +531,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_143521Z_HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_143521Z_HONF_Run1502_Maturation_and_Run1503_Adaptive_Hyperedge_Opening_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md).
+Matched closeout/reference: [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1501_Executor_and_Run1502_Development.md: related report/reference for this campaign; ## Decision summary; Report first committed 2026-09-23T01:07:54-04:00 (publication evidence, NOT exact completion).
 
@@ -541,9 +541,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1503_Reversible_Edge_Coalescence_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_122620Z_HONF_Run1503_Reversible_Edge_Coalescence_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_122620Z_HONF_Run1503_Reversible_Edge_Coalescence_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md).
+Matched closeout/reference: [20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1503_v2_Reversible_Edge_Coalescence.md: related report/reference for this campaign; The 90-case test split is also used for sampled training validation, so full-grid results on it are development evidence. Single-run comparisons do not estimate training-seed variation. Group labels are permutation-ambiguous, and model-side routing does not identify physical causality.; Report first committed 2026-09-24T18:06:35-04:00 (publication evidence, NOT exact completion).
 
@@ -551,9 +551,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_150357Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_150357Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md).
+Matched closeout/reference: [20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md: related report/reference for this campaign; ## Numerical planner and prelaunch decision; Report first committed 2026-09-24T18:06:35-04:00 (publication evidence, NOT exact completion).
 
@@ -561,9 +561,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220002Z_HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220002Z_HONF_Run1503_v4_Continuous_Functional_Coalescence_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md).
+Matched closeout/reference: [20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md: related report/reference for this campaign; Run 1506 is the single fresh 1503-v4 candidate following the continuous functional coalescence plan. The run uses the same 600 training and 90 development cases, seed, K=12, D=16, fine physical reader, predicted-port curriculum, optimizer, losses, and normalizers as Run 1502. The dataset's test split supplies sampled validation and the full-grid evaluations here; these are **development**, not independent test results. One seed does not estimate run-to-run variation. Checkpoints, numerical tables, figures, and one-time diagnostic runners remain in local ignored directories.; Report first committed 2026-09-24T20:21:04-04:00 (publication evidence, NOT exact completion).
 
@@ -571,9 +571,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_031136Z_HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_031136Z_HONF_Run1503_v5_Task_Trained_Functional_Coalescence_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md).
+Matched closeout/reference: [20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md: related report/reference for this campaign; The 90 HDF5 test IDs are **development cases** because this split also supplies sampled validation. Full-grid results and checkpoint selections must be labelled separately. Local one-time scripts, raw data, and generated figures are under ignored diagnostics/generated/ paths; the maintained implementation and tests are in the repository.; Report first committed 2026-09-25T01:31:04-04:00 (publication evidence, NOT exact completion).
 
@@ -581,9 +581,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_020749Z_HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_020749Z_HONF_Runs_2000_2100_2200_Codex_Implementation_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md).
+Matched closeout/reference: [20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Dynamic_Sparse_Routing_Comparison_Report.md: related report/reference for this campaign; This comparison is being populated by Goals 1 and 2. Run 2000 and the separately authorized Run 2100 are training; no completed routing accuracy or acceleration claim is available yet. At the user's request, Run-2000 final analysis waits for a later instruction; see its analysis handoff. Run 2100 has its own first-50-epoch interim handoff option. Goal 3 remains unexecuted.; Report first committed 2026-09-16T00:20:45-04:00 (publication evidence, NOT exact completion).
 
@@ -591,9 +591,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Runs_2000_2100_2200_Mathematical_Design.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_020750Z_HONF_Runs_2000_2100_2200_Mathematical_Design.md). Status: `historical_reference`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_020750Z_HONF_Runs_2000_2100_2200_Mathematical_Design.md). Status: `historical_reference`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md).
+Matched closeout/reference: [20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Dynamic_Sparse_Routing_Comparison_Report.md: related report/reference for this campaign; This comparison is being populated by Goals 1 and 2. Run 2000 and the separately authorized Run 2100 are training; no completed routing accuracy or acceleration claim is available yet. At the user's request, Run-2000 final analysis waits for a later instruction; see its analysis handoff. Run 2100 has its own first-50-epoch interim handoff option. Goal 3 remains unexecuted.; Report first committed 2026-09-16T00:20:45-04:00 (publication evidence, NOT exact completion).
 
@@ -601,9 +601,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Sparse_Interface_Operators_Three_Stage_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260905_114308Z_HONF_Sparse_Interface_Operators_Three_Stage_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260905_20260914_Interface_Fields_and_Response_Compression/20260905_114308Z_HONF_Sparse_Interface_Operators_Three_Stage_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260906_052330Z_HONF_Interface_Study_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260906_052330Z_HONF_Interface_Study_Report.md).
+Matched closeout/reference: [20260906_052330Z_HONF_Interface_Study_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260906_052330Z_HONF_Interface_Study_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Interface_Study_Report.md: related report/reference for this campaign; # HONF interface-operator study: Stage-3 evaluation and continuation decision; Report first committed 2026-09-06T01:23:30-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/_bk/HONF_Interface_Study_Report.md:3: Completed continuation (2026-09-09): the exact epoch-5,000 comparison finds Dense regaining the overall field lead, with specific near-interface and physical-quantity exceptions. Historical results below are preserved..
 
@@ -611,9 +611,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_WindFarm_Forward_Training_Plan.md
 
-[Current document](../../UpgradePlan/WindFarm/20260913_20260915_WindFarm_Forward_Baselines/20260913_045340Z_HONF_WindFarm_Forward_Training_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/WindFarm/20260913_20260915_WindFarm_Forward_Baselines/20260913_045340Z_HONF_WindFarm_Forward_Training_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md](_bk/20260913_20260915_WindFarm_Forward_Baselines/20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md).
+Matched closeout/reference: [20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md](../20260913_20260915_WindFarm_Forward_Baselines/20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md).
 
 Evidence: HONF_Proj/docs/reports/windfarm_forward_2500_comparison/WINDFARM_FORWARD_2500_COMPARISON.md: related report/reference for this campaign; # WindFarm Forward Velocity: 2,500-Epoch Comparative Study; Report first committed 2026-09-14T22:45:00-04:00 (publication evidence, NOT exact completion).
 
@@ -621,7 +621,7 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Case_Adaptive_Forward_Model.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260903_035356Z_HONF_Case_Adaptive_Forward_Model.md). Status: `historical_reference`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260903_035356Z_HONF_Case_Adaptive_Forward_Model.md). Status: `historical_reference`. Filename basis: file_creation_not_proposal.
 
 Evidence: ; .
 
@@ -629,9 +629,9 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### HONF_Case_Adaptive_Forward_RevisePlan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260903_035248Z_HONF_Case_Adaptive_Forward_RevisePlan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260903_035248Z_HONF_Case_Adaptive_Forward_RevisePlan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [Run_1700_vs_Run_1401_5K_Comparative_Evaluation.md](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1700_20260903_005055_case_adaptive_residual_v1/Run_1700_vs_Run_1401_5K_Comparative_Evaluation.md).
+Matched closeout/reference: [Run_1700_vs_Run_1401_5K_Comparative_Evaluation.md](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1700_20260903_005055_case_adaptive_residual_v1/Run_1700_vs_Run_1401_5K_Comparative_Evaluation.md).
 
 Evidence: HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1700_20260903_005055_case_adaptive_residual_v1/Run_1700_vs_Run_1401_5K_Comparative_Evaluation.md: related report/reference for this campaign; ## Executive decision; HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1700_20260903_005055_case_adaptive_residual_v1/Run_1700_vs_Run_1401_5K_Comparative_Evaluation.md:5: **Evaluation date:** 2026-09-03 EDT  .
 
@@ -639,9 +639,9 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260904_160116Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260904_160116Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [Run_1701_Phase2_500_Evaluation.md](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1701_20260904_124924_case_adaptive_tensor_residual_v2/Run_1701_Phase2_500_Evaluation.md).
+Matched closeout/reference: [Run_1701_Phase2_500_Evaluation.md](../../../../Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1701_20260904_124924_case_adaptive_tensor_residual_v2/Run_1701_Phase2_500_Evaluation.md).
 
 Evidence: HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1701_20260904_124924_case_adaptive_tensor_residual_v2/Run_1701_Phase2_500_Evaluation.md: related report/reference for this campaign; > **Preliminary epoch-500 closeout.** Run 1701 completed its single authorized 500-epoch budget and the bounded epoch-500 evaluation. This is not a promotion report and does not include the final 90-case comparison. The evidence does **not** support continuation to epoch 5000.; HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1701_20260904_124924_case_adaptive_tensor_residual_v2/Run_1701_Phase2_500_Evaluation.md:152: All commands were run from /home/wanglz/Desktop/src/ModularDT/HONF_Proj after epoch 500. Each command is bounded to the scope authorized for this closeout. On 2026-09-04, all five command surfaces below were checked against their live --help parsers. Individual visualization options were supported, but an explicit checkpoint path must be used without --run-id; the corrected commands below reflect that rule.; HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/02_20260823_20260904_StructuredContext_and_CaseAdaptation/Run_1701_20260904_124924_case_adaptive_tensor_residual_v2/Run_1701_Phase2_500_Evaluation.md:243: The managed run completed normally. run_manifest.json records status completed, exit code 0, start 2026-09-04T16:49:24.147879+00:00, end 2026-09-04T18:06:04.824532+00:00, and last_completed_epoch=500. The launch source is the clean implementation commit ba4a796fa38ed55e3bd311cd6c98a8f2b8e5bda9; the diagnostics-only closeout commit does not alter the checkpoint..
 
@@ -649,7 +649,7 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260904_193826Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md). Status: `superseded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260904_193826Z_HONF_Case_Adaptive_Forward_RevisePlan_Phase2_Restart.md). Status: `superseded`. Filename basis: file_creation_not_proposal.
 
 Evidence: HONF_Sparse_Interface_Operators_Three_Stage_Plan.md replaces active development after failed1700/1701; restart is frozen-rank alternative without directly matched execution closeout.; .
 
@@ -657,7 +657,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### HONF_Forward_Upgrade_Codex_Goal_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260817_232236Z_HONF_Forward_Upgrade_Codex_Goal_Plan.md). Status: `completed_implementation`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260817_232236Z_HONF_Forward_Upgrade_Codex_Goal_Plan.md). Status: `completed_implementation`. Filename basis: file_creation_not_proposal.
 
 Evidence: ; HONF_Proj/UpgradePlan/_bk/HONF_Forward_Upgrade_Codex_Goal_Plan.md:1954 final verification accepted; 2026-08-18 post-acceptance locality correction distinct.
 
@@ -665,9 +665,9 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### HONF_Run1404_Routing_Only_Pairwise_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_130712Z_HONF_Run1404_Routing_Only_Pairwise_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_130712Z_HONF_Run1404_Routing_Only_Pairwise_Plan.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
-Matched closeout/reference: [20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md).
+Matched closeout/reference: [20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md).
 
 Evidence: HONF_Proj/docs/reports/_bk/HONF_Run1404_Routing_Only_Pairwise_Report.md: related report/reference for this campaign; ## Decision; Report first committed 2026-09-16T10:21:30-04:00 (publication evidence, NOT exact completion); HONF_Proj/docs/reports/_bk/HONF_Run1404_Routing_Only_Pairwise_Report.md:7: **Date:** 2026-09-16.
 
@@ -675,7 +675,7 @@ Uncertainty: UpgradePlan is ignored by .gitignore:26 and has no Git publication 
 
 ### HONF_Stage4_Goal_Mode_Upgrade_Plan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260820_205643Z_HONF_Stage4_Goal_Mode_Upgrade_Plan.md). Status: `completed_implementation`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260820_205643Z_HONF_Stage4_Goal_Mode_Upgrade_Plan.md). Status: `completed_implementation`. Filename basis: file_creation_not_proposal.
 
 Evidence: ; HONF_Proj/UpgradePlan/_bk/HONF_Stage4_Goal_Mode_Upgrade_Plan.md:764 implementation closeout.
 
@@ -683,7 +683,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_154650Z_HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md). Status: `completed_evaluation`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_154650Z_HONF_Stage5_SoftOrganized_SparseExecuted_GoalMode.md). Status: `completed_evaluation`. Filename basis: file_creation_not_proposal.
 
 Evidence: Stage5_SoftOrganization_Evaluation.md documents actual requested topology ladder and final control selection.; .
 
@@ -691,7 +691,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### Stage5_SoftOrganization_Evaluation.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md). Status: `completed_evaluation`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md). Status: `completed_evaluation`. Filename basis: file_creation_not_proposal.
 
 Evidence: HONF_Proj/UpgradePlan/_bk/Stage5_SoftOrganization_Evaluation.md:251 Verification completed; evaluation performed, no long training launched; .
 
@@ -699,7 +699,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### Stage6_Fixed_Role_Consistent_GoalMode.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260822_160818Z_Stage6_Fixed_Role_Consistent_GoalMode.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260822_160818Z_Stage6_Fixed_Role_Consistent_GoalMode.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
 Evidence: Stage7_StageSummary.md records Stage6 tests/screens and Run1304 accepted as accuracy-capable but organizer rank-one; matched Stage6 implementation exists.; .
 
@@ -707,7 +707,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### Stage7_Clean_Up.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193824Z_Stage7_Clean_Up.md). Status: `historical_unexecuted`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193824Z_Stage7_Clean_Up.md). Status: `historical_unexecuted`. Filename basis: file_creation_not_proposal.
 
 Evidence: HONF_Proj/UpgradePlan/_bk/Stage7_Clean_Up.md:5 explicitly Plan only; no cleanup/move/deletion/training executed. Archive does not establish completion.; .
 
@@ -715,7 +715,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### Stage7_GoalModePlan.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_184332Z_Stage7_GoalModePlan.md). Status: `completed_implementation`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_184332Z_Stage7_GoalModePlan.md). Status: `completed_implementation`. Filename basis: file_creation_not_proposal.
 
 Evidence: Stage7_Modern_Structured_Context_GoalMode.md documents prepared implementation and validation; Stage7_StageSummary documents later Run1401 acceptance.; .
 
@@ -723,7 +723,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### Stage7_Model_Enhance.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260824_121515Z_Stage7_Model_Enhance.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260824_121515Z_Stage7_Model_Enhance.md). Status: `completed_bounded`. Filename basis: file_creation_not_proposal.
 
 Evidence: Stage7_StageSummary.md:849 sparse context execution accepted; K=4 completed non-promoted and K=8 rejected at e500.; .
 
@@ -731,7 +731,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### Stage7_Modern_Structured_Context_GoalMode.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md). Status: `completed_readiness`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md). Status: `completed_readiness`. Filename basis: file_creation_not_proposal.
 
 Evidence: HONF_Proj/UpgradePlan/_bk/Stage7_Modern_Structured_Context_GoalMode.md:17 exact 237-key compatibility; end no training launched; Run1401 later accepted in Stage7_StageSummary; .
 
@@ -739,7 +739,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### Stage7_StageSummary.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md). Status: `historical_reference`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md). Status: `historical_reference`. Filename basis: file_creation_not_proposal.
 
 Evidence: ; .
 
@@ -747,7 +747,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### dynamic_sparse_hypergraph_routing.md
 
-[Current document](../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_021042Z_dynamic_sparse_hypergraph_routing.md). Status: `historical_reference`. Filename basis: file_creation_not_proposal.
+[Current document](../../../../UpgradePlan/ThemalChannel/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_021042Z_dynamic_sparse_hypergraph_routing.md). Status: `historical_reference`. Filename basis: file_creation_not_proposal.
 
 Evidence: ; .
 
@@ -755,7 +755,7 @@ Uncertainty: No directly matched closeout report found in current Markdown inven
 
 ### HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md). Status: `completed_bounded_study`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260929_115806Z_HONF_Active_Organization_and_Frozen_Inverse_Reuse_Study.md). Status: `completed_bounded_study`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `2e792a9082d20832e3fc329b4326aef3f0e5d5d1`, 2026-09-29T11:58:06Z.
 
@@ -765,7 +765,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Case_Budgeted_Dynamic_K_Evaluation.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md). Status: `closed_negative_gate`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_165525Z_HONF_Case_Budgeted_Dynamic_K_Evaluation.md). Status: `closed_negative_gate`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `e10b5df38609fc01393d41a316cb814b31724bad`, 2026-09-22T16:55:25Z.
 
@@ -775,7 +775,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md). Status: `closed_resource_censored_study`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_132648Z_HONF_Controlled_Maturation_and_Action_Aware_Organization_Report.md). Status: `closed_resource_censored_study`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `b55dd280ae288f43f443639a1e0f721dd063a91a`, 2026-10-02T13:26:48Z.
 
@@ -785,7 +785,7 @@ Uncertainty: Round closed with incomplete selected Thermal sampling; archival do
 
 ### HONF_Decision_Aware_Dynamic_K_Study.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md). Status: `closed_negative_gate`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Decision_Aware_Dynamic_K_Study.md). Status: `closed_negative_gate`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `70d0c0a9407d48939d887fe74657a1a479262483`, 2026-09-26T19:59:12Z.
 
@@ -795,7 +795,7 @@ Uncertainty: Unexecuted next remedy is a recommendation, not active continuation
 
 ### HONF_Dependency_Correct_Forward_Interface_Report.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md). Status: `completed_bounded_result`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Forward_Interface_Report.md). Status: `completed_bounded_result`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `25e28993975d8cea79a24b3d14f9e9e9658eff45`, 2026-10-06T15:42:29Z.
 
@@ -805,7 +805,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Dependency_Correct_Source_Audit.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Source_Audit.md). Status: `completed_source_audit`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_154229Z_HONF_Dependency_Correct_Source_Audit.md). Status: `completed_source_audit`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `25e28993975d8cea79a24b3d14f9e9e9658eff45`, 2026-10-06T15:42:29Z.
 
@@ -815,7 +815,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_233129Z_HONF_Directed_Packets_and_Stable_Inverse_Implementation_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `0076b2898d47b1d12a87e89ff10f5005b12543b5`, 2026-10-02T23:31:29Z.
 
@@ -825,7 +825,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_204904Z_HONF_Fidelity_Budgeted_Joint_Forward_Maturation_Study.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `a6da7e641fcdf2e326dbd5e1820dc7bdd9e050d8`, 2026-09-27T20:49:04Z.
 
@@ -835,7 +835,7 @@ Uncertainty: Declared completion day 27 Sep local /28 Sep UTC; no exact clock fo
 
 ### HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20261002_183337Z_HONF_Focused_Organizer_Utility_and_Predictor_Diagnosis_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `61e9d42d6d4c05991f55a33794a96f944b824877`, 2026-10-02T18:33:37Z.
 
@@ -845,7 +845,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Interaction_Response_and_Inverse_Design_Study.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_064922Z_HONF_Interaction_Response_and_Inverse_Design_Study.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `0217a53f6fd4a390c88147f4edc89209bb685f4d`, 2026-09-26T06:49:22Z.
 
@@ -855,7 +855,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Lean_Interaction_Reset_Development_Report.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md). Status: `completed_development_experiment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_185023Z_HONF_Lean_Interaction_Reset_Development_Report.md). Status: `completed_development_experiment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `6c65d36be5a28f5da8f1bfe5f771c53ceebf945f`, 2026-10-05T18:50:23Z.
 
@@ -865,7 +865,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Native_Context_100_Epoch_Review.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_052824Z_HONF_Native_Context_100_Epoch_Review.md). Status: `completed_historical_milestone`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_052824Z_HONF_Native_Context_100_Epoch_Review.md). Status: `completed_historical_milestone`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `7015b8f6947090dc774ad8ebaf8d3fdaa97bbc04`, 2026-10-05T05:28:24Z.
 
@@ -875,7 +875,7 @@ Uncertainty: Historical e100 review superseded by completed e500 confirmation..
 
 ### HONF_Native_Context_Organizer_Confirmation_Report.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md). Status: `completed_development_experiment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_105606Z_HONF_Native_Context_Organizer_Confirmation_Report.md). Status: `completed_development_experiment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `ac0f1ca45ef01b32132c1ee8be6313d77faab301`, 2026-10-05T10:56:06Z.
 
@@ -885,7 +885,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Native_Recovery_and_Adaptive_Interaction_Study.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_004608Z_HONF_Native_Recovery_and_Adaptive_Interaction_Study.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `488075ecdaefbd812bd20f014c3cb0853e9f75e3`, 2026-09-27T00:46:08Z.
 
@@ -901,7 +901,7 @@ Uncertainty: No work performed on the absent document..
 
 ### HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_031743Z_HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md). Status: `completed_formal_comparison`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_031743Z_HONF_RDirect_Formal_Readiness_and_Receiver_Local_Organization_Report.md). Status: `completed_formal_comparison`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `51fdada3599641d04365a88dc690702ca0ab3500`, 2026-10-07T03:17:43Z.
 
@@ -911,7 +911,7 @@ Uncertainty: Content has later 7 Oct completed formal comparison; first-publicat
 
 ### HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_231703Z_HONF_Receiver_Interaction_Identification_and_Physical_Audit_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `6c22d67f7eb0071f2eacc34a0dd401393cc45dce`, 2026-10-05T23:17:03Z.
 
@@ -921,7 +921,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260927_101609Z_HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `25196daef0f9e9fe0d59342c5577db3a927c6410`, 2026-09-27T10:16:09Z.
 
@@ -931,7 +931,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Response_Competent_Forward_Refinement_Report.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_040005Z_HONF_Response_Competent_Forward_Refinement_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `9448df3ee7553e4a35fcb79b1af85eb9fb989059`, 2026-10-06T04:00:05Z.
 
@@ -941,7 +941,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Response_Operator_Consolidation_and_Maturation_Report.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `775afa2c93bf2ba9dde46470dea4b5b66165ec3a`, 2026-10-06T19:16:13Z.
 
@@ -951,7 +951,7 @@ Uncertainty: 19:04 UTC GPU closeout is minute-precision and explicitly precedes 
 
 ### HONF_Shared_Core_Alignment.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_014201Z_HONF_Shared_Core_Alignment.md). Status: `completed_implementation_reference`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_014201Z_HONF_Shared_Core_Alignment.md). Status: `completed_implementation_reference`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `4ce5d5df6d3a3981b4b2247a9032a96bdf020c4d`, 2026-10-03T01:42:01Z.
 
@@ -961,7 +961,7 @@ Uncertainty: Supporting implementation/alignment report, not a completed scienti
 
 ### HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md). Status: `completed_stopped_campaign`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md). Status: `completed_stopped_campaign`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `fb6f5983d52fde1e11df85185c17d363944adc3e`, 2026-10-04T03:03:00Z.
 
@@ -971,7 +971,7 @@ Uncertainty: Final conclusions explicitly close campaign with Tree intentional e
 
 ### HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_014201Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md). Status: `superseded_historical_campaign_log`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261003_014201Z_HONF_Shared_Core_Thermal_Strategy_Campaign_Status.md). Status: `superseded_historical_campaign_log`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `4ce5d5df6d3a3981b4b2247a9032a96bdf020c4d`, 2026-10-03T01:42:01Z.
 
@@ -981,7 +981,7 @@ Uncertainty: Final pending statements are superseded by HONF_Shared_Core_Thermal
 
 ### HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_194430Z_HONF_Shared_Interaction_Core_and_Receiver_Packets_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `2af49e7564ba127a5a427c40545a5bfdaccb3d7a`, 2026-10-07T19:44:30Z.
 
@@ -991,7 +991,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Tree_Faithfulness_Fixed25_Development_Report.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md). Status: `completed_bounded_round`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `de6f467b9466fd9f585255d49552fcaec1d857f2`, 2026-10-04T09:15:19Z.
 
@@ -1001,7 +1001,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### HONF_Tree_Lite_Execution_and_Maturation_Report.md
 
-[Current document](_bk/20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md). Status: `completed_bounded_round_with_followup`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261003_20261005_Shared_Core_Tree_and_Interaction_Identification/20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md). Status: `completed_bounded_round_with_followup`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `dfaddfeeefcf2c65501d481e420eb67ac7895cec`, 2026-10-05T00:03:28Z.
 
@@ -1011,7 +1011,7 @@ Uncertainty: Contains dated 2026-10-05 bounded follow-up diagnosis after origina
 
 ### HONF_Two_Week_Milestone_Review_2026-10-06.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_141642Z_HONF_Two_Week_Milestone_Review_2026-10-06.md). Status: `completed_retrospective_review`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261006_141642Z_HONF_Two_Week_Milestone_Review_2026-10-06.md). Status: `completed_retrospective_review`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `401dd312280497c493da7733b5bcc90d3fc23d62`, 2026-10-06T14:16:42Z.
 
@@ -1031,7 +1031,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### Thermal_RDirect_Formal5000_Launch_20261007.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_035824Z_Thermal_RDirect_Formal5000_Launch_20261007.md). Status: `superseded_launch_handoff`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_035824Z_Thermal_RDirect_Formal5000_Launch_20261007.md). Status: `superseded_launch_handoff`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `bb3fe8b1148fabdd93bd75a53626dc02c5893e20`, 2026-10-07T03:58:24Z.
 
@@ -1041,7 +1041,7 @@ Uncertainty: Literal report says running; later completed formal comparison line
 
 ### HONF_Dynamic_Sparse_Routing_Comparison_Report.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md). Status: `historical_partial_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Dynamic_Sparse_Routing_Comparison_Report.md). Status: `historical_partial_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `1d8af8e8fee5cb7c4254a459e8c76808dc31d64b`, 2026-09-16T04:20:45Z.
 
@@ -1051,7 +1051,7 @@ Uncertainty: Draft comparison says Goals 1/2 training and Goal 3 unexecuted; lat
 
 ### HONF_Epoch2500_Comparison_Report.md
 
-[Current document](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260909_043914Z_HONF_Epoch2500_Comparison_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260905_20260914_Interface_Fields_and_Response_Compression/20260909_043914Z_HONF_Epoch2500_Comparison_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `82981ae4e2d2aab0a17b1088f434ef7a63075a1d`, 2026-09-09T04:39:14Z.
 
@@ -1061,7 +1061,7 @@ Uncertainty: .
 
 ### HONF_Epoch5000_Comparison_Report.md
 
-[Current document](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260909_221909Z_HONF_Epoch5000_Comparison_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260905_20260914_Interface_Fields_and_Response_Compression/20260909_221909Z_HONF_Epoch5000_Comparison_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `6cf15f4c274f0dc86f77ca0a6fd3493d760acc05`, 2026-09-09T22:19:09Z.
 
@@ -1071,7 +1071,7 @@ Uncertainty: .
 
 ### HONF_Five_Model_Epoch5000_Comparison_Report.md
 
-[Current document](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_041053Z_HONF_Five_Model_Epoch5000_Comparison_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260905_20260914_Interface_Fields_and_Response_Compression/20260912_041053Z_HONF_Five_Model_Epoch5000_Comparison_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `b829ca9234f4d676041c35de8d463f88260d8a4f`, 2026-09-12T04:10:53Z.
 
@@ -1081,7 +1081,7 @@ Uncertainty: .
 
 ### HONF_Group_Reader_Recovery_Report.md
 
-[Current document](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260908_073524Z_HONF_Group_Reader_Recovery_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260905_20260914_Interface_Fields_and_Response_Compression/20260908_073524Z_HONF_Group_Reader_Recovery_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `e3dbcdc8e6391920bf2ab64ada0058effc690bb0`, 2026-09-08T07:35:24Z.
 
@@ -1091,7 +1091,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Interface_Study_Report.md
 
-[Current document](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260906_052330Z_HONF_Interface_Study_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260905_20260914_Interface_Fields_and_Response_Compression/20260906_052330Z_HONF_Interface_Study_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `116cb22e41b862af911a74942f63056a66b741b4`, 2026-09-06T05:23:30Z.
 
@@ -1101,7 +1101,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_NStage2_Comparison_Report.md
 
-[Current document](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `62deb25f04db4b788c50a3017a71c90e2c078562`, 2026-09-12T17:25:48Z.
 
@@ -1111,7 +1111,7 @@ Uncertainty: First issuance at e500 on2026-09-12; current mature update is dated
 
 ### HONF_RDirect_Historical_Readiness_Assessment.md
 
-[Current document](_bk/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_152137Z_HONF_RDirect_Historical_Readiness_Assessment.md). Status: `historical_readiness_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_152137Z_HONF_RDirect_Historical_Readiness_Assessment.md). Status: `historical_readiness_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `5fe0ce29de75fe17149f481bf4fbae04faf63040`, 2026-10-07T15:21:37Z.
 
@@ -1121,7 +1121,7 @@ Uncertainty: Archive extraction first added 2026-10-07; underlying readiness tex
 
 ### HONF_Regional_Response_Compression_Report.md
 
-[Current document](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260910_144112Z_HONF_Regional_Response_Compression_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260905_20260914_Interface_Fields_and_Response_Compression/20260910_144112Z_HONF_Regional_Response_Compression_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `0429b531b43efae9f9116312f0faf3301672d6b2`, 2026-09-10T14:41:12Z.
 
@@ -1131,7 +1131,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Routing_Epoch2500_Comparative_Evaluation.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260917_201432Z_HONF_Routing_Epoch2500_Comparative_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260917_201432Z_HONF_Routing_Epoch2500_Comparative_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `3943710c0df76c8380feb6b98d0cf7b9842c0594`, 2026-09-17T20:14:32Z.
 
@@ -1141,7 +1141,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Routing_Execution_Optimization_Report.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_215851Z_HONF_Routing_Execution_Optimization_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_215851Z_HONF_Routing_Execution_Optimization_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `66a669ee50f1f9b9e4a2fec8ae19eb66b8b42446`, 2026-09-16T21:58:51Z.
 
@@ -1151,7 +1151,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Routing_Four_Run_500_Comparison.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_211504Z_HONF_Routing_Four_Run_500_Comparison.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_211504Z_HONF_Routing_Four_Run_500_Comparison.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `fb451619185c4a76954719f78147fb21b413dee8`, 2026-09-16T21:15:04Z.
 
@@ -1161,7 +1161,7 @@ Uncertainty: .
 
 ### HONF_Routing_Memory_Diagnostics.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_131839Z_HONF_Routing_Memory_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_131839Z_HONF_Routing_Memory_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `92d66a5d32446a776fa378e28dc374702786f143`, 2026-09-16T13:18:39Z.
 
@@ -1171,7 +1171,7 @@ Uncertainty: .
 
 ### HONF_Routing_Run2000_Epoch500_Handoff.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Routing_Run2000_Epoch500_Handoff.md). Status: `historical_handoff_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Routing_Run2000_Epoch500_Handoff.md). Status: `historical_handoff_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `1d8af8e8fee5cb7c4254a459e8c76808dc31d64b`, 2026-09-16T04:20:45Z.
 
@@ -1181,7 +1181,7 @@ Uncertainty: Prepared final-analysis handoff explicitly says commands unexecuted
 
 ### HONF_Routing_Run2000_Epoch500_Report.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Routing_Run2000_Epoch500_Report.md). Status: `historical_partial_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042045Z_HONF_Routing_Run2000_Epoch500_Report.md). Status: `historical_partial_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `1d8af8e8fee5cb7c4254a459e8c76808dc31d64b`, 2026-09-16T04:20:45Z.
 
@@ -1191,7 +1191,7 @@ Uncertainty: Explicit training-in-progress report with pending final analysis; l
 
 ### HONF_Routing_Run2100_Epoch500_Report.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_044526Z_HONF_Routing_Run2100_Epoch500_Report.md). Status: `historical_interim_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_044526Z_HONF_Routing_Run2100_Epoch500_Report.md). Status: `historical_interim_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `b0d5554fa90dc3732ab9b4e179ce3d081528bfc6`, 2026-09-16T04:45:26Z.
 
@@ -1201,7 +1201,7 @@ Uncertainty: e50 review complete; exact500/savedbest final analysis deferred in 
 
 ### HONF_Routing_Sparse_Execution_Next_Phase_Report.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md). Status: `historical_interim_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260918_142031Z_HONF_Routing_Sparse_Execution_Next_Phase_Report.md). Status: `historical_interim_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `8fbd2e74bf2e77b0b3e796c635fe370f8f877ec7`, 2026-09-18T14:20:31Z.
 
@@ -1211,7 +1211,7 @@ Uncertainty: Implementation and first50 report; Run2110 remains running toward a
 
 ### HONF_Run1404_Routing_Only_Pairwise_Report.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_142130Z_HONF_Run1404_Routing_Only_Pairwise_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `ef073fbbf20956d758b45aae98e90f996af395a4`, 2026-09-16T14:21:30Z.
 
@@ -1221,7 +1221,7 @@ Uncertainty: .
 
 ### HONF_Run1406_Epoch500_Comparative_Evaluation.md
 
-[Current document](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_204408Z_HONF_Run1406_Epoch500_Comparative_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_204408Z_HONF_Run1406_Epoch500_Comparative_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `3da43e607efb83c844eac1da5a692dd05a6e60f3`, 2026-09-19T20:44:08Z.
 
@@ -1231,7 +1231,7 @@ Uncertainty: .
 
 ### HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md
 
-[Current document](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_173916Z_HONF_Run1406_Executor_Optimization_and_Relaunch_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `23be7fc72ac6ce339ba9fdb32492c5b059c1d88d`, 2026-09-19T17:39:16Z.
 
@@ -1241,7 +1241,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1406_Group_Control_Development_Report.md
 
-[Current document](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_161428Z_HONF_Run1406_Group_Control_Development_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `f7751bad3666c551075963d00ab055dac2873629`, 2026-09-19T16:14:28Z.
 
@@ -1251,7 +1251,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md
 
-[Current document](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_194226Z_HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_194226Z_HONF_Run1406_Performance_Diagnosis_and_Exact_Optimization_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `c261951b690d131419003c5c431a6134b8f08259`, 2026-09-19T19:42:26Z.
 
@@ -1261,7 +1261,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md
 
-[Current document](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_140238Z_HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_140238Z_HONF_Run1406_Run1407_BestBefore5000_Comparative_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `c64c52e4791f7004b94a60fe16fbc40bca955cb1`, 2026-09-20T14:02:38Z.
 
@@ -1271,7 +1271,7 @@ Uncertainty: .
 
 ### HONF_Run1407_Phase_Shared_Routing_Report.md
 
-[Current document](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md). Status: `historical_milestone_with_continuation_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260919_221956Z_HONF_Run1407_Phase_Shared_Routing_Report.md). Status: `historical_milestone_with_continuation_superseded`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `4239af4e0e75a1bf246cd2f2a4d7a8e337504dfc`, 2026-09-19T22:19:56Z.
 
@@ -1281,7 +1281,7 @@ Uncertainty: e50/e500 training milestones completed; same-run5000 startup verifi
 
 ### HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md
 
-[Current document](_bk/20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260919_20260920_Group_Control_and_Sparse_Quadrature/20260920_192323Z_HONF_Run1408_Hypergraph_Quadrature_Epoch500_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `6f6194b55c2be7f395fcd460211d9b979a891bab`, 2026-09-20T19:23:23Z.
 
@@ -1291,7 +1291,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1409_DenseToSparse_Rerun_Evaluation.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_202022Z_HONF_Run1409_DenseToSparse_Rerun_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `4cda778b107bd523f91bd7f37c234691ed6152e2`, 2026-09-22T20:20:22Z.
 
@@ -1301,7 +1301,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1409_OccupancyAdaptive_Evaluation.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260922_222513Z_HONF_Run1409_OccupancyAdaptive_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `547f5e4ec5c42508d4b2be83e683d611a93c2122`, 2026-09-22T22:25:13Z.
 
@@ -1311,7 +1311,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1500_MassCompetitive_Evaluation.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_000619Z_HONF_Run1500_MassCompetitive_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `924607ea264f5ace74b2187eb747b24b9c691be3`, 2026-09-23T00:06:19Z.
 
@@ -1321,7 +1321,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1501_Executor_and_Run1502_Development.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md). Status: `completed_bounded_work_with_later_continuation_unverified`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md). Status: `completed_bounded_work_with_later_continuation_unverified`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `e89aa4f2b6ae1a329effc8e428f6778fd44c31e0`, 2026-09-23T05:07:54Z.
 
@@ -1331,7 +1331,7 @@ Uncertainty: Executor work and Run1503 e50 gate complete; Run1502 formal continu
 
 ### HONF_Run1501_SparseIncidence_Evaluation.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `fe8c0f2a61aa3ead841944ce9b5fc37119d589a2`, 2026-09-23T03:03:36Z.
 
@@ -1341,7 +1341,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1503_v2_Reversible_Edge_Coalescence.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `22095cd2b7a25672c31b7204c7cd0b90c4cad9ff`, 2026-09-24T22:06:35Z.
 
@@ -1351,7 +1351,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `22095cd2b7a25672c31b7204c7cd0b90c4cad9ff`, 2026-09-24T22:06:35Z.
 
@@ -1361,7 +1361,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1505_E500_Organizer_Diagnostics.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1505_E500_Organizer_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1505_E500_Organizer_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `22095cd2b7a25672c31b7204c7cd0b90c4cad9ff`, 2026-09-24T22:06:35Z.
 
@@ -1371,7 +1371,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_002104Z_HONF_Run1506_Continuous_Functional_Coalescence_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `e62afc52e685ac810de2fa415a9f89b123effc13`, 2026-09-25T00:21:04Z.
 
@@ -1381,7 +1381,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_053104Z_HONF_Run1507_Task_Trained_Functional_Coalescence_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `f4825397293e12def3508b655ec7657e6565d2fc`, 2026-09-25T05:31:04Z.
 
@@ -1391,7 +1391,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Source_Conditioned_Core_Diagnostics.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260925_154120Z_HONF_Source_Conditioned_Core_Diagnostics.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `67a52b3edf0d0b3d0c8510f61f98e1094b462a1e`, 2026-09-25T15:41:20Z.
 
@@ -1401,7 +1401,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_Stage7_Decoder_Context_Ablation_Report.md
 
-[Current document](_bk/20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042137Z_HONF_Stage7_Decoder_Context_Ablation_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260916_20260918_Dynamic_Routing_and_Exact_Execution/20260916_042137Z_HONF_Stage7_Decoder_Context_Ablation_Report.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `d1bdaef71cf9b740ff5499a84cfaf0fb791ce756`, 2026-09-16T04:21:37Z.
 
@@ -1411,7 +1411,7 @@ Uncertainty: .
 
 ### HONF_Thermal_Physical_Interaction_Evidence.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Thermal_Physical_Interaction_Evidence.md). Status: `completed_bounded_phases_with_explicit_unspent_scope`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_HONF_Thermal_Physical_Interaction_Evidence.md). Status: `completed_bounded_phases_with_explicit_unspent_scope`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `70d0c0a9407d48939d887fe74657a1a479262483`, 2026-09-26T19:59:12Z.
 
@@ -1421,7 +1421,7 @@ Uncertainty: Report closes bounded observed phases but explicitly leaves frozen1
 
 ### baseline_decision.md
 
-[Current document](_bk/20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_baseline_decision.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260926_20261002_Responses_Decisions_and_Inverse_Recovery/20260926_195912Z_baseline_decision.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `70d0c0a9407d48939d887fe74657a1a479262483`, 2026-09-26T19:59:12Z.
 
@@ -1431,7 +1431,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### README.md
 
-[Current document](_bk/stage1_interface_fields/README.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../stage1_interface_fields/README.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `fab802d3007267594d3fd38ad549a7e2fa5f025d`, 2026-09-05T20:50:03Z.
 
@@ -1441,7 +1441,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### README.md
 
-[Current document](_bk/stage2_sparse_interface_honf/README.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../stage2_sparse_interface_honf/README.md). Status: `completed_bounded_assessment`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `c412769d303ffdba16b51db7c92683e8c5c5c809`, 2026-09-05T23:56:00Z.
 
@@ -1451,7 +1451,7 @@ Uncertainty: No exact report-completion timestamp declared; Git publication is n
 
 ### HONF_1404_1804_1501_1502_Mature_Comparison.md
 
-[Current document](_bk/20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md). Status: `completed_comparative_report`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md). Status: `completed_comparative_report`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1461,7 +1461,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### accuracy_findings.md
 
-[Current document](run1501_1502_comparison/accuracy/accuracy_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../../run1501_1502_comparison/accuracy/accuracy_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1471,7 +1471,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### commands.md
 
-[Current document](run1501_1502_comparison/accuracy/commands.md). Status: `reproduction_commands`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../../run1501_1502_comparison/accuracy/commands.md). Status: `reproduction_commands`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1481,7 +1481,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### commands.md
 
-[Current document](run1501_1502_comparison/cost/commands.md). Status: `reproduction_commands`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../../run1501_1502_comparison/cost/commands.md). Status: `reproduction_commands`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1491,7 +1491,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### cost_findings.md
 
-[Current document](run1501_1502_comparison/cost/cost_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../../run1501_1502_comparison/cost/cost_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1501,7 +1501,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### README.md
 
-[Current document](run1501_1502_comparison/cost/superseded/README.md). Status: `superseded_support_index`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../../run1501_1502_comparison/cost/superseded/README.md). Status: `superseded_support_index`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1511,7 +1511,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### routing_findings.md
 
-[Current document](run1501_1502_comparison/routing_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../../run1501_1502_comparison/routing_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1521,7 +1521,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### README.md
 
-[Current document](run1503_v3_organizer_diagnostics/effective_k/README.md). Status: `ignored_local_diagnostics_index`. Filename basis: No Git timestamp; stable support filename.
+[Current document](../../run1503_v3_organizer_diagnostics/effective_k/README.md). Status: `ignored_local_diagnostics_index`. Filename basis: No Git timestamp; stable support filename.
 
 Evidence: This folder contains a frozen-checkpoint diagnosis for the 90 cases in the.
 
@@ -1529,7 +1529,7 @@ Uncertainty: Ignored untracked diagnostic README; no Git publication evidence. K
 
 ### WINDFARM_FORWARD_2500_COMPARISON.md
 
-[Current document](_bk/20260913_20260915_WindFarm_Forward_Baselines/20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md). Status: `completed_comparative_report`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../20260913_20260915_WindFarm_Forward_Baselines/20260915_024500Z_WINDFARM_FORWARD_2500_COMPARISON.md). Status: `completed_comparative_report`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aa761a77a2d25d9e62cf9ad6f9ba88f737fa8032`, 2026-09-15T02:45:00Z.
 
@@ -1543,25 +1543,25 @@ These targets were unavailable before the archive review. No scientific artifact
 
 | Document | Original unavailable link |
 | --- | --- |
-| [20260912_172548Z_HONF_NStage2_Comparison_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md) | `../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1807_20260912_091246_nstage2_hierarchical_regional/run_manifest.json` |
-| [20260912_172548Z_HONF_NStage2_Comparison_Report.md](_bk/20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md) | `../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1808_20260912_091247_nstage2_group_mediated_reader/run_manifest.json` |
-| [DEEPGEOTHERMAL_HONF_QUICKSTART.md](../../UpgradePlan/DEEPGEOTHERMAL_HONF_QUICKSTART.md) | `case_plugin.md` |
-| [20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md) | `../diagnostics/Stage7_Run1000_Compatibility_Audit.md` |
-| [20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md) | `../diagnostics/Stage7_Focused_Validation.md` |
-| [20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md) | `../diagnostics/stage7_dry_run_provenance.json` |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage1_1005/0653/organization_matrices_physical_order.png` |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/organization_matrices_physical_order.png` |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/routing_attention_maps.png` |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/routing_dominant_margin.png` |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/organization_environment_unsorted.png` |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/organization_environment_sorted_by_dominant_edge.png` |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/topology_field_contributions.png` |
-| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke_1000_1202/figures/stage4_1202/0653/organization_matrices_physical_order.png` |
-| [20260823_193541Z_Stage7_StageSummary.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/Stage5_Runs_1301_1304_vs_1000_Evaluation.md` |
-| [20260823_193541Z_Stage7_StageSummary.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/Stage7_Run1000_Compatibility_Audit.md` |
-| [20260823_193541Z_Stage7_StageSummary.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/stage5_final_comparison/accuracy_by_channel.png` |
-| [20260823_193541Z_Stage7_StageSummary.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/stage5_final_comparison/organizer_quality.png` |
-| [20260823_193541Z_Stage7_StageSummary.md](../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/stage5_final_comparison/retained_mass_pruning.png` |
+| [20260912_172548Z_HONF_NStage2_Comparison_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md) | `../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1807_20260912_091246_nstage2_hierarchical_regional/run_manifest.json` |
+| [20260912_172548Z_HONF_NStage2_Comparison_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260912_172548Z_HONF_NStage2_Comparison_Report.md) | `../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1808_20260912_091247_nstage2_group_mediated_reader/run_manifest.json` |
+| [DEEPGEOTHERMAL_HONF_QUICKSTART.md](../../../../UpgradePlan/DEEPGEOTHERMAL_HONF_QUICKSTART.md) | `case_plugin.md` |
+| [20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md) | `../diagnostics/Stage7_Run1000_Compatibility_Audit.md` |
+| [20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md) | `../diagnostics/Stage7_Focused_Validation.md` |
+| [20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_190708Z_Stage7_Modern_Structured_Context_GoalMode.md) | `../diagnostics/stage7_dry_run_provenance.json` |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage1_1005/0653/organization_matrices_physical_order.png` |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/organization_matrices_physical_order.png` |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/routing_attention_maps.png` |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/routing_dominant_margin.png` |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/organization_environment_unsorted.png` |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/organization_environment_sorted_by_dominant_edge.png` |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke/figures/stage2_1007/0653/topology_field_contributions.png` |
+| [20260821_162259Z_Stage5_SoftOrganization_Evaluation.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260821_162259Z_Stage5_SoftOrganization_Evaluation.md) | `../diagnostics/stage5_topology_smoke_1000_1202/figures/stage4_1202/0653/organization_matrices_physical_order.png` |
+| [20260823_193541Z_Stage7_StageSummary.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/Stage5_Runs_1301_1304_vs_1000_Evaluation.md` |
+| [20260823_193541Z_Stage7_StageSummary.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/Stage7_Run1000_Compatibility_Audit.md` |
+| [20260823_193541Z_Stage7_StageSummary.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/stage5_final_comparison/accuracy_by_channel.png` |
+| [20260823_193541Z_Stage7_StageSummary.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/stage5_final_comparison/organizer_quality.png` |
+| [20260823_193541Z_Stage7_StageSummary.md](../../../../UpgradePlan/ThemalChannel/20260817_20260904_Forward_Foundations_and_Case_Adaptive/20260823_193541Z_Stage7_StageSummary.md) | `../diagnostics/stage5_final_comparison/retained_mass_pruning.png` |
 
 ## Follow-up archive review — 13 October 2026
 
@@ -1575,34 +1575,34 @@ UTC filename prefixes follow the previous audit convention. Plans use the explic
 
 | Archived plan | Original path | Proposal evidence / filename basis | Closure evidence and completion |
 | --- | --- | --- | --- |
-| [20261007_210324Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Plan.md](../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_210324Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Plan.md` | Proposal clock unknown; preserved file birth 20261007_210324Z UTC (creation fallback) | `completed_formal_followup`. Opening status: both fresh formal fits reached e5000 with return code 0; prior bounded development is a separate archived record. See [20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md). Exact report-completion clock unknown; record last published 2026-10-09T05:05:10Z (`0db193c`); later corrections may postdate science. |
-| [20261008_142419Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Plan.md](../../UpgradePlan/ThemalChannel/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_142419Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Plan.md` | Proposal clock unknown; preserved file birth 20261008_142419Z UTC (creation fallback) | `completed_bounded_and_formal_followup`. Opening status says completed bounded development and fresh formal follow-up; resource closeout reports no active campaign processes. See [20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md). Exact report-completion clock unknown; record last published 2026-10-09T05:05:10Z (`0db193c`); later corrections may postdate science. |
-| [20261009_142332Z_HONF_Joint_Field_and_Regional_Hypergraph_Development_Plan.md](../../UpgradePlan/ThemalChannel/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261009_142332Z_HONF_Joint_Field_and_Regional_Hypergraph_Development_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Joint_Field_and_Regional_Hypergraph_Development_Plan.md` | Proposal clock unknown; preserved file birth 20261009_142332Z UTC (creation fallback) | `completed_bounded`. Opening status and computational closeout: final learned children reached e2500; wrapper exit143 and failed branches remain disclosed. Scientific GPU closeout: 2026-10-09 19:58:46Z. See [20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md). Exact report-completion clock unknown; record last published 2026-10-09T20:25:09Z (`8bfe2ca`); later corrections may postdate science. |
-| [20261010_190505Z_HONF_Interaction_Preserving_Joint_Core_Recovery_Plan.md](../../UpgradePlan/ThemalChannel/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_190505Z_HONF_Interaction_Preserving_Joint_Core_Recovery_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Interaction_Preserving_Joint_Core_Recovery_Plan.md` | Proposal clock unknown; preserved file birth 20261010_190505Z UTC (creation fallback) | `closed_recovery_failed`. Opening and final decision: Recovery failed; full-TRAIN e1000 follow-up stopped normally, no active campaign sessions. See [20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md). Exact report-completion clock unknown; record last published 2026-10-11T06:02:28Z (`672614d`); later corrections may postdate science. |
-| [20261011_HONF_Reference_Anchored_Consolidation_and_Diagnosis_Plan.md](../../UpgradePlan/ThemalChannel/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_HONF_Reference_Anchored_Consolidation_and_Diagnosis_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Reference_Anchored_Consolidation_and_Diagnosis_Plan.md` | Prepared: 11 October 2026; day precision retained | `completed_bounded_diagnosis`. Four decisions and closeout: scientific work stopped, GPU2 released; later provenance corrections are retained. See [20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md). Exact report-completion clock unknown; record last published 2026-10-12T05:32:11Z (`0004ab6`); later corrections may postdate science. |
-| [20261011_235532Z_HONF_Native_Interaction_Routing_Development_Plan.md](../../UpgradePlan/ThemalChannel/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_235532Z_HONF_Native_Interaction_Routing_Development_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Native_Interaction_Routing_Development_Plan.md` | Proposal clock unknown; preserved file birth 20261011_235532Z UTC (creation fallback) | `completed_bounded`. Opening and closeout: both children reached absolute e2500; all38 governed sessions finalized, workers stopped; later authorized cache cleanup retained. See [20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md). Exact report-completion clock unknown; record last published 2026-10-12T14:35:01Z (`1b4da2c`); later corrections may postdate science. |
-| [20261012_155506Z_HONF_Multiview_Native_Routing_and_Fair_Comparison_Plan.md](../../UpgradePlan/ThemalChannel/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261012_155506Z_HONF_Multiview_Native_Routing_and_Fair_Comparison_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Multiview_Native_Routing_and_Fair_Comparison_Plan.md` | Proposal clock unknown; preserved file birth 20261012_155506Z UTC (creation fallback) | `closed_resource_censored`. Start: 2026-10-12 15:57:01Z. All67 ledger entries closed; common e2000 comparison, missing e2500 endpoints unmeasured; subsequent R0 quarantine retained. Cutoff is not an exact finish clock. See [20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md). Exact report-completion clock unknown; record last published 2026-10-13T15:50:14Z (`eee3b8c`); later corrections may postdate science. |
-| [20261013_115632Z_HONF_R1_Consolidation_and_Content_Budgeted_Sparse_Reads_Plan.md](../../UpgradePlan/ThemalChannel/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_115632Z_HONF_R1_Consolidation_and_Content_Budgeted_Sparse_Reads_Plan.md) | `HONF_Proj/UpgradePlan/HONF_R1_Consolidation_and_Content_Budgeted_Sparse_Reads_Plan.md` | Proposal clock unknown; preserved file birth 20261013_115632Z UTC (creation fallback) | `completed_bounded_negative_sparse_frontier`. Start: 2026-10-13 11:58:51Z. Explicit scientific GPU finish: 2026-10-13 18:26:28Z. Wind continuation reached e2500; sparse scorer deliberately unfitted after failed omission frontiers. See [20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md). Exact report-completion clock unknown; record last published 2026-10-13T18:44:02Z (`f10aa86`); later corrections may postdate science. |
+| [20261007_210324Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Plan.md](../../../../UpgradePlan/ThemalChannel/20261006_20261007_Source_Response_and_Dependency_Correct_Interfaces/20261007_210324Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Plan.md` | Proposal clock unknown; preserved file birth 20261007_210324Z UTC (creation fallback) | `completed_formal_followup`. Opening status: both fresh formal fits reached e5000 with return code 0; prior bounded development is a separate archived record. See [20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md). Exact report-completion clock unknown; record last published 2026-10-09T05:05:10Z (`0db193c`); later corrections may postdate science. |
+| [20261008_142419Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Plan.md](../../../../UpgradePlan/ThemalChannel/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_142419Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Plan.md` | Proposal clock unknown; preserved file birth 20261008_142419Z UTC (creation fallback) | `completed_bounded_and_formal_followup`. Opening status says completed bounded development and fresh formal follow-up; resource closeout reports no active campaign processes. See [20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md). Exact report-completion clock unknown; record last published 2026-10-09T05:05:10Z (`0db193c`); later corrections may postdate science. |
+| [20261009_142332Z_HONF_Joint_Field_and_Regional_Hypergraph_Development_Plan.md](../../../../UpgradePlan/ThemalChannel/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261009_142332Z_HONF_Joint_Field_and_Regional_Hypergraph_Development_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Joint_Field_and_Regional_Hypergraph_Development_Plan.md` | Proposal clock unknown; preserved file birth 20261009_142332Z UTC (creation fallback) | `completed_bounded`. Opening status and computational closeout: final learned children reached e2500; wrapper exit143 and failed branches remain disclosed. Scientific GPU closeout: 2026-10-09 19:58:46Z. See [20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md). Exact report-completion clock unknown; record last published 2026-10-09T20:25:09Z (`8bfe2ca`); later corrections may postdate science. |
+| [20261010_190505Z_HONF_Interaction_Preserving_Joint_Core_Recovery_Plan.md](../../../../UpgradePlan/ThemalChannel/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_190505Z_HONF_Interaction_Preserving_Joint_Core_Recovery_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Interaction_Preserving_Joint_Core_Recovery_Plan.md` | Proposal clock unknown; preserved file birth 20261010_190505Z UTC (creation fallback) | `closed_recovery_failed`. Opening and final decision: Recovery failed; full-TRAIN e1000 follow-up stopped normally, no active campaign sessions. See [20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md). Exact report-completion clock unknown; record last published 2026-10-11T06:02:28Z (`672614d`); later corrections may postdate science. |
+| [20261011_HONF_Reference_Anchored_Consolidation_and_Diagnosis_Plan.md](../../../../UpgradePlan/ThemalChannel/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_HONF_Reference_Anchored_Consolidation_and_Diagnosis_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Reference_Anchored_Consolidation_and_Diagnosis_Plan.md` | Prepared: 11 October 2026; day precision retained | `completed_bounded_diagnosis`. Four decisions and closeout: scientific work stopped, GPU2 released; later provenance corrections are retained. See [20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md). Exact report-completion clock unknown; record last published 2026-10-12T05:32:11Z (`0004ab6`); later corrections may postdate science. |
+| [20261011_235532Z_HONF_Native_Interaction_Routing_Development_Plan.md](../../../../UpgradePlan/ThemalChannel/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_235532Z_HONF_Native_Interaction_Routing_Development_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Native_Interaction_Routing_Development_Plan.md` | Proposal clock unknown; preserved file birth 20261011_235532Z UTC (creation fallback) | `completed_bounded`. Opening and closeout: both children reached absolute e2500; all38 governed sessions finalized, workers stopped; later authorized cache cleanup retained. See [20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md). Exact report-completion clock unknown; record last published 2026-10-12T14:35:01Z (`1b4da2c`); later corrections may postdate science. |
+| [20261012_155506Z_HONF_Multiview_Native_Routing_and_Fair_Comparison_Plan.md](../../../../UpgradePlan/ThemalChannel/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261012_155506Z_HONF_Multiview_Native_Routing_and_Fair_Comparison_Plan.md) | `HONF_Proj/UpgradePlan/HONF_Multiview_Native_Routing_and_Fair_Comparison_Plan.md` | Proposal clock unknown; preserved file birth 20261012_155506Z UTC (creation fallback) | `closed_resource_censored`. Start: 2026-10-12 15:57:01Z. All67 ledger entries closed; common e2000 comparison, missing e2500 endpoints unmeasured; subsequent R0 quarantine retained. Cutoff is not an exact finish clock. See [20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md). Exact report-completion clock unknown; record last published 2026-10-13T15:50:14Z (`eee3b8c`); later corrections may postdate science. |
+| [20261013_115632Z_HONF_R1_Consolidation_and_Content_Budgeted_Sparse_Reads_Plan.md](../../../../UpgradePlan/ThemalChannel/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_115632Z_HONF_R1_Consolidation_and_Content_Budgeted_Sparse_Reads_Plan.md) | `HONF_Proj/UpgradePlan/HONF_R1_Consolidation_and_Content_Budgeted_Sparse_Reads_Plan.md` | Proposal clock unknown; preserved file birth 20261013_115632Z UTC (creation fallback) | `completed_bounded_negative_sparse_frontier`. Start: 2026-10-13 11:58:51Z. Explicit scientific GPU finish: 2026-10-13 18:26:28Z. Wind continuation reached e2500; sparse scorer deliberately unfitted after failed omission frontiers. See [20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md). Exact report-completion clock unknown; record last published 2026-10-13T18:44:02Z (`f10aa86`); later corrections may postdate science. |
 
 ### Newly reviewed reports and companions
 
 | Archived report | Original path | Declared report/stage dates | Status and completion evidence | Filename timestamp basis |
 | --- | --- | --- | --- | --- |
-| [20261008_202013Z_HONF_Fresh_Formal_5000_Query_Decision_and_Launch_20261008.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_202013Z_HONF_Fresh_Formal_5000_Query_Decision_and_Launch_20261008.md) | `HONF_Proj/docs/reports/HONF_Fresh_Formal_5000_Query_Decision_and_Launch_20261008.md` | 8 October | `superseded_launch_handoff`. Snapshot records fits running at20:17Z; successor Unified/Wind reports establish the same3904/2202 lineages completed e5000/return0. This document itself remains launch evidence. Launch record published 2026-10-08T20:20:13Z (`a89bad1`); successor reports establish lineage closure by 2026-10-09T05:05:10Z (`0db193c`). | first Git publication UTC; not measured experiment finish; `a89bad1` at 20261008_202013Z |
-| [20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md) | `HONF_Proj/docs/reports/HONF_Interaction_Preserving_Recovery_20261010.md` | 10–11 October | `closed_recovery_failed`. Opening and final decision: Recovery failed; full-TRAIN e1000 follow-up stopped normally, no active campaign sessions. Exact report-completion clock unknown; record last published 2026-10-11T06:02:28Z (`672614d`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `edd432c` at 20261010_195650Z |
-| [20261010_214021Z_HONF_Interaction_Preserving_Recovery_20261010_Appendix.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_214021Z_HONF_Interaction_Preserving_Recovery_20261010_Appendix.md) | `HONF_Proj/docs/reports/HONF_Interaction_Preserving_Recovery_20261010_Appendix.md` | 10–11 October | `closed_historical_companion`. Opening scope: companion appendix of the completed segmented e2500/full-TRAIN e1000 recovery campaign. Exact report-completion clock unknown; record last published 2026-10-11T06:02:28Z (`672614d`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `3984352` at 20261010_214021Z |
-| [20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md) | `HONF_Proj/docs/reports/HONF_Joint_Field_Regional_Development_20261009.md` | 9 October | `completed_bounded`. Opening status and computational closeout: final learned children reached e2500; wrapper exit143 and failed branches remain disclosed. Scientific GPU closeout: 2026-10-09 19:58:46Z. Exact report-completion clock unknown; record last published 2026-10-09T20:25:09Z (`8bfe2ca`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `8bfe2ca` at 20261009_202509Z |
-| [20261010_154719Z_HONF_Joint_Formal_Comparison_20261010.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_154719Z_HONF_Joint_Formal_Comparison_20261010.md) | `HONF_Proj/docs/reports/HONF_Joint_Formal_Comparison_20261010.md` | 10 October | `completed_formal_comparison`. Opening status: separate completed e5000 formal models; closing recommendations launch no new campaign. Exact report-completion clock unknown; record last published 2026-10-10T15:47:19Z (`8e7c170`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `8e7c170` at 20261010_154719Z |
-| [20261013_035603Z_HONF_Multiview_Native_Evidence_Index_20261012.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_035603Z_HONF_Multiview_Native_Evidence_Index_20261012.md) | `HONF_Proj/docs/reports/HONF_Multiview_Native_Evidence_Index_20261012.md` | 12–13 October | `closed_evidence_companion`. Common-e2000 evidence and final cleanup/preservation receipts; bounded stops do not establish the prospective e2500 gate. Exact report-completion clock unknown; record last published 2026-10-13T03:56:03Z (`a6e898d`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `a6e898d` at 20261013_035603Z |
-| [20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md) | `HONF_Proj/docs/reports/HONF_Multiview_Native_Routing_20261012.md` | 12–13 October | `closed_resource_censored`. Start: 2026-10-12 15:57:01Z. All67 ledger entries closed; common e2000 comparison, missing e2500 endpoints unmeasured; subsequent R0 quarantine retained. Cutoff is not an exact finish clock. Exact report-completion clock unknown; record last published 2026-10-13T15:50:14Z (`eee3b8c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `a6e898d` at 20261013_035603Z |
-| [20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md) | `HONF_Proj/docs/reports/HONF_Native_Interaction_Routing_Development_Report.md` | 11–12 October | `completed_bounded`. Opening and closeout: both children reached absolute e2500; all38 governed sessions finalized, workers stopped; later authorized cache cleanup retained. Exact report-completion clock unknown; record last published 2026-10-12T14:35:01Z (`1b4da2c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `0004ab6` at 20261012_053211Z |
-| [20261012_053211Z_HONF_Native_Interaction_Routing_Evidence_Index.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261012_053211Z_HONF_Native_Interaction_Routing_Evidence_Index.md) | `HONF_Proj/docs/reports/HONF_Native_Interaction_Routing_Evidence_Index.md` | 11–12 October | `closed_evidence_companion`. Final fitting, delivery, upload and cache-cleanup receipts accompany the closed native-routing report. Exact report-completion clock unknown; record last published 2026-10-12T14:35:01Z (`1b4da2c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `0004ab6` at 20261012_053211Z |
-| [20261013_155014Z_HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_155014Z_HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md) | `HONF_Proj/docs/reports/HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md` | 13 October | `closed_failed_qualification`. Bounded reconciliation ends with strict GPU-interface failure and quarantine; no further remedy queued. Input parity timestamp is a substage, not complete paired DEV22 qualification. Exact report-completion clock unknown; record last published 2026-10-13T18:44:02Z (`f10aa86`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `eee3b8c` at 20261013_155014Z |
-| [20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md) | `HONF_Proj/docs/reports/HONF_R1_Consolidation_and_Sparse_Reads_20261013.md` | 13 October | `completed_bounded_negative_sparse_frontier`. Start: 2026-10-13 11:58:51Z. Explicit scientific GPU finish: 2026-10-13 18:26:28Z. Wind continuation reached e2500; sparse scorer deliberately unfitted after failed omission frontiers. Exact report-completion clock unknown; record last published 2026-10-13T18:44:02Z (`f10aa86`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `f10aa86` at 20261013_184402Z |
-| [20261013_184402Z_HONF_R1_Sparse_Reads_Evidence_Index_20261013.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_184402Z_HONF_R1_Sparse_Reads_Evidence_Index_20261013.md) | `HONF_Proj/docs/reports/HONF_R1_Sparse_Reads_Evidence_Index_20261013.md` | 13 October | `closed_evidence_companion`. Completed continuation/frontier evidence and resource, protection and cleanup closeout accompany the R1 report. Exact report-completion clock unknown; record last published 2026-10-13T18:44:02Z (`f10aa86`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `f10aa86` at 20261013_184402Z |
-| [20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md) | `HONF_Proj/docs/reports/HONF_Reference_Anchored_Consolidation_20261011.md` | 11 October | `completed_bounded_diagnosis`. Four decisions and closeout: scientific work stopped, GPU2 released; later provenance corrections are retained. Exact report-completion clock unknown; record last published 2026-10-12T05:32:11Z (`0004ab6`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `b851acd` at 20261011_224701Z |
-| [20261011_224701Z_HONF_Reference_Anchored_Evidence_Index_20261011.md](_bk/20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_224701Z_HONF_Reference_Anchored_Evidence_Index_20261011.md) | `HONF_Proj/docs/reports/HONF_Reference_Anchored_Evidence_Index_20261011.md` | 11 October | `closed_evidence_companion`. Final evidence binds the completed400-update pair and preservation/budget/visual receipts. Exact report-completion clock unknown; record last published 2026-10-12T05:32:11Z (`0004ab6`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `b851acd` at 20261011_224701Z |
-| [20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md) | `HONF_Proj/docs/reports/HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md` | 7–9 October; header states updated 9 October America/New_York | `completed_formal_followup`. Opening status: both fresh formal fits reached e5000 with return code 0; prior bounded development is a separate archived record. Exact report-completion clock unknown; record last published 2026-10-09T05:05:10Z (`0db193c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `a677dc1` at 20261008_004514Z |
-| [20261008_160519Z_HONF_Wind_Consolidation_Test_Classification.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_160519Z_HONF_Wind_Consolidation_Test_Classification.md) | `HONF_Proj/docs/reports/HONF_Wind_Consolidation_Test_Classification.md` | 8 October | `closed_test_classification_companion`. Baseline/current test classifications and follow-up results retained as supporting evidence of the closed Wind campaign. Exact report-completion clock unknown; record last published 2026-10-08T17:32:40Z (`4032dd9`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `ed60447` at 20261008_160519Z |
-| [20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md) | `HONF_Proj/docs/reports/HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md` | 8–9 October; follow-up dates retained | `completed_bounded_and_formal_followup`. Opening status says completed bounded development and fresh formal follow-up; resource closeout reports no active campaign processes. Exact report-completion clock unknown; record last published 2026-10-09T05:05:10Z (`0db193c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `1ca126a` at 20261008_182414Z |
-| [20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Development_Report.md](_bk/20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Development_Report.md) | `HONF_Proj/docs/reports/_bk/20261008_113547Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Development_Report.md` | 7–8 October | `completed_bounded_development`. Previously omitted historical development copy. Source first published in a677dc1 at2026-10-08 00:45:14Z; copy published in f792dd6 at12:35:49Z. Prior113547Z prefix had no substantiated basis; source-publication prefix replaces it. Exact report-completion clock unknown; record last published 2026-10-08T12:35:49Z (`f792dd6`); later corrections may postdate science. | first publication of source report a677dc1; historical copy f792dd6; replaces unexplained old prefix |
+| [20261008_202013Z_HONF_Fresh_Formal_5000_Query_Decision_and_Launch_20261008.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_202013Z_HONF_Fresh_Formal_5000_Query_Decision_and_Launch_20261008.md) | `HONF_Proj/docs/reports/HONF_Fresh_Formal_5000_Query_Decision_and_Launch_20261008.md` | 8 October | `superseded_launch_handoff`. Snapshot records fits running at20:17Z; successor Unified/Wind reports establish the same3904/2202 lineages completed e5000/return0. This document itself remains launch evidence. Launch record published 2026-10-08T20:20:13Z (`a89bad1`); successor reports establish lineage closure by 2026-10-09T05:05:10Z (`0db193c`). | first Git publication UTC; not measured experiment finish; `a89bad1` at 20261008_202013Z |
+| [20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md) | `HONF_Proj/docs/reports/HONF_Interaction_Preserving_Recovery_20261010.md` | 10–11 October | `closed_recovery_failed`. Opening and final decision: Recovery failed; full-TRAIN e1000 follow-up stopped normally, no active campaign sessions. Exact report-completion clock unknown; record last published 2026-10-11T06:02:28Z (`672614d`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `edd432c` at 20261010_195650Z |
+| [20261010_214021Z_HONF_Interaction_Preserving_Recovery_20261010_Appendix.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_214021Z_HONF_Interaction_Preserving_Recovery_20261010_Appendix.md) | `HONF_Proj/docs/reports/HONF_Interaction_Preserving_Recovery_20261010_Appendix.md` | 10–11 October | `closed_historical_companion`. Opening scope: companion appendix of the completed segmented e2500/full-TRAIN e1000 recovery campaign. Exact report-completion clock unknown; record last published 2026-10-11T06:02:28Z (`672614d`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `3984352` at 20261010_214021Z |
+| [20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261009_202509Z_HONF_Joint_Field_Regional_Development_20261009.md) | `HONF_Proj/docs/reports/HONF_Joint_Field_Regional_Development_20261009.md` | 9 October | `completed_bounded`. Opening status and computational closeout: final learned children reached e2500; wrapper exit143 and failed branches remain disclosed. Scientific GPU closeout: 2026-10-09 19:58:46Z. Exact report-completion clock unknown; record last published 2026-10-09T20:25:09Z (`8bfe2ca`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `8bfe2ca` at 20261009_202509Z |
+| [20261010_154719Z_HONF_Joint_Formal_Comparison_20261010.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261010_154719Z_HONF_Joint_Formal_Comparison_20261010.md) | `HONF_Proj/docs/reports/HONF_Joint_Formal_Comparison_20261010.md` | 10 October | `completed_formal_comparison`. Opening status: separate completed e5000 formal models; closing recommendations launch no new campaign. Exact report-completion clock unknown; record last published 2026-10-10T15:47:19Z (`8e7c170`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `8e7c170` at 20261010_154719Z |
+| [20261013_035603Z_HONF_Multiview_Native_Evidence_Index_20261012.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_035603Z_HONF_Multiview_Native_Evidence_Index_20261012.md) | `HONF_Proj/docs/reports/HONF_Multiview_Native_Evidence_Index_20261012.md` | 12–13 October | `closed_evidence_companion`. Common-e2000 evidence and final cleanup/preservation receipts; bounded stops do not establish the prospective e2500 gate. Exact report-completion clock unknown; record last published 2026-10-13T03:56:03Z (`a6e898d`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `a6e898d` at 20261013_035603Z |
+| [20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_035603Z_HONF_Multiview_Native_Routing_20261012.md) | `HONF_Proj/docs/reports/HONF_Multiview_Native_Routing_20261012.md` | 12–13 October | `closed_resource_censored`. Start: 2026-10-12 15:57:01Z. All67 ledger entries closed; common e2000 comparison, missing e2500 endpoints unmeasured; subsequent R0 quarantine retained. Cutoff is not an exact finish clock. Exact report-completion clock unknown; record last published 2026-10-13T15:50:14Z (`eee3b8c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `a6e898d` at 20261013_035603Z |
+| [20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md) | `HONF_Proj/docs/reports/HONF_Native_Interaction_Routing_Development_Report.md` | 11–12 October | `completed_bounded`. Opening and closeout: both children reached absolute e2500; all38 governed sessions finalized, workers stopped; later authorized cache cleanup retained. Exact report-completion clock unknown; record last published 2026-10-12T14:35:01Z (`1b4da2c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `0004ab6` at 20261012_053211Z |
+| [20261012_053211Z_HONF_Native_Interaction_Routing_Evidence_Index.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261012_053211Z_HONF_Native_Interaction_Routing_Evidence_Index.md) | `HONF_Proj/docs/reports/HONF_Native_Interaction_Routing_Evidence_Index.md` | 11–12 October | `closed_evidence_companion`. Final fitting, delivery, upload and cache-cleanup receipts accompany the closed native-routing report. Exact report-completion clock unknown; record last published 2026-10-12T14:35:01Z (`1b4da2c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `0004ab6` at 20261012_053211Z |
+| [20261013_155014Z_HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_155014Z_HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md) | `HONF_Proj/docs/reports/HONF_R0_Thermal_Classic_Native_Input_Reconciliation_20261013.md` | 13 October | `closed_failed_qualification`. Bounded reconciliation ends with strict GPU-interface failure and quarantine; no further remedy queued. Input parity timestamp is a substage, not complete paired DEV22 qualification. Exact report-completion clock unknown; record last published 2026-10-13T18:44:02Z (`f10aa86`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `eee3b8c` at 20261013_155014Z |
+| [20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_184402Z_HONF_R1_Consolidation_and_Sparse_Reads_20261013.md) | `HONF_Proj/docs/reports/HONF_R1_Consolidation_and_Sparse_Reads_20261013.md` | 13 October | `completed_bounded_negative_sparse_frontier`. Start: 2026-10-13 11:58:51Z. Explicit scientific GPU finish: 2026-10-13 18:26:28Z. Wind continuation reached e2500; sparse scorer deliberately unfitted after failed omission frontiers. Exact report-completion clock unknown; record last published 2026-10-13T18:44:02Z (`f10aa86`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `f10aa86` at 20261013_184402Z |
+| [20261013_184402Z_HONF_R1_Sparse_Reads_Evidence_Index_20261013.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261013_184402Z_HONF_R1_Sparse_Reads_Evidence_Index_20261013.md) | `HONF_Proj/docs/reports/HONF_R1_Sparse_Reads_Evidence_Index_20261013.md` | 13 October | `closed_evidence_companion`. Completed continuation/frontier evidence and resource, protection and cleanup closeout accompany the R1 report. Exact report-completion clock unknown; record last published 2026-10-13T18:44:02Z (`f10aa86`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `f10aa86` at 20261013_184402Z |
+| [20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md) | `HONF_Proj/docs/reports/HONF_Reference_Anchored_Consolidation_20261011.md` | 11 October | `completed_bounded_diagnosis`. Four decisions and closeout: scientific work stopped, GPU2 released; later provenance corrections are retained. Exact report-completion clock unknown; record last published 2026-10-12T05:32:11Z (`0004ab6`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `b851acd` at 20261011_224701Z |
+| [20261011_224701Z_HONF_Reference_Anchored_Evidence_Index_20261011.md](../20261011_20261013_Native_Routing_Consolidation_and_Qualification/20261011_224701Z_HONF_Reference_Anchored_Evidence_Index_20261011.md) | `HONF_Proj/docs/reports/HONF_Reference_Anchored_Evidence_Index_20261011.md` | 11 October | `closed_evidence_companion`. Final evidence binds the completed400-update pair and preservation/budget/visual receipts. Exact report-completion clock unknown; record last published 2026-10-12T05:32:11Z (`0004ab6`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `b851acd` at 20261011_224701Z |
+| [20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md) | `HONF_Proj/docs/reports/HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md` | 7–9 October; header states updated 9 October America/New_York | `completed_formal_followup`. Opening status: both fresh formal fits reached e5000 with return code 0; prior bounded development is a separate archived record. Exact report-completion clock unknown; record last published 2026-10-09T05:05:10Z (`0db193c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `a677dc1` at 20261008_004514Z |
+| [20261008_160519Z_HONF_Wind_Consolidation_Test_Classification.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_160519Z_HONF_Wind_Consolidation_Test_Classification.md) | `HONF_Proj/docs/reports/HONF_Wind_Consolidation_Test_Classification.md` | 8 October | `closed_test_classification_companion`. Baseline/current test classifications and follow-up results retained as supporting evidence of the closed Wind campaign. Exact report-completion clock unknown; record last published 2026-10-08T17:32:40Z (`4032dd9`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `ed60447` at 20261008_160519Z |
+| [20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_182414Z_HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md) | `HONF_Proj/docs/reports/HONF_Wind_Fidelity_and_Shared_Execution_Consolidation_Report.md` | 8–9 October; follow-up dates retained | `completed_bounded_and_formal_followup`. Opening status says completed bounded development and fresh formal follow-up; resource closeout reports no active campaign processes. Exact report-completion clock unknown; record last published 2026-10-09T05:05:10Z (`0db193c`); later corrections may postdate science. | first Git publication UTC; not measured experiment finish; `1ca126a` at 20261008_182414Z |
+| [20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Development_Report.md](../20261008_20261010_Unified_Training_Formal_and_Joint_Recovery/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Development_Report.md) | `HONF_Proj/docs/reports/_bk/20261008_113547Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Development_Report.md` | 7–8 October | `completed_bounded_development`. Previously omitted historical development copy. Source first published in a677dc1 at2026-10-08 00:45:14Z; copy published in f792dd6 at12:35:49Z. Prior113547Z prefix had no substantiated basis; source-publication prefix replaces it. Exact report-completion clock unknown; record last published 2026-10-08T12:35:49Z (`f792dd6`); later corrections may postdate science. | first publication of source report a677dc1; historical copy f792dd6; replaces unexplained old prefix |
