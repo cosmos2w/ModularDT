@@ -14,7 +14,7 @@ import os
 import signal
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -823,7 +823,12 @@ def _read_run_checkpoint(run_dir: Path, selector: str = "latest") -> tuple[dict[
     payload = load_trusted_checkpoint(path, map_location="cpu")
     saved_identity = read_json(RunLayout(run_dir).read_path("experiment_identity.json"))
     if _canonical_sha256(payload.get("experiment_identity")) != _canonical_sha256(saved_identity):
-        raise ValueError("Selected checkpoint identity differs from the declared research run.")
+        from .unified_training import _resume_identity_amendment
+        receipt = RunLayout(run_dir).read_path("configs/horizon_extension.json")
+        if not receipt.exists() or read_json(receipt).get("execution_horizon") != saved_identity.get("engine_config", {}).get("total_epochs"):
+            raise ValueError("Selected checkpoint identity differs from the declared research run.")
+        _resume_identity_amendment(payload.get("experiment_identity", {}), saved_identity,
+                                   allow_horizon_extension=True)
     return payload, path
 
 
@@ -2007,7 +2012,8 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
                       resume_checkpoint: Path | None = None, allow_microbatch_change: bool = False,
                       runtime_microbatch_cases: int | None = None,
                       runtime_execution_options: Mapping[str, Any] | None = None,
-                      permitted_devices: Sequence[str] | None = None):
+                      permitted_devices: Sequence[str] | None = None,
+                      allow_horizon_extension: bool = False):
     retries = 0
     active_engine = engine
     current_resume = resume_checkpoint
@@ -2045,10 +2051,12 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
                 stop_after=int(stop_after),
                 resume_checkpoint=current_resume,
                 allow_microbatch_change=allow_microbatch_change,
+                allow_horizon_extension=allow_horizon_extension,
             )
             if _is_softonly(provider._research_config):
                 payload, _ = _read_run_checkpoint(output, "latest")
-                if int(payload["epoch"]) == int(provider._research_config["training"]["local_horizon"]):
+                if (int(payload["epoch"]) == int(provider._research_config["training"]["local_horizon"])
+                        == active_engine.config.total_epochs):
                     from .thermal_soft_reviews import run_final_validation
                     runtime = provider.soft_organization
                     remaining = max(0.0, 14400.0 - runtime.state["review_elapsed_seconds"])
@@ -2104,6 +2112,7 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
                     microbatch=nominal_microbatch,
                     diagnostic=provider._research_case_limit is not None,
                 )
+                _extend_execution_horizon(active_engine, engine.config.total_epochs)
                 active_engine.bind_execution_runtime(
                     output / "execution_runtime.json", nominal_microbatch_cases=nominal_microbatch,
                 )
@@ -2406,10 +2415,23 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
         permitted_devices=permitted,
     )
 
+def _extend_execution_horizon(engine: ResearchTrainingEngine, horizon: int) -> None:
+    """Extend execution/review clocks while leaving provider and LR schedules sealed."""
+    if horizon <= engine.config.total_epochs:
+        return
+    if horizon % 100:
+        raise ValueError("Research horizon extensions must end on a 100-epoch milestone.")
+    checkpoints = tuple(range(100, horizon + 1, 100))
+    engine.config = replace(engine.config, total_epochs=horizon,
+        monitor_epochs=tuple(range(engine.config.monitor_every, horizon + 1, engine.config.monitor_every)),
+        checkpoint_epochs=checkpoints)
+
+
 def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = None,
            stop_after_epoch: int | None = None, devices: Sequence[str] | None = None,
            microbatch_cases: int | None = None, query_tile_size: int | None = None,
-           checkpoint: str | None = None, backend: str | None = None) -> dict[str, Any]:
+           checkpoint: str | None = None, backend: str | None = None,
+           extend_horizon: bool = False) -> dict[str, Any]:
     run = Path(run_dir).expanduser().resolve(strict=True)
     run_manifest, _ = _load_run_manifest(run)
     config = copy.deepcopy(run_manifest["config"])
@@ -2419,9 +2441,16 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
     payload, latest_path = _read_run_checkpoint(run, "latest")
     local_horizon = int(config["training"]["local_horizon"])
     current_epoch = int(payload["epoch"])
+    execution_horizon = int(payload["experiment_identity"]["engine_config"]["total_epochs"])
+    requested_stop = (current_epoch + additional_epochs if type(additional_epochs) is int else stop_after_epoch)
+    if extend_horizon:
+        if (not _is_softonly(config) or type(requested_stop) is not int
+                or requested_stop % 100 or requested_stop <= execution_horizon or current_epoch != execution_horizon):
+            raise ValueError("Explicit horizon extension requires a terminal soft-only checkpoint and a larger stop.")
+        execution_horizon = requested_stop
     stop_after = _resolve_resume_stop(
         current_epoch=current_epoch,
-        local_horizon=local_horizon,
+        local_horizon=execution_horizon,
         additional_epochs=additional_epochs,
         stop_after_epoch=stop_after_epoch,
     )
@@ -2470,6 +2499,7 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
         microbatch=runtime_config["training"]["microbatch_cases"],
         diagnostic=diagnostic,
     )
+    _extend_execution_horizon(engine, execution_horizon)
     identity = _experiment_identity(
         config,
         provider,
@@ -2477,6 +2507,29 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
         run_manifest.get("initialization_recipe_sha256") or run_manifest["source_checkpoint_sha256"],
         diagnostic=diagnostic,
     )
+    if extend_horizon:
+        from .unified_training import _resume_identity_amendment
+        sealed, _ = _round12_sealed_identity(config, model, provider, engine,
+            run_manifest["initialization_recipe"], run_manifest["initialization_recipe_sha256"])
+        amendment = _resume_identity_amendment(payload["experiment_identity"], sealed,
+                                              allow_horizon_extension=True)
+        # Preserve the original terminal state and manifest; fit records the amendment
+        # and restores all training state through its ordinary strict resume path.
+        import fcntl
+        with (run / ".training.lock").open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            milestone, milestone_path = _read_run_checkpoint(run, f"epoch_{current_epoch:04d}_model.pt")
+            if int(milestone["epoch"]) != current_epoch:
+                raise ValueError("The original terminal milestone must be retained before extension.")
+            _atomic_json(RunLayout(run).write_path("horizon_extension.json", category="configs"), {
+                **amendment, "source_checkpoint": str(latest_path), "source_epoch": current_epoch,
+                "source_checkpoint_sha256": sha256_file(latest_path),
+                "retained_terminal_milestone": str(milestone_path),
+                "retained_terminal_milestone_sha256": sha256_file(milestone_path),
+                "original_config": config, "storage": verify_storage(config, output=run,
+                    estimated_bytes=2 * 1024**3, peak_temporary_bytes=512 * 1024**2),
+                "created_unix": time.time(),
+            })
     print(json.dumps({
         "event": "research_resume_prepared",
         "run": str(run),
@@ -2505,6 +2558,7 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
         runtime_microbatch_cases=microbatch_cases,
         runtime_execution_options=(runtime_execution_options if option_overrides else None),
         permitted_devices=permitted,
+        allow_horizon_extension=extend_horizon,
     )
 
 

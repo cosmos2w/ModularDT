@@ -42,6 +42,8 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--run", required=True)
     resume.add_argument("--device", required=True)
     resume.add_argument("--devices", nargs="+")
+    resume.add_argument("--extend-horizon", action="store_true",
+                        help="explicitly extend a terminal soft-only run; preserve its original schedules")
     resume_stop = resume.add_mutually_exclusive_group(required=True)
     resume_stop.add_argument("--additional-epochs", type=int)
     resume_stop.add_argument("--stop-after-epoch", type=int,
@@ -105,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             devices=args.devices,
             additional_epochs=args.additional_epochs,
+            extend_horizon=args.extend_horizon,
             stop_after_epoch=args.stop_after_epoch,
             microbatch_cases=args.microbatch_cases,
             query_tile_size=args.query_tile_size,

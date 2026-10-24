@@ -332,11 +332,34 @@ def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
 
 
 def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, Any],
-                               *, allow_microbatch_change: bool = False) -> dict[str, Any] | None:
-    """Permit only an explicit microbatch amendment; all scientific bindings stay sealed."""
+                               *, allow_microbatch_change: bool = False,
+                               allow_horizon_extension: bool = False) -> dict[str, Any] | None:
+    """Permit explicit packing or execution-horizon changes; keep scientific schedules sealed."""
     if saved == current:
         return None
     message = "Checkpoint identity, engine config, selection or optimizer schedule differs."
+    if allow_horizon_extension:
+        # Checkpoints retain tuples while the identity sidecar is JSON.
+        saved, current = (json.loads(json.dumps(value)) for value in (saved, current))
+        previous, proposed = saved.get("engine_config", {}), current.get("engine_config", {})
+        before, after = previous.get("total_epochs"), proposed.get("total_epochs")
+        if (allow_microbatch_change or saved.get("workflow") != "ordinary_honf_research_train_v1"
+                or type(before) is not int or type(after) is not int or after <= before
+                or before % 100 or after % 100
+                or previous.get("checkpoint_epochs") != list(range(100, before + 1, 100))
+                or proposed.get("checkpoint_epochs") != list(range(100, after + 1, 100))
+                or previous.get("monitor_every", 0) < 1
+                or proposed.get("monitor_epochs") != list(range(previous["monitor_every"], after + 1,
+                                                                  previous["monitor_every"]))):
+            raise ValueError(message)
+        amended = copy.deepcopy(saved)
+        for key in ("total_epochs", "monitor_epochs", "checkpoint_epochs"):
+            amended["engine_config"][key] = copy.deepcopy(proposed[key])
+        if amended != current:
+            raise ValueError(message)
+        return {"kind": "explicit_research_horizon_extension", "previous_horizon": before,
+                "execution_horizon": after, "schedule_horizon_unchanged": True,
+                "trajectory_note": "Original optimizer, controller, sampler and provider schedules remain sealed."}
     if not allow_microbatch_change:
         raise ValueError(message)
     previous = saved.get("engine_config", {})
@@ -3129,6 +3152,7 @@ class TrainingEngine:
         branch_from_checkpoint: str | Path | None = None,
         clean_stop_name: str = "CLEAN_STOP_REQUEST.json",
         allow_microbatch_change: bool = False,
+        allow_horizon_extension: bool = False,
         mathematical_route_branch: Mapping[str, Any] | None = None,
         joint_core_revision: Mapping[str, Any] | None = None,
         diagnostic_age_branch: Mapping[str, Any] | None = None,
@@ -3850,7 +3874,8 @@ class TrainingEngine:
                 )
             else:
                 amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
-                    allow_microbatch_change=allow_microbatch_change)
+                    allow_microbatch_change=allow_microbatch_change,
+                    allow_horizon_extension=allow_horizon_extension)
             if readout_extension_amendment is not None:
                 if amendment is not None:
                     raise ValueError("Round6 extension receipt cannot be combined with another resume amendment.")
