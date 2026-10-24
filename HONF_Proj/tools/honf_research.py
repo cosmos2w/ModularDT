@@ -33,6 +33,11 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--case-limit", type=int)
     train.add_argument("--case-id", action="append", dest="case_ids")
 
+    qualify = commands.add_parser("qualify-softonly", help="bounded no-retained-training soft-only qualification")
+    qualify.add_argument("--config", required=True)
+    qualify.add_argument("--device", required=True)
+    qualify.add_argument("--output", required=True)
+
     resume = commands.add_parser("resume", help="continue this run from its latest complete checkpoint")
     resume.add_argument("--run", required=True)
     resume.add_argument("--device", required=True)
@@ -91,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
             case_ids=args.case_ids,
             diagnostic_only=args.diagnostic_only,
         )
+    elif args.command == "qualify-softonly":
+        from honf_runtime.thermal_soft_organization import qualify_softonly
+        result = qualify_softonly(args.config, args.device, args.output)
     elif args.command == "resume":
         result = research.resume(
             args.run,

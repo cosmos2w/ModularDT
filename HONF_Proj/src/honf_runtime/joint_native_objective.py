@@ -105,6 +105,14 @@ class JointMacroObjective:
             self.work[f'joint_constraint_residual_{typed}']=float(residual.cpu())
             self.work[f'joint_case_requests_{typed}']=denominator
             self.controller_residuals[typed]=torch.stack(self.controller[typed]).sum()/denominator
+        additive_transform = getattr(self.core, 'joint_apply_additive_gradients', None)
+        if callable(additive_transform):
+            # Optional research capability: receives the completed native task
+            # and work gradient before adding bounded structural gradients.
+            additive_transform(self)
+            self.gradients.clear()
+            self.additive_gradients.clear()
+            return
         for name,values in self.additive_values.items():
             denominator=self.additive_denominators[name]
             for parameter,gradient in self.additive_gradients[name].items():

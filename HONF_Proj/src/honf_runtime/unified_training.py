@@ -2943,6 +2943,9 @@ class TrainingEngine:
                 weighted_auxiliary_norm=math.sqrt(auxiliary_squared_norm),
             )
             losses["source_read_auxiliary"] = float(auxiliary_loss.detach())
+        before_step = getattr(provider, "before_optimizer_step", None)
+        if callable(before_step):
+            before_step(model, optimizer, losses, work, epoch=epoch, update_index=update_index)
         parameters = [parameter for group in optimizer.param_groups for parameter in group["params"]
                       if parameter.grad is not None]
         norm = torch.nn.utils.clip_grad_norm_(parameters, self.config.gradient_clip)
@@ -4589,6 +4592,9 @@ class TrainingEngine:
                         if reviewer is None or not callable(getattr(reviewer,"review_epoch",None)):
                             raise RuntimeError("Sparse Round9 fit requires its fixed-TRAIN 25-epoch review capability.")
                         row["joint_native_train_review"]=reviewer.review_epoch(model,provider,self,epoch,layout,training_row=row)
+                epoch_hook = getattr(provider, "completed_training_epoch", None)
+                if callable(epoch_hook):
+                    epoch_hook(model, self, epoch, output, row)
                 clean_stop_request = _read_clean_stop_request(output, clean_stop_name)
                 clean_stop_requested = clean_stop_request is not None
                 review = (epoch % self.config.monitor_every == 0 or epoch in self.config.monitor_epochs
@@ -4612,9 +4618,12 @@ class TrainingEngine:
                     )
                     validation_reduction = aggregation or "No held-out objective losses were recorded by this provider."
                     objective = {
-                        "scope": "exposed VALIDATION panel evaluated with deployed hard inference",
+                        "scope": ("exposed VALIDATION panel evaluated with deployed soft-only organization"
+                                  if getattr(getattr(model, "core", model), "compact_mode", None) == "soft_only"
+                                  else "exposed VALIDATION panel evaluated with deployed hard inference"),
                         "training_phase": phase,
-                        "validation_route_phase": "hard",
+                        "validation_route_phase": ("soft_only" if getattr(
+                            getattr(model, "core", model), "compact_mode", None) == "soft_only" else "hard"),
                         "training_reduction": training_reduction,
                         "validation_reduction": validation_reduction,
                         "training_prediction_mode": (

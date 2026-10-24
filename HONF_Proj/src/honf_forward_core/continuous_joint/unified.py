@@ -4,6 +4,8 @@ from __future__ import annotations
 import torch
 from torch import nn
 import copy
+import math
+from contextlib import contextmanager
 from ..native_retrieval.contracts import tensor_versions
 
 SUMMARY_ROOTS = ("scene_summary_net", "module_scene_projection", "environment_scene_projection",
@@ -363,10 +365,14 @@ class CompactUnifiedJointCore(UnifiedJointCore):
 
     schema = "compact_unified_joint_v1"
     compact_state_schema = "compact_unified_groups_state_v1"
-    _COMPACT_ARMS = {"common": 0, "singleton": 1, "merge": 2}
+    _COMPACT_ARMS = {"common": 0, "singleton": 1, "merge": 2, "soft_only": 3}
+    _COMPACT_MODES = {"legacy": 0, "soft_only": 1}
 
     def __init__(self, base_model_config, *, input_dataset, input_capability="local_records_context_v1",
-                 input_contract_sha256=None, **options):
+                 input_contract_sha256=None, compact_mode="legacy", **options):
+        if compact_mode not in self._COMPACT_MODES:
+            raise ValueError("Compact mode must be legacy or soft_only.")
+        self.compact_mode = compact_mode
         super().__init__(base_model_config, input_dataset=input_dataset,
                          input_capability=input_capability,
                          input_contract_sha256=input_contract_sha256, **options)
@@ -383,10 +389,18 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             )
         self.register_buffer("compact_local_epoch", torch.zeros((), dtype=torch.long))
         self.register_buffer("compact_arm_code", torch.zeros((), dtype=torch.long))
+        self.register_buffer("compact_mode_code", torch.tensor(self._COMPACT_MODES[compact_mode], dtype=torch.long))
         self.register_buffer("compact_cut_active", torch.zeros((), dtype=torch.bool))
         self.register_buffer("compact_policy_frozen", torch.zeros((), dtype=torch.bool))
         self.register_buffer("compact_tie_loss_coefficient", torch.zeros(()))
         self.register_buffer("compact_capacity_loss_coefficient", torch.zeros(()))
+        self.register_buffer("compact_tie_loss_coefficient_M", torch.ones(()))
+        self.register_buffer("compact_tie_loss_coefficient_E", torch.ones(()))
+        self.register_buffer("compact_capacity_loss_coefficient_M", torch.ones(()))
+        self.register_buffer("compact_capacity_loss_coefficient_E", torch.ones(()))
+        self.register_buffer("compact_structure_loss_scale", torch.ones(()))
+        if compact_mode == "soft_only":
+            self.compact_arm_code.fill_(self._COMPACT_ARMS["soft_only"])
         # The inherited per-record dispatchers are retired by compact Q-to-K
         # routing. Keep their tensors for strict checkpoint compatibility, but
         # exclude them from every compact optimizer, including from_config loads.
@@ -396,16 +410,28 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             parameter.requires_grad_(False)
         self._compact_loss_entries = []
         self._last_compact_topology = None
+        self._compact_soft_intervention_scope = ("learned", None)
+        self._compact_build_options = None
         self.compact_parameter_migration = dict(copied_names=[], new_names=[], dropped_names=[],
                                                 optimizer_excluded_names=[], state_dropped_names=[],
                                                 cloned_route_and_reader_names=[])
 
     @classmethod
     def validate_config(cls, config):
-        return super().validate_config(config)
+        values = dict(config)
+        compact_mode = values.pop("compact_mode", "legacy")
+        if compact_mode not in cls._COMPACT_MODES:
+            raise ValueError("Compact configuration mode must be legacy or soft_only.")
+        return super().validate_config(values)
+
+    def get_config(self):
+        config = super().get_config()
+        if self.compact_mode != "legacy":
+            config["compact_mode"] = self.compact_mode
+        return config
 
     @classmethod
-    def from_unified_parent(cls, parent):
+    def from_unified_parent(cls, parent, *, compact_mode="legacy"):
         """Fork compact retrieval from one complete U-H state without resetting clocks."""
         if type(parent) is not UnifiedJointCore or parent.routing_mode != "hypergraph":
             raise ValueError("Compact initialization requires a non-compact unified parent.")
@@ -414,6 +440,7 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             config["base_model_config"], input_dataset=parent.input_dataset,
             input_capability=parent.input_capability,
             input_contract_sha256=parent.local_input_contract["sha256"],
+            compact_mode=compact_mode,
             routing_mode=parent.routing_mode, native_backend=parent.native_backend,
             checkpoint_pipeline=parent.checkpoint_pipeline,
             query_tile_size=parent.query_tile_size,
@@ -460,6 +487,16 @@ class CompactUnifiedJointCore(UnifiedJointCore):
 
     @property
     def compact_alpha(self):
+        if self.compact_mode == "soft_only":
+            if bool(self.compact_cut_active.detach().cpu()) or bool(self.compact_policy_frozen.detach().cpu()):
+                raise RuntimeError("soft_only compact mode cannot cut groups or freeze its policy.")
+            epoch = int(self.compact_local_epoch.detach().cpu())
+            if epoch < 1:
+                return 0.0
+            if epoch >= 200:
+                return 1.0
+            progress = (epoch - 1) / 199.0
+            return 0.1 + 0.45 * (1.0 - math.cos(math.pi * progress))
         if self.compact_arm != "merge" or bool(self.compact_cut_active.detach().cpu()):
             return 0.0
         epoch = int(self.compact_local_epoch.detach().cpu())
@@ -471,7 +508,7 @@ class CompactUnifiedJointCore(UnifiedJointCore):
         if type(local_epoch) is not int or local_epoch < 0:
             raise ValueError("Compact local epoch must be a nonnegative integer.")
         if arm not in self._COMPACT_ARMS:
-            raise ValueError("Compact arm must be common, singleton, or merge.")
+            raise ValueError("Compact arm must be common, singleton, merge, or soft_only.")
         current_epoch = int(self.compact_local_epoch.detach().cpu())
         cut_active = bool(self.compact_cut_active.detach().cpu())
         policy_frozen = bool(self.compact_policy_frozen.detach().cpu())
@@ -479,6 +516,15 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             raise ValueError("Compact hard-cut activation and policy-freeze state must agree.")
         if local_epoch < current_epoch:
             raise ValueError("Compact local epoch cannot move backward.")
+        if self.compact_mode == "soft_only":
+            if cut_active or policy_frozen:
+                raise ValueError("soft_only compact mode cannot resume with a cut or frozen policy.")
+            if arm == "common":
+                arm = "soft_only"
+            if arm != "soft_only":
+                raise ValueError("soft_only compact mode requires the soft_only phase arm.")
+        elif arm == "soft_only":
+            raise ValueError("The soft_only phase arm requires compact_mode='soft_only'.")
         if cut_active and arm != "merge":
             raise ValueError("A hard-cut compact state can only resume on the merge arm.")
         if not cut_active and arm == "merge" and local_epoch > 40:
@@ -493,6 +539,47 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             raise ValueError("Compact structural loss coefficients must be finite and nonnegative.")
         self.compact_tie_loss_coefficient.fill_(values[0])
         self.compact_capacity_loss_coefficient.fill_(values[1])
+        self.compact_tie_loss_coefficient_M.fill_(values[0])
+        self.compact_tie_loss_coefficient_E.fill_(values[0])
+        self.compact_capacity_loss_coefficient_M.fill_(values[1])
+        self.compact_capacity_loss_coefficient_E.fill_(values[1])
+
+    def set_compact_bank_loss_coefficients(self, *, tie_M=1.0, tie_E=1.0,
+                                           capacity_M=1.0, capacity_E=1.0,
+                                           structure_scale=None):
+        """Set v2 bank coefficients; the legacy scalar setter remains available."""
+        values = tuple(float(value) for value in (tie_M, tie_E, capacity_M, capacity_E))
+        if any(not torch.isfinite(torch.tensor(value)).item() or value < 0 for value in values):
+            raise ValueError("Compact bank loss coefficients must be finite and nonnegative.")
+        if structure_scale is not None:
+            scale = float(structure_scale)
+            if not torch.isfinite(torch.tensor(scale)).item() or scale < 0:
+                raise ValueError("Compact structural loss scale must be finite and nonnegative.")
+        else:
+            scale = None
+        for name, value in zip(("compact_tie_loss_coefficient_M", "compact_tie_loss_coefficient_E",
+                                "compact_capacity_loss_coefficient_M", "compact_capacity_loss_coefficient_E"), values):
+            getattr(self, name).fill_(value)
+        if scale is not None:
+            self.compact_structure_loss_scale.fill_(scale)
+
+    def set_compact_structure_loss_scale(self, scale):
+        value = float(scale)
+        if not torch.isfinite(torch.tensor(value)).item() or value < 0:
+            raise ValueError("Compact structural loss scale must be finite and nonnegative.")
+        self.compact_structure_loss_scale.fill_(value)
+
+    @contextmanager
+    def compact_soft_intervention_scope(self, intervention="full_shared", *, pair_slots=None):
+        """Temporarily intervene on the selected two-slot candidates during preparation."""
+        if intervention not in ("learned", "full_shared"):
+            raise ValueError("Compact soft intervention must be learned or full_shared.")
+        previous = self._compact_soft_intervention_scope
+        self._compact_soft_intervention_scope = (intervention, pair_slots)
+        try:
+            yield self
+        finally:
+            self._compact_soft_intervention_scope = previous
 
     def set_compact_loss_weights(self, tie, capacity):
         self.set_compact_loss_coefficients(tie, capacity)
@@ -504,6 +591,8 @@ class CompactUnifiedJointCore(UnifiedJointCore):
                             if name.startswith("compact_retrieval.compatibility.")))
 
     def activate_hard_cut(self):
+        if self.compact_mode == "soft_only":
+            raise ValueError("soft_only compact mode never activates a hard cut.")
         if bool(self.compact_cut_active.detach().cpu()):
             if not bool(self.compact_policy_frozen.detach().cpu()):
                 raise ValueError("Compact hard-cut activation and policy-freeze state must agree.")
@@ -520,9 +609,13 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             parameter.grad = None
 
     def _build_unified_retrieval(self, prepared, capture):
+        options = self._compact_build_options or self._compact_soft_intervention_scope
+        intervention, pair_slots = options
         prepared.compact_groups = self.compact_retrieval.build(
             prepared, alpha=self.compact_alpha,
             cut_active=bool(self.compact_cut_active.detach().cpu()),
+            soft_intervention=intervention,
+            soft_intervention_pair_slots=pair_slots,
         )
         self._last_compact_topology = [row.as_dict() for row in prepared.compact_groups.topology]
         prepared.compact_group_versions = self._compact_group_versions(prepared.compact_groups)
@@ -534,6 +627,10 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             compact.controls, compact.centroids, compact.lengths, compact.extents,
             compact.pair_logits, compact.pair_mask, compact.pair_slots,
         ]
+        if compact.pair_types is not None:
+            tensors.append(compact.pair_types)
+        if compact.soft_intervention_pair_mask is not None:
+            tensors.append(compact.soft_intervention_pair_mask)
         for metadata in (compact.bank_group_indices, compact.bank_group_masks):
             if metadata is not None:
                 tensors.extend(metadata)
@@ -542,7 +639,7 @@ class CompactUnifiedJointCore(UnifiedJointCore):
     def _config_key(self):
         return (*super()._config_key(), int(self.compact_local_epoch.detach().cpu()),
                 int(self.compact_arm_code.detach().cpu()), bool(self.compact_cut_active.detach().cpu()),
-                bool(self.compact_policy_frozen.detach().cpu()))
+                bool(self.compact_policy_frozen.detach().cpu()), int(self.compact_mode_code.detach().cpu()))
 
     def _validate_prepared_state(self, organization):
         super()._validate_prepared_state(organization)
@@ -552,8 +649,18 @@ class CompactUnifiedJointCore(UnifiedJointCore):
         if current != organization.compact_group_versions:
             raise ValueError("Prepared compact membership or controls changed after preparation.")
 
-    def prepare(self, scene, *, include_compact_loss=True, **options):
-        prepared = super().prepare(scene, **options)
+    def prepare(self, scene, *, include_compact_loss=True, compact_soft_intervention=None,
+                compact_soft_intervention_pair_slots=None, **options):
+        if compact_soft_intervention is None:
+            scoped_options = self._compact_soft_intervention_scope
+        else:
+            scoped_options = (compact_soft_intervention, compact_soft_intervention_pair_slots)
+        previous_options = self._compact_build_options
+        self._compact_build_options = scoped_options
+        try:
+            prepared = super().prepare(scene, **options)
+        finally:
+            self._compact_build_options = previous_options
         if (include_compact_loss and self.training and torch.is_grad_enabled()
                 and self.compact_alpha > 0 and not self.compact_cut_active):
             raw_scene = prepared.local_input_source_scene
@@ -573,7 +680,17 @@ class CompactUnifiedJointCore(UnifiedJointCore):
         records = getattr(organization, "joint_records", None)
         if records is None:
             raise ValueError("Compact structural losses require a prepared organization.")
+        if self.compact_mode == "soft_only":
+            return self.compact_retrieval.structural_bank_losses(compact, records)
         return self.compact_retrieval.structural_losses(compact, records)
+
+    def compact_structural_loss_bank_components(self, organization):
+        """Expose raw bank terms and candidate diagnostics for runner calibration."""
+        compact = getattr(organization, "compact_groups", organization)
+        records = getattr(organization, "joint_records", None)
+        if records is None:
+            raise ValueError("Compact structural losses require a prepared organization.")
+        return self.compact_retrieval.structural_bank_losses(compact, records)
 
     def joint_begin_microbatch(self):
         super().joint_begin_microbatch()
@@ -583,12 +700,58 @@ class CompactUnifiedJointCore(UnifiedJointCore):
         result = super().joint_microbatch_result()
         alpha = self.compact_alpha
         if alpha <= 0 or bool(self.compact_cut_active.detach().cpu()):
+            if self.compact_mode == "soft_only":
+                result.setdefault("telemetry", {}).update(
+                    compact_eligible_pairs_M=0,
+                    compact_eligible_pairs_E=0,
+                    compact_valid_scenes_M=0,
+                    compact_valid_scenes_E=0,
+                )
             self._compact_loss_entries = []
             return result
         cases = {}
         for keys, components in self._compact_loss_entries:
             for index, key in enumerate(keys):
-                cases[key] = (components["tie"][index], components["capacity"][index])
+                if self.compact_mode == "soft_only":
+                    cases[key] = components, index
+                else:
+                    cases[key] = (components["tie"][index], components["capacity"][index])
+        if self.compact_mode == "soft_only":
+            telemetry = result.setdefault("telemetry", {})
+            for bank in ("M", "E"):
+                telemetry[f"compact_eligible_pairs_{bank}"] = sum(
+                    int(components[f"candidate_count_{bank}"][index].detach().cpu())
+                    for components, index in cases.values()
+                )
+                telemetry[f"compact_valid_scenes_{bank}"] = sum(
+                    int(bool(components[f"valid_{bank}"][index].detach().cpu()))
+                    for components, index in cases.values()
+                )
+            additive = {}
+            coefficient_names = {
+                ("tie", "M"): "compact_tie_loss_coefficient_M",
+                ("tie", "E"): "compact_tie_loss_coefficient_E",
+                ("capacity", "M"): "compact_capacity_loss_coefficient_M",
+                ("capacity", "E"): "compact_capacity_loss_coefficient_E",
+            }
+            for term in ("tie", "capacity"):
+                for bank in ("M", "E"):
+                    valid_name = f"valid_{bank}"
+                    selected = [components[f"{term}_{bank}"][index]
+                                for components, index in cases.values()
+                                if bool(components[valid_name][index].detach().cpu())]
+                    if not selected:
+                        continue
+                    raw_sum = sum(selected[1:], selected[0])
+                    coefficient = getattr(self, coefficient_names[(term, bank)]).to(raw_sum)
+                    scale = self.compact_structure_loss_scale.to(raw_sum)
+                    additive[f"compact_{term}_{bank}"] = {
+                        "numerator": alpha * scale * coefficient * raw_sum,
+                        "denominator": len(selected),
+                    }
+            result["additive_losses"] = additive
+            self._compact_loss_entries = []
+            return result
         if cases:
             zero = next(self.compact_retrieval.parameters()).sum() * 0
             tie = sum((row[0] for row in cases.values()), zero)
@@ -633,12 +796,18 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             topology = [row.as_dict() for row in compact.topology]
         return dict(
             schema=self.compact_state_schema,
+            compact_mode=self.compact_mode,
             local_epoch=int(self.compact_local_epoch.detach().cpu()),
             arm=self.compact_arm,
             cut_active=bool(self.compact_cut_active.detach().cpu()),
             policy_frozen=bool(self.compact_policy_frozen.detach().cpu()),
             tie_loss_coefficient=float(self.compact_tie_loss_coefficient.detach().cpu()),
             capacity_loss_coefficient=float(self.compact_capacity_loss_coefficient.detach().cpu()),
+            tie_loss_coefficient_M=float(self.compact_tie_loss_coefficient_M.detach().cpu()),
+            tie_loss_coefficient_E=float(self.compact_tie_loss_coefficient_E.detach().cpu()),
+            capacity_loss_coefficient_M=float(self.compact_capacity_loss_coefficient_M.detach().cpu()),
+            capacity_loss_coefficient_E=float(self.compact_capacity_loss_coefficient_E.detach().cpu()),
+            structure_loss_scale=float(self.compact_structure_loss_scale.detach().cpu()),
             cut_rule=self.compact_retrieval.CUT_RULE,
             topology_rule=self.compact_retrieval.TOPOLOGY_RULE,
             last_topology=topology,
@@ -651,12 +820,16 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             raise ValueError("Compact checkpoint state is incomplete.")
         if state["schema"] != self.compact_state_schema:
             raise ValueError("Compact checkpoint state schema differs.")
+        if state.get("compact_mode", "legacy") != self.compact_mode:
+            raise ValueError("Compact checkpoint mode differs from the configured core mode.")
         if state["cut_rule"] != self.compact_retrieval.CUT_RULE or state["topology_rule"] != self.compact_retrieval.TOPOLOGY_RULE:
             raise ValueError("Compact checkpoint topology or cut rule differs.")
         local_epoch = state["local_epoch"]
         arm = state["arm"]
         cut_active = bool(state["cut_active"])
         policy_frozen = bool(state["policy_frozen"])
+        if self.compact_mode == "soft_only" and (cut_active or policy_frozen):
+            raise ValueError("soft_only compact checkpoints cannot contain a hard cut or frozen policy.")
         if cut_active != policy_frozen:
             raise ValueError("Compact checkpoint cut_active and policy_frozen fields must agree.")
         if cut_active and (arm != "merge" or int(local_epoch) < 40):
@@ -665,6 +838,15 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             raise ValueError("An uncut merge checkpoint cannot resume after local epoch 40.")
         self.set_compact_phase(int(local_epoch), arm)
         self.set_compact_loss_coefficients(state["tie_loss_coefficient"], state["capacity_loss_coefficient"])
+        bank_keys = ("tie_loss_coefficient_M", "tie_loss_coefficient_E",
+                     "capacity_loss_coefficient_M", "capacity_loss_coefficient_E")
+        if all(key in state for key in bank_keys):
+            self.set_compact_bank_loss_coefficients(
+                tie_M=state["tie_loss_coefficient_M"], tie_E=state["tie_loss_coefficient_E"],
+                capacity_M=state["capacity_loss_coefficient_M"],
+                capacity_E=state["capacity_loss_coefficient_E"],
+                structure_scale=state.get("structure_loss_scale", 1.0),
+            )
         if cut_active:
             self.activate_hard_cut()
         self._last_compact_topology = state.get("last_topology")
@@ -672,6 +854,28 @@ class CompactUnifiedJointCore(UnifiedJointCore):
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
+        # Only true pre-v2 state dicts (which lack the discriminator buffer)
+        # receive compatibility defaults. A partially written v2 checkpoint
+        # must still fail strict loading instead of silently changing its
+        # effective structural objective.
+        mode_key = prefix + "compact_mode_code"
+        if mode_key not in state_dict:
+            legacy_values = {
+                "compact_mode_code": torch.zeros_like(self.compact_mode_code),
+                "compact_tie_loss_coefficient_M": state_dict.get(
+                    prefix + "compact_tie_loss_coefficient", self.compact_tie_loss_coefficient_M),
+                "compact_tie_loss_coefficient_E": state_dict.get(
+                    prefix + "compact_tie_loss_coefficient", self.compact_tie_loss_coefficient_E),
+                "compact_capacity_loss_coefficient_M": state_dict.get(
+                    prefix + "compact_capacity_loss_coefficient", self.compact_capacity_loss_coefficient_M),
+                "compact_capacity_loss_coefficient_E": state_dict.get(
+                    prefix + "compact_capacity_loss_coefficient", self.compact_capacity_loss_coefficient_E),
+                "compact_structure_loss_scale": torch.ones_like(self.compact_structure_loss_scale),
+            }
+            for name, value in legacy_values.items():
+                key = prefix + name
+                if key not in state_dict:
+                    state_dict[key] = value.detach().clone() if torch.is_tensor(value) else value
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
                                       missing_keys, unexpected_keys, error_msgs)
         if hasattr(self, "compact_policy_frozen"):
@@ -683,8 +887,14 @@ class CompactUnifiedJointCore(UnifiedJointCore):
             frozen = bool(self.compact_policy_frozen.detach().cpu())
             arm_code = int(self.compact_arm_code.detach().cpu())
             epoch = int(self.compact_local_epoch.detach().cpu())
+            mode_code = int(self.compact_mode_code.detach().cpu())
+            if mode_code != self._COMPACT_MODES[self.compact_mode]:
+                error_msgs.append("compact checkpoint mode differs from its configuration")
             if cut_active != frozen:
                 error_msgs.append("compact_cut_active and compact_policy_frozen state must agree")
+            if self.compact_mode == "soft_only" and (cut_active or frozen
+                    or arm_code != self._COMPACT_ARMS["soft_only"]):
+                error_msgs.append("soft_only compact state cannot cut, freeze, or change phase arm")
             if cut_active and (arm_code != self._COMPACT_ARMS["merge"] or epoch < 40):
                 error_msgs.append("a compact hard-cut state must be merge arm at local epoch 40 or later")
             if not cut_active and arm_code == self._COMPACT_ARMS["merge"] and epoch > 40:

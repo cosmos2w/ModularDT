@@ -47,6 +47,10 @@ def _is_round12_scratch(config: Mapping[str, Any]) -> bool:
     return config["initialization"].get("source_kind") == "scratch_compact_config"
 
 
+def _is_softonly(config: Mapping[str, Any]) -> bool:
+    return config.get("round12", {}).get("schema") == "thermal_compact_softonly_v2"
+
+
 def _initialization_path(config: Mapping[str, Any]) -> Path:
     value = (config["dataset"]["base_recipe_path"] if _is_round12_scratch(config)
              else config["initialization"]["source_checkpoint"])
@@ -258,7 +262,10 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
                 or (optimizer.get("kind"), optimizer.get("schedule")) !=
                     ("fresh_adamw_from_config", "constant_config_lr")):
             raise ValueError("Scratch compact runs forbid checkpoint/parent bindings and require fresh TRAIN600/VAL89 initialization.")
-        if (compact.get("schema") != "thermal_compact_round12_v1"
+        if _is_softonly(config):
+            from .thermal_soft_organization import validate_softonly_config
+            validate_softonly_config(config)
+        elif (compact.get("schema") != "thermal_compact_round12_v1"
                 or (compact.get("role"), compact.get("compact_arm")) != ("R1", "merge")
                 or compact.get("tie_loss_gradient") != "stop_outer_probability_v1"
                 or compact.get("shared_prefix_epochs") != 20
@@ -271,7 +278,8 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
         checkpoints = training.get("checkpoint_epochs")
         horizon = training["local_horizon"]
         if (horizon != 1000 or training["first_segment_epochs"] != horizon
-                or checkpoints != [20, 40, *range(100, horizon + 1, 100)]
+                or checkpoints != (list(range(100, horizon + 1, 100)) if _is_softonly(config)
+                                   else [20, 40, *range(100, horizon + 1, 100)])
                 or training.get("checkpoint_every") != 100
                 or training["seed"] != 0 or training["microbatch_cases"] != 24):
             raise ValueError("Scratch compact1000 requires the frozen full1000 schedule and 20/40/100-step milestones.")
@@ -356,6 +364,15 @@ def verify_storage(config: Mapping[str, Any], *, output: str | Path | None = Non
     if free_bytes - int(estimated_bytes) < headroom:
         raise RuntimeError("The requested run would breach configured /data2 free-space headroom.")
     current_bytes = _tree_bytes(root) if root.exists() else 0
+    related_bytes = 0
+    for raw in storage.get("related_output_roots", ()):
+        related = Path(raw).expanduser().resolve(strict=True)
+        if not related.is_relative_to(data2.resolve()) or related.stat().st_dev != data2_stat.st_dev:
+            raise RuntimeError("Related research evidence must remain on the mounted /data2 filesystem.")
+        if related == root or related.is_relative_to(root) or root.is_relative_to(related):
+            raise ValueError("Related evidence roots must not overlap the scientific run root.")
+        related_bytes += _tree_bytes(related)
+    current_bytes += related_bytes
     output_budget = int(storage["max_output_bytes"])
     if current_bytes + int(estimated_bytes) > output_budget:
         raise RuntimeError(
@@ -371,6 +388,7 @@ def verify_storage(config: Mapping[str, Any], *, output: str | Path | None = Non
         "filesystem_device": int(data2_stat.st_dev),
         "free_bytes_before": free_bytes,
         "output_bytes_before": current_bytes,
+        "related_evidence_bytes_before": related_bytes,
         "estimated_new_bytes": int(estimated_bytes),
         "output_budget_bytes": output_budget,
         "estimated_peak_temporary_bytes": int(peak_temporary_bytes),
@@ -634,13 +652,14 @@ def _scratch_compact_components(config: Mapping[str, Any], device: torch.device)
         fresh = UnifiedJointCore(base_config, input_dataset="thermal", routing_mode="hypergraph")
         # Copy only newly generated random tensors inside this initialization;
         # no saved model or checkpoint enters this path.
-        core = CompactUnifiedJointCore.from_unified_parent(fresh)
+        core = (CompactUnifiedJointCore.from_unified_parent(fresh, compact_mode="soft_only")
+                if _is_softonly(config) else CompactUnifiedJointCore.from_unified_parent(fresh))
     core.set_execution_options(**config["execution"]["options"])
     for name, value in config["initialization"]["fresh_controller_lambda0"].items():
         core.joint_budget.duals[name].set_calibrated_lambda0(float(value))
     if int(core.joint_epoch) != 3000 or int(core.joint_macro_clock) != 0:
         raise RuntimeError("Scratch core must start with fresh work-controller clocks.")
-    core.set_compact_phase(0, arm="merge")
+    core.set_compact_phase(0, arm="soft_only" if _is_softonly(config) else "merge")
     adapter = ThermalContentHypergraphAdapterV2(
         state["normalization_stats"], core=core,
         nx=state["native_grid_nx_ny"][0], ny=state["native_grid_nx_ny"][1],
@@ -897,6 +916,19 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
         )
         self._round12_local_epoch = 0
         self.sampling_dataset_id = _sampling_dataset_id(self.identity_payload())
+        if _is_softonly(config):
+            from .thermal_soft_organization import SoftOrganizationRuntime
+            self.soft_organization = SoftOrganizationRuntime(self)
+
+    def before_optimizer_step(self, model, optimizer, losses, work, *, epoch, update_index):
+        runtime = getattr(self, "soft_organization", None)
+        if runtime is not None:
+            runtime.before_step(model, optimizer, losses, work, epoch=epoch, update_index=update_index)
+
+    def completed_training_epoch(self, model, engine, epoch, output, row):
+        runtime = getattr(self, "soft_organization", None)
+        if runtime is not None:
+            runtime.completed_epoch(model, engine, epoch, Path(output), row)
 
     def training_state_dict(self):
         base_reader = getattr(super(ResearchThermalProvider, self), "training_state_dict", None)
@@ -918,7 +950,7 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
         current_epoch = getattr(core, "joint_epoch", None)
         if isinstance(current_epoch, torch.Tensor):
             current_epoch = int(current_epoch.detach().cpu())
-        return {
+        result = {
             "schema": "thermal_compact_round12_provider_state_v1",
             "base": copy.deepcopy(dict(base_state)) if isinstance(base_state, Mapping) else {},
             "compact_state": copy.deepcopy(compact_export()),
@@ -931,6 +963,10 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "optimizer_updates_since_parent": int(current_macro) - self._round12_parent_macro_clock,
             },
         }
+        runtime = getattr(self, "soft_organization", None)
+        if runtime is not None:
+            result["soft_organization"] = runtime.state_dict()
+        return result
 
     def load_training_state_dict(self, state):
         if not isinstance(state, Mapping) or state.get("schema") != "thermal_compact_round12_provider_state_v1":
@@ -948,6 +984,9 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
         if not callable(compact_loader):
             raise TypeError("Round12 resume requires the compact core's explicit state loader.")
         compact_loader(state["compact_state"])
+        runtime = getattr(self, "soft_organization", None)
+        if runtime is not None:
+            runtime.load_state_dict(state["soft_organization"])
         clocks = state.get("clocks")
         expected = self._research_config["initialization"]["clock_mapping"]
         if not isinstance(clocks, Mapping) or any(clocks.get(key) != expected[key] for key in (
@@ -1211,7 +1250,7 @@ class ResearchTrainingEngine(TrainingEngine):
         self.compact_arm = compact_arm
         self.compact_cut_epoch = int(compact_cut_epoch)
         self.round12_clock_mapping = copy.deepcopy(dict(round12_clock_mapping or {}))
-        if compact_arm is not None and compact_arm not in ("common", "singleton", "merge"):
+        if compact_arm is not None and compact_arm not in ("common", "singleton", "merge", "soft_only"):
             raise ValueError("Compact arm must be common, singleton, or merge.")
         if self.compact_cut_epoch < 1:
             raise ValueError("Compact hard-cut epoch must be positive.")
@@ -1402,7 +1441,10 @@ class ResearchTrainingEngine(TrainingEngine):
         if phase is None or arm is None or type(update_index) is not int:
             raise TypeError("Research optimizer updates require phase, arm, and macro update index.")
         native_core = getattr(model, "core", model)
-        if _is_round12_scratch(getattr(provider, "_research_config", {"initialization": {}})):
+        soft_runtime = getattr(provider, "soft_organization", None)
+        if soft_runtime is not None:
+            soft_runtime.before_update(self, model, provider, optimizer, int(epoch), update_index)
+        elif _is_round12_scratch(getattr(provider, "_research_config", {"initialization": {}})):
             if self._execution_runtime_path is None:
                 raise RuntimeError("Scratch phase transitions require the owned run directory.")
             _scratch_round12_boundary(self._execution_runtime_path.parent, model, provider,
@@ -1900,7 +1942,8 @@ def _engine_for(config, *, device: torch.device, parent_age: int, microbatch: in
             "controller_parent_coordinate", parent_age,
         ),
         compact_arm=config.get("round12", {}).get("compact_arm"),
-        compact_cut_epoch=int(config.get("round12", {}).get("cut_after_local_epoch", 40)),
+        compact_cut_epoch=(40 if _is_softonly(config) else
+                           int(config.get("round12", {}).get("cut_after_local_epoch", 40))),
         round12_clock_mapping=config["initialization"].get("clock_mapping"),
     )
 
@@ -1995,7 +2038,7 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
             pending_runtime_microbatch_override = None
         previous_handlers = _install_clean_stop_handlers(output)
         try:
-            return active_engine.fit(
+            result = active_engine.fit(
                 model, provider, output,
                 identity=identity,
                 arm=arm,
@@ -2003,6 +2046,15 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
                 resume_checkpoint=current_resume,
                 allow_microbatch_change=allow_microbatch_change,
             )
+            if _is_softonly(provider._research_config):
+                payload, _ = _read_run_checkpoint(output, "latest")
+                if int(payload["epoch"]) == int(provider._research_config["training"]["local_horizon"]):
+                    from .thermal_soft_reviews import run_final_validation
+                    runtime = provider.soft_organization
+                    remaining = max(0.0, 14400.0 - runtime.state["review_elapsed_seconds"])
+                    result["softonly_terminal_validation"] = run_final_validation(
+                        output, str(active_engine.device), budget_seconds=remaining)
+            return result
         except (torch.cuda.OutOfMemoryError, RuntimeError) as error:
             if isinstance(error, ResearchLocalOOMExhausted):
                 raise

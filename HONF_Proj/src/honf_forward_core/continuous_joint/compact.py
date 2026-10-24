@@ -74,6 +74,9 @@ class CompactOrganization:
     topology: tuple[SceneGroupTopology, ...]
     bank_group_indices: tuple[Tensor, Tensor] | None = None
     bank_group_masks: tuple[Tensor, Tensor] | None = None
+    pair_types: Tensor | None = None  # [B,P], 0=M and 1=E destination bank
+    soft_intervention: str = "learned"
+    soft_intervention_pair_mask: Tensor | None = None
 
     @property
     def live_counts(self) -> Tensor:
@@ -432,8 +435,39 @@ class CompactGroupRetrieval(nn.Module):
             membership = membership.scatter_add(1, indices[..., None].expand_as(values), values)
         return membership
 
-    def build(self, organization, *, alpha: float, cut_active: bool) -> CompactOrganization:
+    @staticmethod
+    def _pair_slot_selection(pair_slots: Tensor, candidate_mask: Tensor, requested_slots):
+        if requested_slots is None:
+            return candidate_mask
+        if torch.is_tensor(requested_slots):
+            requested_slots = requested_slots.detach().cpu().tolist()
+        if (isinstance(requested_slots, (tuple, list)) and len(requested_slots) == 2
+                and all(type(value) is int for value in requested_slots)):
+            requested_slots = [requested_slots]
+        if not isinstance(requested_slots, (tuple, list)):
+            raise TypeError("Soft intervention pair slots must be a pair or a sequence of pairs.")
+        normalized = set()
+        for pair in requested_slots:
+            if (not isinstance(pair, (tuple, list)) or len(pair) != 2
+                    or any(type(value) is not int or value < 0 for value in pair)):
+                raise ValueError("Each soft intervention target must contain two nonnegative slot indices.")
+            normalized.add(tuple(sorted(pair)))
+        selected = torch.zeros_like(candidate_mask)
+        for left, right in normalized:
+            selected |= ((pair_slots[..., 0] == left) & (pair_slots[..., 1] == right))
+            selected |= ((pair_slots[..., 0] == right) & (pair_slots[..., 1] == left))
+        selected &= candidate_mask
+        if normalized and not bool(selected.any().detach().cpu()):
+            raise ValueError("No eligible sibling candidate matched the requested soft intervention slots.")
+        return selected
+
+    def build(self, organization, *, alpha: float, cut_active: bool,
+              soft_intervention: str = "learned", soft_intervention_pair_slots=None) -> CompactOrganization:
         """Build metadata once, then batch all live control and membership math."""
+        if soft_intervention not in ("learned", "full_shared"):
+            raise ValueError("Soft intervention must be learned or full_shared.")
+        if cut_active and (soft_intervention != "learned" or soft_intervention_pair_slots is not None):
+            raise ValueError("Soft interventions require the uncut two-slot compact topology.")
         scene, records = organization.scene, organization.joint_records
         batch = scene.batch_size
         reference = organization.module_states
@@ -452,6 +486,9 @@ class CompactGroupRetrieval(nn.Module):
         pair_types = torch.tensor(pair_type_rows, device=device, dtype=torch.long).reshape(batch, max_pairs)
         pair_slots = torch.tensor(pair_slot_rows, device=device, dtype=torch.long).reshape(batch, max_pairs, 2)
         eligible_pairs = torch.tensor(pair_mask_rows, device=device, dtype=torch.bool).reshape(batch, max_pairs)
+        intervention_pairs = self._pair_slot_selection(
+            pair_slots, eligible_pairs, soft_intervention_pair_slots,
+        ) if soft_intervention_pair_slots is not None else eligible_pairs
         pair_logits = self._pair_logits(organization, pair_indices, pair_types, eligible_pairs)
         accepted_rows = (pair_logits.detach() > 0).cpu().tolist()
 
@@ -498,21 +535,43 @@ class CompactGroupRetrieval(nn.Module):
         group_mask = torch.tensor(mask_rows, device=device, dtype=torch.bool).reshape(batch, max_groups)
         native_states = torch.cat((organization.module_states, organization.environment_states), 1)
         descriptors = self._descriptors(organization, native_states, ancestry, ancestry_mask, group_types, group_mask)
-        if not cut_active and alpha > 0 and max_pairs:
+        if not cut_active and max_pairs and (alpha > 0 or soft_intervention == "full_shared"):
             pair_ancestry_mask = eligible_pairs[..., None].expand(-1, -1, 2)
             pair_descriptors = self._descriptors(organization, native_states, pair_indices,
                 pair_ancestry_mask, pair_types, eligible_pairs)
-            weight = (float(alpha) * pair_logits.sigmoid() * eligible_pairs)[..., None, None]
-            blended = []
-            for values, combined in zip(descriptors, pair_descriptors):
-                width = values.shape[-1]
-                leaf = self._gather_children(values, pair_slots)
-                delta = weight * (combined[:, :, None] - leaf)
-                scatter_indices = pair_slots.reshape(batch, max_pairs * 2, 1).expand(-1, -1, width)
-                correction = torch.zeros_like(values).scatter_add(1, scatter_indices,
-                    delta.reshape(batch, max_pairs * 2, width))
-                blended.append(values + correction)
-            descriptors = tuple(blended)
+            if soft_intervention == "full_shared":
+                # A scoped intervention gives both original candidate slots the
+                # same pair descriptor. It never merges the slots or changes
+                # candidate construction, pair probability, or native records.
+                shared_descriptors = []
+                flat_indices = pair_slots.reshape(batch, max_pairs * 2)
+                selected_children = intervention_pairs[..., None].expand(-1, -1, 2)
+                selected_children_flat = selected_children.reshape(batch, max_pairs * 2)
+                selected_slots = torch.zeros_like(group_mask, dtype=torch.long).scatter_add(
+                    1, flat_indices, selected_children_flat.to(torch.long),
+                ).bool()
+                for values, combined in zip(descriptors, pair_descriptors):
+                    width = values.shape[-1]
+                    replacements = combined[:, :, None, :].expand(-1, -1, 2, -1)
+                    replacements = replacements * selected_children[..., None].to(replacements)
+                    shared_by_slot = torch.zeros_like(values).scatter_add(
+                        1, flat_indices[..., None].expand(-1, -1, width),
+                        replacements.reshape(batch, max_pairs * 2, width),
+                    )
+                    shared_descriptors.append(torch.where(selected_slots[..., None], shared_by_slot, values))
+                descriptors = tuple(shared_descriptors)
+            else:
+                weight = (float(alpha) * pair_logits.sigmoid() * intervention_pairs)[..., None, None]
+                blended = []
+                for values, combined in zip(descriptors, pair_descriptors):
+                    width = values.shape[-1]
+                    leaf = self._gather_children(values, pair_slots)
+                    delta = weight * (combined[:, :, None] - leaf)
+                    scatter_indices = pair_slots.reshape(batch, max_pairs * 2, 1).expand(-1, -1, width)
+                    correction = torch.zeros_like(values).scatter_add(1, scatter_indices,
+                        delta.reshape(batch, max_pairs * 2, width))
+                    blended.append(values + correction)
+                descriptors = tuple(blended)
         controls, centroids, lengths, extents = descriptors
         bank_indices, bank_masks = [], []
         for bank in (0, 1):
@@ -526,7 +585,9 @@ class CompactGroupRetrieval(nn.Module):
             bank_indices, bank_masks)
         return CompactOrganization(membership, group_mask, group_types, controls, centroids, lengths, extents,
             pair_logits, eligible_pairs if not cut_active else torch.zeros_like(eligible_pairs),
-            pair_slots, tuple(topology_rows), tuple(bank_indices), tuple(bank_masks))
+            pair_slots, tuple(topology_rows), tuple(bank_indices), tuple(bank_masks), pair_types,
+            soft_intervention, intervention_pairs if soft_intervention_pair_slots is not None
+            or soft_intervention == "full_shared" else None)
 
     def query_access(self, compact: CompactOrganization, organization, query, query_states: Tensor,
                      local_envelope: Tensor, query_mask: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -584,6 +645,48 @@ class CompactGroupRetrieval(nn.Module):
         present = records.present.sum(-1).to(rows)
         capacity = (present - probability.sum(-1)) / present.clamp_min(1)
         return {"tie": tie, "capacity": capacity}
+
+    @staticmethod
+    def structural_bank_losses(compact: CompactOrganization, records) -> dict[str, Tensor]:
+        """Return legacy C/p values split into per-scene destination-bank means."""
+        rows = compact.membership
+        batch, pairs = compact.pair_mask.shape
+        if pairs:
+            pair_types = getattr(compact, "pair_types", None)
+            if pair_types is None:
+                pair_types = compact.group_types.gather(1, compact.pair_slots[..., 0])
+            children = CompactGroupRetrieval._gather_children(rows, compact.pair_slots)
+            delta = (children[:, :, 0] - children[:, :, 1]).abs()
+            eligible = records.eligible
+            module_count = records.module_count
+            distance_sum = rows.new_zeros(batch, pairs)
+            type_count = rows.new_zeros(batch, 1)
+            for donor_slice in (slice(0, module_count), slice(module_count, rows.shape[-1])):
+                valid = eligible[:, donor_slice]
+                count = valid.sum(-1, keepdim=True)
+                distance_sum = distance_sum + (delta[:, :, donor_slice] * valid[:, None]).sum(-1) / count.clamp_min(1)
+                type_count = type_count + (count > 0).to(rows)
+            discrepancy = distance_sum / type_count.clamp_min(1)
+            probability = compact.pair_logits.sigmoid() * compact.pair_mask
+        else:
+            pair_types = torch.empty((batch, 0), dtype=torch.long, device=rows.device)
+            discrepancy = rows.new_zeros(batch, 0)
+            probability = rows.new_zeros(batch, 0)
+
+        result = {}
+        for bank, name in ((0, "M"), (1, "E")):
+            candidates = compact.pair_mask & (pair_types == bank)
+            count = candidates.sum(-1)
+            denominator = count.clamp_min(1).to(rows)
+            bank_probability = probability * candidates
+            bank_discrepancy = discrepancy * candidates
+            result[f"tie_{name}"] = (bank_probability.detach() * bank_discrepancy).sum(-1) / denominator
+            result[f"capacity_{name}"] = (count.to(rows) - bank_probability.sum(-1)) / denominator
+            result[f"candidate_count_{name}"] = count
+            result[f"valid_{name}"] = count > 0
+            result[f"p_{name}"] = bank_probability
+            result[f"C_{name}"] = bank_discrepancy
+        return result
 
 
 __all__ = [
