@@ -32,7 +32,9 @@
     "preferred_devices": [
       "cuda:0"
     ],
-    "precision": "fp32"
+    "precision": "fp32",
+    "cuda_visible_devices": "GPU-233fcd85-5c6a-6212-3f44-655252afec70",
+    "visibility_scope": "fresh initialization on physicalGPU0 only; future resume preserves this one-stream visibility"
   },
   "storage": {
     "output_root": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_contextual_frontier_jd_dev_v1",
