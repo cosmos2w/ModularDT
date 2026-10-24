@@ -2112,7 +2112,7 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
                     microbatch=nominal_microbatch,
                     diagnostic=provider._research_case_limit is not None,
                 )
-                _extend_execution_horizon(active_engine, engine.config.total_epochs)
+                _extend_execution_horizon(active_engine, engine.config.total_epochs, provider)
                 active_engine.bind_execution_runtime(
                     output / "execution_runtime.json", nominal_microbatch_cases=nominal_microbatch,
                 )
@@ -2415,8 +2415,10 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
         permitted_devices=permitted,
     )
 
-def _extend_execution_horizon(engine: ResearchTrainingEngine, horizon: int) -> None:
+def _extend_execution_horizon(engine: ResearchTrainingEngine, horizon: int, provider=None) -> None:
     """Extend execution/review clocks while leaving provider and LR schedules sealed."""
+    if provider is not None:
+        provider._round6_sampling_epoch_limit = _parent_age(provider._research_config) + horizon
     if horizon <= engine.config.total_epochs:
         return
     if horizon % 100:
@@ -2499,7 +2501,7 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
         microbatch=runtime_config["training"]["microbatch_cases"],
         diagnostic=diagnostic,
     )
-    _extend_execution_horizon(engine, execution_horizon)
+    _extend_execution_horizon(engine, execution_horizon, provider)
     identity = _experiment_identity(
         config,
         provider,

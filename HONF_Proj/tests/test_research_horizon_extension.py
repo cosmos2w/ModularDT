@@ -32,6 +32,17 @@ def test_execution_extension_requires_explicit_opt_in_and_preserves_schedule():
     assert _resume_identity_amendment(saved, json.loads(json.dumps(current)), allow_horizon_extension=True)
 
 
+def test_extended_sampler_bound_does_not_change_provider_schedule_or_identity():
+    engine = SimpleNamespace(config=EngineConfig(seed=0, microbatch_cases=24, effective_cases=48,
+        total_epochs=1000, training_mode="joint", monitor_every=10))
+    provider = SimpleNamespace(total_epochs=1000, _round6_sampling_epoch_limit=1000,
+        _research_config={"initialization": {"normalization_mode": "scratch_train600_stats"}})
+    _extend_execution_horizon(engine, 2500, provider)
+    assert provider._round6_sampling_epoch_limit == 2500
+    assert provider.total_epochs == 1000
+    assert engine.config.checkpoint_epochs[-1] == 2500
+
+
 @pytest.mark.parametrize("change", ["lr", "sampling", "batch", "cadence", "milestone", "workflow", "shorter"])
 def test_extension_rejects_other_changes(change):
     saved, current = identities()
