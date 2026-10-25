@@ -1,0 +1,44 @@
+{
+  "schema": "thermal_spatial_groups_r13_1_reserve_t_v1",
+  "route": "T",
+  "status": "selected_after_both_full_train500_evaluations",
+  "reason": "From internal epoch400 to 500, F13-0 improved all nine physical means and F13-1 improved eight of nine (material temperature rose 0.77%); fluid-temperature means improved by about 11% in each arm. F13-1 had better native all-nine mean and p90 results at full-data500. Continue the baseline optimization of both original arms without changing their objective or scientific recipe.",
+  "source_basis": {
+    "source_age": 500,
+    "source_kind": "literal_full_train500_checkpoint",
+    "target_age": 1000,
+    "additional_epochs": 500,
+    "training_membership": "full_train600",
+    "preserve_named_adam_provider_rng_sampler_and_absolute_schedule": true,
+    "scientific_configuration_mutations": []
+  },
+  "base_configs": {
+    "F13-0": "thermal_spatial_groups_f13_0_fulltrain_mature_v1.json",
+    "F13-1": "thermal_spatial_groups_f13_1_fulltrain_mature_v1.json"
+  },
+  "reserve": {
+    "max_process_associated_hours_total": 16,
+    "per_arm_max_added_provider_elapsed_seconds": 28800,
+    "clean_save_reserve_seconds": 600,
+    "provider_elapsed_clock_scope": "cumulative elapsed recorded by the Thermal provider from its maintained budget binding; source elapsed is retained on checkpoint restore; excludes provider construction and pre-bind process time",
+    "external_process_charge_scope": "measured separately with the existing GNU time wrapper"
+  },
+  "arms": [
+    {
+      "arm": "F13-0",
+      "run_root": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_0",
+      "source_checkpoint": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_0/checkpoints/epoch_0500_model.pt",
+      "source_saved_provider_elapsed_seconds": 19553.2731,
+      "source_elapsed_ceiling_seconds": 19554,
+      "absolute_cumulative_provider_elapsed_cap_seconds": 48354
+    },
+    {
+      "arm": "F13-1",
+      "run_root": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_1",
+      "source_checkpoint": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_1/checkpoints/epoch_0500_model.pt",
+      "source_saved_provider_elapsed_seconds": 21551.9680,
+      "source_elapsed_ceiling_seconds": 21552,
+      "absolute_cumulative_provider_elapsed_cap_seconds": 50352
+    }
+  ]
+}

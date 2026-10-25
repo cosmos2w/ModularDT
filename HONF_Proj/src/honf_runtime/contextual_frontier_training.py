@@ -30,6 +30,7 @@ SUPPORTED_ARMS = ("J-D", "J-H")
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
 INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1")
 SPATIAL_INTERACTION_GROUP_CORE_SCHEMA = "spatial_interaction_group_fields_v1"
+EXECUTION_BUDGET_SCHEMA = "honf_contextual_execution_budget_v1"
 
 
 def _is_spatial_interaction_group_section(section: Mapping[str, Any]) -> bool:
@@ -400,7 +401,8 @@ def _prepare_storage(config: Mapping[str, Any], output: Path, *, estimated_bytes
 
 
 def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Path,
-                        arm: str, storage: Mapping[str, Any], *, resumed: bool) -> None:
+                        arm: str, storage: Mapping[str, Any], *, resumed: bool,
+                        execution_budget: Mapping[str, Any] | None = None) -> None:
     layout = RunLayout(output)
     layout.ensure()
     section_name, section = _model_section(config)
@@ -430,7 +432,109 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
             raise ValueError("Contextual-frontier run manifest differs from its saved arm/config.")
         manifest["last_resume_storage"] = dict(storage)
         manifest["last_resume_unix"] = time.time()
+        if execution_budget is not None:
+            manifest["execution_budget"] = copy.deepcopy(dict(execution_budget))
         research._atomic_json(manifest_path, manifest)
+
+
+def _provider_elapsed_seconds(payload: Mapping[str, Any]) -> float:
+    provider_state = payload.get("provider_training_state")
+    if not isinstance(provider_state, Mapping):
+        raise ValueError("Execution-budget continuation requires saved provider training state.")
+    elapsed = provider_state.get("training_elapsed_seconds")
+    if (type(elapsed) not in (int, float) or not math.isfinite(float(elapsed))
+            or float(elapsed) < 0):
+        raise ValueError("Saved provider training elapsed seconds must be finite and nonnegative.")
+    return float(elapsed)
+
+
+def _supports_cumulative_budget_override(config: Mapping[str, Any]) -> bool:
+    try:
+        section_name, section = _model_section(config)
+        initialization = config["initialization"]
+        training = config["training"]
+        arm = section["arm"]
+        return (
+            section_name == "interaction_groups"
+            and _is_spatial_interaction_group_section(section)
+            and arm in ("F13-0", "F13-1")
+            and initialization.get("source_kind") == "same_model_development_epoch500"
+            and initialization.get("source_arm") == arm
+            and initialization.get("source_parent_age") == 500
+            and initialization.get("normalization_mode") == "inherit_matching_f13_train150_stats"
+            and training.get("membership") == "full_train600"
+            and training.get("local_horizon") == 1000
+        )
+    except (KeyError, TypeError):
+        return False
+
+
+def _resume_execution_budget(
+    config: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    latest_path: Path,
+    latest_payload: Mapping[str, Any],
+    requested_seconds: int | None,
+) -> tuple[int, dict[str, Any] | None]:
+    """Resolve an execution-only cumulative provider-time allocation for one exact resume."""
+    stored = manifest.get("execution_budget")
+    if requested_seconds is None and stored is None:
+        return int(config["training"]["wall_clock_budget_seconds"]), None
+    if not _supports_cumulative_budget_override(config):
+        raise ValueError(
+            "Cumulative wall-clock overrides are limited to F13 full-TRAIN600 runs sourced from matching development epoch500."
+        )
+    arm = _arm(config)
+    epoch = int(latest_payload.get("epoch", -1))
+    identity = latest_payload.get("experiment_identity")
+    if (epoch < 500 or latest_payload.get("arm") != arm
+            or not isinstance(identity, Mapping)
+            or identity.get("workflow") != "spatial_interaction_groups_joint_training_v1"
+            or identity.get("training_membership") != "full_train600"):
+        raise ValueError("Cumulative wall-clock overrides require the matching F13 full-TRAIN checkpoint at epoch500 or later.")
+    training = config["training"]
+    recipe_seconds = int(training["wall_clock_budget_seconds"])
+    reserve_seconds = int(training["clean_save_reserve_seconds"])
+    if stored is not None:
+        if (not isinstance(stored, Mapping)
+                or stored.get("schema") != EXECUTION_BUDGET_SCHEMA
+                or stored.get("scope") != "absolute_cumulative_provider_elapsed_seconds"
+                or stored.get("recipe_budget_seconds") != recipe_seconds
+                or stored.get("clean_save_reserve_seconds") != reserve_seconds
+                or type(stored.get("absolute_cumulative_seconds")) is not int
+                or stored["absolute_cumulative_seconds"] <= reserve_seconds):
+            raise ValueError("Saved contextual execution-budget metadata is malformed or differs from its run recipe.")
+    if requested_seconds is not None:
+        if type(requested_seconds) is not int or requested_seconds <= reserve_seconds:
+            raise ValueError("Cumulative provider-time budget must be a positive integer greater than the configured clean-save reserve.")
+        selected_seconds = requested_seconds
+        declaration = "explicit_cli_value"
+    elif stored is not None:
+        selected_seconds = int(stored["absolute_cumulative_seconds"])
+        declaration = "reused_manifest_value"
+    else:
+        raise RuntimeError("Execution budget resolution reached an invalid state.")
+
+    source = {
+        "checkpoint": str(latest_path.resolve(strict=True)),
+        "epoch": epoch,
+        "source_saved_provider_elapsed_seconds": _provider_elapsed_seconds(latest_payload),
+    }
+    result = copy.deepcopy(dict(stored)) if isinstance(stored, Mapping) else {
+        "schema": EXECUTION_BUDGET_SCHEMA,
+        "scope": "absolute_cumulative_provider_elapsed_seconds",
+        "recipe_budget_seconds": recipe_seconds,
+        "clean_save_reserve_seconds": reserve_seconds,
+        "initial_source": source,
+    }
+    result.update({
+        "absolute_cumulative_seconds": selected_seconds,
+        "last_resume_source": source,
+        "last_declaration": declaration,
+        "declared_unix": time.time(),
+        "declaration_status": "declared_before_fit",
+    })
+    return selected_seconds, result
 
 
 def _link_parent_field_selector(output: Path, source_checkpoint: Path,
@@ -460,7 +564,8 @@ def _link_parent_field_selector(output: Path, source_checkpoint: Path,
 
 def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], output: Path, *,
          device: torch.device, stop_after: int, resume_checkpoint: Path | None = None,
-         external_state_continuation: bool = False) -> dict[str, Any]:
+         external_state_continuation: bool = False,
+         wall_clock_budget_seconds: int | None = None) -> dict[str, Any]:
     from .research_training import ResearchTrainingEngine
 
     arm = _arm(config)
@@ -474,10 +579,15 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
         nominal_microbatch_cases=int(config["training"]["microbatch_cases"]),
     )
     budget_binder = getattr(provider, "bind_wall_clock_budget", None)
+    if wall_clock_budget_seconds is not None and not callable(budget_binder):
+        raise ValueError("The selected provider cannot enforce an explicit cumulative wall-clock budget.")
     if callable(budget_binder):
         budget_binder(
             output_dir=output,
-            budget_seconds=int(config["training"]["wall_clock_budget_seconds"]),
+            budget_seconds=int(
+                config["training"]["wall_clock_budget_seconds"]
+                if wall_clock_budget_seconds is None else wall_clock_budget_seconds
+            ),
             saver_reserve_seconds=int(config["training"]["clean_save_reserve_seconds"]),
         )
     previous_handlers = research._install_clean_stop_handlers(output)
@@ -625,6 +735,7 @@ def continue_contextual_frontier(config_path: str | Path, *, device: str, output
 def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_epoch: int,
                                devices: Sequence[str] | None = None,
                                task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None,
+                               wall_clock_budget_seconds: int | None = None,
                                verify_bindings: bool = True) -> dict[str, Any]:
     run = Path(run_dir).expanduser().resolve(strict=True)
     layout = RunLayout(run)
@@ -655,6 +766,9 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         raise ValueError("Resume stop must advance the latest completed epoch.")
     if stop_after_epoch > int(config["training"]["local_horizon"]):
         raise ValueError(f"Resume stop exceeds the configured absolute {config['training']['local_horizon']}-epoch horizon.")
+    selected_budget, execution_budget = _resume_execution_budget(
+        config, manifest, latest_path, latest_payload, wall_clock_budget_seconds,
+    )
 
     binding_info = _ensure_workspace_storage_bindings() if verify_bindings else {}
     research.verify_storage(config, output=run, estimated_bytes=0, peak_temporary_bytes=0)
@@ -668,7 +782,7 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     storage = _prepare_storage(config, run, estimated_bytes=estimated_bytes,
                                 peak_temporary_bytes=peak_temporary, bindings=binding_info)
     _write_run_manifest(run, config, Path(str(manifest.get("config_path", ""))),
-                        arm, storage, resumed=True)
+                        arm, storage, resumed=True, execution_budget=execution_budget)
     print(json.dumps({
         "event": "contextual_frontier_resume_prepared",
         "run": str(run),
@@ -676,10 +790,13 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         "selected_device": device_info,
         "completed_epoch": current_epoch,
         "stop_after_epoch": int(stop_after_epoch),
+        "wall_clock_budget_seconds": selected_budget,
+        "wall_clock_budget_scope": "absolute cumulative provider elapsed seconds",
         "storage": storage,
     }, sort_keys=True, default=str, allow_nan=False), flush=True)
     return _fit(model, provider, config, run, device=selected_device,
-                stop_after=stop_after_epoch, resume_checkpoint=latest_path)
+                stop_after=stop_after_epoch, resume_checkpoint=latest_path,
+                wall_clock_budget_seconds=selected_budget)
 
 
 def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:

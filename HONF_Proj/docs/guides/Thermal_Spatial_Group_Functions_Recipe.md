@@ -75,3 +75,23 @@ CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n ModularDT python tools/h
 The same resume command applies to the `thermal_spatial_groups_r13_1_full_f13_1` root. A later process may select a different physical GPU by changing `CUDA_VISIBLE_DEVICES` while keeping exactly one device visible and continuing to pass `--device cuda:0`.
 
 These commands establish the authorized Round13-1 training path; completion, measured gains and misses, and any conditional reserve choice must be reported from saved evidence rather than inferred from successful startup.
+
+## Route T runtime allocation after the evaluated full-TRAIN500 endpoints
+
+Route T is recorded in [the versioned reserve recipe](../../configs/research/thermal_spatial_groups_r13_1_reserve_t_v1.json): both original full-TRAIN runs continue from their own literal epoch-500 checkpoints to the absolute epoch-1000 horizon with model, named Adam state, provider state, RNG, sampler, schedule, and scientific configs unchanged. The per-arm absolute cumulative provider-elapsed caps are 48,354 seconds for F13-0 and 50,352 seconds for F13-1; each retains the existing 600-second clean-save reserve and has up to eight additional provider-hours beyond its saved source elapsed. These caps are execution allocations, not changes to the scientific recipe, and GNU-time process charges remain separately measured.
+
+For the first continuation after the epoch-500 evaluation, pass the arm's absolute cumulative cap to `resume-contextual`; this resumes the existing run directory and does not create a new arm or reset optimizer/provider/RNG state.
+
+```bash
+cd /home/wanglz/Desktop/src/ModularDT/HONF_Proj
+
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n ModularDT python tools/honf_research.py resume-contextual \
+  --run /data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_0 \
+  --device cuda:0 --stop-after-epoch 1000 --wall-clock-budget-seconds 48354
+
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n ModularDT python tools/honf_research.py resume-contextual \
+  --run /data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_1 \
+  --device cuda:0 --stop-after-epoch 1000 --wall-clock-budget-seconds 50352
+```
+
+If either resumed fit needs another process after a clean interruption, omit `--wall-clock-budget-seconds` to reuse the same absolute cap stored in that run's `run_manifest.json`; the runner never adds a fresh allowance. An explicit later value is also absolute cumulative provider elapsed time, not additional time, and is recorded in the manifest. The provider clock starts at its maintained budget binding after provider construction, so report it separately from whole-process elapsed charge. These commands authorize work only through epoch 1000 and do not claim either endpoint is complete.

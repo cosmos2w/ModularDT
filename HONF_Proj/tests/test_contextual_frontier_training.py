@@ -11,9 +11,13 @@ import torch
 
 from honf_runtime import research_training
 from honf_runtime.contextual_frontier_training import (
+    EXECUTION_BUDGET_SCHEMA,
+    _fit,
     _link_parent_field_selector,
+    _resume_execution_budget,
     _engine_config,
     _run_identity,
+    _write_run_manifest,
     continue_contextual_frontier,
     load_contextual_frontier_config,
     train_contextual_frontier,
@@ -284,6 +288,144 @@ class _TinyProvider:
         self.wall_clock_budget = (Path(output_dir), budget_seconds, saver_reserve_seconds)
 
 
+def _f13_full_payload(epoch: int, elapsed: float) -> dict:
+    return {
+        "epoch": epoch,
+        "arm": "F13-0",
+        "experiment_identity": {
+            "workflow": "spatial_interaction_groups_joint_training_v1",
+            "training_membership": "full_train600",
+        },
+        "provider_training_state": {"training_elapsed_seconds": elapsed},
+    }
+
+
+def test_f13_resume_budget_is_execution_only_and_binds_the_provider(tmp_path, monkeypatch) -> None:
+    import honf_runtime.research_training as research
+
+    config, _ = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_fulltrain_mature_v1.json"
+    )
+    original = json.loads(json.dumps(config))
+    model = _TinyModel("F13-0")
+    provider = _TinyProvider(model)
+    captured = {}
+
+    class _FakeEngine:
+        def __init__(self, engine_config, **kwargs):
+            captured["engine_config"] = engine_config
+
+        def bind_execution_runtime(self, *args, **kwargs):
+            captured["runtime"] = (args, kwargs)
+
+        def fit(self, *args, **kwargs):
+            captured["fit"] = kwargs
+            return {"status": "dispatched"}
+
+    monkeypatch.setattr(research, "ResearchTrainingEngine", _FakeEngine)
+    monkeypatch.setattr(research, "_install_clean_stop_handlers", lambda _output: None)
+    monkeypatch.setattr(research, "_restore_handlers", lambda _handlers: None)
+    result = _fit(
+        model, provider, config, tmp_path / "f13-full", device=torch.device("cpu"),
+        stop_after=1000, resume_checkpoint=tmp_path / "source.pt",
+        wall_clock_budget_seconds=48354,
+    )
+
+    assert result == {"status": "dispatched"}
+    assert provider.wall_clock_budget == (tmp_path / "f13-full", 48354, 600)
+    assert captured["fit"]["identity"]["recipe"]["wall_clock_budget_seconds"] == 36000
+    assert captured["fit"]["resume_checkpoint"] == tmp_path / "source.pt"
+    assert config == original
+
+
+def test_cumulative_resume_budget_is_persisted_and_reused_without_renewal(tmp_path) -> None:
+    config, _ = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_fulltrain_mature_v1.json"
+    )
+    epoch500 = tmp_path / "checkpoints" / "epoch_0500_model.pt"
+    epoch600 = tmp_path / "checkpoints" / "epoch_0600_model.pt"
+    epoch500.parent.mkdir()
+    epoch500.touch()
+    epoch600.touch()
+    budget, record = _resume_execution_budget(
+        config, {}, epoch500, _f13_full_payload(500, 19553.2731), 48354,
+    )
+
+    assert budget == 48354
+    assert record["schema"] == EXECUTION_BUDGET_SCHEMA
+    assert record["absolute_cumulative_seconds"] == 48354
+    assert record["clean_save_reserve_seconds"] == 600
+    assert record["initial_source"] == {
+        "checkpoint": str(epoch500.resolve()),
+        "epoch": 500,
+        "source_saved_provider_elapsed_seconds": 19553.2731,
+    }
+
+    resumed_budget, resumed_record = _resume_execution_budget(
+        config, {"execution_budget": record}, epoch600, _f13_full_payload(600, 24000.0), None,
+    )
+    assert resumed_budget == 48354
+    assert resumed_record["absolute_cumulative_seconds"] == 48354
+    assert resumed_record["initial_source"] == record["initial_source"]
+    assert resumed_record["last_resume_source"]["epoch"] == 600
+    assert resumed_record["last_resume_source"]["source_saved_provider_elapsed_seconds"] == 24000.0
+    assert resumed_record["last_declaration"] == "reused_manifest_value"
+
+
+def test_resume_manifest_records_execution_budget_outside_exact_config(tmp_path) -> None:
+    config, config_path = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_fulltrain_mature_v1.json"
+    )
+    output = tmp_path / "run"
+    storage = {"free_bytes_before": 1000, "minimum_free_headroom_bytes": 1}
+    _write_run_manifest(output, config, config_path, "F13-0", storage, resumed=False)
+    record = {
+        "schema": EXECUTION_BUDGET_SCHEMA,
+        "scope": "absolute_cumulative_provider_elapsed_seconds",
+        "absolute_cumulative_seconds": 48354,
+        "recipe_budget_seconds": 36000,
+        "clean_save_reserve_seconds": 600,
+    }
+    _write_run_manifest(
+        output, config, config_path, "F13-0", storage, resumed=True, execution_budget=record,
+    )
+    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["config"] == config
+    assert manifest["execution_budget"] == record
+
+
+@pytest.mark.parametrize("budget", (0, 600, -1, True))
+def test_cumulative_resume_budget_rejects_invalid_integer_caps(tmp_path, budget) -> None:
+    config, _ = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_fulltrain_mature_v1.json"
+    )
+    checkpoint = tmp_path / "epoch_0500_model.pt"
+    checkpoint.touch()
+    with pytest.raises(ValueError, match="positive integer"):
+        _resume_execution_budget(config, {}, checkpoint, _f13_full_payload(500, 19553.0), budget)
+
+
+def test_cumulative_resume_budget_is_limited_to_the_declared_f13_full_run(tmp_path) -> None:
+    config, _ = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_dev_mature_v1.json"
+    )
+    checkpoint = tmp_path / "epoch_0500_model.pt"
+    checkpoint.touch()
+    with pytest.raises(ValueError, match="limited to F13 full-TRAIN600"):
+        _resume_execution_budget(config, {}, checkpoint, _f13_full_payload(500, 19553.0), 48354)
+
+
+def test_legacy_resume_without_budget_metadata_keeps_recipe_budget(tmp_path) -> None:
+    config, _ = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_contextual_frontier_jd_dev_v1.json"
+    )
+    checkpoint = tmp_path / "latest_model.pt"
+    checkpoint.touch()
+    budget, record = _resume_execution_budget(config, {}, checkpoint, {"epoch": 10}, None)
+    assert budget == config["training"]["wall_clock_budget_seconds"] == 43200
+    assert record is None
+
+
 def test_runner_uses_maintained_engine_and_saves_standard_runlayout(tmp_path: Path, monkeypatch) -> None:
     config, config_path = load_contextual_frontier_config(
         CONFIG_DIR / "thermal_contextual_frontier_jd_dev_v1.json"
@@ -358,3 +500,5 @@ def test_cli_exposes_contextual_frontier_commands(command: str) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "contextual" in result.stdout.lower()
+    if command == "resume-contextual":
+        assert "--wall-clock-budget-seconds" in result.stdout

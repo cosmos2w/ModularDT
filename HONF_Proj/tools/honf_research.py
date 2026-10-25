@@ -83,6 +83,11 @@ def _parser() -> argparse.ArgumentParser:
     resume_contextual.add_argument("--devices", nargs="+")
     resume_contextual.add_argument("--stop-after-epoch", type=int, required=True,
                                    help="absolute local epoch to reach")
+    resume_contextual.add_argument(
+        "--wall-clock-budget-seconds", type=int,
+        help=("absolute cumulative provider elapsed-time cap for a supported F13 full-TRAIN resume; "
+              "omitting it reuses any saved run-manifest value"),
+    )
 
     cut = commands.add_parser("activate-cut", help="activate and persist the Round12 R1 hard cut after local e40")
     cut.add_argument("--run", required=True)
@@ -183,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             devices=args.devices,
             stop_after_epoch=args.stop_after_epoch,
+            wall_clock_budget_seconds=args.wall_clock_budget_seconds,
         )
     elif args.command == "activate-cut":
         result = research.activate_round12_cut(args.run)
