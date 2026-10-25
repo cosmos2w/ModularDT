@@ -17,6 +17,8 @@ from honf_forward_core.contextual_organization import ContextualOrganizationJoin
 from honf_runtime.contextual_frontier_organization import (
     _bounded_query_subset,
     _masked_rms,
+    _native_e_only_region,
+    _region_metrics,
     compare_reprepared_source_change,
     decode_receiver_roles,
     evaluate_common_e_only_quality,
@@ -25,6 +27,22 @@ from honf_runtime.contextual_frontier_organization import (
     inspect_prepared,
     measure_native_cost,
 )
+
+
+def test_e_only_curl_includes_neighbors_and_nonfinite_prediction_keeps_denominator():
+    stencil = SimpleNamespace(indices=torch.tensor([[[0], [2]]]), weights=torch.ones(1, 2, 1),
+                              valid=torch.ones(1, 2, dtype=torch.bool))
+    prepared = SimpleNamespace(stencils={"fluid": stencil},
+        curl_stencil=SimpleNamespace(gather_indices=torch.tensor([[[0, 1, 0, 0, 0], [2, 2, 2, 2, 2]]])))
+    region = _native_e_only_region(prepared, torch.tensor([True, False, True]))
+    assert region.tolist() == [[False, True]]
+    prediction = torch.ones(1, 2, 5)
+    prediction[0, 0, 4] = float("inf")
+    metrics = _region_metrics(prediction, torch.ones(1, 2, 5), torch.ones(1, 2), torch.ones(1, 2, dtype=torch.bool))
+    assert metrics["temperature"]["valid_rows"] == 2
+    assert metrics["temperature"]["nonfinite_prediction_rows"] == 1
+    assert metrics["temperature"]["rmse"] is None
+    assert metrics["u"]["rmse"] == 0
 
 
 def _scene() -> SceneBatch:

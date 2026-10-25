@@ -629,6 +629,17 @@ def _stencil_e_only_mask(stencil: Any, e_only_query: torch.Tensor) -> torch.Tens
     return stencil.valid & use.any(dim=-1) & all_contributors_e_only
 
 
+def _native_e_only_region(prepared: Any, e_only_query: torch.Tensor) -> torch.Tensor:
+    region = _stencil_e_only_mask(prepared.stencils["fluid"], e_only_query)
+    curl = getattr(prepared, "curl_stencil", None)
+    if curl is not None:
+        # Conservative common mask for all five native fluid outputs: a curl
+        # query also consumes its neighbor nodes, even when its center is E-only.
+        contributors = e_only_query[curl.gather_indices.long()]
+        region = region & contributors.all(dim=-1)
+    return region
+
+
 def _region_metrics(prediction: torch.Tensor, target: torch.Tensor, weights: torch.Tensor,
                     common_region: torch.Tensor,
                     channel_map: Sequence[tuple[str, int, int]] | None = None
@@ -642,18 +653,23 @@ def _region_metrics(prediction: torch.Tensor, target: torch.Tensor, weights: tor
     mapping = _regional_channel_map(pred.shape[-1], truth.shape[-1], channel_map)
     rows = {}
     for name, predicted_channel, target_channel in mapping:
-        finite = np.isfinite(truth[..., target_channel]) & np.isfinite(pred[..., predicted_channel])
-        mask = region & finite & (query_weights > 0)
+        mask = region & np.isfinite(truth[..., target_channel]) & (query_weights > 0)
+        nonfinite_predictions = int((mask & ~np.isfinite(pred[..., predicted_channel])).sum())
         local_weights = query_weights * mask
         denominator = float(local_weights.sum())
-        error = np.nan_to_num(pred[..., predicted_channel] - truth[..., target_channel])
-        target_values = np.nan_to_num(truth[..., target_channel])
+        error = np.nan_to_num(pred[..., predicted_channel] - truth[..., target_channel],
+                              nan=0.0, posinf=0.0, neginf=0.0)
+        target_values = np.nan_to_num(truth[..., target_channel], nan=0.0, posinf=0.0, neginf=0.0)
         error_l2 = math.sqrt(float(np.sum(error * error * local_weights)))
         target_l2 = math.sqrt(float(np.sum(target_values * target_values * local_weights)))
         rows[name] = {
             "valid_rows": int(mask.sum()),
-            "rmse": math.sqrt(float(np.sum(error * error * local_weights)) / denominator) if denominator else None,
-            "relative_l2": error_l2 / max(target_l2, 1e-12) if denominator else None,
+            "nonfinite_prediction_rows": nonfinite_predictions,
+            "status": "invalid_nonfinite_prediction" if nonfinite_predictions else "valid" if denominator else "empty",
+            "rmse": math.sqrt(float(np.sum(error * error * local_weights)) / denominator)
+                if denominator and not nonfinite_predictions else None,
+            "relative_l2": error_l2 / target_l2
+                if denominator and target_l2 > 0 and not nonfinite_predictions else None,
         }
     return rows
 
@@ -705,7 +721,7 @@ def _evaluate_common_e_only_quality(
             module_read = _query_source_flags(trace, "module", query_count, prepared.query_batch.coordinates.device)
             environment_read = _query_source_flags(trace, "environment", query_count, prepared.query_batch.coordinates.device)
             e_only = (~module_read) & environment_read
-            fluid_region = _stencil_e_only_mask(prepared.stencils["fluid"], e_only)
+            fluid_region = _native_e_only_region(prepared, e_only)
             predictions_by_case.setdefault(case_batch[0], {})[arm_name] = (
                 batch, predictions, prepared, fluid_region, traced.work_counts,
             )

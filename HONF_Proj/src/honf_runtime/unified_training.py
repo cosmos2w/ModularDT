@@ -4362,11 +4362,36 @@ class TrainingEngine:
                             }
                         if joint_step_recorder is not None:
                             update_kwargs["successful_step_recorder"] = joint_step_recorder
+                        if (capture_fresh_stream
+                                and bool(getattr(self, "supports_successful_mask_digest", False))):
+                            update_kwargs["capture_successful_mask_digest"] = True
                         losses, work, denominators, sampling_hash = self._run_update(
                             model, provider, optimizer, microbatches,
                             phase=phase, arm=arm, epoch=epoch, update_index=update_index,
                             **update_kwargs,
                         )
+                        execution_metadata_reader = getattr(self, "take_last_update_execution_metadata", None)
+                        execution_metadata = (
+                            execution_metadata_reader() if callable(execution_metadata_reader) else None
+                        )
+                        successful_microbatch_count = len(microbatches)
+                        oom_retry_attempts = 0
+                        failed_attempt_microbatches_constructed = 0
+                        successful_mask_sha256 = None
+                        if execution_metadata is not None:
+                            if not isinstance(execution_metadata, Mapping):
+                                raise TypeError("Update execution metadata must be a mapping.")
+                            successful_microbatch_count = execution_metadata.get("successful_microbatch_count")
+                            oom_retry_attempts = execution_metadata.get("oom_retry_attempts")
+                            failed_attempt_microbatches_constructed = execution_metadata.get(
+                                "failed_attempt_microbatches_constructed"
+                            )
+                            successful_mask_sha256 = execution_metadata.get("successful_mask_sha256")
+                            if (type(successful_microbatch_count) is not int or successful_microbatch_count < 1
+                                    or type(oom_retry_attempts) is not int or oom_retry_attempts < 0
+                                    or type(failed_attempt_microbatches_constructed) is not int
+                                    or failed_attempt_microbatches_constructed < 0):
+                                raise ValueError("Completed update execution metadata is malformed.")
                         source_read_auxiliary_update = None
                         if source_read_manager is not None:
                             weighted_auxiliary_loss = losses.pop("source_read_auxiliary", None)
@@ -4381,9 +4406,19 @@ class TrainingEngine:
                         if capture_fresh_stream:
                             if sampling_hash is None:
                                 raise ValueError("Fresh matched epoch 1 requires observed receiver/query-ID hashes.")
+                            if successful_mask_sha256 is None:
+                                if successful_microbatch_count != len(microbatches):
+                                    raise ValueError(
+                                        "A repacked fresh update omitted the successful-batch mask digest."
+                                    )
+                                successful_mask_sha256 = _observed_mask_digest(microbatches)
+                            if (not isinstance(successful_mask_sha256, str)
+                                    or len(successful_mask_sha256) != 64
+                                    or any(char not in "0123456789abcdef" for char in successful_mask_sha256)):
+                                raise ValueError("Successful-batch mask digest is malformed.")
                             observed_mask_hashes.append({
                                 "update_index": update_index,
-                                "sha256": _observed_mask_digest(microbatches),
+                                "sha256": successful_mask_sha256,
                             })
                             observed_query_hashes.append({
                                 "update_index": update_index,
@@ -4394,8 +4429,13 @@ class TrainingEngine:
                                 "denominators": {name: float(value) for name, value in sorted(denominators.items())},
                             })
                         update_row = {"losses": losses, "work": work, "case_count": len(update_cases),
-                                      "microbatch_count": len(microbatches),
+                                      "microbatch_count": successful_microbatch_count,
                                       "query_sampling_sha256": sampling_hash}
+                        if oom_retry_attempts:
+                            update_row["oom_retry_attempts"] = oom_retry_attempts
+                            update_row["failed_attempt_microbatches_constructed"] = (
+                                failed_attempt_microbatches_constructed
+                            )
                         if source_read_auxiliary_update is not None:
                             update_row["source_read_auxiliary"] = source_read_auxiliary_update
                         update_rows.append(update_row)
@@ -4441,6 +4481,12 @@ class TrainingEngine:
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                     "case_order_sha256": order_hash,
                 }
+                retry_attempts = sum(int(item.get("oom_retry_attempts", 0)) for item in update_rows)
+                if retry_attempts:
+                    row["oom_retry_attempts"] = retry_attempts
+                    row["failed_attempt_microbatches_constructed"] = sum(
+                        int(item.get("failed_attempt_microbatches_constructed", 0)) for item in update_rows
+                    )
                 if identity_is_native_retrieval:
                     if native_recipe["treatment"] == "G-native-M":
                         native_core = getattr(model, "core", model)

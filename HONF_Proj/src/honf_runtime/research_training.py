@@ -30,6 +30,7 @@ from .unified_training import (
     SelectionPolicy,
     TrainingEngine,
     _atomic_json,
+    _observed_mask_digest,
     _sampling_dataset_id,
     capture_rng_state,
     restore_rng_state,
@@ -1234,6 +1235,8 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
 class ResearchTrainingEngine(TrainingEngine):
     """Use local history epochs with separate sampler and native model clocks."""
 
+    supports_successful_mask_digest = True
+
     def __init__(self, config: EngineConfig, *, device, parent_age: int, selection=None,
                  fresh_model_schedule: Mapping[str, Any] | None = None,
                  execution_options: Mapping[str, Any] | None = None,
@@ -1268,6 +1271,13 @@ class ResearchTrainingEngine(TrainingEngine):
         self.local_oom_retry_count = 0
         self._execution_runtime_path: Path | None = None
         self._execution_runtime_dirty = False
+        self._last_update_execution_metadata: dict[str, Any] | None = None
+
+    def take_last_update_execution_metadata(self) -> dict[str, Any] | None:
+        """Return the completed packing receipt once, without retaining its batches."""
+        metadata = self._last_update_execution_metadata
+        self._last_update_execution_metadata = None
+        return metadata
 
     def _make_optimizer(self, model, provider, arm, initial_epoch, optimizer_seed, *, group_specs=None):
         if self.compact_arm is None:
@@ -1430,6 +1440,10 @@ class ResearchTrainingEngine(TrainingEngine):
         return value
 
     def _run_update(self, *args, epoch: int, **kwargs):
+        self._last_update_execution_metadata = None
+        capture_successful_mask_digest = kwargs.pop("capture_successful_mask_digest", False)
+        if type(capture_successful_mask_digest) is not bool:
+            raise TypeError("Successful-batch mask digest control must be boolean.")
         # The optimizer schedule is local and constant. Warm starts continue
         # their native controller clock; fresh full-TRAIN starts run the
         # controller's near-open work ramp on its native absolute coordinate.
@@ -1492,6 +1506,7 @@ class ResearchTrainingEngine(TrainingEngine):
                           if callable(provider_state_reader) else None)
         microbatches = initial_microbatches
         attempt = 0
+        failed_attempt_microbatches_constructed = 0
         while True:
             try:
                 update_result = super()._run_update(
@@ -1508,10 +1523,19 @@ class ResearchTrainingEngine(TrainingEngine):
                             "Round12 soft-merge additive losses were not returned for training history: "
                             f"{sorted(missing_structural)}"
                         )
+                self._last_update_execution_metadata = {
+                    "successful_microbatch_count": len(microbatches),
+                    "oom_retry_attempts": attempt,
+                    "failed_attempt_microbatches_constructed": failed_attempt_microbatches_constructed,
+                    "successful_mask_sha256": (
+                        _observed_mask_digest(microbatches) if capture_successful_mask_digest else None
+                    ),
+                }
                 return update_result
             except (torch.cuda.OutOfMemoryError, RuntimeError) as error:
                 if not _is_cuda_oom(error):
                     raise
+                failed_attempt_microbatches_constructed += len(microbatches)
                 error_type = type(error).__name__
                 error_text = str(error)
                 error.__traceback__ = None

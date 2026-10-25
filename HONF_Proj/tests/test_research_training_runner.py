@@ -12,7 +12,18 @@ import torch
 from torch import nn
 
 from honf_runtime import research_training as research
-from honf_runtime.unified_training import EngineConfig, SamplingKey, TaskBatch, TrainingEngine
+from honf_runtime.run_layout import RunLayout
+from honf_runtime.unified_training import (
+    EngineConfig,
+    LossTerm,
+    OptimizerGroupSpec,
+    SamplingKey,
+    ScheduleSpec,
+    TaskBatch,
+    TrainingEngine,
+    _observed_mask_digest,
+    _sampling_dataset_id,
+)
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -1124,6 +1135,7 @@ def test_local_oom_retry_restores_the_last_complete_optimizer_macro(tmp_path, mo
         first_macro_optimizer = None
         failed_entry_rng = None
         seen_cases = []
+        seen_batches = []
         second_macro_calls = 0
 
         def injected_parent_update(self, active_model, active_provider, active_optimizer, microbatches,
@@ -1132,6 +1144,7 @@ def test_local_oom_retry_restores_the_last_complete_optimizer_macro(tmp_path, mo
             del self, phase, arm, epoch, kwargs
             cases = tuple(case for batch in microbatches for case in batch.case_keys)
             seen_cases.append(cases)
+            seen_batches.append(tuple(microbatches))
             denominator = active_provider.loss_denominators(microbatches, "joint", "A2-H")["field"]
             if update_index == 1:
                 second_macro_calls += 1
@@ -1178,6 +1191,10 @@ def test_local_oom_retry_restores_the_last_complete_optimizer_macro(tmp_path, mo
                 model, provider, optimizer, first_batches,
                 phase="joint", arm="A2-H", epoch=1, update_index=0,
             )
+            first_metadata = engine.take_last_update_execution_metadata()
+            assert first_metadata["successful_microbatch_count"] == 1
+            assert first_metadata["oom_retry_attempts"] == 0
+            assert first_metadata["failed_attempt_microbatches_constructed"] == 0
             second_batches = engine.prepare_update_microbatches(
                 provider, arm="A2-H", phase="joint", epoch=1, update_index=1,
                 update_cases=order, sampling_dataset_id=provider.sampling_dataset_id,
@@ -1185,7 +1202,9 @@ def test_local_oom_retry_restores_the_last_complete_optimizer_macro(tmp_path, mo
             engine._run_update(
                 model, provider, optimizer, second_batches,
                 phase="joint", arm="A2-H", epoch=1, update_index=1,
+                capture_successful_mask_digest=True,
             )
+            retried_metadata = engine.take_last_update_execution_metadata()
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
         runtime = json.loads((output / "execution_runtime.json").read_text())
@@ -1198,6 +1217,11 @@ def test_local_oom_retry_restores_the_last_complete_optimizer_macro(tmp_path, mo
         assert runtime["local_oom_retry_count"] == 1
         assert runtime["last_oom"]["status"] == "repacked_same_optimizer_macro"
         assert runtime["last_oom"]["ordered_case_keys"] == list(order)
+        assert retried_metadata["successful_microbatch_count"] == 2
+        assert retried_metadata["oom_retry_attempts"] == 1
+        assert retried_metadata["failed_attempt_microbatches_constructed"] == 1
+        assert retried_metadata["successful_mask_sha256"] == _observed_mask_digest(seen_batches[-1])
+        assert engine.take_last_update_execution_metadata() is None
         resumed_engine = research.ResearchTrainingEngine(
             EngineConfig(seed=13, microbatch_cases=2, effective_cases=2, total_epochs=4,
                          training_mode="joint", sampling_version=SamplingKey.CASE_EPOCH_VERSION),
@@ -1224,6 +1248,156 @@ def test_local_oom_retry_restores_the_last_complete_optimizer_macro(tmp_path, mo
         assert provider.mutable_state == 2
     finally:
         research.restore_rng_state(previous_rng)
+
+
+def test_local_oom_retry_history_uses_successful_repacked_batches(tmp_path, monkeypatch):
+    import hashlib
+
+    class Provider:
+        def __init__(self):
+            self.sampling_dataset_id = _sampling_dataset_id(self.identity_payload())
+
+        def identity_payload(self):
+            return {"dataset": "retry-history-toy", "manifest_fingerprint": "a" * 64}
+
+        def epoch_cases(self, epoch, seed):
+            del epoch, seed
+            return ("case-a", "case-b")
+
+        def make_batch(self, case_chunk, key):
+            rows = []
+            x_values = []
+            for case_id in case_chunk:
+                draw = tuple(map(int, key.native_indices(32, 4, case_id, "toy", "primary")))
+                rows.append([case_id, list(draw)])
+                x_values.append(float(ord(case_id[-1]) - ord("a") + 1))
+            receipt = hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
+            inputs = torch.tensor(x_values, dtype=torch.float32).reshape(-1, 1)
+            targets = 2.0 * inputs + 1.0
+            return TaskBatch(
+                inputs, None, targets, {"query_sampling_sha256": receipt}, tuple(case_chunk),
+            )
+
+        def loss_denominators(self, batches, phase, arm):
+            del phase, arm
+            return {"native": sum(batch.targets.numel() for batch in batches)}
+
+        def make_scene(self, scene_inputs):
+            return scene_inputs
+
+        def predict_native(self, model, scene, receivers, execution_mode, phase, epoch, temperature):
+            del receivers, execution_mode, phase, epoch, temperature
+            return model(scene), None
+
+        def loss_terms(self, predictions, targets, phase, auxiliary_state):
+            del phase, auxiliary_state
+            return {"native": LossTerm((predictions - targets).square().sum(), targets.numel())}
+
+        def validation_batches(self):
+            inputs = torch.tensor([[1.0], [2.0]], dtype=torch.float32)
+            return iter((TaskBatch(inputs, None, 2.0 * inputs + 1.0, {}, ("dev-a", "dev-b")),))
+
+        def validation_metrics(self, predictions, targets, auxiliary_state):
+            del auxiliary_state
+            return {"squared_error": float((predictions - targets).square().sum()), "count": targets.numel()}
+
+        def reduce_native_metrics(self, records):
+            return {"field_score": sum(row["squared_error"] for row in records)
+                    / sum(row["count"] for row in records)}
+
+        def optimizer_groups(self, model, arm, stage):
+            del model, arm, stage
+            return (OptimizerGroupSpec(
+                name="predictor", parameter_names=("weight", "bias"),
+                schedule=ScheduleSpec(peak_lr=0.01, warmup_start_lr=0.01, warmup_epochs=1,
+                                     hold_through_epoch=1, total_epochs=2, final_lr=0.01),
+                weight_decay=0.0,
+            ),)
+
+        def work_counts(self, batch, predictions, auxiliary_state):
+            del predictions, auxiliary_state
+            return {"primary_queries": batch.targets.numel()}
+
+    def make_config(microbatch_cases):
+        return EngineConfig(
+            seed=31, microbatch_cases=microbatch_cases, effective_cases=2, total_epochs=1,
+            monitor_every=1, monitor_epochs=(1,), checkpoint_epochs=(1,), latest_every=1,
+            curve_every=None, progress_enabled=False, sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+            training_mode="joint",
+        )
+
+    def make_model():
+        model = nn.Linear(1, 1)
+        with torch.no_grad():
+            model.weight.fill_(0.25)
+            model.bias.fill_(0.5)
+        return model
+
+    original_update = TrainingEngine._run_update
+    initial_packing_failed = False
+    successful_repacked_batches = []
+
+    def inject_one_oom(self, *args, **kwargs):
+        nonlocal initial_packing_failed
+        batches = tuple(args[3])
+        if not initial_packing_failed:
+            initial_packing_failed = True
+            raise RuntimeError("CUDA out of memory: injected history-packing retry")
+        if not successful_repacked_batches:
+            successful_repacked_batches.extend(batches)
+        return original_update(self, *args, **kwargs)
+
+    monkeypatch.setattr(TrainingEngine, "_run_update", inject_one_oom)
+    retry_provider = Provider()
+    retry_model = make_model()
+    retry_output = tmp_path / "retry-history"
+    retry_engine = research.ResearchTrainingEngine(
+        make_config(2), device="cpu", parent_age=0,
+    )
+    retry_engine.bind_execution_runtime(
+        retry_output / "execution_runtime.json", nominal_microbatch_cases=2,
+    )
+    retry_engine.fit(
+        retry_model, retry_provider, retry_output, identity={"fixture": "oom-history"},
+        arm="A2-H", stop_after=1,
+    )
+
+    retry_history = json.loads(RunLayout(retry_output).read_path("history.json").read_text())
+    retry_row = retry_history[0]
+    assert initial_packing_failed
+    assert [len(batch.case_keys) for batch in successful_repacked_batches] == [1, 1]
+    assert retry_row["case_visits"] == 2
+    assert retry_row["optimizer_updates"] == 1
+    assert retry_row["microbatches"] == 2
+    assert retry_row["oom_retry_attempts"] == 1
+    assert retry_row["failed_attempt_microbatches_constructed"] == 1
+    successful_query_hashes = [batch.auxiliary["query_sampling_sha256"] for batch in successful_repacked_batches]
+    successful_macro_hash = hashlib.sha256(
+        json.dumps(successful_query_hashes, separators=(",", ":")).encode()
+    ).hexdigest()
+    expected_epoch_hash = hashlib.sha256(
+        json.dumps([successful_macro_hash], separators=(",", ":")).encode()
+    ).hexdigest()
+    assert retry_row["query_sampling_sha256"] == expected_epoch_hash
+
+    control_provider = Provider()
+    control_model = make_model()
+    control_output = tmp_path / "successful-pack-control"
+    control_engine = research.ResearchTrainingEngine(
+        make_config(1), device="cpu", parent_age=0,
+    )
+    control_engine.bind_execution_runtime(
+        control_output / "execution_runtime.json", nominal_microbatch_cases=1,
+    )
+    control_engine.fit(
+        control_model, control_provider, control_output, identity={"fixture": "oom-history-control"},
+        arm="A2-H", stop_after=1,
+    )
+    control_row = json.loads(RunLayout(control_output).read_path("history.json").read_text())[0]
+    assert control_row["microbatches"] == 2
+    assert control_row["query_sampling_sha256"] == retry_row["query_sampling_sha256"]
+    for name in retry_model.state_dict():
+        torch.testing.assert_close(retry_model.state_dict()[name], control_model.state_dict()[name], rtol=0, atol=1e-7)
 
 
 def test_local_oom_exhaustion_does_not_enter_epoch_checkpoint_fallback(tmp_path, monkeypatch):
