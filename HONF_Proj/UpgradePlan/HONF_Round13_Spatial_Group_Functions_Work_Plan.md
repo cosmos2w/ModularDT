@@ -4,6 +4,8 @@
 
 **Deliverable:** one focused Thermal-first implementation and bounded comparison, followed by a user-controlled full-data handoff. This document proposes new mathematics and experiments; it does not describe an already validated model. Existing R12/R12-2/R12-3 checkpoints and their physical laws remain separate.
 
+**Subsequent R13-1 scope, 25 October 2026:** the [mature-training and organization-refinement follow-up](HONF_Round13-1_Mature_Training_and_Organization_Refinement_Work_Plan.md) supersedes this document's100-epoch final-stop/manual-only full-data handoff when that follow-up is invoked. It targets development500 and actual TRAIN600/VAL89 training/evaluation through full-data500 for both arms, with a finite conditional continuation/refinement reserve. The historical R13 measurements remain100-epoch engineering evidence; writing the follow-up launches no jobs.
+
 ## 0. The decision in one page
 
 Build **spatially resolved interaction groups**, not another smaller address directory. A group stores a small latent function of receiver position, rather than only a mean vector. The same group partition and the same field-read primitive participate in module contextualization and receiver prediction. Learn subdivision from measured parent-versus-descendant task advantages on TRAIN, rather than from a global sampled-loss reward or stronger compression pressure.
