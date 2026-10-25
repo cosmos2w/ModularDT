@@ -1,0 +1,154 @@
+{
+  "schema": "honf_thermal_research_run_v1",
+  "name": "thermal_interaction_groups_gee_dev_v1",
+  "dataset": {
+    "name": "thermal",
+    "data_path": "/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "manifest_path": "/data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json",
+    "base_recipe_path": "../../src/config_core/forward/content_hypergraph/thermal_a2-h6_development.json"
+  },
+  "initialization": {
+    "source_kind": "fresh_random_interaction_groups",
+    "source_checkpoint": null,
+    "pretrained_weights": false,
+    "source_arm": "scratch_random",
+    "source_parent_age": 0,
+    "normalization_mode": "fixed25_train150_stats",
+    "seed": 0
+  },
+  "optimizer": {
+    "kind": "fresh_adamw_from_config",
+    "schedule": "constant_config_lr",
+    "lr": 0.0003,
+    "weight_decay": 1e-05,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "gradient_clip": 1.0
+  },
+  "execution": {
+    "preferred_devices": [
+      "cuda:0"
+    ],
+    "precision": "fp32",
+    "cuda_visible_devices": "GPU-3ceda40c-fd5c-4b88-6c47-b3301711571e",
+    "visibility_scope": "fresh one-stream initialization on physical GPU1; resume preserves visibility"
+  },
+  "storage": {
+    "output_root": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_interaction_groups_gee_dev_v1",
+    "max_output_bytes": 4294967296,
+    "max_peak_temporary_bytes": 536870912,
+    "minimum_free_headroom_bytes": 214748364800
+  },
+  "evaluation": {
+    "max_output_bytes": 268435456,
+    "representative_case_limit": 4,
+    "representative_selection": "first_validation_case_per_evenly_spaced_module_count_stratum",
+    "priority_quantities": [
+      "temperature/fluid",
+      "temperature/surface",
+      "temperature/material",
+      "module_maxima"
+    ],
+    "preservation_mean_ratio": 1.1,
+    "preservation_p90_ratio": 1.15,
+    "response_median_ratio": 1.1,
+    "response_p90_ratio": 1.15,
+    "useful_inference_time_reduction": 0.1,
+    "useful_pair_reduction": 0.2,
+    "useful_macro_time_reduction": 0.1,
+    "max_peak_memory_growth": 0.1,
+    "detailed_dev_ids": [
+      "0277",
+      "0287",
+      "0294",
+      "0684"
+    ],
+    "physical_reference_note": "M1/M2 geometry-response atlas unavailable; development validation exposed"
+  },
+  "training": {
+    "membership": "fixed25_train150_dev22",
+    "local_horizon": 1000,
+    "first_segment_epochs": 100,
+    "total_epochs": 1000,
+    "effective_batch_size": 48,
+    "microbatch_cases": 24,
+    "primary_queries": 1024,
+    "seed": 0,
+    "monitor_every": 100,
+    "checkpoint_every": 100,
+    "checkpoint_epochs": [
+      100,
+      200,
+      300,
+      400,
+      500,
+      600,
+      700,
+      800,
+      900,
+      1000
+    ],
+    "latest_every": 100,
+    "curve_every": 10,
+    "progress_enabled": true,
+    "wall_clock_budget_seconds": 21600,
+    "clean_save_reserve_seconds": 600
+  },
+  "objective": {
+    "native_weights": {
+      "flow/u": 0.125,
+      "flow/v": 0.125,
+      "flow/p": 0.125,
+      "flow/omega": 0.125,
+      "temperature/fluid": 0.16666666666666666,
+      "temperature/surface": 0.16666666666666666,
+      "temperature/material": 0.16666666666666666,
+      "q_proxy": 0.05
+    },
+    "response_training_families": [
+      "0348"
+    ],
+    "response_microbatch_every_primary_updates": 4,
+    "response_shared_gradient_cap_fraction": 0.1,
+    "response_calibration_epoch": 1,
+    "native_weights_frozen_through_epoch": 100,
+    "native_weights_fixed": true,
+    "work_prices": {},
+    "work_policy_coefficient": 0.0,
+    "work_price_status": "pending no-step TRAIN calibration before adaptive training; no work reward in singleton controls"
+  },
+  "interaction_groups": {
+    "schema": "thermal_interaction_groups_v1",
+    "arm": "G-EE",
+    "core_schema": "interaction_groups_v1",
+    "model": {
+      "module_input_dim": 9,
+      "environment_input_dim": 6,
+      "coordinate_dim": 2,
+      "operating_input_dim": 12,
+      "query_input_dim": 0,
+      "output_dim": 4,
+      "context_dim": 128,
+      "num_heads": 4,
+      "context_depth": 2,
+      "local_hidden_dim": 128,
+      "dropout": 0.0,
+      "init_seed": 0,
+      "query_tile_size": 512
+    },
+    "frontier": {
+      "learning_from_epoch": 1,
+      "forced_leaf_warmup_epochs": 0,
+      "organization_frozen": false,
+      "target_k": null,
+      "absolute_master_epochs": 1000,
+      "smooth_schedule_last_epoch": 500,
+      "work_ramp": "cosine 0 to 1, epochs1-500",
+      "temperature": "2 to 1, same cosine",
+      "refinement": false
+    }
+  }
+}

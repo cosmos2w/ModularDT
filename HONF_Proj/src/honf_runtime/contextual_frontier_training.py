@@ -27,6 +27,18 @@ from .unified_training import (
 
 CONTEXTUAL_FRONTIER_CONFIG_SCHEMA = "thermal_contextual_frontier_v1"
 SUPPORTED_ARMS = ("J-D", "J-H")
+INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
+INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H")
+
+
+def _model_section(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
+    if "interaction_groups" in config:
+        return "interaction_groups", config["interaction_groups"]
+    return "contextual_frontier", config["contextual_frontier"]
+
+
+def _arm(config: Mapping[str, Any]) -> str:
+    return str(_model_section(config)[1]["arm"])
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -45,8 +57,9 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
     config = _read_json(config_path)
     if config.get("schema") != research.RESEARCH_SCHEMA:
         raise ValueError(f"Contextual-frontier config must declare schema={research.RESEARCH_SCHEMA}.")
+    section_name = "interaction_groups" if "interaction_groups" in config else "contextual_frontier"
     required = {"name", "dataset", "initialization", "training", "optimizer", "execution", "storage",
-                "contextual_frontier", "objective"}
+                section_name, "objective"}
     missing = required - set(config)
     if missing:
         raise ValueError(f"Contextual-frontier config is missing {sorted(missing)}.")
@@ -54,12 +67,14 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
     for section in ("dataset", "initialization", "training", "optimizer", "execution", "storage", "objective"):
         if not isinstance(config[section], Mapping):
             raise TypeError(f"{section} must be a JSON object.")
-    frontier = config["contextual_frontier"]
-    if not isinstance(frontier, Mapping) or frontier.get("schema") != CONTEXTUAL_FRONTIER_CONFIG_SCHEMA:
-        raise ValueError(f"contextual_frontier.schema must be {CONTEXTUAL_FRONTIER_CONFIG_SCHEMA}.")
+    frontier = config[section_name]
+    expected_schema = INTERACTION_GROUPS_CONFIG_SCHEMA if section_name == "interaction_groups" else CONTEXTUAL_FRONTIER_CONFIG_SCHEMA
+    if not isinstance(frontier, Mapping) or frontier.get("schema") != expected_schema:
+        raise ValueError(f"{section_name}.schema must be {expected_schema}.")
     arm = frontier.get("arm")
-    if arm not in SUPPORTED_ARMS:
-        raise ValueError(f"Contextual-frontier arm must be one of {SUPPORTED_ARMS}.")
+    supported_arms = INTERACTION_GROUPS_ARMS if section_name == "interaction_groups" else SUPPORTED_ARMS
+    if arm not in supported_arms:
+        raise ValueError(f"{section_name} arm must be one of {supported_arms}.")
 
     dataset = config["dataset"]
     if not isinstance(dataset, Mapping) or dataset.get("name") != "thermal":
@@ -96,9 +111,17 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
             or checkpoints != sorted(set(checkpoints))):
         raise ValueError("training.checkpoint_epochs must be sorted, unique in-horizon epochs.")
     if not isinstance(frontier.get("model"), Mapping):
-        raise ValueError("contextual_frontier.model must be a model configuration mapping.")
+        raise ValueError(f"{section_name}.model must be a model configuration mapping.")
     if not isinstance(config["objective"].get("native_weights"), Mapping):
         raise ValueError("objective.native_weights must be declared by the Thermal task config.")
+    if section_name == "interaction_groups":
+        objective = config["objective"]
+        if (objective.get("response_microbatch_every_primary_updates") != 4
+                or float(objective.get("response_shared_gradient_cap_fraction", -1)) != 0.1
+                or objective.get("response_calibration_epoch") != 1
+                or objective.get("native_weights_fixed") is not True
+                or objective.get("native_weights_frozen_through_epoch") != 100):
+            raise ValueError("Interaction-group development requires epoch-1 response calibration, a 10% cap, and fixed native weights through epoch 100 and beyond.")
 
     storage = config["storage"]
     if not isinstance(storage.get("output_root"), str) or not storage["output_root"].startswith("/data2/"):
@@ -174,9 +197,16 @@ def _task_factory() -> Callable[..., tuple[torch.nn.Module, Any]]:
     return build_thermal_contextual_frontier_task
 
 
+def _interaction_group_task_factory() -> Callable[..., tuple[torch.nn.Module, Any]]:
+    from channelthermal.training.interaction_group_task import build_thermal_interaction_group_task
+
+    return build_thermal_interaction_group_task
+
+
 def _build_task(config: Mapping[str, Any], arm: str, device: torch.device,
                 task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None):
-    factory = task_factory or _task_factory()
+    factory = task_factory or (_interaction_group_task_factory()
+                               if "interaction_groups" in config else _task_factory())
     model, provider = factory(config, arm=arm, device=device)
     if model is None or provider is None:
         raise TypeError("Contextual-frontier task factory must return a model and provider.")
@@ -207,11 +237,13 @@ def _engine_config(config: Mapping[str, Any]) -> EngineConfig:
 
 
 def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
-    frontier = copy.deepcopy(dict(config["contextual_frontier"]))
+    section_name, section = _model_section(config)
+    frontier = copy.deepcopy(dict(section))
+    interaction_groups = section_name == "interaction_groups"
     return {
-        "schema": "honf_contextual_frontier_training_v1",
-        "workflow": "contextual_frontier_joint_training_v1",
-        "model_family": "contextual_organization_joint_field_v1",
+        "schema": "honf_interaction_groups_training_v1" if interaction_groups else "honf_contextual_frontier_training_v1",
+        "workflow": "interaction_groups_joint_training_v1" if interaction_groups else "contextual_frontier_joint_training_v1",
+        "model_family": "interaction_groups_joint_field_v1" if interaction_groups else "contextual_organization_joint_field_v1",
         "dataset": "thermal",
         "config_name": config["name"],
         "training_membership": config["training"]["membership"],
@@ -219,7 +251,7 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
         "initialization": copy.deepcopy(dict(config["initialization"])),
         "optimizer": copy.deepcopy(dict(config["optimizer"])),
         "recipe": {
-            "contextual_frontier": frontier,
+            section_name: frontier,
             "native_weights": copy.deepcopy(dict(config["objective"]["native_weights"])),
             "absolute_horizon": int(config["training"]["local_horizon"]),
             "primary_queries": int(config["training"]["primary_queries"]),
@@ -278,7 +310,8 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
     if not resumed:
         research._atomic_json(layout.write_path("resolved_config.json"), dict(config))
         research._atomic_json(layout.write_path("run_manifest.json"), {
-            "schema": "honf_contextual_frontier_run_manifest_v1",
+            "schema": ("honf_interaction_groups_run_manifest_v1" if "interaction_groups" in config
+                       else "honf_contextual_frontier_run_manifest_v1"),
             "artifact_layout_version": 1,
             "config": dict(config),
             "config_path": str(config_path),
@@ -289,7 +322,9 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
     else:
         manifest_path = layout.read_path("run_manifest.json")
         manifest = _read_json(manifest_path)
-        if (manifest.get("schema") != "honf_contextual_frontier_run_manifest_v1"
+        expected_schema = ("honf_interaction_groups_run_manifest_v1" if "interaction_groups" in config
+                           else "honf_contextual_frontier_run_manifest_v1")
+        if (manifest.get("schema") != expected_schema
                 or manifest.get("artifact_layout_version") != 1
                 or manifest.get("arm") != arm
                 or manifest.get("config") != dict(config)):
@@ -303,7 +338,7 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
          device: torch.device, stop_after: int, resume_checkpoint: Path | None = None) -> dict[str, Any]:
     from .research_training import ResearchTrainingEngine
 
-    arm = str(config["contextual_frontier"]["arm"])
+    arm = _arm(config)
     engine_config = _engine_config(config)
     engine = ResearchTrainingEngine(
         engine_config, device=device, parent_age=0,
@@ -353,20 +388,19 @@ def train_contextual_frontier(config_path: str | Path, *, device: str, output: s
     configured_devices = config["execution"].get("preferred_devices")
     permitted = research._permitted_order(device, devices or configured_devices)
     selected_device, device_info = research.resolve_device(permitted[0], permitted_devices=permitted)
-    model, provider = _build_task(config, str(config["contextual_frontier"]["arm"]), selected_device,
-                                  task_factory=task_factory)
+    arm = _arm(config)
+    model, provider = _build_task(config, arm, selected_device, task_factory=task_factory)
     estimated_bytes, peak_temporary = _storage_estimate(
         model, completed_epoch=0, stop_after=stop_after, config=config,
     )
     storage = _prepare_storage(config, output_path, estimated_bytes=estimated_bytes,
                                 peak_temporary_bytes=peak_temporary, bindings=binding_info)
     output_path.mkdir(parents=True, exist_ok=True)
-    _write_run_manifest(output_path, config, resolved_config_path,
-                        str(config["contextual_frontier"]["arm"]), storage, resumed=False)
+    _write_run_manifest(output_path, config, resolved_config_path, arm, storage, resumed=False)
     print(json.dumps({
         "event": "contextual_frontier_run_prepared",
         "output": str(output_path),
-        "arm": config["contextual_frontier"]["arm"],
+        "arm": arm,
         "selected_device": device_info,
         "training_membership": training["membership"],
         "case_count": len(getattr(provider, "training_case_ids", ())),
@@ -388,13 +422,17 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     layout = RunLayout(run)
     manifest_path = layout.read_path("run_manifest.json")
     manifest = _read_json(manifest_path)
-    if (manifest.get("schema") != "honf_contextual_frontier_run_manifest_v1"
+    if (manifest.get("schema") not in {"honf_contextual_frontier_run_manifest_v1",
+                                        "honf_interaction_groups_run_manifest_v1"}
             or manifest.get("artifact_layout_version") != 1):
         raise ValueError("Run is missing the maintained contextual-frontier manifest.")
     config = copy.deepcopy(manifest.get("config"))
     if not isinstance(config, dict):
         raise ValueError("Contextual-frontier run manifest has no saved configuration.")
-    arm = str(config.get("contextual_frontier", {}).get("arm", ""))
+    try:
+        arm = _arm(config)
+    except (KeyError, TypeError):
+        arm = ""
     if manifest.get("arm") != arm:
         raise ValueError("Saved run arm differs from its versioned config.")
     # Revalidate the stored config with a temporary on-disk-free structural pass.
@@ -437,12 +475,24 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
 
 def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
     """Validate a manifest-held config without resolving its external input files."""
-    frontier = config.get("contextual_frontier", {})
+    section_name = "interaction_groups" if "interaction_groups" in config else "contextual_frontier"
+    frontier = config.get(section_name, {})
+    expected_schema = INTERACTION_GROUPS_CONFIG_SCHEMA if section_name == "interaction_groups" else CONTEXTUAL_FRONTIER_CONFIG_SCHEMA
+    supported_arms = INTERACTION_GROUPS_ARMS if section_name == "interaction_groups" else SUPPORTED_ARMS
     if (config.get("schema") != research.RESEARCH_SCHEMA
             or not isinstance(frontier, Mapping)
-            or frontier.get("schema") != CONTEXTUAL_FRONTIER_CONFIG_SCHEMA
-            or frontier.get("arm") not in SUPPORTED_ARMS):
-        raise ValueError("Saved contextual-frontier config is malformed or uses an unsupported arm.")
+            or frontier.get("schema") != expected_schema
+            or frontier.get("arm") not in supported_arms):
+        raise ValueError("Saved contextual model config is malformed or uses an unsupported arm.")
+    if section_name == "interaction_groups":
+        objective = config.get("objective", {})
+        if (not isinstance(objective, Mapping)
+                or objective.get("response_microbatch_every_primary_updates") != 4
+                or objective.get("response_shared_gradient_cap_fraction") != 0.1
+                or objective.get("response_calibration_epoch") != 1
+                or objective.get("native_weights_fixed") is not True
+                or objective.get("native_weights_frozen_through_epoch") != 100):
+            raise ValueError("Saved interaction-group objective contract is malformed.")
     if not isinstance(config.get("dataset"), Mapping) or config["dataset"].get("name") != "thermal":
         raise ValueError("Saved contextual-frontier run does not use the Thermal task.")
     training = config.get("training", {})

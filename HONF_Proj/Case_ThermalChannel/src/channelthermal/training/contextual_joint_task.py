@@ -67,13 +67,16 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
                       "calibration_scene_visits": 0, "calibrations": [], "baselines": {}}
         self._pending = []
         self.native_weights = dict(recipe.get("objective", {}).get("native_weights", THERMAL_CONTENT_LOSS_WEIGHTS))
-        from .contextual_joint_objective import ContextualJointObjectiveRuntime
-        self.organizer = ContextualJointObjectiveRuntime(model, self)
+        self.organizer = self._make_organizer()
         from .contextual_joint_responses import JointResponseSupervision
         families = tuple(v for v in ("0001", "0318", "0333", "0348") if v in self.training_case_ids)
         self.responses = JointResponseSupervision(self.atlas_directory, families, model.normalization_stats)
         self._budget_binding = None
         self._segment_started = time.monotonic()
+
+    def _make_organizer(self):
+        from .contextual_joint_objective import ContextualJointObjectiveRuntime
+        return ContextualJointObjectiveRuntime(self.model, self)
 
     def identity_payload(self):
         return {"schema": "thermal_contextual_frontier_provider_v1", "dataset": "ThermalChannel",

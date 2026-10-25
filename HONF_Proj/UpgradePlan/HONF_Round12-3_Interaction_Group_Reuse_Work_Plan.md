@@ -6,6 +6,8 @@ The central change is to make a group an information-bearing object before a rec
 
 This is a replacement of the Round12-2 main path, not another retrieval layer above it. The new primary model removes E→E, independently learned retrieval C, M compaction, E-conditioned M reading, protected direct-M decoder access, and ordinary expansion of a selected group into all its E members. Raw physical records remain inputs and provenance; their identity does not require retaining every historical prediction branch. Optional bounded refinement is a separately qualified replacement of a coarse contribution, not a second unrestricted contribution.
 
+**Execution update, 24 October 2026:** The [measured development report](../docs/reports/HONF_Round12-3_Interaction_Group_Reuse_Development_Report.md) records completed G-EE/G-F100, native G-H qualification, physical-reference and execution evaluation, and a Stage-B stop. Surface-temperature preservation failed, so G-H100 and reserve expenditure were not started. This measured stop does not establish learned compact hypergraph organization.
+
 ## 1. Scientific question and decisions
 
 Can a small collection of scene-dependent environmental groups simultaneously support useful module contextualization and reusable query inference, with lower measured work and useful native fields/original-control responses? A group must do work in the encoder and survive a direct query reuse test. A small K, attractive graph, high stop probability, or low auxiliary discrepancy is insufficient.

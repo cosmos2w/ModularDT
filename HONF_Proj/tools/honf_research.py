@@ -98,12 +98,12 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--checkpoint", default="latest")
 
     evaluate_contextual = commands.add_parser(
-        "evaluate-contextual", help="evaluate an explicit joint-frontier checkpoint without training",
+        "evaluate-contextual", help="evaluate a contextual-frontier or interaction-groups checkpoint without training",
     )
     evaluate_contextual.add_argument("--checkpoint", required=True)
     evaluate_contextual.add_argument("--device", required=True)
     evaluate_contextual.add_argument("--output", required=True)
-    evaluate_contextual.add_argument("--kind", choices=("native", "responses", "organization"), required=True)
+    evaluate_contextual.add_argument("--kind", choices=("native", "responses", "organization", "group-execution"), required=True)
 
     assess = commands.add_parser("assess", help="summarize history and available checkpoints")
     assess.add_argument("--run", required=True)
@@ -175,7 +175,16 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "evaluate":
         result = research.evaluate(args.run, device=args.device, checkpoint=args.checkpoint)
     elif args.command == "evaluate-contextual":
-        if args.kind == "native":
+        if args.kind == "organization":
+            from honf_runtime.compat import load_trusted_checkpoint
+            from honf_runtime.contextual_frontier_evaluation import _contextual_checkpoint_parts
+            payload = load_trusted_checkpoint(args.checkpoint, map_location="cpu")
+            identity, _provider, _saved = _contextual_checkpoint_parts(payload)
+            if identity.get("workflow") == "interaction_groups_joint_training_v1":
+                raise ValueError("The contextual organization evaluator does not support interaction_groups_v1 checkpoints; use native, responses, or group-execution evaluation.")
+        if args.kind == "group-execution":
+            from honf_runtime.interaction_group_evaluation import evaluate_execution as evaluate
+        elif args.kind == "native":
             from honf_runtime.contextual_frontier_evaluation import evaluate_native as evaluate
         elif args.kind == "responses":
             from honf_runtime.contextual_frontier_responses import evaluate_responses as evaluate

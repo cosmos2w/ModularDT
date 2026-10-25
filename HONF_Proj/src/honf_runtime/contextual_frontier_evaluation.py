@@ -16,7 +16,7 @@ import torch
 from .compat import load_trusted_checkpoint
 
 
-_EVALUABLE_ARMS = ("J-D", "J-H")
+_EVALUABLE_ARMS = ("J-D", "J-H", "G-EE", "G-F", "G-H")
 _MAX_OUTPUT_BYTES = 256 * 1024**2
 _OBSERVABLES = (
     "u", "v", "p", "omega", "temperature_fluid", "temperature_surface",
@@ -28,20 +28,25 @@ def _contextual_checkpoint_parts(
     payload: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     identity = payload.get("experiment_identity")
-    if not isinstance(identity, Mapping) or identity.get("workflow") != "contextual_frontier_joint_training_v1":
-        raise ValueError("Checkpoint is not a maintained contextual-frontier joint-training checkpoint.")
+    if not isinstance(identity, Mapping) or identity.get("workflow") not in {
+            "contextual_frontier_joint_training_v1", "interaction_groups_joint_training_v1"}:
+        raise ValueError("Checkpoint is not a maintained contextual or interaction-groups training checkpoint.")
     provider_identity = identity.get("provider_identity")
     if not isinstance(provider_identity, Mapping):
         raise ValueError("Contextual-frontier checkpoint is missing its provider identity.")
-    if provider_identity.get("schema") != "thermal_contextual_frontier_provider_v1":
-        raise ValueError("Checkpoint provider identity is not the Thermal contextual-frontier provider.")
+    expected_provider_schema = ("thermal_interaction_groups_provider_v1"
+                                if identity["workflow"] == "interaction_groups_joint_training_v1"
+                                else "thermal_contextual_frontier_provider_v1")
+    if provider_identity.get("schema") != expected_provider_schema:
+        raise ValueError("Checkpoint provider identity does not match its maintained model workflow.")
     adapter_state = provider_identity.get("adapter_state")
     recipe = provider_identity.get("recipe")
     if not isinstance(adapter_state, Mapping) or not isinstance(recipe, Mapping):
         raise ValueError("Checkpoint must contain the adapter state payload and the original provider recipe.")
     arm = str(payload.get("arm", provider_identity.get("architecture", "")))
-    if arm not in _EVALUABLE_ARMS or provider_identity.get("architecture") != arm:
-        raise ValueError("Checkpoint arm and provider architecture must both be J-D or J-H and agree.")
+    supported = ("G-EE", "G-F", "G-H") if identity["workflow"] == "interaction_groups_joint_training_v1" else ("J-D", "J-H")
+    if arm not in supported or provider_identity.get("architecture") != arm:
+        raise ValueError("Checkpoint arm and provider architecture must agree with the workflow schema.")
     return identity, provider_identity, {"adapter_state": adapter_state, "recipe": recipe, "arm": arm}
 
 
@@ -77,7 +82,11 @@ def load_contextual_checkpoint(
     # Import through the maintained runner so model/provider reconstruction
     # uses the same task factory as training and resume.
     from .contextual_frontier_training import _build_task
-    from channelthermal.contextual_joint import ThermalContextualJointAdapter
+    interaction_groups = saved["arm"] in ("G-EE", "G-F", "G-H")
+    if interaction_groups:
+        from channelthermal.interaction_groups import ThermalInteractionGroupsAdapter as Adapter
+    else:
+        from channelthermal.contextual_joint import ThermalContextualJointAdapter as Adapter
 
     evaluation_device = torch.device(device)
     recipe = dict(saved["recipe"])
@@ -87,7 +96,7 @@ def load_contextual_checkpoint(
     model_state = payload.get("model_state_dict")
     if not isinstance(model_state, Mapping):
         raise ValueError("Contextual-frontier checkpoint has no model_state_dict.")
-    model = ThermalContextualJointAdapter.from_state_payload(saved["adapter_state"], device="cpu")
+    model = Adapter.from_state_payload(saved["adapter_state"], device="cpu")
     # assign=True preserves each checkpoint tensor's saved dtype instead of
     # silently copying it into the factory constructor's default float32.
     model.load_state_dict(model_state, strict=True, assign=True)
@@ -378,6 +387,11 @@ def evaluate_native(
     per_case_rows: list[Mapping[str, Any]] = []
     work_totals: dict[str, float] = {}
     observed: list[str] = []
+    baseline_records = []
+    baseline_means = None
+    if model.architecture in ("G-F", "G-EE", "G-H"):
+        from .interaction_group_evaluation import mean_prediction, selected_train_mean
+        baseline_means = selected_train_mean(provider)
     epoch = int(payload.get("epoch", payload.get("current_epoch", 0)))
     arm = str(payload.get("arm", provider_identity.get("architecture", "")))
     model.core.set_organization_clock(epoch, 0)
@@ -401,6 +415,9 @@ def evaluate_native(
             if not isinstance(record, Mapping):
                 raise TypeError("Native validation metrics must return a record mapping.")
             metric_records.append(record)
+            if baseline_means is not None:
+                baseline = mean_prediction(prediction, baseline_means)
+                baseline_records.extend(provider.validation_metrics(baseline, batch.targets, auxiliary)["case_rows"])
             rows = record.get("case_rows")
             if isinstance(rows, Sequence):
                 per_case_rows.extend(rows)
@@ -436,7 +453,9 @@ def evaluate_native(
 
     array_bytes = sum(int(value.nbytes) for arrays in representative_arrays.values() for value in arrays.values())
     result = {
-        "schema": "thermal_contextual_frontier_native_evaluation_v1",
+        "schema": ("thermal_interaction_groups_native_evaluation_v1"
+                   if arm in ("G-EE", "G-F", "G-H")
+                   else "thermal_contextual_frontier_native_evaluation_v1"),
         "status": "completed",
         "checkpoint": str(checkpoint_path),
         "checkpoint_selection": _checkpoint_selection(checkpoint_path, payload),
@@ -455,6 +474,11 @@ def evaluate_native(
         "case_ids": observed,
         "metrics": metrics,
         "maintained_native_reduction": reduced,
+        **({"selected_train_mean_baseline": {
+            "means": baseline_means, "fit_case_count": len(provider.training_case_ids),
+            "metrics": _summarize_nine_observables(baseline_records, known_module_counts=_known_module_counts(provider)),
+            "scope": "constant selected-TRAIN physical means, evaluated on identical native masks"}}
+           if baseline_means is not None else {}),
         "executed_work_counts": {
             name: int(value) if value.is_integer() else value
             for name, value in sorted(work_totals.items())
