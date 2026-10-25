@@ -4,6 +4,8 @@ The two original spatial-group models received400 more epochs on the fixed TRAIN
 
 **Status:** closed at the user’s stop request. Both mandatory development500 and full-TRAIN500 experiments and their native VAL89 evaluations completed. The single selected Route T reserve clean-stopped with exit0 at full-data779 for F13-0 and755 for F13-1. Epoch1000 remains unfinished; no further training or endpoint evaluation was launched after the stop request.
 
+**Archive location:** at the user’s subsequent request, all four Round13-1 run directories were moved to `_bk/14_20261025_Round13_1_Maturation` beneath the Thermal forward-run root. Checkpoints, histories and identities remain intact; recorded original paths and launch/resume commands are historical provenance. See the [current location map](../guides/Thermal_Forward_Run_Archive.md). Any future exact replay would require restoring original physical run/parent paths before execution; no continuation is scheduled.
+
 At full-data500, F13-1 has lower canonical VAL89 mean and p90 errors than F13-0 for all nine native quantities. Its fluid-temperature mean RMSE is0.6978 versus1.0028 and surface-temperature mean RMSE is0.6363 versus0.9589. The organizer has moved beyond the predominantly root cuts of the original100-epoch screen, and the first-order modes and early relay have measurable downstream effects. Physical response errors improve unevenly and homogeneous zero-heat temperatures remain nonzero. These measured gains do not establish physical validity, convergence, independent TEST performance or inverse-design success.
 
 ## Identity, state and data clocks
