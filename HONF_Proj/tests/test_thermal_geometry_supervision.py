@@ -324,3 +324,33 @@ def test_calibration_uses_one_single_difference_per_train_family():
     assert detail["optimizer_steps"] == 0
     assert detail["loss_reduction"]["pair_denominator"] == 4
     assert len(detail["loss_reduction"]["per_pair_component_valid_scalar_denominators"]) == 4
+
+
+def test_sampled_response_frontiers_have_distinct_replayable_endpoint_keys():
+    class SampledAdapter(_DifferentiableNativeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.keys = []
+
+        def prepare_native(self, *args, scene_key, **kwargs):
+            self.keys.append(scene_key)
+            prepared = super().prepare_native(*args, scene_key=scene_key, **kwargs)
+            prepared.organization = SimpleNamespace(layers=((SimpleNamespace(
+                frontier=SimpleNamespace(log_probability=self.amplitude * -0.3)
+            ),),))
+            return prepared
+
+    model = SampledAdapter().train()
+    logps = []
+    kwargs = dict(schedule_index=3, device=torch.device("cpu"), dtype=torch.float32,
+                  fluid_queries=8, local_queries_per_module=3, ntheta=16,
+                  fluid_chunk_size=8, seed=17)
+    loss, *_ = _pair_panel_loss(model, _pair(), _scales(), frontier_log_probabilities=logps, **kwargs)
+    assert len(model.keys) == len(logps) == 2
+    assert len(model.keys[0]) == len(model.keys[1]) == 1
+    assert model.keys[0] != model.keys[1]
+    first_keys = list(model.keys)
+    _pair_panel_loss(model, _pair(), _scales(), frontier_log_probabilities=[], **kwargs)
+    assert model.keys[2:] == first_keys
+    (loss + loss.detach() * torch.stack(logps).sum()).backward()
+    assert torch.isfinite(model.amplitude.grad) and model.amplitude.grad.abs() > 0

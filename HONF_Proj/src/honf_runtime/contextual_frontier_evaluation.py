@@ -16,7 +16,7 @@ import torch
 from .compat import load_trusted_checkpoint
 
 
-_EVALUABLE_ARMS = ("J-D", "J-H", "G-EE", "G-F", "G-H")
+_EVALUABLE_ARMS = ("J-D", "J-H", "G-EE", "G-F", "G-H", "G-EE-H")
 _MAX_OUTPUT_BYTES = 256 * 1024**2
 _OBSERVABLES = (
     "u", "v", "p", "omega", "temperature_fluid", "temperature_surface",
@@ -44,7 +44,7 @@ def _contextual_checkpoint_parts(
     if not isinstance(adapter_state, Mapping) or not isinstance(recipe, Mapping):
         raise ValueError("Checkpoint must contain the adapter state payload and the original provider recipe.")
     arm = str(payload.get("arm", provider_identity.get("architecture", "")))
-    supported = ("G-EE", "G-F", "G-H") if identity["workflow"] == "interaction_groups_joint_training_v1" else ("J-D", "J-H")
+    supported = ("G-EE", "G-F", "G-H", "G-EE-H") if identity["workflow"] == "interaction_groups_joint_training_v1" else ("J-D", "J-H")
     if arm not in supported or provider_identity.get("architecture") != arm:
         raise ValueError("Checkpoint arm and provider architecture must agree with the workflow schema.")
     return identity, provider_identity, {"adapter_state": adapter_state, "recipe": recipe, "arm": arm}
@@ -82,7 +82,7 @@ def load_contextual_checkpoint(
     # Import through the maintained runner so model/provider reconstruction
     # uses the same task factory as training and resume.
     from .contextual_frontier_training import _build_task
-    interaction_groups = saved["arm"] in ("G-EE", "G-F", "G-H")
+    interaction_groups = saved["arm"] in ("G-EE", "G-F", "G-H", "G-EE-H")
     if interaction_groups:
         from channelthermal.interaction_groups import ThermalInteractionGroupsAdapter as Adapter
     else:
@@ -389,7 +389,7 @@ def evaluate_native(
     observed: list[str] = []
     baseline_records = []
     baseline_means = None
-    if model.architecture in ("G-F", "G-EE", "G-H"):
+    if model.architecture in ("G-F", "G-EE", "G-H", "G-EE-H"):
         from .interaction_group_evaluation import mean_prediction, selected_train_mean
         baseline_means = selected_train_mean(provider)
     epoch = int(payload.get("epoch", payload.get("current_epoch", 0)))
@@ -454,7 +454,7 @@ def evaluate_native(
     array_bytes = sum(int(value.nbytes) for arrays in representative_arrays.values() for value in arrays.values())
     result = {
         "schema": ("thermal_interaction_groups_native_evaluation_v1"
-                   if arm in ("G-EE", "G-F", "G-H")
+                   if arm in ("G-EE", "G-F", "G-H", "G-EE-H")
                    else "thermal_contextual_frontier_native_evaluation_v1"),
         "status": "completed",
         "checkpoint": str(checkpoint_path),

@@ -27,7 +27,7 @@ class InteractionGroupObjectiveRuntime:
         self.pending = []
 
     def collect(self, predictions, per_case_native_losses, epoch, case_ids=None):
-        if self.model.architecture != "G-H":
+        if not self.core.adaptive_groups:
             return
         p = predictions.native_prepared.organization
         logps = torch.stack(
@@ -40,6 +40,15 @@ class InteractionGroupObjectiveRuntime:
             for layer in p.layers:
                 for name, count in layer[b].work_counts.items():
                     cost += float(prices.get(name, 0.0)) * count
+            query_rows = predictions.native_prepared.query_batch.num_queries
+            slots = min(8, p.final_groups[b].frontier.K)
+            query_counts = {
+                "group_scores": query_rows * slots * self.core.num_heads,
+                "group_value_reads": query_rows * slots,
+                "query_module_scores": query_rows * p.scene.module_mask.shape[1],
+                "spatial_cell_visits": query_rows * 9,
+            }
+            cost += sum(float(prices.get(name, 0.0)) * count for name, count in query_counts.items())
             costs.append(cost)
         work = logps.new_tensor(costs)
         task = ((per_case_native_losses.detach() - self.state["task_baseline"]) * logps).sum()
@@ -83,6 +92,26 @@ class InteractionGroupObjectiveRuntime:
                     named[n].grad = g.clone() * factor
                 else:
                     named[n].grad.add_(g, alpha=factor)
+        slices = {}
+        for label, select in {
+            "organizer": lambda n: ".frontier." in n,
+            "shared_encoder": lambda n: n.startswith(
+                ("core.module_encoder.", "core.environment_encoder.", "core.operating_encoder.")
+            ),
+            "exchange": lambda n: n.startswith("core.layers.") and ".frontier." not in n,
+        }.items():
+            names = [n for n in named if select(n)]
+            tg = {n: task_g[n] for n in names if n in task_g}
+            wg = {n: work_g[n] for n in names if n in work_g}
+            a, b = gradient_norm(tg), gradient_norm(wg)
+            dot = sum(float((tg[n] * wg[n]).sum()) for n in tg if n in wg)
+            slices[label] = {
+                "task_norm": a,
+                "work_norm": b,
+                "cosine": dot / (a * b) if a * b else None,
+                "missing_task": sum(n not in tg for n in names),
+                "missing_work": sum(n not in wg for n in names),
+            }
         task_mean = sum(row[3] for row in self.pending) / total
         work_mean = sum(row[4] for row in self.pending) / total
         self.state["task_baseline"] = 0.9 * self.state["task_baseline"] + 0.1 * task_mean
@@ -94,6 +123,7 @@ class InteractionGroupObjectiveRuntime:
                 "epoch": epoch,
                 "update": update_index,
                 "native_policy_norm": nt,
+                "slices": slices,
                 "raw_work_policy_norm": nw,
                 "native_full_norm": nn,
                 "work_ramp": ramp,

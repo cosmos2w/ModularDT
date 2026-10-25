@@ -28,7 +28,7 @@ from .unified_training import (
 CONTEXTUAL_FRONTIER_CONFIG_SCHEMA = "thermal_contextual_frontier_v1"
 SUPPORTED_ARMS = ("J-D", "J-H")
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
-INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H")
+INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H")
 
 
 def _model_section(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:

@@ -42,12 +42,26 @@ class ThermalInteractionGroupTask(ThermalContextualJointTask):
         )
         return identity
 
+    @property
+    def core_adaptive_training(self):
+        return self.model.core.adaptive_groups and self.model.training
+
     def _response_gradient(self, native, *, index, calibrate=False):
         from honf_runtime.thermal_soft_organization import gradient_balance, gradient_norm
 
         named = {name: parameter for name, parameter in self.model.named_parameters() if parameter.requires_grad}
-        loss, detail = self.responses.loss(self.model, index)
-        gradients = torch.autograd.grad(loss, tuple(named.values()), allow_unused=True)
+        if self.core_adaptive_training:
+            loss, detail, logp = self.responses.sampled_group_loss(self.model, index)
+            baseline = float(self.state.get("response_policy_baseline", 0.0))
+            gradient_loss = loss + (loss.detach() - baseline) * logp
+            detail["policy_log_probability"] = float(logp.detach())
+            detail["policy_baseline"] = baseline
+            if not calibrate:
+                self.state["response_policy_baseline"] = 0.9 * baseline + 0.1 * float(loss.detach())
+        else:
+            loss, detail = self.responses.loss(self.model, index)
+            gradient_loss = loss
+        gradients = torch.autograd.grad(gradient_loss, tuple(named.values()), allow_unused=True)
         raw = {
             name: gradient.detach()
             for (name, _parameter), gradient in zip(named.items(), gradients)
@@ -103,7 +117,7 @@ class ThermalInteractionGroupTask(ThermalContextualJointTask):
         )
 
     def before_optimizer_step(self, model, optimizer, losses, work, *, epoch, update_index):
-        if model is not self.model or model.architecture not in {"G-EE", "G-F", "G-H"}:
+        if model is not self.model or model.architecture not in {"G-EE", "G-F", "G-H", "G-EE-H"}:
             raise ValueError("Wrong InteractionGroupCore optimizer owner or architecture.")
         if self.native_weights != self._native_weights_contract:
             raise RuntimeError("Interaction-group training must preserve the declared native loss weights.")

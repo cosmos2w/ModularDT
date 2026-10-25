@@ -202,7 +202,7 @@ def test_streamed_task_policy_gradients_baseline_and_retry_state():
     out = adapter.core.decode(p, query())
     loss = out.joint_fields.square().mean((1, 2))
     runtime = InteractionGroupObjectiveRuntime(adapter, SimpleNamespace(recipe={"objective": {"work_prices": {}}}))
-    prediction = SimpleNamespace(native_prepared=SimpleNamespace(organization=p))
+    prediction = SimpleNamespace(native_prepared=SimpleNamespace(organization=p, query_batch=query()))
     runtime.collect(prediction, loss, 1)
     state = runtime.state_dict()
     assert runtime.state["task_baseline"] == 0
@@ -213,3 +213,61 @@ def test_streamed_task_policy_gradients_baseline_and_retry_state():
     assert adapter.core.layers[0].frontier.policy[-1].weight.grad.abs().sum() > 0
     runtime.load_state_dict(state)
     assert runtime.state["task_baseline"] == 0 and len(runtime.pending) == 1
+
+
+@pytest.mark.parametrize("prior", ["legacy_additive", "balanced_postings_v1"])
+def test_corrected_exhaustive_prior_and_separate_coverage(prior):
+    c = core()
+    c.reader_prior = prior
+    p = c.prepare(scene())
+    q = query(7)
+    restricted, tr = c.decode(p, q, return_trace=True, association_scope="all")
+    full, tf = c.decode(p, q, return_trace=True, exhaustive=True)
+    for rt, ft in zip(tr[0], tf[0]):
+        candidates = rt["candidates"]
+        valid = candidates >= 0
+        # The same group's B contribution is identical with either support;
+        # exhaustive must not add an existing posting contribution twice.
+        actual = ft["association_prior"].gather(1, candidates.clamp_min(0))
+        torch.testing.assert_close(rt["association_prior"][valid], actual[valid])
+    if prior == "balanced_postings_v1":
+        for t in tf[0]:
+            torch.testing.assert_close(t["association_prior"].sum(-1), t["alpha"].sum(-1))
+    assert full.work_counts["group_value_reads"] == 7 * 8
+    assert restricted.work_counts["original_e_query_reads"] == 0
+
+
+def test_balanced_reader_normalizes_each_entrance_and_retains_module_gradient():
+    c = core()
+    c.reader_prior = "balanced_postings_v1"
+    p = c.prepare(scene(1))
+    out, tr = c.decode(p, query(7), return_trace=True)
+    for t in tr[0]:
+        torch.testing.assert_close(t["geometry_prior"].sum(-1), torch.ones(len(t["candidates"])))
+        torch.testing.assert_close(t["association_prior"].sum(-1), t["alpha"].sum(-1), atol=1e-6, rtol=1e-6)
+    out.joint_fields.square().sum().backward()
+    assert c.proposal_key.weight.grad.abs().sum() > 0
+
+
+def test_retained_ee_adaptive_pools_instead_of_member_expansion():
+    c = core("G-EE-H")
+    s = scene()
+    p = c.prepare(s, forced_frontier={0: (14, "parent"), 1: (14, "parent")})
+    assert [layer[0].frontier.K for layer in p.layers] == [1, 1]
+    assert p.work_counts["ee_pairs"] > 0
+    out = c.decode(p, query(7))
+    assert out.work_counts["group_value_reads"] == 7
+    assert out.work_counts["original_e_query_reads"] == 0
+    assert p.work_counts["group_key_value_rows"] == 2
+    restored = InteractionGroupCore.from_config(c.get_config()).eval()
+    restored.load_state_dict(c.state_dict())
+    assert restored.adaptive_groups and restored.layers[0].ee is not None
+
+
+def test_legacy_serialized_config_does_not_gain_default_recipe_fields():
+    c = core("G-EE")
+    config = c.get_config()
+    assert "reader_prior" not in config and "frontier_distance_scales" not in config
+    restored = InteractionGroupCore.from_config(config)
+    assert restored.get_config() == config
+    restored.load_state_dict(c.state_dict(), strict=True)

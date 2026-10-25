@@ -258,10 +258,16 @@ class InteractionGroupCore(nn.Module):
         query_tile_size=512,
         environment_nx=24,
         environment_ny=8,
+        reader_prior=None,
+        frontier_distance_scales=None,
     ):
         super().__init__()
-        if architecture not in ("G-F", "G-EE", "G-H"):
+        self._legacy_recipe_config = reader_prior is None
+        reader_prior = "legacy_additive" if reader_prior is None else reader_prior
+        if architecture not in ("G-F", "G-EE", "G-H", "G-EE-H"):
             raise ValueError("Unknown interaction-group arm")
+        if reader_prior not in ("legacy_additive", "balanced_postings_v1"):
+            raise ValueError("Unknown group reader prior")
         if coordinate_dim != 2 or context_dim % num_heads or dropout != 0:
             raise ValueError("Unsupported group dimensions/dropout")
         self.config = {
@@ -281,6 +287,8 @@ class InteractionGroupCore(nn.Module):
             "query_tile_size": query_tile_size,
             "environment_nx": environment_nx,
             "environment_ny": environment_ny,
+            "reader_prior": reader_prior,
+            "frontier_distance_scales": frontier_distance_scales,
         }
         self.__dict__.update(self.config)
         # Common named tensors use identical seeds regardless of extra E->E.
@@ -303,14 +311,30 @@ class InteractionGroupCore(nn.Module):
             self.group_query = nn.Linear(context_dim, context_dim, bias=False)
             self.fusion_trunk = _mlp(2 * context_dim, context_dim, context_dim)
             self.field_head = nn.Linear(context_dim, output_dim)
-            if architecture == "G-EE":
+            if architecture in ("G-EE", "G-EE-H"):
                 for layer in self.layers:
                     layer.ee = Exchange(context_dim, num_heads)
+        if frontier_distance_scales is not None:
+            if len(frontier_distance_scales) != context_depth:
+                raise ValueError("One calibrated distance scale per layer required")
+            for layer, scales in zip(self.layers, frontier_distance_scales):
+                layer.frontier.distance_scales.copy_(torch.as_tensor(scales))
+                layer.frontier.scales_calibrated.fill_(True)
         self.register_buffer("organization_epoch", torch.tensor(1, dtype=torch.long))
         self.register_buffer("organization_update", torch.tensor(0, dtype=torch.long))
 
+    @property
+    def adaptive_groups(self):
+        return self.architecture in ("G-H", "G-EE-H")
+
     def get_config(self):
-        return {"schema": self.schema, **self.config}
+        config = {"schema": self.schema, **self.config}
+        # Preserve legacy serialized adapter identities on exact resume.
+        if self._legacy_recipe_config:
+            config.pop("reader_prior")
+            if config["frontier_distance_scales"] is None:
+                config.pop("frontier_distance_scales")
+        return config
 
     @classmethod
     def from_config(cls, config):
@@ -379,7 +403,7 @@ class InteractionGroupCore(nn.Module):
                 scene,
                 xy,
                 exy,
-                adaptive=self.architecture == "G-H",
+                adaptive=self.adaptive_groups,
                 epoch=int(self.organization_epoch),
                 update=int(self.organization_update),
                 seed=self.init_seed,
@@ -419,7 +443,9 @@ class InteractionGroupCore(nn.Module):
             raise ValueError("Query coordinate frame differs")
         q.validate(batch_size=p.scene.batch_size, coordinate_dim=2, query_input_dim=self.query_input_dim)
 
-    def _read_tile(self, p, b, q, coordinates, ids, *, exhaustive=False, fixed_candidates=None):
+    def _read_tile(
+        self, p, b, q, coordinates, ids, *, exhaustive=False, fixed_candidates=None, association_scope="postings"
+    ):
         g = p.final_groups[b]
         n = len(q)
         h = self.num_heads
@@ -504,22 +530,29 @@ class InteractionGroupCore(nn.Module):
             # Compact valid entries in geometric-first order, then cap before
             # neural group scoring. 4 reserved geometric slots, total <=8.
             compact = torch.argsort((all_ids < 0).long(), stable=True, dim=-1)
-            candidates = all_ids.gather(1, compact)[:, :8]
+            candidates = all_ids.gather(1, compact)[:, : min(8, len(g.mass))]
         good = candidates >= 0
         safe_ids = candidates.clamp_min(0)
         # Compute address prior only on bounded retained groups. No QxK
         # learned logits, values or proposal prior allocation in production.
         geo_match = safe_ids[:, :, None] == geo_ids[:, None, :]
-        rho = (geo_match * geo_weights[:, None, :]).sum(-1)
+        geo_prior = (geo_match * geo_weights[:, None, :]).sum(-1)
+        if self.reader_prior == "balanced_postings_v1":
+            geo_prior = geo_prior / geo_weights.sum(-1, keepdim=True).clamp_min(1.0e-30)
+        association_prior = torch.zeros_like(geo_prior)
         if selected.shape[1]:
             B = g.B.mean(0)
             bp = B[selected[:, :, None], safe_ids[:, None, :]]
             ownpost = (safe_ids[:, None, :, None] == g.postings[selected][:, :, None, :]).any(-1)
-            rho = rho + (alpha[:, :, None] * bp * ownpost).sum(1)
-        if exhaustive:
-            # Diagnostic alternate search retains geometric entrance and all
-            # M associations; it is a different address function, not parity.
-            rho = rho + (alpha[:, :, None] * g.B.mean(0)[selected]).sum(1) if selected.shape[1] else rho
+            if association_scope == "all" or exhaustive:
+                ownpost = torch.ones_like(ownpost)
+            if self.reader_prior == "balanced_postings_v1":
+                normalizer = B.sum(-1) if association_scope == "all" or exhaustive else B.gather(1, g.postings).sum(-1)
+                bp = bp / normalizer[selected][:, :, None].clamp_min(1.0e-30)
+            association_prior = (alpha[:, :, None] * bp * ownpost).sum(1)
+        geo_prior = geo_prior * good
+        association_prior = association_prior * good
+        rho = geo_prior + association_prior
         keys = g.keys[safe_ids]
         values = g.values[safe_ids]
         query = self.group_query(q).reshape(n, h, d)
@@ -546,9 +579,24 @@ class InteractionGroupCore(nn.Module):
             "exploration_queries": exploration,
             "native_query_rows": n,
         }
-        return fields, work, {"candidates": candidates, "proposal_ids": selected, "alpha": alpha, "weights": weights}
+        return (
+            fields,
+            work,
+            {
+                "candidates": candidates,
+                "proposal_ids": selected,
+                "alpha": alpha,
+                "weights": weights,
+                "geometry_prior": geo_prior,
+                "association_prior": association_prior,
+            },
+        )
 
-    def decode(self, p, query, *, exhaustive=False, return_trace=False, candidate_traces=None):
+    def decode(
+        self, p, query, *, exhaustive=False, return_trace=False, candidate_traces=None, association_scope="postings"
+    ):
+        if association_scope not in ("postings", "all"):
+            raise ValueError("Unknown diagnostic association scope")
         self._assert_prepared(p, query)
         gamma = coordinate_gamma(query.coordinates, p.frame_origin, p.frame_scale)
         q = self.query_encoder(torch.cat((query.features, gamma), -1) if self.query_input_dim else gamma)
@@ -572,6 +620,7 @@ class InteractionGroupCore(nn.Module):
                     query.coordinates[b, start:end],
                     ids,
                     exhaustive=exhaustive,
+                    association_scope=association_scope,
                     fixed_candidates=candidate_traces[b][len(tiles)]["candidates"]
                     if candidate_traces is not None
                     else None,

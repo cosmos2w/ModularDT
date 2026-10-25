@@ -113,7 +113,7 @@ def evaluate_execution(checkpoint, device, output, *, panels=None):
     if free - 256 * 1024**2 < 200 * 1024**3:
         raise OSError("Insufficient DATA2 headroom")
     model, provider, payload = load_contextual_checkpoint(checkpoint, device)
-    if model.architecture not in ("G-F", "G-EE", "G-H"):
+    if model.architecture not in ("G-F", "G-EE", "G-H", "G-EE-H"):
         raise ValueError("Expected an interaction-group checkpoint")
     panels = input_panels(provider) if panels is None else panels
     model.eval()
@@ -182,12 +182,26 @@ def evaluate_execution(checkpoint, device, output, *, panels=None):
             query = native.query_batch
             ordinary, trace = model.core.decode(p, query, return_trace=True)
             base = ordinary.joint_fields
+            geometry = torch.cat([t["geometry_prior"] for t in trace[0]])
+            association = torch.cat([t["association_prior"] for t in trace[0]])
+            attention = torch.cat([t["weights"] for t in trace[0]])
+            attribution = (attention * (geometry / (geometry + association).clamp_min(1e-30))[:, None]).sum(-1)
+            B = p.final_groups[0].B.mean(0)
+            posting_mass = B.gather(1, p.final_groups[0].postings).sum(-1)
+            reader = {
+                "top4_B_fraction_by_module": (posting_mass / B.sum(-1).clamp_min(1e-30)).cpu().tolist(),
+                "geometry_prior_fraction": float(
+                    (geometry.sum(-1) / (geometry + association).sum(-1).clamp_min(1e-30)).mean()
+                ),
+                "attention_geometry_attribution": float((attribution / attention.sum(-1).clamp_min(1e-30)).mean()),
+            }
             row = {
                 "case_id": batch.case_keys[0],
                 "module_count": int(p.scene.module_mask.sum()),
                 "K": [g[0].frontier.K for g in p.layers],
                 "group_key_value_reused": True,
                 "ordinary_work": ordinary.work_counts,
+                "reader_diagnostics": reader,
                 "ordinary_native_metrics": provider.validation_metrics(prediction, batch.targets, {})["case_rows"][0],
                 "interventions": {},
             }
@@ -209,7 +223,116 @@ def evaluate_execution(checkpoint, device, output, *, panels=None):
                     "native_output_change": errors,
                     "native_metrics": utility,
                 }
+            if model.core.adaptive_groups:
+                sharing = []
+                fmask = native.stencils["fluid"].valid & (batch.targets.point_weights > 0)
+                smask = (
+                    native.stencils["surface"].valid.reshape(prediction.native_main["pred_interface"].shape[:-1])
+                    & native.source_present[..., None]
+                )
+                imask = (
+                    native.stencils["material"].valid.reshape(
+                        prediction.native_main["pred_internal_temperature"].shape[:-1]
+                    )
+                    & native.source_present[..., None]
+                )
+                for layer_index, groups in enumerate(p.layers):
+                    frontier = groups[0].frontier
+                    internal = [node for node in frontier.nodes if frontier.children[node] is not None]
+                    node = internal[0] if internal else frontier.reached[0]
+                    variants = {}
+                    variant_predictions = {}
+                    for mode in ("parent", "children"):
+                        changed = model.core.prepare(p.scene, forced_frontier={layer_index: (node, mode)})
+                        out = model.core.decode(changed, query)
+                        main = model._extract_native_roles(native, out.thermal_temperature, out.nonlinear_field)
+                        variant_predictions[mode] = main
+                        variants[mode] = {
+                            "K": [layer[0].frontier.K for layer in changed.layers],
+                            "native_metrics": provider.validation_metrics(
+                                replace(prediction, native_main=main), batch.targets, {}
+                            )["case_rows"][0],
+                            "prepare_work": changed.work_counts,
+                            "query_work": out.work_counts,
+                            "native_output_change": {
+                                key: _relative_change(value, main[key])
+                                for key, value in prediction.native_main.items()
+                                if torch.is_tensor(value)
+                            },
+                        }
+                    sharing.append(
+                        {
+                            "layer": layer_index + 1,
+                            "node": node,
+                            "stop_probability": float(frontier.probabilities[node - len(frontier.labels)]),
+                            "dependent_reprepare": True,
+                            "deterministic_inference": True,
+                            "parent_child_fluid_channel_rms": [
+                                _relative_change(
+                                    variant_predictions["parent"]["pred_field"][..., j],
+                                    variant_predictions["children"]["pred_field"][..., j],
+                                    fmask,
+                                )
+                                for j in range(5)
+                            ],
+                            "parent_child_surface_rms": _relative_change(
+                                variant_predictions["parent"]["pred_interface"][..., 0],
+                                variant_predictions["children"]["pred_interface"][..., 0],
+                                smask,
+                            ),
+                            "parent_child_material_rms": _relative_change(
+                                variant_predictions["parent"]["pred_internal_temperature"][..., 0],
+                                variant_predictions["children"]["pred_internal_temperature"][..., 0],
+                                imask,
+                            ),
+                            "variants": variants,
+                        }
+                    )
+                row["parent_child_replays"] = sharing
+                # Isolate the organizer's use of applied relations; M->E
+                # and the pooled relation prior in the exchange remain intact.
+                hooks = [
+                    layer.frontier.register_forward_pre_hook(
+                        lambda _module, args: (args[0], torch.zeros_like(args[1]), args[2], args[3])
+                    )
+                    for layer in model.core.layers
+                ]
+                try:
+                    relation_free = model.core.prepare(p.scene)
+                    out = model.core.decode(relation_free, query)
+                finally:
+                    for hook in hooks:
+                        hook.remove()
+                main = model._extract_native_roles(native, out.thermal_temperature, out.nonlinear_field)
+                row["relation_free_organizer"] = {
+                    "scope": "zero R only in tree/policy descriptors; actual M->E and group->M priors retained",
+                    "K": [layer[0].frontier.K for layer in relation_free.layers],
+                    "changed_E_labels": [
+                        int((original[0].labels != changed[0].labels).sum())
+                        for original, changed in zip(p.layers, relation_free.layers)
+                    ],
+                    "native_metrics": provider.validation_metrics(
+                        replace(prediction, native_main=main), batch.targets, {}
+                    )["case_rows"][0],
+                    "joint_rms": _relative_change(base, out.joint_fields),
+                }
+
             exhaustive = model.core.decode(p, query, exhaustive=True)
+            restricted_all = model.core.decode(p, query, association_scope="all")
+            row["restricted_all_associations"] = {
+                "joint_rms": _relative_change(base, restricted_all.joint_fields),
+                "native_metrics": provider.validation_metrics(
+                    replace(
+                        prediction,
+                        native_main=model._extract_native_roles(
+                            native, restricted_all.thermal_temperature, restricted_all.nonlinear_field
+                        ),
+                    ),
+                    batch.targets,
+                    {},
+                )["case_rows"][0],
+                "scope": "same restricted candidates; full B prior, each contribution once; balanced mode normalizes by full B mass",
+            }
             row["exhaustive_search"] = {
                 "joint_rms": _relative_change(base, exhaustive.joint_fields),
                 "work": exhaustive.work_counts,
@@ -461,6 +584,10 @@ def benchmark_optimizer_macro(model, provider, payload, device):
         model.train()
         for repeat in range(4):
             model.load_state_dict(state)
+            if saved_provider:
+                provider.load_training_state_dict(saved_provider)
+            if optimizer_state_source == "checkpoint named AdamW state":
+                _load_named_optimizer_state(model, optimizer, payload["optimizer_state_by_name"])
             optimizer.zero_grad(set_to_none=True)
             if torch.device(device).type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
@@ -485,7 +612,11 @@ def benchmark_optimizer_macro(model, provider, payload, device):
                 pred, _ = provider.predict_native(
                     model, batch.scene_inputs, batch.receivers, model.architecture, "joint", epoch=payload["epoch"]
                 )
-                loss = provider._weighted_native(pred, batch.targets).sum() / 48
+                native_losses = provider._weighted_native(pred, batch.targets)
+                # Include the executed native/work policy VJPs before backward,
+                # as in the real engine's loss_terms path.
+                provider.organizer.collect(pred, native_losses, int(payload["epoch"]), case_ids=batch.case_keys)
+                loss = native_losses.sum() / 48
                 _sync(device)
                 fwd += time.perf_counter() - t
                 t = time.perf_counter()
@@ -528,6 +659,7 @@ def benchmark_optimizer_macro(model, provider, payload, device):
         "microbatch_cases": 24,
         "primary_queries": 1024,
         "response_included": True,
+        "native_and_work_policy_vjps_included": model.core.adaptive_groups,
         "optimizer_state_source": optimizer_state_source,
         "warmup_engineering_steps": 1,
         "recorded_engineering_steps": 3,

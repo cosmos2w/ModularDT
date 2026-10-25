@@ -543,6 +543,7 @@ def _pair_panel_loss(
     ntheta: int,
     fluid_chunk_size: int,
     seed: int,
+    frontier_log_probabilities: list | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, int], dict[str, Any]]:
     fluid = pair.roles["fluid_fields"]
     interface = pair.roles["interface"]
@@ -602,9 +603,15 @@ def _pair_panel_loss(
                 fluid_tensor,
                 local_query_points=local_tensor,
                 ntheta=ntheta,
-                scene_key=("thermal_geometry_response", pair.family_id, pair.label, schedule_index, chunk_index, label),
+                scene_key=((f"thermal_geometry_response:{pair.family_id}:{pair.label}:{schedule_index}:{chunk_index}:{label}",)
+                           if frontier_log_probabilities is not None else
+                           ("thermal_geometry_response", pair.family_id, pair.label, schedule_index, chunk_index, label)),
                 **({"physical_heat": heat} if getattr(model, "requires_control_in_prepare", False) else {}),
             )
+            if frontier_log_probabilities is not None:
+                frontier_log_probabilities.extend(
+                    g.frontier.log_probability for layer in prepared.organization.layers for g in layer
+                )
             output = model.apply_native(prepared, heat)
             if not isinstance(output, Mapping):
                 raise TypeError("Thermal adapter apply_native must return a role mapping.")

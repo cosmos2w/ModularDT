@@ -66,3 +66,29 @@ class JointResponseSupervision:
             for module,mode in modes.items():
                 module.training=mode
         return loss,{"kind":"heat",**detail}
+
+    def sampled_group_loss(self, model, index):
+        """Same finite pair and receivers, with sampled adaptive frontiers.
+
+        Return joint endpoint log probability so the caller can add the
+        score-function term; continuous response derivatives remain ordinary.
+        """
+        if index % 2:
+            pair = self.geometry._selected_pairs(index // 2, False)[0]
+            scales = self.geometry.scales
+            schedule_index = index // 2
+            kind = "single_geometry"
+        else:
+            pair = self.heat_pairs[(index // 2) % len(self.heat_pairs)]
+            scales = self.heat_scales
+            schedule_index = index
+            kind = "heat"
+        parameter = next(model.parameters())
+        logps = []
+        loss, _, _, detail = _pair_panel_loss(
+            model, pair, scales, schedule_index=schedule_index,
+            device=parameter.device, dtype=parameter.dtype, fluid_queries=256,
+            local_queries_per_module=32, ntheta=16, fluid_chunk_size=256, seed=0,
+            frontier_log_probabilities=logps,
+        )
+        return loss, {"kind": kind, **detail}, torch.stack(logps).sum()

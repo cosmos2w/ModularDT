@@ -83,7 +83,8 @@ class LocalFrontier(nn.Module):
         scales = self.distance_scales.to(components)
         costs = (components / scales.clamp_min(1.0e-12) * (scales > 0)).sum(-1)
         edges = self.edges.cpu().tolist()
-        order = sorted(range(len(edges)), key=lambda j: (float(costs[j].detach()), *edges[j]))
+        host_costs = costs.detach().cpu().tolist()
+        order = sorted(range(len(edges)), key=lambda j: (host_costs[j], *edges[j]))
         parent = list(range(n))
         root = list(range(n))
         children = [None] * n
@@ -146,6 +147,8 @@ class LocalFrontier(nn.Module):
         # NumPy SeedSequence is ordinary keyed sampling, independent of tiles
         # and global CUDA RNG. No cryptographic identity machinery is needed.
         rng = np.random.default_rng(np.random.SeedSequence([int(v) & 0xFFFFFFFF for v in seed]))
+        host_probabilities = probabilities.detach().cpu().tolist()
+        host_logits = logits.detach().cpu().tolist()
         active = []
         reached = []
         terms = []
@@ -157,7 +160,7 @@ class LocalFrontier(nn.Module):
                 continue
             j = node - n
             reached.append(node)
-            stop = bool(rng.random() < float(probabilities[j].detach())) if training else bool(logits[j].detach() >= 0)
+            stop = bool(rng.random() < host_probabilities[j]) if training else host_logits[j] >= 0
             if forced is not None and node == forced[0]:
                 stop = forced[1] == "parent"
             if training:

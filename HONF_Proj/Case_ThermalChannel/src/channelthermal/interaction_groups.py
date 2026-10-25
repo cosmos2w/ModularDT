@@ -42,8 +42,8 @@ class ThermalInteractionGroupsAdapter(ThermalContextualJointAdapter):
             environment_nx=environment_nx,
             environment_ny=environment_ny,
         )
-        if self.architecture not in {"G-EE", "G-F", "G-H"}:
-            raise ValueError("InteractionGroupCore architecture must be G-EE, G-F, or G-H.")
+        if self.architecture not in {"G-EE", "G-F", "G-H", "G-EE-H"}:
+            raise ValueError("InteractionGroupCore architecture must be G-EE, G-F, G-H, or G-EE-H.")
 
     def get_config(self):
         return {
