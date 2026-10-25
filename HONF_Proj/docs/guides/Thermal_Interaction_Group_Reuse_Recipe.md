@@ -1,5 +1,7 @@
 # Thermal interaction-group reuse development recipe
 
+The 25 October2026 run-directory cleanup archived the reported interaction/recovery runs under `_bk/12_20261024_Interaction_Group_Recovery`. See the [current run map](Thermal_Forward_Run_Archive.md) for their exact locations. The commands and source-path strings below document the original experiments; no archived run is scheduled for continuation, and an exact historical replay must restore original physical input paths instead of rewriting saved checkpoint identities.
+
 This recipe implements the bounded [Round12-3 plan](../../UpgradePlan/HONF_Round12-3_Interaction_Group_Reuse_Work_Plan.md). The new `interaction_groups_v1` core prepares information-bearing E aggregates inside two interaction layers and exposes the same final group key/value tensors to a bounded query reader. It preserves original M identities and heat columns. It has one joint u/v/p/T head, case-owned native extraction, no direct M-value read, no independently learned membership C, no ordinary original-E query expansion and no optional refinement. This exclusive connected partition is a restricted organizational hypothesis, not unrestricted overlapping hypergraph learning.
 
 The [completed first100 report](../reports/HONF_Round12-3_Interaction_Group_Reuse_Development_Report.md) records the surface-preservation failure and the decision not to start G-H100. The recovery amendment separates deleting E→E from adaptive organization and permits a retained-E→E comparison; the original failure and reporting bands remain unchanged.

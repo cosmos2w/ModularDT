@@ -1,5 +1,7 @@
 # Thermal compact tie-stop: full TRAIN600 scratch1000 recipe
 
+The 25 October2026 run-directory cleanup moved this superseded v1 run, stopped at epoch467, to `_bk/10_20261023_Compact_TieStop_and_U_Controls/thermal_compact_tiestop_full1000_scratch_v1`. The compact soft-only successor remains at the forward-run root. See the [current run map](Thermal_Forward_Run_Archive.md). Commands below retain their historical launch namespace and do not authorize restarting this archived experiment.
+
 This recipe starts a new randomly initialized compact hypergraph model and trains it for 1000 complete TRAIN600 epochs. It uses the maintained Round12 retrieval implementation and its stop-outer-probability tie loss, with canonical exposed VAL89 training-side validation. It reads architecture, physical objectives and optimizer hyperparameters from the formal A2-D recipe; it does not read pretrained weights, saved optimizer moments, mature controller state or an existing run. The frozen executable recipe is [`thermal_compact_tiestop_full1000_scratch_v1.json`](../../configs/research/thermal_compact_tiestop_full1000_scratch_v1.json).
 
 ## Initialization and data
