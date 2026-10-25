@@ -339,6 +339,12 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
         return None
     message = "Checkpoint identity, engine config, selection or optimizer schedule differs."
     if allow_horizon_extension:
+        if saved.get("workflow") == "spatial_interaction_groups_joint_training_v1":
+            if allow_microbatch_change:
+                raise ValueError(message)
+            from .spatial_group_continuation import spatial_group_horizon_amendment
+
+            return spatial_group_horizon_amendment(saved, current)
         # Checkpoints retain tuples while the identity sidecar is JSON.
         saved, current = (json.loads(json.dumps(value)) for value in (saved, current))
         previous, proposed = saved.get("engine_config", {}), current.get("engine_config", {})
@@ -3153,6 +3159,7 @@ class TrainingEngine:
         clean_stop_name: str = "CLEAN_STOP_REQUEST.json",
         allow_microbatch_change: bool = False,
         allow_horizon_extension: bool = False,
+        external_state_continuation: bool = False,
         mathematical_route_branch: Mapping[str, Any] | None = None,
         joint_core_revision: Mapping[str, Any] | None = None,
         diagnostic_age_branch: Mapping[str, Any] | None = None,
@@ -3175,6 +3182,8 @@ class TrainingEngine:
         output.mkdir(parents=True, exist_ok=True)
         layout = RunLayout(output)
         layout.ensure()
+        if external_state_continuation and resume_checkpoint is None:
+            raise ValueError("External full-state continuation requires an explicit saved checkpoint.")
         if resume_checkpoint is None:
             markers = (
                 "latest_model.pt",
@@ -3189,6 +3198,18 @@ class TrainingEngine:
             )
             if any(layout.read_path(name).exists() for name in markers) or has_epoch_checkpoints:
                 raise ValueError("A new fit requires a fresh run directory; use exact resume for existing history.")
+        elif external_state_continuation:
+            if (branch_from_checkpoint is not None or not allow_horizon_extension
+                    or identity.get("workflow") != "spatial_interaction_groups_joint_training_v1"
+                    or arm not in ("F13-0", "F13-1")):
+                raise ValueError("External full-state continuation requires the declared F13 horizon extension.")
+            requested_source = resolve_checkpoint(output, resume_checkpoint)
+            if requested_source.is_relative_to(output):
+                raise ValueError("External full-state continuation requires a distinct source run.")
+            if (layout.read_path("history.json").exists()
+                    or layout.read_path("latest_model.pt").exists()
+                    or any((output / "checkpoints").glob("epoch_*_model.pt"))):
+                raise ValueError("External full-state continuation requires a fresh output history.")
         else:
             requested_latest = resolve_checkpoint(output, resume_checkpoint)
             current_latest = resolve_checkpoint(output, "latest")
@@ -3764,6 +3785,15 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
+            if external_state_continuation:
+                declaration = provider_identity.get("recipe", {}).get("continuation", {})
+                declared_path = Path(str(declaration.get("source_checkpoint", ""))).expanduser().resolve()
+                source_history = source_payload.get("history", ())
+                source_epoch = int(source_payload.get("epoch", -1))
+                if (declared_path != source_path or declaration.get("source_epoch") != source_epoch
+                        or source_epoch != 100 or len(source_history) != source_epoch
+                        or [row.get("epoch") for row in source_history] != list(range(1, source_epoch + 1))):
+                    raise ValueError("External F13 continuation lacks its literal source age and complete history.")
             if identity_is_joint_native and branch_from_checkpoint is not None:
                 from .joint_native_child import prepare_joint_native_child
                 if identity_is_continuous_joint:
@@ -4071,10 +4101,11 @@ class TrainingEngine:
         resume_amendments = list(source_payload.get("resume_amendments", [])) if source_payload is not None else []
         if amendment is not None:
             amendment = {**amendment, "source_epoch": int(source_payload["epoch"]), "next_epoch": start_epoch,
-                "source_checkpoint_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
                 "preserved_case_visits": sum(int(row["case_visits"]) for row in history),
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
+            if amendment.get("kind") != "explicit_spatial_group_full_state_continuation":
+                amendment["source_checkpoint_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
             resume_amendments.append(amendment)
             amendment_name = ('joint_native_child' if identity_is_joint_native and branch_from_checkpoint is not None else
                               'joint_native_resume' if identity_is_joint_native else
@@ -4109,6 +4140,11 @@ class TrainingEngine:
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = (copy.deepcopy(source_payload.get("branch_parent"))
                          if source_payload is not None and resume_checkpoint is not None else None)
+        if external_state_continuation:
+            branch_parent = {
+                "path": str(source_path), "epoch": int(source_payload["epoch"]),
+                "kind": "exact_state_continuation", "history_inherited": True,
+            }
         if branch_from_checkpoint is not None:
             branch_parent = {
                 "path": str(source_path),
@@ -4249,7 +4285,7 @@ class TrainingEngine:
         }
         if resume_amendments:
             active["resume_amendments"] = resume_amendments
-        if resume_checkpoint is None and layout.canonical_writes:
+        if (resume_checkpoint is None or external_state_continuation) and layout.canonical_writes:
             identity_path = layout.path("experiment_identity.json")
             marker_path = layout.path("artifact_layout.json")
             if not marker_path.exists():

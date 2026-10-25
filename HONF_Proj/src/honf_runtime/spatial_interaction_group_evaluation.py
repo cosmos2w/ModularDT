@@ -12,6 +12,7 @@ import json
 import io
 import math
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -34,6 +35,154 @@ _LEGACY_OUTPUT_LIMIT = 32 * 1024**2
 _SPATIAL_OUTPUT_LIMIT = 256 * 1024**2
 _OUTPUT_HEADROOM = 200 * 1024**3
 _SURFACE_TRAIN_IDS = ("0303", "0322", "0337", "0348")
+
+
+def _canonical_val89_ids() -> tuple[str, ...]:
+    """Return the maintained exposed validation membership, excluding 0273."""
+    from .thermal_soft_reviews import _canonical_val89_ids as maintained_val89_ids
+
+    case_ids = tuple(map(str, maintained_val89_ids()))
+    if len(case_ids) != 89 or len(set(case_ids)) != 89 or "0273" in case_ids:
+        raise ValueError("Maintained canonical validation membership must contain 89 unique IDs and exclude 0273.")
+    return case_ids
+
+
+@contextmanager
+def _bound_native_validation_membership(provider: Any, case_ids: Sequence[str]):
+    """Temporarily expose a fixed native panel through the provider's catalog loader."""
+    expected = tuple(map(str, case_ids))
+    catalog = tuple(
+        case_id for case_id in map(str, getattr(provider, "catalog_case_ids", ()))
+        if getattr(provider, "case_split_by_id", {}).get(case_id) == "test" and case_id != "0273"
+    )
+    if expected != _canonical_val89_ids() or set(catalog) != set(expected):
+        raise ValueError("Native validation binding must equal the maintained canonical VAL89 catalog minus 0273.")
+    if any(getattr(provider, "case_split_by_id", {}).get(case_id) != "test" for case_id in expected):
+        raise ValueError("Canonical validation binding contains an ID outside the original test partition.")
+    old_ids = provider.validation_case_ids
+    old_index = provider._validation_index_by_id
+    old_cache = provider._validation_batches_cache
+    try:
+        provider.validation_case_ids = expected
+        provider._validation_index_by_id = {case_id: index for index, case_id in enumerate(expected)}
+        provider._validation_batches_cache = None
+        yield
+    finally:
+        provider.validation_case_ids = old_ids
+        provider._validation_index_by_id = old_index
+        provider._validation_batches_cache = old_cache
+
+
+def _fixed_train150_ids(provider: Any, provider_identity: Mapping[str, Any]) -> tuple[str, ...]:
+    """Resolve the development parent's fixed TRAIN150 membership for baselines."""
+    from channelthermal.data.development_split import development_case_ids
+
+    manifest_ids = tuple(map(str, development_case_ids(provider.manifest, "train")))
+    if len(manifest_ids) != 150 or len(set(manifest_ids)) != 150:
+        raise ValueError("Round13 fixed baseline requires the exact fixed25 TRAIN150 manifest membership.")
+    initialization = provider_identity.get("initialization", {})
+    identity_parent_ids = tuple(map(str, initialization.get("parent_training_case_ids", ())))
+    initialization_provider = getattr(provider, "initialization_provider", {})
+    provider_parent_ids = tuple(map(str, initialization_provider.get("training_case_ids", ())))
+    source_identity = getattr(provider, "initialization_identity", {})
+    source_identity_ids = tuple(map(str, source_identity.get("training_case_ids", ())))
+    candidates = [
+        ids for ids in (identity_parent_ids, provider_parent_ids, source_identity_ids)
+        if ids
+    ]
+    if not candidates or any(ids != candidates[0] for ids in candidates[1:]):
+        raise ValueError("Round13 TRAIN150 baseline source identities are absent or disagree.")
+    baseline_ids = candidates[0]
+    if baseline_ids != manifest_ids:
+        raise ValueError("Round13 TRAIN150 baseline source IDs differ from the fixed25 manifest order.")
+    train_set = {
+        str(case_id) for case_id, split in getattr(provider, "case_split_by_id", {}).items()
+        if str(split).lower() == "train"
+    }
+    if not set(baseline_ids) <= train_set:
+        raise ValueError("Round13 TRAIN150 baseline contains a case outside the original TRAIN partition.")
+    return baseline_ids
+
+
+def _fixed_dev22_ids(provider: Any, experiment_identity: Mapping[str, Any]) -> tuple[str, ...]:
+    """Resolve the inherited fixed DEV22 even when the active provider exposes VAL89."""
+    from channelthermal.data.development_split import development_case_ids
+
+    dev_train_ids = tuple(map(str, development_case_ids(provider.manifest, "train")))
+    dev_ids = tuple(map(str, development_case_ids(provider.manifest, "test")))
+    val_ids = _canonical_val89_ids()
+    if len(dev_train_ids) != 150 or len(set(dev_train_ids)) != 150:
+        raise ValueError("Round13 DEV22 lineage requires its exact fixed25 TRAIN150 manifest.")
+    if len(dev_ids) != 22 or len(set(dev_ids)) != 22 or not set(dev_ids).issubset(val_ids):
+        raise ValueError("Round13 fixed DEV22 manifest must be a unique subset of canonical VAL89.")
+    if len(set(val_ids) - set(dev_ids)) != 67:
+        raise ValueError("Round13 canonical VAL89 must contain DEV22 plus exactly 67 additional cases.")
+
+    parent_provider = getattr(provider, "initialization_provider", None)
+    parent_identity = getattr(provider, "initialization_identity", None)
+    if not isinstance(parent_provider, Mapping) or not isinstance(parent_identity, Mapping):
+        raise ValueError("Round13 evaluator requires the maintained inherited DEV22 source identity.")
+    source_provider_identity = parent_identity.get("provider_identity")
+    if not isinstance(source_provider_identity, Mapping):
+        raise ValueError("Inherited checkpoint identity has no parent provider validation identity.")
+    if parent_identity.get("training_membership") != "fixed25_train150_dev22":
+        raise ValueError("Inherited checkpoint is not bound to fixed25 TRAIN150/DEV22 membership.")
+
+    manifest_fingerprint = provider.manifest.get("manifest_sha256")
+    for label, source in (("initialization provider", parent_provider),
+                          ("initialization checkpoint", source_provider_identity)):
+        source_train = tuple(map(str, source.get("training_case_ids", ())))
+        source_validation = tuple(map(str, source.get("validation_case_ids", ())))
+        if source_train != dev_train_ids or source_validation != dev_ids:
+            raise ValueError(f"Inherited {label} IDs differ from the fixed25 TRAIN150/DEV22 manifest.")
+        if manifest_fingerprint is not None and source.get("subset_manifest_sha256") != manifest_fingerprint:
+            raise ValueError(f"Inherited {label} does not match the fixed25 subset manifest fingerprint.")
+
+    active_train = tuple(map(str, getattr(provider, "training_case_ids", ())))
+    active_validation = tuple(map(str, getattr(provider, "validation_case_ids", ())))
+    provider_identity = experiment_identity.get("provider_identity")
+    if not isinstance(provider_identity, Mapping):
+        raise ValueError("Active experiment identity has no provider membership identity.")
+    active_train_identity = tuple(map(str, provider_identity.get("training_case_ids", ())))
+    active_validation_identity = tuple(map(str, provider_identity.get("validation_case_ids", ())))
+    membership = experiment_identity.get("training_membership")
+    if active_train_identity != active_train or active_validation_identity != active_validation:
+        raise ValueError("Active provider IDs differ from its saved checkpoint identity.")
+    if len(active_train) == 150 and membership == "fixed25_train150_dev22":
+        if active_validation != dev_ids:
+            raise ValueError("Development provider validation IDs differ from its fixed DEV22 membership.")
+    elif len(active_train) == 600 and membership == "full_train600":
+        if active_validation != val_ids:
+            raise ValueError("Full-TRAIN provider validation IDs differ from canonical VAL89.")
+    else:
+        raise ValueError("Round13 evaluation supports only fixed TRAIN150/DEV22 or full TRAIN600/VAL89.")
+    return dev_ids
+
+
+def _fixed_train_mean(provider: Any, case_ids: Sequence[str]) -> dict[str, Any]:
+    """Compute physical means from provider-retained TRAIN records in the exact TRAIN150 panel."""
+    values = {name: [] for name in ("surface", "q", "material")}
+    cases_by_id = {str(case["case_id"]): case for case in provider.training_cases}
+    if not set(map(str, case_ids)) <= set(cases_by_id):
+        raise ValueError("The provider does not retain every declared TRAIN150 baseline case.")
+    for case_id in map(str, case_ids):
+        case = cases_by_id[case_id]
+        interface = np.asarray(case["interface_target"])
+        present = np.asarray(case["structure"]["module_present"]) > 0.5
+        valid = np.asarray(case["interface_condition_valid_mask"]) > 0.5
+        valid &= present[:, None]
+        values["surface"].extend(interface[..., 0][valid & np.isfinite(interface[..., 0])].tolist())
+        values["q"].extend(interface[..., 1][valid & np.isfinite(interface[..., 1])].tolist())
+        material = np.asarray(case["module_internal_temperature_points"])
+        values["material"].extend(material[present][np.isfinite(material[present])].tolist())
+    if any(not values[name] for name in values):
+        raise ValueError("Fixed TRAIN150 baseline panel lacks finite native targets for one or more roles.")
+    return {
+        "field": list(provider.model.normalization_stats["field_mean_by_channel"]),
+        "surface": float(np.mean(values["surface"])),
+        "q": float(np.mean(values["q"])),
+        "material": float(np.mean(values["material"])),
+    }
 
 
 def _retained_round12_panels() -> dict[str, Any]:
@@ -460,6 +609,10 @@ def _score_spatial_variant(
     }
     if include_losses:
         result["native_losses"] = _native_component_losses(provider, scored_prediction, batch)
+        result["native_role_losses"] = {
+            str(name): _scalar(value)
+            for name, value in provider._role_losses(scored_prediction, batch.targets).items()
+        }
     if zero_slopes is not None:
         result["decode_zero_slopes"] = bool(zero_slopes)
     return result
@@ -525,6 +678,112 @@ def _stratified_organizer_candidate(
         denominator = panel_count - 1
         selected_index = (numerator + denominator // 2) // denominator
     return selected_index, ordered[selected_index]
+
+
+def _stratified_organizer_nodes(
+    metadata: Sequence[Mapping[str, Any]], *, panel_index: int, panel_count: int,
+) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+    """Select coarse, intermediate, and deep candidates from input metadata only."""
+    if not metadata or panel_count < 1 or not 0 <= panel_index < panel_count:
+        raise ValueError("Organizer node selection requires metadata and a valid fixed-panel index.")
+    by_depth: dict[int, list[Mapping[str, Any]]] = {}
+    for row in metadata:
+        by_depth.setdefault(int(row["depth"]), []).append(row)
+    depths = sorted(by_depth)
+    band_indices = sorted(set((0, len(depths) // 2, len(depths) - 1)))
+    labels = ("coarse", "intermediate", "deep")
+    selected = []
+    for band_index, depth_index in enumerate(band_indices):
+        band = labels[min(band_index, len(labels) - 1)]
+        candidates = sorted(
+            by_depth[depths[depth_index]],
+            key=lambda item: (-int(item["size"]), int(item["node_id"])),
+        )
+        candidate = candidates[(panel_index * 7 + band_index * 11) % len(candidates)]
+        selected.append((band, candidate))
+    return tuple(selected)
+
+
+def _utility_role_scales(model: Any) -> dict[str, float]:
+    field = _array(model.field_std).astype(np.float64).reshape(-1)
+    interface = _array(model.interface_target_std).astype(np.float64).reshape(-1)
+    internal = _array(model.internal_temperature_std).astype(np.float64).reshape(-1)
+    if field.size < 5 or interface.size < 2 or internal.size < 1:
+        raise ValueError("Spatial utility role scales do not match the native Thermal loss roles.")
+    return {
+        "flow/u": float(field[0]), "flow/v": float(field[1]), "flow/p": float(field[2]),
+        "flow/omega": float(field[3]), "temperature/fluid": float(field[4]),
+        "temperature/surface": float(interface[0]), "q_proxy": float(interface[1]),
+        "temperature/material": float(internal[0]),
+    }
+
+
+def _gain_pair(parent_loss: float, descendant_loss: float) -> dict[str, float]:
+    """Return the training-head relative target and its raw loss-unit numerator."""
+    parent = float(parent_loss)
+    descendant = float(descendant_loss)
+    denominator = 0.5 * (parent + descendant) + 1e-8
+    return {
+        "raw_gain": parent - descendant,
+        "relative_gain_denominator": denominator,
+        "relative_gain": (parent - descendant) / denominator,
+    }
+
+
+def _utility_probe_aggregate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "probe_count": 0,
+            "relative_gain_regression_mae": None,
+            "mean_selected_action_regret_raw_weighted_native_units": None,
+        }
+    proxies = np.asarray([float(row["predicted_normalized_weighted_gain_proxy"]) for row in rows])
+    gains = np.asarray([float(row["relative_weighted_native_gain"]) for row in rows])
+    raw_gains = np.asarray([float(row["raw_weighted_native_gain"]) for row in rows])
+    regrets = np.asarray([float(row["selected_action_regret_raw_weighted_native_units"]) for row in rows])
+    threshold = 0.05
+    conditional = np.abs(gains) > threshold
+    role_names = tuple(rows[0]["relative_rolewise_native_gains"])
+    role_sign = {}
+    for role in role_names:
+        values = np.asarray([float(row["relative_rolewise_native_gains"][role]) for row in rows])
+        keep = np.abs(values) > threshold
+        role_sign[role] = {
+            "magnitude_threshold": threshold,
+            "eligible_count": int(keep.sum()),
+            "sign_agreement": float(np.mean([
+                np.sign(float(rows[i]["predicted_normalized_weighted_gain_proxy"])) == np.sign(values[i])
+                for i in np.flatnonzero(keep)
+            ])) if keep.any() else None,
+        }
+    def count_by(key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in rows:
+            value = str(row[key])
+            counts[value] = counts.get(value, 0) + 1
+        return dict(sorted(counts.items()))
+    return {
+        "probe_count": len(rows),
+        "relative_gain_regression_mae": float(np.mean(np.abs(proxies - gains))),
+        "mean_raw_weighted_native_gain": float(raw_gains.mean()),
+        "median_raw_weighted_native_gain": float(np.median(raw_gains)),
+        "mean_relative_weighted_native_gain": float(gains.mean()),
+        "median_relative_weighted_native_gain": float(np.median(gains)),
+        "raw_gain_units": "weighted native loss units",
+        "relative_gain_definition": "(parent_loss - children_loss) / (0.5 * (parent_loss + children_loss) + 1e-8)",
+        "weighted_gain_sign_agreement": float(np.mean(np.sign(proxies[conditional]) == np.sign(gains[conditional]))) if conditional.any() else None,
+        "weighted_gain_sign_agreement_threshold": threshold,
+        "weighted_gain_sign_eligible_count": int(conditional.sum()),
+        "rolewise_sign_agreement_conditional_on_magnitude": role_sign,
+        "mean_selected_action_regret_raw_weighted_native_units": float(regrets.mean()),
+        "total_selected_action_regret_raw_weighted_native_units": float(regrets.sum()),
+        "coverage_by_depth": count_by("node_depth"),
+        "coverage_by_depth_band": count_by("depth_band"),
+        "coverage_by_module_count": count_by("module_count"),
+        "coverage_by_case_id": count_by("case_id"),
+        "coverage_by_predicted_action": count_by("proxy_action"),
+        "coverage_by_observed_action": count_by("observed_native_better_action"),
+    }
 
 
 def _frontier_cut_summary(group: Any) -> dict[str, Any]:
@@ -699,6 +958,8 @@ def _spatial_support_arrays(
             stage_prefix + "candidate_learned_utilities": _array(group.frontier.utilities).astype(np.float32),
             stage_prefix + "group_means": _array(group.group_means).astype(np.float32),
             stage_prefix + "group_slopes": _array(group.group_slopes).astype(np.float32),
+            stage_prefix + "group_keys": _array(group.keys).astype(np.float32),
+            stage_prefix + "group_value_coefficients": _array(group.value_coefficients).astype(np.float32),
             stage_prefix + "group_latent_constant_residual": _array(group.latent_constant_residual).astype(np.float32),
             stage_prefix + "group_latent_residual": _array(group.latent_residual).astype(np.float32),
             stage_prefix + "group_mass": _array(group.mass).astype(np.float32),
@@ -1168,12 +1429,12 @@ def evaluate_spatial_groups(
 ) -> dict[str, Any]:
     """Measure bounded Round13 native, response, cut, and organizer evidence.
 
-    The fixed panel comes from the retained Round12 input selections and report.
-    This evaluates the exposed DEV22 panel, twelve M1/M2 TRAIN cases, the
-    retained TRAIN4/DEV4 surface panels, eight saved response atlases, the
-    organizer24 same-target probes, and four TRAIN scenes under five legal
-    covers plus the bounded mode, relay, and organizer ablations. It never
-    trains or invokes a solver.
+    The fixed panels come from the retained Round12 selections and maintained
+    canonical VAL89 catalog. This evaluates DEV22 and the full exposed VAL89
+    partition, twelve M1/M2 TRAIN cases, fixed detailed field panels, eight
+    saved response atlases, TRAIN24 same-target probes, and four TRAIN scenes
+    under common covers and bounded counterfactuals. It never trains or invokes
+    a solver.
     """
     checkpoint_path = Path(checkpoint).expanduser().resolve(strict=True)
     output_path = _validate_new_output(output, max_bytes=_SPATIAL_OUTPUT_LIMIT)
@@ -1191,9 +1452,13 @@ def evaluate_spatial_groups(
     intervention_ids = tuple(map(str, panels["intervention_train_ids"]))
     surface_train_ids = _SURFACE_TRAIN_IDS
     train_ids = tuple(dict.fromkeys((*organizer_ids, *risk_train_ids)))
-    dev_ids = tuple(map(str, getattr(provider, "validation_case_ids", ())))
+    dev_ids = _fixed_dev22_ids(provider, identity)
     if len(dev_ids) != 22 or len(set(dev_ids)) != 22:
         raise ValueError("Round13 exposed native validation must be the fixed DEV22 panel.")
+    val_ids = _canonical_val89_ids()
+    if not set(dev_ids).issubset(val_ids) or len(set(val_ids) - set(dev_ids)) != 67:
+        raise ValueError("Round13 canonical VAL89 must contain the complete DEV22 slice plus 67 additional cases.")
+    additional_val_ids = tuple(case_id for case_id in val_ids if case_id not in set(dev_ids))
     if not set(dev_detail_ids).issubset(dev_ids):
         raise ValueError("Retained DEV4 surface-detail IDs are outside the exposed DEV22 panel.")
     training_membership = set(map(str, getattr(provider, "training_case_ids", ())))
@@ -1214,21 +1479,24 @@ def evaluate_spatial_groups(
     model.eval()
     model.core.set_organization_clock(epoch, 0)
 
-    from .interaction_group_evaluation import mean_prediction, selected_train_mean
-    train_means = selected_train_mean(provider)
+    from .interaction_group_evaluation import mean_prediction
+    train150_ids = _fixed_train150_ids(provider, provider_identity)
+    train_means = _fixed_train_mean(provider, train150_ids)
     train_rows_by_id: dict[str, Mapping[str, Any]] = {}
     train_records_by_id: dict[str, Mapping[str, Any]] = {}
     train_baseline_rows_by_id: dict[str, Mapping[str, Any]] = {}
     train_baseline_records_by_id: dict[str, Mapping[str, Any]] = {}
-    dev_rows_by_id: dict[str, Mapping[str, Any]] = {}
-    dev_records_by_id: dict[str, Mapping[str, Any]] = {}
-    dev_baseline_rows_by_id: dict[str, Mapping[str, Any]] = {}
-    dev_baseline_records_by_id: dict[str, Mapping[str, Any]] = {}
+    val_rows_by_id: dict[str, Mapping[str, Any]] = {}
+    val_records_by_id: dict[str, Mapping[str, Any]] = {}
+    val_baseline_rows_by_id: dict[str, Mapping[str, Any]] = {}
+    val_baseline_records_by_id: dict[str, Mapping[str, Any]] = {}
     detail_rows: dict[str, Any] = {}
     detail_arrays: dict[str, np.ndarray] = {}
     organizer_rows: list[dict[str, Any]] = []
+    learned_cover_reference_rows: list[dict[str, Any]] = []
     dev_organizer_rows: list[dict[str, Any]] = []
     cover_rows: list[dict[str, Any]] = []
+    offpath_rows: list[dict[str, Any]] = []
     fixed_cover_mode_rows: list[dict[str, Any]] = []
     ablation_rows: list[dict[str, Any]] = []
     cost_rows: list[dict[str, Any]] = []
@@ -1314,65 +1582,100 @@ def evaluate_spatial_groups(
                 candidate_metadata_rows = tuple(
                     core.utility_candidate_metadata(organized, batch_index=0)
                 )
-                candidate_index, candidate_metadata = _stratified_organizer_candidate(
+                selected_nodes = _stratified_organizer_nodes(
                     candidate_metadata_rows,
                     panel_index=organizer_index,
                     panel_count=len(organizer_ids),
                 )
-                candidate_metadata = dict(candidate_metadata)
-                node = int(candidate_metadata["node_id"])
-                if node not in candidates:
-                    raise ValueError("Organizer candidate metadata does not match the utility candidate set.")
-                features = core.utility_features(organized, node, batch_index=0, detach=True)
-                utility_proxy = _scalar(core.predict_utility(features))
                 frontier = organized.layers[0][0].frontier
                 candidate_utilities = _array(frontier.utilities).astype(np.float64, copy=False).reshape(-1)
                 candidate_positions = {candidate: index for index, candidate in enumerate(candidates)}
-                selected_frontier_utility = float(candidate_utilities[candidate_positions[node]])
                 candidate_tree = frontier.tree
-                ancestry = []
-                ancestor = node
-                while True:
-                    ancestry.append(
-                        {
+                role_scales = _utility_role_scales(model)
+                candidate_probe_rows = []
+                for depth_band, metadata in selected_nodes:
+                    candidate_metadata = dict(metadata)
+                    node = int(candidate_metadata["node_id"])
+                    if node not in candidates:
+                        raise ValueError("Organizer candidate metadata does not match the utility candidate set.")
+                    features = core.utility_features(organized, node, batch_index=0, detach=True)
+                    utility_proxy = _scalar(core.predict_utility(features))
+                    alternatives = {}
+                    for mode in ("parent", "children"):
+                        changed = core.prepare(native.organization.scene, forced_frontier={0: (node, mode)})
+                        alternatives[mode] = _score_spatial_variant(
+                            model, provider, prediction, batch, changed,
+                        )
+                        alternatives[mode]["K_by_layer"] = [
+                            int(layer[0].frontier.K) for layer in changed.layers
+                        ]
+                    parent_loss = alternatives["parent"]["native_losses"]
+                    child_loss = alternatives["children"]["native_losses"]
+                    weighted_gain_metrics = _gain_pair(
+                        parent_loss["raw_weighted_native_total"],
+                        child_loss["raw_weighted_native_total"],
+                    )
+                    raw_role_gains = {
+                        name: _gain_pair(
+                            alternatives["parent"]["native_role_losses"][name],
+                            alternatives["children"]["native_role_losses"][name],
+                        )
+                        for name in alternatives["parent"]["native_role_losses"]
+                    }
+                    relative_role_gains = {
+                        name: values["relative_gain"] for name, values in raw_role_gains.items()
+                    }
+                    raw_standardized_role_gains = {
+                        name: values["raw_gain"] for name, values in raw_role_gains.items()
+                    }
+                    physical_squared_role_gains = {
+                        name: raw_standardized_role_gains[name] * role_scales[name] ** 2
+                        for name in raw_standardized_role_gains
+                    }
+                    weighted_gain = weighted_gain_metrics["raw_gain"]
+                    relative_weighted_gain = weighted_gain_metrics["relative_gain"]
+                    observed_children = weighted_gain > 0.0
+                    predicted_children = utility_proxy > 0.0
+                    ancestry = []
+                    ancestor = node
+                    while True:
+                        ancestry.append({
                             "node_id": int(ancestor),
                             "depth": int(candidate_tree.depths[ancestor]),
                             "subtree_leaf_count": int(candidate_tree.sizes[ancestor]),
-                        }
-                    )
-                    if ancestor == candidate_tree.root:
-                        break
-                    ancestor = int(candidate_tree.parents[ancestor])
-                ancestry.reverse()
-                alternatives = {}
-                raw_losses = {}
-                for mode in ("parent", "children"):
-                    changed = core.prepare(native.organization.scene, forced_frontier={0: (node, mode)})
-                    alternatives[mode] = _score_spatial_variant(
-                        model, provider, prediction, batch, changed,
-                    )
-                    raw_losses[mode] = alternatives[mode]["native_losses"]
-                    alternatives[mode]["K_by_layer"] = [
-                        int(layer[0].frontier.K) for layer in changed.layers
-                    ]
-                raw_gain = (
-                    raw_losses["parent"]["raw_weighted_native_total"]
-                    - raw_losses["children"]["raw_weighted_native_total"]
-                )
-                component_gains = {
-                    name: float(
-                        raw_losses["parent"]["raw_native_components"][name]
-                        - raw_losses["children"]["raw_native_components"][name]
-                    )
-                    for name in raw_losses["parent"]["raw_native_components"]
-                }
-                predicted_descendant_action = utility_proxy > 0.0
-                observed_descendant_benefit = raw_gain > 0.0
-                proxy_regret = (
-                    abs(raw_gain)
-                    if predicted_descendant_action != observed_descendant_benefit
-                    else 0.0
-                )
+                        })
+                        if ancestor == candidate_tree.root:
+                            break
+                        ancestor = int(candidate_tree.parents[ancestor])
+                    ancestry.reverse()
+                    candidate_probe_rows.append({
+                        "case_id": case_id,
+                        "module_count": int(row["module_count"]),
+                        "depth_band": depth_band,
+                        "node_id": node,
+                        "node_depth": int(candidate_metadata["depth"]),
+                        "candidate": candidate_metadata,
+                        "candidate_count": len(candidates),
+                        "candidate_policy_index": candidate_positions[node],
+                        "ancestry": ancestry,
+                        "predicted_normalized_weighted_gain_proxy": utility_proxy,
+                        "raw_weighted_native_gain": weighted_gain,
+                        "weighted_native_gain_relative_denominator": weighted_gain_metrics["relative_gain_denominator"],
+                        "relative_weighted_native_gain": relative_weighted_gain,
+                        "raw_standardized_mse_rolewise_gains": raw_standardized_role_gains,
+                        "relative_rolewise_native_gains": relative_role_gains,
+                        "physical_squared_rolewise_native_gains": physical_squared_role_gains,
+                        "role_scales": role_scales,
+                        "proxy_action": "children" if predicted_children else "parent",
+                        "observed_native_better_action": "children" if observed_children else "parent",
+                        "selected_action_regret_raw_weighted_native_units": abs(weighted_gain) if predicted_children != observed_children else 0.0,
+                        "sign_agreement": bool(np.sign(utility_proxy) == np.sign(relative_weighted_gain))
+                        if utility_proxy != 0.0 and relative_weighted_gain != 0.0 else None,
+                        "alternatives": alternatives,
+                        "same_target_masks_queries_and_dependent_reprepare": True,
+                        "positive_gain_means_children_reduce_native_loss": True,
+                        "optimizer_updates": 0,
+                    })
                 organizer_rows.append(
                     {
                         "case_id": case_id,
@@ -1381,7 +1684,6 @@ def evaluate_spatial_groups(
                         "actual_cut_summary": {
                             "stage0": _frontier_cut_summary(organized.layers[0][0]),
                             "stage1": _frontier_cut_summary(organized.layers[1][0]),
-                            "chosen_candidate_ancestry": ancestry,
                         },
                         "latent_mean_vs_first_order_residuals": _latent_residual_summary(organized),
                         "persistent_spatial_prepared_tensor_storage_bytes": _spatial_prepared_tensor_bytes(organized),
@@ -1391,29 +1693,11 @@ def evaluate_spatial_groups(
                         },
                         "target_free_candidate_selection": {
                             "candidate_count": len(candidates),
-                            "depth_size_stratified_rank": candidate_index,
-                            "candidate_policy_index": candidate_positions[node],
-                            "candidate": candidate_metadata,
-                            "selection": "fixed organizer24 panel index selects evenly spaced rank after sorting input-only node depth, subtree leaf count, and node id; no target or error access",
+                            "selected_depth_bands": [row["depth_band"] for row in candidate_probe_rows],
+                            "selection": "up to three input-only candidates at coarse, intermediate, and deep hierarchy depths; candidate locations are spread deterministically across TRAIN24 order",
                         },
-                        "predicted_parent_minus_children_signed_gain_proxy": utility_proxy,
-                        "selected_frontier_learned_utility": selected_frontier_utility,
+                        "selected_candidate_probes": candidate_probe_rows,
                         "learned_utility_distribution": _distribution_summary(candidate_utilities),
-                        "learned_utility_near_zero": abs(utility_proxy) <= 0.05,
-                        "learned_utility_near_zero_threshold": 0.05,
-                        "parent_minus_children_raw_weighted_native_gain": raw_gain,
-                        "parent_minus_children_raw_component_gains": component_gains,
-                        "utility_proxy_sign_agrees_with_observed_gain": (
-                            bool(np.sign(utility_proxy) == np.sign(raw_gain))
-                            if utility_proxy != 0.0 and raw_gain != 0.0 else None
-                        ),
-                        "proxy_action": "children" if predicted_descendant_action else "parent",
-                        "observed_native_better_action": "children" if observed_descendant_benefit else "parent",
-                        "bounded_single_candidate_native_regret": proxy_regret,
-                        "regret_definition": "absolute raw weighted native gain when the selected candidate proxy chooses the worse of parent versus descendants; zero otherwise",
-                        "positive_raw_gain_means_children_reduce_native_loss": True,
-                        "raw_same_target_losses": raw_losses,
-                        "alternatives": alternatives,
                         "optimizer_updates": 0,
                     }
                 )
@@ -1421,6 +1705,18 @@ def evaluate_spatial_groups(
             if case_id in intervention_ids:
                 native = prediction.native_prepared
                 core = model.core
+                learned_cover_reference_rows.append({
+                    "case_id": case_id,
+                    "module_count": int(row["module_count"]),
+                    "K_by_layer": [int(layer[0].frontier.K) for layer in native.organization.layers],
+                    "native_losses": _native_component_losses(provider, prediction, batch),
+                    "native_metrics": dict(row),
+                    "work": {
+                        "native_prediction": dict(auxiliary.get("work", {})),
+                        "spatial_prepare": dict(native.organization.work_counts),
+                    },
+                    "source": "unmodified selected learned cover from the already computed base native prediction",
+                })
                 detail_arrays.update(
                     _spatial_support_arrays(
                         native.organization, case_id, physical_heat=batch.receivers.heat,
@@ -1458,6 +1754,100 @@ def evaluate_spatial_groups(
                             **row_variant,
                         }
                     )
+                tree = native.organization.layers[0][0].frontier.tree
+                root_children = tuple(map(int, tree.children[int(tree.root)]))
+                checked_root_children = tuple(map(int, tree.validate_cover(root_children)))
+                changed = core.prepare(
+                    native.organization.scene,
+                    forced_frontier={0: {"cover": checked_root_children}},
+                )
+                cover_rows.append({
+                    "case_id": case_id,
+                    "cover_name": "root_children_K2",
+                    "cover_definition": {
+                        "K": 2,
+                        "node_ids": list(checked_root_children),
+                        "selection": "the two children of the input-defined geometry-tree root",
+                    },
+                    "K_by_layer": [int(layer[0].frontier.K) for layer in changed.layers],
+                    "zero_final_read_mode_same_cut": None,
+                    **_score_spatial_variant(model, provider, prediction, batch, changed),
+                })
+                grandchildren = tuple(
+                    int(child)
+                    for parent_node in root_children
+                    for child in tree.children[int(parent_node)]
+                )
+                if len(grandchildren) != 4:
+                    raise ValueError("Round13 root-grandchildren diagnostic requires four input-tree grandchildren.")
+                checked_grandchildren = tuple(map(int, tree.validate_cover(grandchildren)))
+                changed = core.prepare(
+                    native.organization.scene,
+                    forced_frontier={0: {"cover": checked_grandchildren}},
+                )
+                cover_rows.append({
+                    "case_id": case_id,
+                    "cover_name": "root_grandchildren_K4",
+                    "cover_definition": {
+                        "K": 4,
+                        "node_ids": list(checked_grandchildren),
+                        "selection": "the four grandchildren of the input-defined geometry-tree root",
+                    },
+                    "K_by_layer": [int(layer[0].frontier.K) for layer in changed.layers],
+                    "zero_final_read_mode_same_cut": None,
+                    **_score_spatial_variant(model, provider, prediction, batch, changed),
+                })
+
+                # Evaluate one input-selected depth-1 node under two covers of
+                # its off-path sibling. The target action remains parent or its
+                # immediate children in each context.
+                target_node = root_children[organizer_ids.index(case_id) % len(root_children)]
+                offpath_node = root_children[1 - organizer_ids.index(case_id) % len(root_children)]
+                target_children = tuple(map(int, tree.children[target_node]))
+                offpath_children = tuple(map(int, tree.children[offpath_node]))
+                if len(target_children) != 2 or len(offpath_children) != 2:
+                    raise ValueError("Round13 off-path context diagnostic requires binary depth-1 nodes.")
+                context_covers = {
+                    "offpath_sibling_at_parent": (offpath_node,),
+                    "offpath_sibling_at_children": offpath_children,
+                }
+                context_rows = []
+                for context_name, context_nodes in context_covers.items():
+                    alternatives = {}
+                    for mode, target_cover in (
+                        ("parent", (target_node,)),
+                        ("children", target_children),
+                    ):
+                        nodes = tuple(map(int, tree.validate_cover((*target_cover, *context_nodes))))
+                        changed = core.prepare(
+                            native.organization.scene,
+                            forced_frontier={0: {"cover": nodes}},
+                        )
+                        alternatives[mode] = {
+                            "cover_node_ids": list(nodes),
+                            "K_by_layer": [int(layer[0].frontier.K) for layer in changed.layers],
+                            **_score_spatial_variant(model, provider, prediction, batch, changed),
+                        }
+                    parent_loss = alternatives["parent"]["native_losses"]["raw_weighted_native_total"]
+                    child_loss = alternatives["children"]["native_losses"]["raw_weighted_native_total"]
+                    context_rows.append({
+                        "context": context_name,
+                        "offpath_node_ids": list(context_nodes),
+                        "gain_scope": "same selected target node and target parent-versus-children action under the named off-path cover context",
+                        "parent_minus_children_raw_weighted_native_gain": float(parent_loss - child_loss),
+                        "raw_gain_units": "weighted native loss units",
+                        "alternatives": alternatives,
+                        "same_target_node_and_action": target_node,
+                    })
+                offpath_rows.append({
+                    "case_id": case_id,
+                    "module_count": int(row["module_count"]),
+                    "selected_target_node": target_node,
+                    "target_depth": int(tree.depths[target_node]),
+                    "selection": "left/right root child alternates by fixed intervention-panel order; uses geometry-tree input only",
+                    "contexts": context_rows,
+                    "optimizer_updates": 0,
+                })
                 ablations = (
                     ("zero_final_read_slopes", None, True),
                     ("zero_spatial_slopes_relay_and_final", {"zero_slopes": True}, None),
@@ -1503,28 +1893,32 @@ def evaluate_spatial_groups(
         raise ValueError("Round13 organizer diagnostic changed the retained case order.")
     if tuple(row["case_id"] for row in cover_rows if row["cover_name"] == "root_K1") != intervention_ids:
         raise ValueError("Round13 cover diagnostic did not cover all four retained interaction cases.")
-    if len(cover_rows) != 4 * 5 or len(ablation_rows) != 4 * 4:
+    if len(cover_rows) != 4 * 7 or len(ablation_rows) != 4 * 4:
         raise ValueError("Round13 fixed-cover/ablation evidence cardinality differs from its bounded plan.")
+    if len(offpath_rows) != 4 or any(len(row["contexts"]) != 2 for row in offpath_rows):
+        raise ValueError("Round13 same-target off-path evidence must retain two bounded contexts per intervention case.")
     if len(fixed_cover_mode_rows) != 4:
         raise ValueError("Round13 common-cover zero-mode probe must cover each retained interaction case once.")
+    if tuple(row["case_id"] for row in learned_cover_reference_rows) != intervention_ids:
+        raise ValueError("Round13 learned-cover reference must retain all four exact intervention cases in fixed order.")
 
-    observed_dev = []
-    with torch.no_grad():
+    observed_val = []
+    with _bound_native_validation_membership(provider, val_ids), torch.no_grad():
         for batch in provider.native_evaluation_batches(
-            split="validation", case_keys=dev_ids, microbatch_size=1,
+            split="validation", case_keys=val_ids, microbatch_size=1,
         ):
             case_id = str(batch.case_keys[0])
-            if case_id not in dev_ids or len(batch.case_keys) != 1:
-                raise ValueError("Round13 DEV22 loader changed the exact one-case panel.")
-            observed_dev.append(case_id)
+            if case_id not in val_ids or len(batch.case_keys) != 1:
+                raise ValueError("Round13 VAL89 loader changed the exact one-case panel.")
+            observed_val.append(case_id)
             prediction, auxiliary, record, row = measured_record(batch)
-            dev_rows_by_id[case_id] = row
-            dev_records_by_id[case_id] = record
+            val_rows_by_id[case_id] = row
+            val_records_by_id[case_id] = record
             baseline = mean_prediction(prediction, train_means)
-            dev_baseline_records_by_id[case_id] = provider.validation_metrics(
+            val_baseline_records_by_id[case_id] = provider.validation_metrics(
                 baseline, batch.targets, auxiliary,
             )
-            dev_baseline_rows_by_id[case_id] = dev_baseline_records_by_id[case_id]["case_rows"][0]
+            val_baseline_rows_by_id[case_id] = val_baseline_records_by_id[case_id]["case_rows"][0]
             if case_id in dev_detail_ids:
                 score_detail(case_id, prediction, batch)
                 native = prediction.native_prepared
@@ -1550,7 +1944,23 @@ def evaluate_spatial_groups(
                     )
                 parent_loss = alternatives["parent"]["native_losses"]["raw_weighted_native_total"]
                 child_loss = alternatives["children"]["native_losses"]["raw_weighted_native_total"]
-                raw_gain = float(parent_loss - child_loss)
+                gain_metrics = _gain_pair(parent_loss, child_loss)
+                raw_gain = gain_metrics["raw_gain"]
+                relative_gain = gain_metrics["relative_gain"]
+                role_scales = _utility_role_scales(model)
+                role_gain_metrics = {
+                    name: _gain_pair(
+                        alternatives["parent"]["native_role_losses"][name],
+                        alternatives["children"]["native_role_losses"][name],
+                    )
+                    for name in alternatives["parent"]["native_role_losses"]
+                }
+                raw_standardized_role_gains = {
+                    name: values["raw_gain"] for name, values in role_gain_metrics.items()
+                }
+                relative_role_gains = {
+                    name: values["relative_gain"] for name, values in role_gain_metrics.items()
+                }
                 proxy_action = "children" if utility_proxy > 0.0 else "parent"
                 observed_action = "children" if raw_gain > 0.0 else "parent"
                 dev_organizer_rows.append(
@@ -1563,9 +1973,25 @@ def evaluate_spatial_groups(
                         "candidate_count": len(candidates),
                         "predicted_parent_minus_children_signed_gain_proxy": utility_proxy,
                         "parent_minus_children_raw_weighted_native_gain": raw_gain,
+                        "weighted_native_gain_relative_denominator": gain_metrics["relative_gain_denominator"],
+                        "relative_weighted_native_gain": relative_gain,
+                        "raw_gain_units": "weighted native loss units",
+                        "raw_standardized_mse_rolewise_gains": raw_standardized_role_gains,
+                        "relative_rolewise_native_gains": relative_role_gains,
+                        "physical_squared_rolewise_native_gains": {
+                            name: value * role_scales[name] ** 2
+                            for name, value in raw_standardized_role_gains.items()
+                        },
+                        "role_scales": role_scales,
+                        "proxy_absolute_relative_gain_error": abs(utility_proxy - relative_gain),
                         "proxy_action": proxy_action,
                         "observed_native_better_action": observed_action,
-                        "bounded_single_candidate_native_regret": abs(raw_gain) if proxy_action != observed_action else 0.0,
+                        "bounded_single_candidate_native_regret_raw_weighted_native_units": abs(raw_gain) if proxy_action != observed_action else 0.0,
+                        "sign_agreement_conditional_on_magnitude": (
+                            bool(np.sign(utility_proxy) == np.sign(relative_gain))
+                            if abs(relative_gain) > 0.05 and utility_proxy != 0.0 else None
+                        ),
+                        "sign_agreement_magnitude_threshold": 0.05,
                         "same_target_masks_queries_and_dependent_reprepare": True,
                         "alternatives": alternatives,
                         "actual_cut_summary": {
@@ -1580,8 +2006,8 @@ def evaluate_spatial_groups(
                         "optimizer_updates": 0,
                     }
                 )
-    if tuple(observed_dev) != dev_ids:
-        raise ValueError("Round13 DEV22 panel was not evaluated exactly once in provider membership order.")
+    if tuple(observed_val) != val_ids:
+        raise ValueError("Round13 VAL89 panel was not evaluated exactly once in canonical membership order.")
     if tuple(row["case_id"] for row in dev_organizer_rows) != dev_detail_ids:
         raise ValueError("Round13 DEV4 utility panel was not evaluated once per retained detail case.")
     if set(detail_rows) != {*surface_train_ids, *dev_detail_ids}:
@@ -1590,11 +2016,19 @@ def evaluate_spatial_groups(
     risk_rows = [train_rows_by_id[case_id] for case_id in risk_train_ids]
     risk_records = [train_records_by_id[case_id] for case_id in risk_train_ids]
     risk_baseline_rows = [train_baseline_rows_by_id[case_id] for case_id in risk_train_ids]
-    dev_rows = [dev_rows_by_id[case_id] for case_id in dev_ids]
-    dev_records = [dev_records_by_id[case_id] for case_id in dev_ids]
-    dev_baseline_rows = [dev_baseline_rows_by_id[case_id] for case_id in dev_ids]
-    module_counts = {row["case_id"]: int(row["module_count"]) for row in (*risk_rows, *dev_rows)}
+    val_rows = [val_rows_by_id[case_id] for case_id in val_ids]
+    val_records = [val_records_by_id[case_id] for case_id in val_ids]
+    val_baseline_rows = [val_baseline_rows_by_id[case_id] for case_id in val_ids]
+    dev_rows = [val_rows_by_id[case_id] for case_id in dev_ids]
+    dev_records = [val_records_by_id[case_id] for case_id in dev_ids]
+    dev_baseline_rows = [val_baseline_rows_by_id[case_id] for case_id in dev_ids]
+    dev_baseline_rows = [val_baseline_rows_by_id[case_id] for case_id in dev_ids]
+    additional_rows = [val_rows_by_id[case_id] for case_id in additional_val_ids]
+    additional_records = [val_records_by_id[case_id] for case_id in additional_val_ids]
+    additional_baseline_rows = [val_baseline_rows_by_id[case_id] for case_id in additional_val_ids]
+    module_counts = {row["case_id"]: int(row["module_count"]) for row in (*risk_rows, *val_rows)}
     dev_module_counts = tuple(sorted({module_counts[case_id] for case_id in dev_ids}))
+    val_module_counts = tuple(sorted({module_counts[case_id] for case_id in val_ids}))
     for case_id in risk_train_ids[:6]:
         if module_counts[case_id] != 1:
             raise ValueError(f"Retained TRAIN risk panel expected {case_id} to be M1.")
@@ -1608,11 +2042,15 @@ def evaluate_spatial_groups(
     train_reduction = dict(reducer(
         risk_records, split="train", case_keys=risk_train_ids,
     ))
-    dev_reduction = dict(reducer(
-        dev_records, split="validation", case_keys=dev_ids,
+    dev_reduction = dict(reducer(dev_records, split="validation", case_keys=dev_ids))
+    val_reduction = dict(reducer(val_records, split="validation", case_keys=val_ids))
+    additional_reduction = dict(reducer(
+        additional_records, split="validation", case_keys=additional_val_ids,
     ))
     train_baseline_records = [train_baseline_records_by_id[case_id] for case_id in risk_train_ids]
-    dev_baseline_records = [dev_baseline_records_by_id[case_id] for case_id in dev_ids]
+    dev_baseline_records = [val_baseline_records_by_id[case_id] for case_id in dev_ids]
+    val_baseline_records = [val_baseline_records_by_id[case_id] for case_id in val_ids]
+    additional_baseline_records = [val_baseline_records_by_id[case_id] for case_id in additional_val_ids]
     train_metrics = {
         "TRAIN_M1": _summarize_nine_observables(
             [row for row in risk_rows if int(row["module_count"]) == 1], known_module_counts=(1, 2),
@@ -1622,6 +2060,10 @@ def evaluate_spatial_groups(
         ),
         "TRAIN_M1_M2_combined": _summarize_nine_observables(risk_rows, known_module_counts=(1, 2)),
         "DEV22": _summarize_nine_observables(dev_rows, known_module_counts=dev_module_counts),
+        "VAL89": _summarize_nine_observables(val_rows, known_module_counts=val_module_counts),
+        "VAL89_additional67": _summarize_nine_observables(
+            additional_rows, known_module_counts=val_module_counts,
+        ),
     }
     baseline_metrics = {
         "TRAIN_M1": _summarize_nine_observables(
@@ -1634,6 +2076,12 @@ def evaluate_spatial_groups(
             risk_baseline_rows, known_module_counts=(1, 2),
         ),
         "DEV22": _summarize_nine_observables(dev_baseline_rows, known_module_counts=dev_module_counts),
+        "VAL89": _summarize_nine_observables(
+            val_baseline_rows, known_module_counts=val_module_counts,
+        ),
+        "VAL89_additional67": _summarize_nine_observables(
+            additional_baseline_rows, known_module_counts=val_module_counts,
+        ),
     }
 
     from . import contextual_frontier_responses as responses
@@ -1734,6 +2182,14 @@ def evaluate_spatial_groups(
         f"M{count}": [case_id for case_id in dev_ids if module_counts.get(case_id) == count]
         for count in dev_module_counts
     }
+    val_ids_by_count = {
+        f"M{count}": [case_id for case_id in val_ids if module_counts.get(case_id) == count]
+        for count in sorted({module_counts[case_id] for case_id in val_ids})
+    }
+    utility_probe_rows = [
+        probe for case_row in organizer_rows for probe in case_row["selected_candidate_probes"]
+    ]
+    utility_summary = _utility_probe_aggregate(utility_probe_rows)
     result = {
         "schema": "thermal_spatial_interaction_groups_round13_evaluation_v1",
         "status": "completed",
@@ -1746,6 +2202,7 @@ def evaluate_spatial_groups(
             "config_name": identity.get("config_name"),
             "training_membership": identity.get("training_membership"),
             "validation_scope": provider_identity.get("validation_scope"),
+            "evaluation_validation_scope": "canonical VAL89 with DEV22 and additional67 partitions reported separately",
             "normalization_fit_scope": provider_identity.get("normalization_fit_scope"),
         },
         "native_evaluation": {
@@ -1755,21 +2212,35 @@ def evaluate_spatial_groups(
             "dev22_case_ids": list(dev_ids),
             "dev22_case_ids_by_module_count": dev_ids_by_count,
             "dev22_module_counts": list(dev_module_counts),
+            "canonical_val89_case_ids": list(val_ids),
+            "canonical_val89_case_ids_by_module_count": val_ids_by_count,
+            "additional67_case_ids": list(additional_val_ids),
+            "validation_scope": "original source test partition exposed for validation, excluding 0273; not an independent final TEST",
+            "canonical_val89_case_count": len(val_rows),
+            "canonical_val89_module_counts": list(val_module_counts),
+            "additional67_case_count": len(additional_rows),
+            "excluded_case_ids": ["0273"],
             "fixed_train_risk_case_ids_by_module_count": {
                 "M1": list(risk_train_ids[:6]), "M2": list(risk_train_ids[6:]),
             },
             "maintained_reductions": {
                 "TRAIN_M1_M2_panel": train_reduction,
                 "DEV22": dev_reduction,
+                "VAL89": val_reduction,
+                "VAL89_additional67": additional_reduction,
             },
             "selected_train_mean_baseline": {
                 "means": train_means,
+                "fit_case_ids": list(train150_ids),
+                "fit_case_count": len(train150_ids),
                 "metrics": baseline_metrics,
-                "scope": "constant selected-TRAIN physical means, evaluated with identical native batches and masks",
+                "scope": "constant physical means computed from the exact inherited fixed TRAIN150 membership, then evaluated with identical native batches and masks for every endpoint",
             },
             "case_rows": {
                 "TRAIN_M1_M2_panel": risk_rows,
                 "DEV22": dev_rows,
+                "VAL89": val_rows,
+                "VAL89_additional67": additional_rows,
             },
         },
         "metrics": train_metrics,
@@ -1791,9 +2262,10 @@ def evaluate_spatial_groups(
         "response_panel_arrays_file": "response_delta_panels.npz",
         "organizer24_same_target_parent_descendant": {
             "case_ids": list(organizer_ids),
-            "selection": "Round12 retained input-only organizer panel; one deterministic internal target per case",
+            "selection": "Round12 retained input-only organizer panel; up to three deterministic internal targets per case at coarse, intermediate, and deep hierarchy depths",
             "candidate_proxy_definition": "core.predict_utility fixed-width target-free proxy; positive means descendant split benefit",
-            "measured_gain_definition": "raw weighted native parent loss minus child-cover weighted native loss on identical target, masks, query points and downstream reprepare",
+            "measured_gain_definition": "raw weighted and per-role parent-minus-child native MSE differences plus training-head relative gains (parent-child)/(0.5*(parent+child)+1e-8) with independent per-role denominators; physical-squared role differences use raw standardized-MSE differences times role scale squared",
+            "summary": utility_summary,
             "cases": organizer_rows,
         },
         "dev4_same_target_utility_probe": {
@@ -1803,9 +2275,21 @@ def evaluate_spatial_groups(
         },
         "fixed_cover_interventions": {
             "case_ids": list(intervention_ids),
-            "cover_names": ["root_K1", "nearest_K8", "nearest_K32", "nearest_K128", "leaf_K192"],
-            "selection": "five fixed, deterministic legal hierarchy covers, independent of target errors",
+            "cover_names": ["root_K1", "nearest_K8", "nearest_K32", "nearest_K128", "leaf_K192", "root_children_K2", "root_grandchildren_K4"],
+            "common_cover_names": ["root_K1", "nearest_K8", "nearest_K32", "nearest_K128", "leaf_K192"],
+            "selection": "five common fixed legal hierarchy covers plus exact input-defined root children and root grandchildren, independent of target errors",
             "cases": cover_rows,
+        },
+        "learned_cover_reference": {
+            "case_ids": list(intervention_ids),
+            "definition": "native losses, field metrics, K by layer, and work from each unmodified selected learned cover; reuses the base prediction and adds no forward pass",
+            "cases": learned_cover_reference_rows,
+        },
+        "same_target_offpath_contexts": {
+            "case_ids": list(intervention_ids),
+            "maximum_input_defined_context_covers_per_case": 2,
+            "selection": "one fixed root child target per case; compare its parent and child actions while refining only the input-defined sibling subtree",
+            "cases": offpath_rows,
         },
         "mode_relay_organizer_relation_ablations": {
             "case_ids": list(intervention_ids),

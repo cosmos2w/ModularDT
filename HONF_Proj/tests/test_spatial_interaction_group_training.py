@@ -33,8 +33,12 @@ CONFIG_DIR = PROJECT / "configs" / "research"
     (
         ("F13-0", "dev", "fixed25_train150_dev22", 100),
         ("F13-1", "dev", "fixed25_train150_dev22", 100),
+        ("F13-0", "dev_mature", "fixed25_train150_dev22", 500),
+        ("F13-1", "dev_mature", "fixed25_train150_dev22", 500),
         ("F13-0", "fulltrain", "full_train600", 200),
         ("F13-1", "fulltrain", "full_train600", 200),
+        ("F13-0", "fulltrain_mature", "full_train600", 500),
+        ("F13-1", "fulltrain_mature", "full_train600", 500),
     ),
 )
 def test_versioned_configs_bind_matching_spatial_runner_contract(
@@ -50,6 +54,10 @@ def test_versioned_configs_bind_matching_spatial_runner_contract(
     assert section["model"]["architecture"] == arm
     assert config["training"]["membership"] == membership
     assert config["training"]["first_segment_epochs"] == first_segment
+    if kind == "dev_mature":
+        assert config["continuation"]["mode"] == "full_state"
+        assert config["continuation"]["source_epoch"] == 100
+        assert config["training"]["optimizer_schedule_horizon"] == 100
     assert config["training"]["effective_batch_size"] == 48
     assert config["training"]["microbatch_cases"] == 24
     assert config["training"]["primary_queries"] == 1024
@@ -65,6 +73,7 @@ def test_versioned_configs_bind_matching_spatial_runner_contract(
     assert config["objective"]["additional_work_pressure"] == 0.0
     assert config["storage"]["output_root"].startswith("/data2/")
     assert _engine_config(config).checkpoint_epochs == tuple(config["training"]["checkpoint_epochs"])
+    _validate_loaded_contextual_config(config)
     identity = _run_identity(config, SimpleNamespace())
     assert identity["workflow"] == "spatial_interaction_groups_joint_training_v1"
     assert identity["recipe"]["native_weights"] == config["objective"]["native_weights"]
@@ -79,6 +88,24 @@ def test_loaded_resume_config_rejects_changed_paired_reduction() -> None:
     malformed["objective"]["paired_utility_physical_reduction"] = "per_case_sum"
     with pytest.raises(ValueError, match="objective contract"):
         _validate_loaded_contextual_config(malformed)
+
+
+def test_mature_configs_reject_changed_source_age_or_schedule_horizon() -> None:
+    dev, _ = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_dev_mature_v1.json"
+    )
+    malformed_dev = copy.deepcopy(dev)
+    malformed_dev["continuation"]["source_epoch"] = 99
+    with pytest.raises(ValueError, match="continuation"):
+        _validate_loaded_contextual_config(malformed_dev)
+
+    full, _ = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_fulltrain_mature_v1.json"
+    )
+    malformed_full = copy.deepcopy(full)
+    malformed_full["initialization"]["source_parent_age"] = 100
+    with pytest.raises(ValueError, match="source, horizon, or normalization"):
+        _validate_loaded_contextual_config(malformed_full)
 
 
 def test_fulltrain_endpoint_proves_inherited_train150_normalizer_lineage() -> None:
@@ -98,6 +125,7 @@ def test_fulltrain_endpoint_proves_inherited_train150_normalizer_lineage() -> No
 
     assert _normalizer_lineage_is_valid("balanced_singleton_recovery_epoch100", literal_parent)
     assert _normalizer_lineage_is_valid("same_model_development_epoch100", development_endpoint)
+    assert _normalizer_lineage_is_valid("same_model_development_epoch500", development_endpoint)
     development_endpoint["initialization"]["normalization_scope"] = "all source TRAIN"
     assert not _normalizer_lineage_is_valid("same_model_development_epoch100", development_endpoint)
 

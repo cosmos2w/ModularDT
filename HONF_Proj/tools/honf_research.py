@@ -42,6 +42,15 @@ def _parser() -> argparse.ArgumentParser:
     train_contextual.add_argument("--epochs", type=int, help="local stop; defaults to the configured first segment")
     train_contextual.add_argument("--output", required=True)
 
+    continue_contextual = commands.add_parser(
+        "continue-contextual", help="continue an F13 development checkpoint with full state in a fresh namespace",
+    )
+    continue_contextual.add_argument("--config", required=True)
+    continue_contextual.add_argument("--device", required=True)
+    continue_contextual.add_argument("--devices", nargs="+")
+    continue_contextual.add_argument("--epochs", type=int, help="absolute local stop, including the source epoch")
+    continue_contextual.add_argument("--output", required=True)
+
     qualify = commands.add_parser("qualify-softonly", help="bounded no-retained-training soft-only qualification")
     qualify.add_argument("--config", required=True)
     qualify.add_argument("--device", required=True)
@@ -136,6 +145,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "train-contextual":
         from honf_runtime.contextual_frontier_training import train_contextual_frontier
         result = train_contextual_frontier(
+            args.config,
+            device=args.device,
+            devices=args.devices,
+            epochs=args.epochs,
+            output=args.output,
+        )
+    elif args.command == "continue-contextual":
+        from honf_runtime.contextual_frontier_training import continue_contextual_frontier
+        result = continue_contextual_frontier(
             args.config,
             device=args.device,
             devices=args.devices,

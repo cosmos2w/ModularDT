@@ -93,12 +93,27 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
         training = config["training"]
         source_kind = initialization.get("source_kind")
         if source_kind == "balanced_singleton_recovery_epoch100":
-            if (training.get("membership") != "fixed25_train150_dev22"
-                    or training.get("local_horizon") != 100
-                    or training.get("first_segment_epochs") != 100
-                    or initialization.get("source_arm") != "G-EE"
-                    or initialization.get("source_parent_age") != 100
-                    or initialization.get("normalization_mode") != "inherit_balanced_singleton_train150_stats"):
+            continuation = config.get("continuation")
+            continuation_requested = continuation is not None
+            valid_initialization = (
+                initialization.get("source_arm") == "G-EE"
+                and initialization.get("source_parent_age") == 100
+                and initialization.get("normalization_mode") == "inherit_balanced_singleton_train150_stats"
+            )
+            valid_training = (
+                training.get("membership") == "fixed25_train150_dev22"
+                and training.get("local_horizon") == (500 if continuation_requested else 100)
+                and training.get("first_segment_epochs") == (500 if continuation_requested else 100)
+            )
+            valid_continuation = (
+                isinstance(continuation, Mapping)
+                and continuation.get("mode") == "full_state"
+                and continuation.get("source_epoch") == 100
+                and isinstance(continuation.get("source_checkpoint"), str)
+                and Path(continuation["source_checkpoint"]).expanduser().is_absolute()
+                and training.get("optimizer_schedule_horizon") == 100
+            ) if continuation_requested else True
+            if not (valid_initialization and valid_training and valid_continuation):
                 raise ValueError("F13 development must adapt the literal singleton epoch100 under inherited TRAIN150 normalization.")
         elif source_kind == "same_model_development_epoch100":
             if (training.get("membership") != "full_train600"
@@ -108,8 +123,16 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                     or initialization.get("source_parent_age") != 100
                     or initialization.get("normalization_mode") != "inherit_matching_f13_train150_stats"):
                 raise ValueError("Full-TRAIN F13 handoff must start from its matching epoch100 development endpoint.")
+        elif source_kind == "same_model_development_epoch500":
+            if (training.get("membership") != "full_train600"
+                    or training.get("local_horizon") != 1000
+                    or training.get("first_segment_epochs") != 500
+                    or initialization.get("source_arm") != arm
+                    or initialization.get("source_parent_age") != 500
+                    or initialization.get("normalization_mode") != "inherit_matching_f13_train150_stats"):
+                raise ValueError("Full-TRAIN F13 training must start fresh from its matching development epoch500 weights and TRAIN150 normalization.")
         else:
-            raise ValueError("Spatial interaction-group initialization must use one of the two versioned Round13 sources.")
+            raise ValueError("Spatial interaction-group initialization must use a supported versioned Round13 source.")
     elif section_name == "interaction_groups" and arm in ("F13-0", "F13-1"):
         raise ValueError("F13 arms require the spatial interaction-group core schema.")
 
@@ -343,7 +366,7 @@ def _model_state_bytes(model: torch.nn.Module) -> int:
 
 
 def _storage_estimate(model: torch.nn.Module, *, completed_epoch: int, stop_after: int,
-                      config: Mapping[str, Any]) -> tuple[int, int]:
+                      config: Mapping[str, Any], fresh_namespace: bool = False) -> tuple[int, int]:
     """Conservatively include model, named Adam moments, aliases, and atomic-save space."""
     state_bytes = max(1, _model_state_bytes(model))
     payload_bytes = 4 * state_bytes + 8 * 1024**2
@@ -352,7 +375,7 @@ def _storage_estimate(model: torch.nn.Module, *, completed_epoch: int, stop_afte
         if completed_epoch < int(epoch) <= stop_after
     )
     terminal = int(stop_after not in config["training"]["checkpoint_epochs"])
-    if completed_epoch == 0:
+    if completed_epoch == 0 or fresh_namespace:
         alias_count = 2  # latest and best-field are distinct retained files
     else:
         alias_count = 0  # both aliases already exist and are atomically replaced
@@ -410,8 +433,34 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
         research._atomic_json(manifest_path, manifest)
 
 
+def _link_parent_field_selector(output: Path, source_checkpoint: Path,
+                                source_payload: Mapping[str, Any]) -> Path:
+    """Preserve the parent best-field checkpoint by reference in a fresh continuation namespace."""
+    source_run = source_checkpoint.resolve(strict=True).parents[1]
+    source_best = resolve_checkpoint(source_run, "best_field").resolve(strict=True)
+    from .compat import load_trusted_checkpoint
+
+    best_payload = load_trusted_checkpoint(source_best, map_location="cpu")
+    source_identity = source_payload.get("experiment_identity")
+    if (best_payload.get("arm") != source_payload.get("arm")
+            or int(best_payload.get("epoch", -1)) > int(source_payload.get("epoch", -1))
+            or best_payload.get("experiment_identity") != source_identity):
+        raise ValueError("Parent best-field selector does not belong to the exact full-state source lineage.")
+    layout = RunLayout(output)
+    destination = layout.write_path("best_by_field_mse_model.pt")
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"Fresh continuation selector path already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.symlink_to(os.path.relpath(source_best, destination.parent))
+    if destination.resolve(strict=True) != source_best:
+        destination.unlink()
+        raise RuntimeError("Parent best-field selector reference failed verification.")
+    return destination
+
+
 def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], output: Path, *,
-         device: torch.device, stop_after: int, resume_checkpoint: Path | None = None) -> dict[str, Any]:
+         device: torch.device, stop_after: int, resume_checkpoint: Path | None = None,
+         external_state_continuation: bool = False) -> dict[str, Any]:
     from .research_training import ResearchTrainingEngine
 
     arm = _arm(config)
@@ -433,12 +482,17 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
         )
     previous_handlers = research._install_clean_stop_handlers(output)
     try:
+        continuation_options = ({
+            "external_state_continuation": True,
+            "allow_horizon_extension": True,
+        } if external_state_continuation else {})
         return engine.fit(
             model, provider, output,
             identity=_run_identity(config, provider),
             arm=arm,
             stop_after=int(stop_after),
             resume_checkpoint=resume_checkpoint,
+            **continuation_options,
         )
     finally:
         research._restore_handlers(previous_handlers)
@@ -490,6 +544,84 @@ def train_contextual_frontier(config_path: str | Path, *, device: str, output: s
     return _fit(model, provider, config, output_path, device=selected_device, stop_after=stop_after)
 
 
+def continue_contextual_frontier(config_path: str | Path, *, device: str, output: str | Path,
+                                 epochs: int | None = None, devices: Sequence[str] | None = None,
+                                 task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None,
+                                 verify_bindings: bool = True) -> dict[str, Any]:
+    """Continue one F13 development checkpoint in a fresh run namespace, preserving full state."""
+    config, resolved_config_path = load_contextual_frontier_config(config_path)
+    continuation = config.get("continuation")
+    if (not isinstance(continuation, Mapping) or continuation.get("mode") != "full_state"
+            or continuation.get("source_epoch") != 100):
+        raise ValueError("Contextual full-state continuation requires its declared F13 epoch100 source.")
+    source_path = Path(continuation["source_checkpoint"]).expanduser().resolve(strict=True)
+    from .compat import load_trusted_checkpoint
+
+    source_payload = load_trusted_checkpoint(source_path, map_location="cpu")
+    arm = _arm(config)
+    if (int(source_payload.get("epoch", -1)) != int(continuation["source_epoch"])
+            or source_payload.get("arm") != arm):
+        raise ValueError("Full-state continuation source age or arm differs from its ordinary recipe.")
+    identity = source_payload.get("experiment_identity")
+    provider_identity = identity.get("provider_identity") if isinstance(identity, Mapping) else None
+    if (not isinstance(identity, Mapping)
+            or identity.get("workflow") != "spatial_interaction_groups_joint_training_v1"
+            or identity.get("training_membership") != "fixed25_train150_dev22"
+            or not isinstance(provider_identity, Mapping)
+            or provider_identity.get("workflow") != "spatial_interaction_groups_joint_training_v1"):
+        raise ValueError("Full-state continuation source is not the matching F13 development lineage.")
+    training = config["training"]
+    stop_after = int(training["first_segment_epochs"] if epochs is None else epochs)
+    if not int(source_payload["epoch"]) < stop_after <= int(training["local_horizon"]):
+        raise ValueError("Continuation stop must advance the source epoch and remain inside the declared horizon.")
+    output_path = Path(output).expanduser().resolve(strict=False)
+    if output_path.exists() and (not output_path.is_dir() or any(output_path.iterdir())):
+        raise FileExistsError(f"Fresh full-state continuations require an empty output namespace: {output_path}")
+    root = Path(config["storage"]["output_root"]).expanduser().resolve(strict=False)
+    if not output_path.is_relative_to(root):
+        raise ValueError(f"Continuation output must be inside configured DATA2 output root {root}.")
+    binding_info = _ensure_workspace_storage_bindings() if verify_bindings else {}
+    research.verify_storage(config, output=output_path, estimated_bytes=0, peak_temporary_bytes=0)
+    configured_devices = config["execution"].get("preferred_devices")
+    permitted = research._permitted_order(device, devices or configured_devices)
+    selected_device, device_info = research.resolve_device(permitted[0], permitted_devices=permitted)
+    model, provider = _build_task(config, arm, selected_device, task_factory=task_factory)
+    estimated_bytes, peak_temporary = _storage_estimate(
+        model, completed_epoch=int(source_payload["epoch"]), stop_after=stop_after,
+        config=config, fresh_namespace=True,
+    )
+    storage = _prepare_storage(config, output_path, estimated_bytes=estimated_bytes,
+                                peak_temporary_bytes=peak_temporary, bindings=binding_info)
+    output_path.mkdir(parents=True, exist_ok=True)
+    _write_run_manifest(output_path, config, resolved_config_path, arm, storage, resumed=False)
+    _link_parent_field_selector(output_path, source_path, source_payload)
+    from .unified_training import _render_loss_curves
+
+    _render_loss_curves(
+        source_payload.get("history", ()),
+        RunLayout(output_path).write_path("loss_curves.png").parent,
+        "field_score",
+        loss_metadata=(provider.loss_metadata() if callable(getattr(provider, "loss_metadata", None)) else None),
+    )
+    print(json.dumps({
+        "event": "contextual_frontier_full_state_continuation_prepared",
+        "source_checkpoint": str(source_path),
+        "source_epoch": int(source_payload["epoch"]),
+        "output": str(output_path),
+        "arm": arm,
+        "selected_device": device_info,
+        "training_membership": training["membership"],
+        "case_count": len(getattr(provider, "training_case_ids", ())),
+        "validation_case_count": len(getattr(provider, "validation_case_ids", ())),
+        "source_history_rows": len(source_payload.get("history", ())),
+        "stop_after_epoch": stop_after,
+        "storage": storage,
+    }, sort_keys=True, default=str, allow_nan=False), flush=True)
+    return _fit(model, provider, config, output_path, device=selected_device,
+                stop_after=stop_after, resume_checkpoint=source_path,
+                external_state_continuation=True)
+
+
 def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_epoch: int,
                                devices: Sequence[str] | None = None,
                                task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None,
@@ -522,7 +654,7 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     if current_epoch < 1 or stop_after_epoch <= current_epoch:
         raise ValueError("Resume stop must advance the latest completed epoch.")
     if stop_after_epoch > int(config["training"]["local_horizon"]):
-        raise ValueError("Resume stop exceeds the configured absolute 2000-epoch horizon.")
+        raise ValueError(f"Resume stop exceeds the configured absolute {config['training']['local_horizon']}-epoch horizon.")
 
     binding_info = _ensure_workspace_storage_bindings() if verify_bindings else {}
     research.verify_storage(config, output=run, estimated_bytes=0, peak_temporary_bytes=0)
@@ -570,20 +702,35 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                 or model.get("architecture") != arm):
             raise ValueError("Saved spatial interaction-group config has a malformed core binding.")
         initialization = config.get("initialization", {})
+        training = config.get("training", {})
         source_kind = initialization.get("source_kind") if isinstance(initialization, Mapping) else None
         if source_kind == "balanced_singleton_recovery_epoch100":
+            continuation = config.get("continuation")
+            matured = continuation is not None
             expected_binding = (
-                "fixed25_train150_dev22", 100, 100, "G-EE",
+                "fixed25_train150_dev22", 500 if matured else 100, 500 if matured else 100, "G-EE",
                 "inherit_balanced_singleton_train150_stats",
             )
+            if matured and (
+                    not isinstance(continuation, Mapping)
+                    or continuation.get("mode") != "full_state"
+                    or continuation.get("source_epoch") != 100
+                    or not isinstance(continuation.get("source_checkpoint"), str)
+                    or not Path(continuation["source_checkpoint"]).is_absolute()
+                    or training.get("optimizer_schedule_horizon") != 100):
+                raise ValueError("Saved spatial development continuation does not bind its literal epoch100 full-state source.")
         elif source_kind == "same_model_development_epoch100":
             expected_binding = (
                 "full_train600", 1000, 200, arm,
                 "inherit_matching_f13_train150_stats",
             )
+        elif source_kind == "same_model_development_epoch500":
+            expected_binding = (
+                "full_train600", 1000, 500, arm,
+                "inherit_matching_f13_train150_stats",
+            )
         else:
             raise ValueError("Saved spatial config declares an unsupported initialization source.")
-        training = config.get("training", {})
         actual_binding = (
             training.get("membership") if isinstance(training, Mapping) else None,
             training.get("local_horizon") if isinstance(training, Mapping) else None,
@@ -591,8 +738,9 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
             initialization.get("source_arm") if isinstance(initialization, Mapping) else None,
             initialization.get("normalization_mode") if isinstance(initialization, Mapping) else None,
         )
+        expected_parent_age = 500 if source_kind == "same_model_development_epoch500" else 100
         if (actual_binding != expected_binding
-                or initialization.get("source_parent_age") != 100):
+                or initialization.get("source_parent_age") != expected_parent_age):
             raise ValueError("Saved spatial config changed its versioned source, horizon, or normalization binding.")
         objective = config.get("objective", {})
         if (not isinstance(objective, Mapping)
@@ -641,6 +789,7 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
 
 __all__ = [
     "CONTEXTUAL_FRONTIER_CONFIG_SCHEMA",
+    "continue_contextual_frontier",
     "load_contextual_frontier_config",
     "resume_contextual_frontier",
     "train_contextual_frontier",

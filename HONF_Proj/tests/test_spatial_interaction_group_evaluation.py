@@ -4,6 +4,12 @@ import numpy as np
 import torch
 
 from honf_runtime.spatial_interaction_group_evaluation import (
+    _bound_native_validation_membership,
+    _canonical_val89_ids,
+    _fixed_dev22_ids,
+    _fixed_train150_ids,
+    _fixed_train_mean,
+    _gain_pair,
     _fixed_spatial_covers,
     _frontier_cut_summary,
     _json_safe,
@@ -15,6 +21,8 @@ from honf_runtime.spatial_interaction_group_evaluation import (
     _spatial_support_arrays,
     _surface_residual_detail,
     _stratified_organizer_candidate,
+    _stratified_organizer_nodes,
+    _utility_probe_aggregate,
     _tree_shape,
 )
 from honf_runtime.contextual_frontier_evaluation import _contextual_checkpoint_parts
@@ -149,7 +157,8 @@ def test_spatial_support_export_retains_exact_cut_and_headwise_relation_arrays()
         hierarchy=tree,
         group_nodes=(root,),
         live_group_count=1,
-        value_coefficients=torch.zeros((0, 1, 2, 3)),
+        keys=torch.arange(8, dtype=torch.float64).reshape(1, 2, 4),
+        value_coefficients=torch.arange(12, dtype=torch.float64).reshape(1, 2, 2, 3),
         group_means=torch.zeros((1, 3)),
         group_slopes=torch.zeros((1, 2, 3)),
         latent_constant_residual=torch.zeros(1),
@@ -191,14 +200,26 @@ def test_spatial_support_export_retains_exact_cut_and_headwise_relation_arrays()
     cut = _frontier_cut_summary(group)
     arrays = _spatial_support_arrays(prepared, "0631", physical_heat=torch.tensor([[2.0, 3.0]]))
 
-    assert cut["K"] == 1 and cut["P"] == 1
-    assert cut["K_times_P"] == 1
+    assert cut["K"] == 1 and cut["P"] == 2
+    assert cut["K_times_P"] == 2
     assert cut["candidate_policy_rows"] == len(tree.internal_nodes) == 191
     assert cut["candidate_internal_node_count"] == 191
     assert cut["allocated_group_count"] == cut["positive_mass_group_count"] == 1
     assert cut["active_nodes_with_ancestry_sizes"][0]["subtree_leaf_count"] == 192
     assert arrays["case_0631__spatial__stage0__environment_group_labels"].shape == (192,)
     assert arrays["case_0631__spatial__stage0__group_relation_mean_headwise"].shape == (1, 2, 2)
+    assert arrays["case_0631__spatial__stage0__group_keys"].shape == (1, 2, 4)
+    assert arrays["case_0631__spatial__stage0__group_keys"].dtype == np.float32
+    assert np.array_equal(
+        arrays["case_0631__spatial__stage0__group_keys"],
+        np.arange(8, dtype=np.float32).reshape(1, 2, 4),
+    )
+    assert arrays["case_0631__spatial__stage0__group_value_coefficients"].shape == (1, 2, 2, 3)
+    assert arrays["case_0631__spatial__stage0__group_value_coefficients"].dtype == np.float32
+    assert np.array_equal(
+        arrays["case_0631__spatial__stage0__group_value_coefficients"],
+        np.arange(12, dtype=np.float32).reshape(1, 2, 2, 3),
+    )
     assert arrays["case_0631__spatial__stage0__all_node_relation_mean_headwise"].shape == (tree.node_count, 2, 2)
     assert arrays["case_0631__spatial__module_coordinates"].shape == (2, 2)
     assert arrays["case_0631__spatial__module_ids"].tolist() == [10, 20]
@@ -425,3 +446,276 @@ def test_organizer24_candidate_selection_stratifies_full_depth_size_range():
     assert selected[0]["depth"] == min(item["depth"] for item in metadata)
     assert selected[-1]["depth"] == max(item["depth"] for item in metadata)
     assert len({item["depth"] for item in selected}) >= 6
+
+
+def test_organizer_utility_nodes_cover_three_input_only_depth_bands():
+    metadata = [
+        {"node_id": node, "depth": depth, "size": max(1, 192 // (2 ** depth))}
+        for depth, nodes in ((0, (382,)), (1, (380, 381)), (2, (375, 376, 377, 378)),
+                             (3, (360, 361, 362, 363, 364, 365, 366, 367)))
+        for node in nodes
+    ]
+
+    selected = _stratified_organizer_nodes(metadata, panel_index=3, panel_count=24)
+
+    assert [band for band, _ in selected] == ["coarse", "intermediate", "deep"]
+    assert len({int(row["depth"]) for _, row in selected}) == 3
+    assert all("node_id" in row and "size" in row for _, row in selected)
+
+
+def test_utility_probe_aggregate_reports_regret_mae_and_conditional_role_signs():
+    rows = [
+        {
+            "case_id": "train-a",
+            "module_count": 3,
+            "predicted_normalized_weighted_gain_proxy": 0.2,
+            "raw_weighted_native_gain": 2.0,
+            "relative_weighted_native_gain": 0.3,
+            "selected_action_regret_raw_weighted_native_units": 0.0,
+            "relative_rolewise_native_gains": {"a": 0.2},
+            "node_depth": 1,
+            "depth_band": "coarse",
+            "module_count": 3,
+            "proxy_action": "children",
+            "observed_native_better_action": "children",
+        },
+        {
+            "case_id": "train-b",
+            "module_count": 5,
+            "predicted_normalized_weighted_gain_proxy": -0.1,
+            "raw_weighted_native_gain": 1.0,
+            "relative_weighted_native_gain": 0.1,
+            "selected_action_regret_raw_weighted_native_units": 0.1,
+            "relative_rolewise_native_gains": {"a": 0.1},
+            "node_depth": 4,
+            "depth_band": "deep",
+            "module_count": 5,
+            "proxy_action": "parent",
+            "observed_native_better_action": "children",
+        },
+    ]
+
+    summary = _utility_probe_aggregate(rows)
+
+    assert summary["probe_count"] == 2
+    assert np.isclose(summary["relative_gain_regression_mae"], 0.15)
+    assert np.isclose(summary["mean_raw_weighted_native_gain"], 1.5)
+    assert np.isclose(summary["total_selected_action_regret_raw_weighted_native_units"], 0.1)
+    assert summary["coverage_by_depth"] == {"1": 1, "4": 1}
+    assert summary["coverage_by_depth_band"] == {"coarse": 1, "deep": 1}
+    assert summary["coverage_by_module_count"] == {"3": 1, "5": 1}
+    assert summary["coverage_by_case_id"] == {"train-a": 1, "train-b": 1}
+    assert summary["rolewise_sign_agreement_conditional_on_magnitude"]["a"]["sign_agreement"] == 0.5
+
+
+def test_relative_gain_matches_training_target_and_is_scale_invariant():
+    gain = _gain_pair(2.0, 1.0)
+    scaled = _gain_pair(2000.0, 1000.0)
+
+    assert gain["raw_gain"] == 1.0
+    assert gain["relative_gain_denominator"] == 1.50000001
+    assert np.isclose(gain["relative_gain"], 2.0 / 3.0)
+    assert np.isclose(scaled["relative_gain"], gain["relative_gain"], rtol=0, atol=1e-8)
+
+    # The role denominators are independent: physical conversion applies only
+    # to raw standardized-MSE differences, not to their relative targets.
+    flow = _gain_pair(2.0, 1.0)
+    temperature = _gain_pair(20.0, 10.0)
+    assert np.isclose(flow["relative_gain"], temperature["relative_gain"])
+    role_scales = {"flow/u": 3.0, "temperature": 0.5}
+    physical_squared = {
+        "flow/u": flow["raw_gain"] * role_scales["flow/u"] ** 2,
+        "temperature": temperature["raw_gain"] * role_scales["temperature"] ** 2,
+    }
+    assert physical_squared == {"flow/u": 9.0, "temperature": 2.5}
+
+
+def test_canonical_val89_binding_is_temporary_and_matches_native_test_catalog():
+    case_ids = _canonical_val89_ids()
+    provider = SimpleNamespace(
+        validation_case_ids=("dev-a", "dev-b"),
+        _validation_index_by_id={"dev-a": 0, "dev-b": 1},
+        _validation_batches_cache=("old",),
+        catalog_case_ids=case_ids,
+        case_split_by_id={case_id: "test" for case_id in case_ids},
+    )
+    original_index = provider._validation_index_by_id
+    original_cache = provider._validation_batches_cache
+
+    with _bound_native_validation_membership(provider, case_ids):
+        assert provider.validation_case_ids == case_ids
+        assert len(provider._validation_index_by_id) == 89
+        assert provider._validation_batches_cache is None
+
+    assert provider.validation_case_ids == ("dev-a", "dev-b")
+    assert provider._validation_index_by_id is original_index
+    assert provider._validation_batches_cache is original_cache
+
+
+def test_fixed_train_mean_uses_only_the_declared_retained_training_membership():
+    cases = [
+        {
+            "case_id": "a",
+            "interface_target": np.asarray([[[2.0, 10.0], [4.0, 20.0]]]),
+            "structure": {"module_present": np.asarray([1.0])},
+            "interface_condition_valid_mask": np.asarray([[1.0, 1.0]]),
+            "module_internal_temperature_points": np.asarray([[3.0, 5.0]]),
+        },
+        {
+            "case_id": "b",
+            "interface_target": np.asarray([[[6.0, 30.0], [8.0, 40.0]]]),
+            "structure": {"module_present": np.asarray([1.0])},
+            "interface_condition_valid_mask": np.asarray([[1.0, 0.0]]),
+            "module_internal_temperature_points": np.asarray([[7.0, 9.0]]),
+        },
+        {
+            "case_id": "outside",
+            "interface_target": np.asarray([[[100.0, 100.0]]]),
+            "structure": {"module_present": np.asarray([1.0])},
+            "interface_condition_valid_mask": np.asarray([[1.0]]),
+            "module_internal_temperature_points": np.asarray([[100.0]]),
+        },
+    ]
+    provider = SimpleNamespace(
+        training_cases=cases,
+        model=SimpleNamespace(normalization_stats={"field_mean_by_channel": [1.0, 2.0]}),
+    )
+
+    means = _fixed_train_mean(provider, ("a", "b"))
+
+    assert means == {"field": [1.0, 2.0], "surface": 4.0, "q": 20.0, "material": 6.0}
+
+
+def test_full600_provider_resolves_train150_from_initialization_lineage_and_manifest():
+    train150 = tuple(f"tr{index:03d}" for index in range(150))
+    train600 = tuple(f"tr{index:03d}" for index in range(600))
+    validation89 = tuple(f"va{index:03d}" for index in range(89))
+    source_provider = {"training_case_ids": list(train150)}
+    provider = SimpleNamespace(
+        manifest={"partitions": {"train": {"case_ids": list(train150)}}},
+        training_case_ids=train600,
+        validation_case_ids=validation89,
+        case_split_by_id={
+            **{case_id: "train" for case_id in train600},
+            **{case_id: "test" for case_id in validation89},
+        },
+        initialization_provider=source_provider,
+        initialization_identity={"training_case_ids": list(train150)},
+    )
+    provider_identity = {
+        "training_case_ids": list(train600),
+        "validation_case_ids": list(validation89),
+        "initialization": {"parent_training_case_ids": list(train150)},
+    }
+
+    assert not hasattr(provider, "_research_source_payload")
+    assert _fixed_train150_ids(provider, provider_identity) == train150
+
+
+def test_full600_train150_lineage_mismatch_fails_closed():
+    train150 = tuple(f"tr{index:03d}" for index in range(150))
+    wrong_parent = tuple(f"tr{index:03d}" for index in range(1, 151))
+    train600 = tuple(f"tr{index:03d}" for index in range(600))
+    provider = SimpleNamespace(
+        manifest={"partitions": {"train": {"case_ids": list(train150)}}},
+        training_case_ids=train600,
+        case_split_by_id={case_id: "train" for case_id in train600},
+        initialization_provider={"training_case_ids": list(train150)},
+        initialization_identity={"training_case_ids": list(train150)},
+    )
+    provider_identity = {"initialization": {"parent_training_case_ids": list(wrong_parent)}}
+
+    try:
+        _fixed_train150_ids(provider, provider_identity)
+    except ValueError as error:
+        assert "identities are absent or disagree" in str(error)
+    else:
+        raise AssertionError("Mismatched full-data baseline source lineage must be rejected.")
+
+
+def _dev22_lineage_fixture(monkeypatch, *, full_train: bool, corrupt_parent: bool = False):
+    dev_train = tuple(f"tr{index:03d}" for index in range(150))
+    dev22 = tuple(f"dv{index:03d}" for index in range(22))
+    val89 = (*dev22, *(f"va{index:03d}" for index in range(67)))
+    manifest_sha = "a" * 64
+    manifest = {
+        "manifest_sha256": manifest_sha,
+        "partitions": {
+            "train": {"case_ids": list(dev_train)},
+            "test": {"case_ids": list(dev22)},
+        },
+    }
+    parent_validation = tuple(f"bad{index:03d}" for index in range(22)) if corrupt_parent else dev22
+    parent_provider = {
+        "training_case_ids": list(dev_train),
+        "validation_case_ids": list(parent_validation),
+        "subset_manifest_sha256": manifest_sha,
+    }
+    parent_identity = {
+        "training_membership": "fixed25_train150_dev22",
+        "provider_identity": dict(parent_provider),
+    }
+    monkeypatch.setattr(
+        "honf_runtime.spatial_interaction_group_evaluation._canonical_val89_ids",
+        lambda: tuple(val89),
+    )
+    if full_train:
+        active_train = tuple(f"tr{index:03d}" for index in range(600))
+        active_validation = tuple(val89)
+        membership = "full_train600"
+    else:
+        active_train = dev_train
+        active_validation = dev22
+        membership = "fixed25_train150_dev22"
+    provider = SimpleNamespace(
+        manifest=manifest,
+        initialization_provider=parent_provider,
+        initialization_identity=parent_identity,
+        training_case_ids=active_train,
+        validation_case_ids=active_validation,
+    )
+    experiment_identity = {
+        "training_membership": membership,
+        "provider_identity": {
+            "training_case_ids": list(active_train),
+            "validation_case_ids": list(active_validation),
+        },
+    }
+    return provider, experiment_identity, dev22
+
+
+def test_fixed_dev22_resolver_accepts_dev150_and_full600_val89(monkeypatch):
+    dev_provider, dev_identity, expected_dev22 = _dev22_lineage_fixture(
+        monkeypatch, full_train=False,
+    )
+    assert _fixed_dev22_ids(dev_provider, dev_identity) == expected_dev22
+
+    full_provider, full_identity, expected_dev22 = _dev22_lineage_fixture(
+        monkeypatch, full_train=True,
+    )
+    assert len(full_provider.training_case_ids) == 600
+    assert len(full_provider.validation_case_ids) == 89
+    assert _fixed_dev22_ids(full_provider, full_identity) == expected_dev22
+
+
+def test_fixed_dev22_resolver_rejects_wrong_full_validation_and_parent_lineage(monkeypatch):
+    provider, identity, _expected = _dev22_lineage_fixture(monkeypatch, full_train=True)
+    wrong_validation = provider.validation_case_ids[:-1]
+    provider.validation_case_ids = wrong_validation
+    identity["provider_identity"]["validation_case_ids"] = list(wrong_validation)
+    try:
+        _fixed_dev22_ids(provider, identity)
+    except ValueError as error:
+        assert "canonical VAL89" in str(error)
+    else:
+        raise AssertionError("Full-TRAIN provider with wrong VAL89 membership must be rejected.")
+
+    provider, identity, _expected = _dev22_lineage_fixture(
+        monkeypatch, full_train=True, corrupt_parent=True,
+    )
+    try:
+        _fixed_dev22_ids(provider, identity)
+    except ValueError as error:
+        assert "fixed25 TRAIN150/DEV22" in str(error) or "fixed25_train150_dev22" in str(error)
+    else:
+        raise AssertionError("Wrong inherited DEV22 source lineage must be rejected.")

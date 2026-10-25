@@ -88,6 +88,15 @@ def _load_initialization_checkpoint(config, arm):
                 or adapter.get("core", {}).get("architecture") != arm
                 or adapter.get("core", {}).get("schema") != ThermalSpatialInteractionGroupsAdapter.CORE_SCHEMA):
             raise ValueError("Full-TRAIN continuation must inherit its matching F13 development epoch100 endpoint.")
+    elif kind == "same_model_development_epoch500":
+        if (int(payload["epoch"]) != 500 or payload.get("arm") != arm
+                or identity.get("workflow") != "spatial_interaction_groups_joint_training_v1"
+                or identity.get("training_membership") != "fixed25_train150_dev22"
+                or provider.get("schema") != "thermal_spatial_interaction_groups_provider_v1"
+                or adapter.get("schema") != ThermalSpatialInteractionGroupsAdapter.SCHEMA
+                or adapter.get("core", {}).get("architecture") != arm
+                or adapter.get("core", {}).get("schema") != ThermalSpatialInteractionGroupsAdapter.CORE_SCHEMA):
+            raise ValueError("Full-TRAIN training must inherit its matching F13 development epoch500 endpoint.")
     else:
         raise ValueError(f"Unsupported spatial-group initialization source kind {kind!r}.")
     response_coefficient = provider_state.get("response_coefficient")
@@ -112,7 +121,9 @@ def _stratified_case_ids(training_cases):
 def _normalizer_lineage_is_valid(source_kind, provider_identity):
     if source_kind == "balanced_singleton_recovery_epoch100":
         return provider_identity.get("normalization_fit_scope") == "selected TRAIN only"
-    if source_kind == "same_model_development_epoch100":
+    if source_kind in (
+            "same_model_development_epoch100",
+            "same_model_development_epoch500"):
         lineage = provider_identity.get("initialization")
         return (
             provider_identity.get("normalization_fit_scope") ==
@@ -158,6 +169,17 @@ class ThermalSpatialInteractionGroupTask(ThermalContextualJointTask):
 
     def _make_organizer(self):
         return SpatialInteractionGroupObjectiveRuntime()
+
+    def _schedule_payload(self):
+        schedule_horizon = int(self.recipe["training"].get("optimizer_schedule_horizon", self.total_epochs))
+        return {
+            "peak_lr": 3e-4,
+            "warmup_start_lr": 3e-4,
+            "warmup_epochs": 0,
+            "hold_through_epoch": schedule_horizon - 1,
+            "total_epochs": schedule_horizon,
+            "final_lr": 3e-4,
+        }
 
     @property
     def core_adaptive_training(self):

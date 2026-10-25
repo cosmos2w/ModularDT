@@ -11,8 +11,10 @@ import torch
 
 from honf_runtime import research_training
 from honf_runtime.contextual_frontier_training import (
+    _link_parent_field_selector,
     _engine_config,
     _run_identity,
+    continue_contextual_frontier,
     load_contextual_frontier_config,
     train_contextual_frontier,
 )
@@ -74,6 +76,111 @@ def test_engine_and_run_identity_preserve_declared_recipe() -> None:
     assert identity["recipe"]["native_weights"] == config["objective"]["native_weights"]
     assert identity["recipe"]["absolute_horizon"] == 2000
     assert identity["recipe"]["wall_clock_budget_seconds"] == 12 * 60 * 60
+
+
+def test_external_continuation_keeps_parent_best_checkpoint_by_reference(tmp_path, monkeypatch) -> None:
+    import honf_runtime.compat as compat
+    import honf_runtime.contextual_frontier_training as runner
+
+    source_run = tmp_path / "source"
+    checkpoint_dir = source_run / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    source_latest = checkpoint_dir / "epoch_0100_model.pt"
+    source_best = checkpoint_dir / "best_by_field_mse_model.pt"
+    source_latest.touch()
+    source_best.touch()
+    identity = {"workflow": "spatial_interaction_groups_joint_training_v1"}
+    source_payload = {"epoch": 100, "arm": "F13-0", "experiment_identity": identity}
+    best_payload = {**source_payload, "epoch": 76}
+    monkeypatch.setattr(runner, "resolve_checkpoint", lambda run, selector: source_best)
+    monkeypatch.setattr(
+        compat, "load_trusted_checkpoint",
+        lambda path, map_location: best_payload,
+    )
+
+    output = tmp_path / "continuation"
+    output.mkdir()
+    selected = _link_parent_field_selector(output, source_latest, source_payload)
+
+    assert selected.is_symlink()
+    assert selected.resolve() == source_best
+    assert selected.stat().st_ino == source_best.stat().st_ino
+
+
+def test_external_continuation_dispatch_uses_literal_source_and_writes_no_history_early(
+    tmp_path, monkeypatch,
+) -> None:
+    import honf_runtime.compat as compat
+    import honf_runtime.contextual_frontier_training as runner
+
+    config, config_path = load_contextual_frontier_config(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_dev_mature_v1.json"
+    )
+    output_root = tmp_path / "runs"
+    config["storage"]["output_root"] = str(output_root)
+    source_run = tmp_path / "source"
+    checkpoint_dir = source_run / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    source = checkpoint_dir / "epoch_0100_model.pt"
+    best = checkpoint_dir / "best_by_field_mse_model.pt"
+    source.touch()
+    best.touch()
+    config["continuation"]["source_checkpoint"] = str(source)
+    config["continuation"]["source_epoch"] = 100
+    identity = {
+        "workflow": "spatial_interaction_groups_joint_training_v1",
+        "training_membership": "fixed25_train150_dev22",
+        "provider_identity": {
+            "workflow": "spatial_interaction_groups_joint_training_v1",
+        },
+    }
+    payload = {"epoch": 100, "arm": "F13-0", "experiment_identity": identity,
+               "history": [{"epoch": epoch} for epoch in range(1, 101)]}
+    best_payload = {**payload, "epoch": 76}
+    monkeypatch.setattr(runner, "load_contextual_frontier_config", lambda _path: (config, config_path))
+    monkeypatch.setattr(runner, "_ensure_workspace_storage_bindings", lambda: {})
+    monkeypatch.setattr(runner, "resolve_checkpoint", lambda _run, _selector: best)
+    monkeypatch.setattr(
+        compat, "load_trusted_checkpoint",
+        lambda path, map_location: best_payload if Path(path) == best else payload,
+    )
+    monkeypatch.setattr(runner.research, "verify_storage", lambda *_args, **_kwargs: {
+        "free_bytes_before": 10**13,
+        "minimum_free_headroom_bytes": 1,
+        "estimated_new_bytes": 0,
+        "estimated_peak_temporary_bytes": 0,
+    })
+    monkeypatch.setattr(runner, "_render_loss_curves", lambda *_args, **_kwargs: None, raising=False)
+    monkeypatch.setattr(
+        "honf_runtime.unified_training._render_loss_curves",
+        lambda *_args, **_kwargs: None,
+    )
+    calls = {}
+
+    def fake_fit(model, provider, actual_config, actual_output, **kwargs):
+        calls.update(kwargs)
+        assert not (actual_output / "history.json").exists()
+        assert not (actual_output / "metrics" / "history.json").exists()
+        assert actual_config["training"]["membership"] == "fixed25_train150_dev22"
+        return {"status": "dispatched"}
+
+    monkeypatch.setattr(runner, "_fit", fake_fit)
+
+    def task_factory(cfg, arm, device):
+        del cfg
+        model = _TinyModel(arm).to(device)
+        return model, _TinyProvider(model)
+
+    result = continue_contextual_frontier(
+        CONFIG_DIR / "thermal_spatial_groups_f13_0_dev_mature_v1.json",
+        device="cpu", devices=["cpu"], output=output_root / "continuation",
+        task_factory=task_factory,
+        verify_bindings=False,
+    )
+
+    assert result == {"status": "dispatched"}
+    assert calls["resume_checkpoint"] == source
+    assert calls["external_state_continuation"] is True
 
 
 class _TinyModel(torch.nn.Module):
