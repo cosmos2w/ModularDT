@@ -1,4 +1,4 @@
-# Thermal spatial group functions: development and handoff recipe
+# Thermal spatial group functions: maturation and full-TRAIN recipe
 
 This guide records the maintained Round13-1 maturation and full-TRAIN recipe for the two Thermal spatial-group models. Both original development runs stopped at epoch 100; those checkpoints remain the literal source states for full-state continuation to development epoch 500, followed by fresh TRAIN600 fits from their matching epoch-500 endpoints. The companion [Round13 development report](../reports/HONF_Round13_Spatial_Group_Functions_Development_Report.md) documents the original short-run evidence and does not claim mature model potential.
 
@@ -95,3 +95,21 @@ CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n ModularDT python tools/h
 ```
 
 If either resumed fit needs another process after a clean interruption, omit `--wall-clock-budget-seconds` to reuse the same absolute cap stored in that run's `run_manifest.json`; the runner never adds a fresh allowance. An explicit later value is also absolute cumulative provider elapsed time, not additional time, and is recorded in the manifest. The provider clock starts at its maintained budget binding after provider construction, so report it separately from whole-process elapsed charge. These commands authorize work only through epoch 1000 and do not claim either endpoint is complete.
+
+## Recorded user stop and later user-controlled continuation
+
+Both development500 and full-TRAIN500 fits and their native VAL89 evaluations completed. At the user's subsequent stop request, Route T clean-stopped with exit0 at full-data epoch779 for F13-0 and755 for F13-1. Their latest/best checkpoints, complete histories, final clean-stop validation and refreshed curves are retained in the same full-data run roots. The matched scientific endpoint remains500; the unequal reserve stops were not given additional full-native evaluation. The [mature report](../reports/HONF_Round13-1_Mature_Spatial_Group_Functions_Report.md) records the completed measurements and unfinished1000 work.
+
+No automatic continuation remains. If the user later chooses to finish the already configured1000 horizon, these same-run commands preserve the saved optimizer/provider/RNG/sampler state and reuse the existing absolute cumulative caps; they do not renew the allowance. There are221/245 epochs left respectively. The explicit-cap resume path was exercised by the actual500→partial continuation, omitted-cap reuse passed focused runner tests, and the existing engine consumes acknowledged clean-stop requests on resume. These commands are documented for user control and were not launched after the stop request.
+
+```bash
+cd /home/wanglz/Desktop/src/ModularDT/HONF_Proj
+
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n ModularDT python tools/honf_research.py resume-contextual \
+  --run /data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_0 \
+  --device cuda:0 --stop-after-epoch 1000
+
+CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n ModularDT python tools/honf_research.py resume-contextual \
+  --run /data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_1 \
+  --device cuda:0 --stop-after-epoch 1000
+```

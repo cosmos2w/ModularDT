@@ -36,9 +36,25 @@
       "arm": "F13-1",
       "run_root": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_1",
       "source_checkpoint": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_spatial_groups_r13_1_full_f13_1/checkpoints/epoch_0500_model.pt",
-      "source_saved_provider_elapsed_seconds": 21551.9680,
+      "source_saved_provider_elapsed_seconds": 21551.968,
       "source_elapsed_ceiling_seconds": 21552,
       "absolute_cumulative_provider_elapsed_cap_seconds": 50352
     }
-  ]
+  ],
+  "execution_outcome": {
+    "status": "user_requested_clean_stop",
+    "F13-0": {
+      "completed_epoch": 779,
+      "remaining_epochs_to1000": 221,
+      "exit_status": 0
+    },
+    "F13-1": {
+      "completed_epoch": 755,
+      "remaining_epochs_to1000": 245,
+      "exit_status": 0
+    },
+    "matched_native_evaluation_endpoint": 500,
+    "additional_partial_endpoint_native_evaluation": false,
+    "automatic_continuation": false
+  }
 }
