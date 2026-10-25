@@ -103,7 +103,16 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_contextual.add_argument("--checkpoint", required=True)
     evaluate_contextual.add_argument("--device", required=True)
     evaluate_contextual.add_argument("--output", required=True)
-    evaluate_contextual.add_argument("--kind", choices=("native", "responses", "organization", "group-execution"), required=True)
+    evaluate_contextual.add_argument(
+        "--kind",
+        choices=("native", "responses", "organization", "group-execution", "group-spatial-diagnostic", "spatial-groups"),
+        required=True,
+    )
+    evaluate_contextual.add_argument(
+        "--include-cost",
+        action="store_true",
+        help="include the bounded Round13 complete-native timing panel (spatial-groups only)",
+    )
 
     assess = commands.add_parser("assess", help="summarize history and available checkpoints")
     assess.add_argument("--run", required=True)
@@ -184,13 +193,22 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("The contextual organization evaluator does not support interaction_groups_v1 checkpoints; use native, responses, or group-execution evaluation.")
         if args.kind == "group-execution":
             from honf_runtime.interaction_group_evaluation import evaluate_execution as evaluate
+        elif args.kind == "group-spatial-diagnostic":
+            from honf_runtime.spatial_interaction_group_evaluation import evaluate_legacy_group_diagnostic as evaluate
+        elif args.kind == "spatial-groups":
+            from honf_runtime.spatial_interaction_group_evaluation import evaluate_spatial_groups as evaluate
         elif args.kind == "native":
             from honf_runtime.contextual_frontier_evaluation import evaluate_native as evaluate
         elif args.kind == "responses":
             from honf_runtime.contextual_frontier_responses import evaluate_responses as evaluate
         else:
             from honf_runtime.contextual_frontier_organization import evaluate_organization as evaluate
-        result = evaluate(args.checkpoint, args.device, args.output)
+        if args.kind == "spatial-groups":
+            result = evaluate(
+                args.checkpoint, args.device, args.output, include_cost=args.include_cost,
+            )
+        else:
+            result = evaluate(args.checkpoint, args.device, args.output)
     else:
         result = research.assess(args.run, dataset=args.dataset)
     if isinstance(result, dict):

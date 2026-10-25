@@ -30,7 +30,8 @@ from .unified_task import DEFAULT_ATLAS_DIRECTORY, _sample_primary, _structure_o
 
 class ThermalContextualJointTask(ThermalContentHypergraphTask):
     def __init__(self, *, model, training_cases, validation_cases, manifest, data_path,
-                 recipe, device, manifest_path=None, catalog=(), source_binding=None):
+                 recipe, device, manifest_path=None, catalog=(), source_binding=None,
+                 response_families=None):
         self.model = self.adapter = model
         self.training_cases = tuple(training_cases)
         self.validation_cases = tuple(validation_cases)
@@ -69,7 +70,10 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
         self.native_weights = dict(recipe.get("objective", {}).get("native_weights", THERMAL_CONTENT_LOSS_WEIGHTS))
         self.organizer = self._make_organizer()
         from .contextual_joint_responses import JointResponseSupervision
-        families = tuple(v for v in ("0001", "0318", "0333", "0348") if v in self.training_case_ids)
+        families = (tuple(map(str, response_families)) if response_families is not None else
+                    tuple(v for v in ("0001", "0318", "0333", "0348") if v in self.training_case_ids))
+        if any(family not in self.training_case_ids for family in families):
+            raise ValueError("Joint response families must be admitted selected TRAIN cases.")
         self.responses = JointResponseSupervision(self.atlas_directory, families, model.normalization_stats)
         self._budget_binding = None
         self._segment_started = time.monotonic()

@@ -28,7 +28,14 @@ from .unified_training import (
 CONTEXTUAL_FRONTIER_CONFIG_SCHEMA = "thermal_contextual_frontier_v1"
 SUPPORTED_ARMS = ("J-D", "J-H")
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
-INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H")
+INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1")
+SPATIAL_INTERACTION_GROUP_CORE_SCHEMA = "spatial_interaction_group_fields_v1"
+
+
+def _is_spatial_interaction_group_section(section: Mapping[str, Any]) -> bool:
+    model = section.get("model", {})
+    return (section.get("core_schema") == SPATIAL_INTERACTION_GROUP_CORE_SCHEMA
+            or (isinstance(model, Mapping) and model.get("schema") == SPATIAL_INTERACTION_GROUP_CORE_SCHEMA))
 
 
 def _model_section(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
@@ -75,6 +82,36 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
     supported_arms = INTERACTION_GROUPS_ARMS if section_name == "interaction_groups" else SUPPORTED_ARMS
     if arm not in supported_arms:
         raise ValueError(f"{section_name} arm must be one of {supported_arms}.")
+    spatial_groups = section_name == "interaction_groups" and _is_spatial_interaction_group_section(frontier)
+    if spatial_groups:
+        model = frontier.get("model")
+        if (arm not in ("F13-0", "F13-1") or not isinstance(model, Mapping)
+                or model.get("schema") != SPATIAL_INTERACTION_GROUP_CORE_SCHEMA
+                or model.get("architecture") != arm):
+            raise ValueError("Spatial interaction-group config must bind its core schema and F13 arm.")
+        initialization = config["initialization"]
+        training = config["training"]
+        source_kind = initialization.get("source_kind")
+        if source_kind == "balanced_singleton_recovery_epoch100":
+            if (training.get("membership") != "fixed25_train150_dev22"
+                    or training.get("local_horizon") != 100
+                    or training.get("first_segment_epochs") != 100
+                    or initialization.get("source_arm") != "G-EE"
+                    or initialization.get("source_parent_age") != 100
+                    or initialization.get("normalization_mode") != "inherit_balanced_singleton_train150_stats"):
+                raise ValueError("F13 development must adapt the literal singleton epoch100 under inherited TRAIN150 normalization.")
+        elif source_kind == "same_model_development_epoch100":
+            if (training.get("membership") != "full_train600"
+                    or training.get("local_horizon") != 1000
+                    or training.get("first_segment_epochs") != 200
+                    or initialization.get("source_arm") != arm
+                    or initialization.get("source_parent_age") != 100
+                    or initialization.get("normalization_mode") != "inherit_matching_f13_train150_stats"):
+                raise ValueError("Full-TRAIN F13 handoff must start from its matching epoch100 development endpoint.")
+        else:
+            raise ValueError("Spatial interaction-group initialization must use one of the two versioned Round13 sources.")
+    elif section_name == "interaction_groups" and arm in ("F13-0", "F13-1"):
+        raise ValueError("F13 arms require the spatial interaction-group core schema.")
 
     dataset = config["dataset"]
     if not isinstance(dataset, Mapping) or dataset.get("name") != "thermal":
@@ -114,7 +151,29 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
         raise ValueError(f"{section_name}.model must be a model configuration mapping.")
     if not isinstance(config["objective"].get("native_weights"), Mapping):
         raise ValueError("objective.native_weights must be declared by the Thermal task config.")
-    if section_name == "interaction_groups":
+    if section_name == "interaction_groups" and spatial_groups:
+        objective = config["objective"]
+        if (objective.get("response_microbatch_every_primary_updates") != 4
+                or float(objective.get("response_shared_gradient_cap_fraction", -1)) != 0.1
+                or objective.get("response_coefficient_source") != "literal_initialization_checkpoint"
+                or objective.get("response_coefficient_calibration") != "none"
+                or objective.get("response_cap_shared_parameter_rule") != (
+                    "module/environment/operating encoders, MM/ME stages excluding EE, "
+                    "group reader, fusion trunk, and field head"
+                )
+                or objective.get("native_weights_fixed") is not True
+                or objective.get("response_training_families") != ["0348"]
+                or objective.get("response_scale_exploration") is not False
+                or objective.get("paired_utility_every_primary_updates") != 4
+                or float(objective.get("paired_utility_huber_delta", -1)) != 1.0
+                or float(objective.get("paired_utility_huber_coefficient", -1)) != 1.0
+                or objective.get("paired_utility_physical_reduction") != "average_over_actual_macro_case_count"
+                or float(objective.get("scale_exploration_fraction", -1)) != 0.25
+                or objective.get("scale_exploration_depth_distribution") != "uniform_available_depth"
+                or objective.get("scale_exploration_shared_keys_across_arms") is not True
+                or float(objective.get("additional_work_pressure", -1)) != 0.0):
+            raise ValueError("Spatial interaction-group objective does not match the paired-utility training contract.")
+    elif section_name == "interaction_groups":
         objective = config["objective"]
         if (objective.get("response_microbatch_every_primary_updates") != 4
                 or float(objective.get("response_shared_gradient_cap_fraction", -1)) != 0.1
@@ -197,7 +256,14 @@ def _task_factory() -> Callable[..., tuple[torch.nn.Module, Any]]:
     return build_thermal_contextual_frontier_task
 
 
-def _interaction_group_task_factory() -> Callable[..., tuple[torch.nn.Module, Any]]:
+def _interaction_group_task_factory(config: Mapping[str, Any]) -> Callable[..., tuple[torch.nn.Module, Any]]:
+    section = _model_section(config)[1]
+    if _is_spatial_interaction_group_section(section):
+        from channelthermal.training.spatial_interaction_group_task import (
+            build_thermal_spatial_interaction_group_task,
+        )
+
+        return build_thermal_spatial_interaction_group_task
     from channelthermal.training.interaction_group_task import build_thermal_interaction_group_task
 
     return build_thermal_interaction_group_task
@@ -205,7 +271,7 @@ def _interaction_group_task_factory() -> Callable[..., tuple[torch.nn.Module, An
 
 def _build_task(config: Mapping[str, Any], arm: str, device: torch.device,
                 task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None):
-    factory = task_factory or (_interaction_group_task_factory()
+    factory = task_factory or (_interaction_group_task_factory(config)
                                if "interaction_groups" in config else _task_factory())
     model, provider = factory(config, arm=arm, device=device)
     if model is None or provider is None:
@@ -240,10 +306,17 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
     section_name, section = _model_section(config)
     frontier = copy.deepcopy(dict(section))
     interaction_groups = section_name == "interaction_groups"
+    spatial_groups = interaction_groups and _is_spatial_interaction_group_section(section)
     return {
-        "schema": "honf_interaction_groups_training_v1" if interaction_groups else "honf_contextual_frontier_training_v1",
-        "workflow": "interaction_groups_joint_training_v1" if interaction_groups else "contextual_frontier_joint_training_v1",
-        "model_family": "interaction_groups_joint_field_v1" if interaction_groups else "contextual_organization_joint_field_v1",
+        "schema": ("honf_spatial_interaction_groups_training_v1" if spatial_groups else
+                   "honf_interaction_groups_training_v1" if interaction_groups else
+                   "honf_contextual_frontier_training_v1"),
+        "workflow": ("spatial_interaction_groups_joint_training_v1" if spatial_groups else
+                     "interaction_groups_joint_training_v1" if interaction_groups else
+                     "contextual_frontier_joint_training_v1"),
+        "model_family": ("spatial_interaction_group_fields_joint_field_v1" if spatial_groups else
+                         "interaction_groups_joint_field_v1" if interaction_groups else
+                         "contextual_organization_joint_field_v1"),
         "dataset": "thermal",
         "config_name": config["name"],
         "training_membership": config["training"]["membership"],
@@ -307,11 +380,15 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
                         arm: str, storage: Mapping[str, Any], *, resumed: bool) -> None:
     layout = RunLayout(output)
     layout.ensure()
+    section_name, section = _model_section(config)
+    spatial_groups = section_name == "interaction_groups" and _is_spatial_interaction_group_section(section)
+    manifest_schema = ("honf_spatial_interaction_groups_run_manifest_v1" if spatial_groups else
+                       "honf_interaction_groups_run_manifest_v1" if section_name == "interaction_groups" else
+                       "honf_contextual_frontier_run_manifest_v1")
     if not resumed:
         research._atomic_json(layout.write_path("resolved_config.json"), dict(config))
         research._atomic_json(layout.write_path("run_manifest.json"), {
-            "schema": ("honf_interaction_groups_run_manifest_v1" if "interaction_groups" in config
-                       else "honf_contextual_frontier_run_manifest_v1"),
+            "schema": manifest_schema,
             "artifact_layout_version": 1,
             "config": dict(config),
             "config_path": str(config_path),
@@ -322,8 +399,7 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
     else:
         manifest_path = layout.read_path("run_manifest.json")
         manifest = _read_json(manifest_path)
-        expected_schema = ("honf_interaction_groups_run_manifest_v1" if "interaction_groups" in config
-                           else "honf_contextual_frontier_run_manifest_v1")
+        expected_schema = manifest_schema
         if (manifest.get("schema") != expected_schema
                 or manifest.get("artifact_layout_version") != 1
                 or manifest.get("arm") != arm
@@ -376,7 +452,7 @@ def train_contextual_frontier(config_path: str | Path, *, device: str, output: s
     training = config["training"]
     stop_after = int(training["first_segment_epochs"] if epochs is None else epochs)
     if not 1 <= stop_after <= int(training["local_horizon"]):
-        raise ValueError("Requested initial screen stop must lie in 1..2000.")
+        raise ValueError("Requested training stop must lie within the configured absolute horizon.")
     output_path = Path(output).expanduser().resolve(strict=False)
     if output_path.exists() and (not output_path.is_dir() or any(output_path.iterdir())):
         raise FileExistsError(f"New contextual-frontier runs require an empty output directory: {output_path}")
@@ -423,7 +499,8 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     manifest_path = layout.read_path("run_manifest.json")
     manifest = _read_json(manifest_path)
     if (manifest.get("schema") not in {"honf_contextual_frontier_run_manifest_v1",
-                                        "honf_interaction_groups_run_manifest_v1"}
+                                        "honf_interaction_groups_run_manifest_v1",
+                                        "honf_spatial_interaction_groups_run_manifest_v1"}
             or manifest.get("artifact_layout_version") != 1):
         raise ValueError("Run is missing the maintained contextual-frontier manifest.")
     config = copy.deepcopy(manifest.get("config"))
@@ -479,12 +556,67 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
     frontier = config.get(section_name, {})
     expected_schema = INTERACTION_GROUPS_CONFIG_SCHEMA if section_name == "interaction_groups" else CONTEXTUAL_FRONTIER_CONFIG_SCHEMA
     supported_arms = INTERACTION_GROUPS_ARMS if section_name == "interaction_groups" else SUPPORTED_ARMS
+    spatial_groups = section_name == "interaction_groups" and isinstance(frontier, Mapping) and _is_spatial_interaction_group_section(frontier)
     if (config.get("schema") != research.RESEARCH_SCHEMA
             or not isinstance(frontier, Mapping)
             or frontier.get("schema") != expected_schema
             or frontier.get("arm") not in supported_arms):
         raise ValueError("Saved contextual model config is malformed or uses an unsupported arm.")
-    if section_name == "interaction_groups":
+    if spatial_groups:
+        model = frontier.get("model")
+        arm = frontier.get("arm")
+        if (frontier.get("arm") not in ("F13-0", "F13-1") or not isinstance(model, Mapping)
+                or model.get("schema") != SPATIAL_INTERACTION_GROUP_CORE_SCHEMA
+                or model.get("architecture") != arm):
+            raise ValueError("Saved spatial interaction-group config has a malformed core binding.")
+        initialization = config.get("initialization", {})
+        source_kind = initialization.get("source_kind") if isinstance(initialization, Mapping) else None
+        if source_kind == "balanced_singleton_recovery_epoch100":
+            expected_binding = (
+                "fixed25_train150_dev22", 100, 100, "G-EE",
+                "inherit_balanced_singleton_train150_stats",
+            )
+        elif source_kind == "same_model_development_epoch100":
+            expected_binding = (
+                "full_train600", 1000, 200, arm,
+                "inherit_matching_f13_train150_stats",
+            )
+        else:
+            raise ValueError("Saved spatial config declares an unsupported initialization source.")
+        training = config.get("training", {})
+        actual_binding = (
+            training.get("membership") if isinstance(training, Mapping) else None,
+            training.get("local_horizon") if isinstance(training, Mapping) else None,
+            training.get("first_segment_epochs") if isinstance(training, Mapping) else None,
+            initialization.get("source_arm") if isinstance(initialization, Mapping) else None,
+            initialization.get("normalization_mode") if isinstance(initialization, Mapping) else None,
+        )
+        if (actual_binding != expected_binding
+                or initialization.get("source_parent_age") != 100):
+            raise ValueError("Saved spatial config changed its versioned source, horizon, or normalization binding.")
+        objective = config.get("objective", {})
+        if (not isinstance(objective, Mapping)
+                or objective.get("response_microbatch_every_primary_updates") != 4
+                or float(objective.get("response_shared_gradient_cap_fraction", -1)) != 0.1
+                or objective.get("response_coefficient_source") != "literal_initialization_checkpoint"
+                or objective.get("response_coefficient_calibration") != "none"
+                or objective.get("response_cap_shared_parameter_rule") != (
+                    "module/environment/operating encoders, MM/ME stages excluding EE, "
+                    "group reader, fusion trunk, and field head"
+                )
+                or objective.get("response_training_families") != ["0348"]
+                or objective.get("response_scale_exploration") is not False
+                or objective.get("native_weights_fixed") is not True
+                or objective.get("paired_utility_every_primary_updates") != 4
+                or objective.get("paired_utility_physical_reduction") != "average_over_actual_macro_case_count"
+                or float(objective.get("paired_utility_huber_delta", -1)) != 1.0
+                or float(objective.get("paired_utility_huber_coefficient", -1)) != 1.0
+                or float(objective.get("scale_exploration_fraction", -1)) != 0.25
+                or objective.get("scale_exploration_depth_distribution") != "uniform_available_depth"
+                or objective.get("scale_exploration_shared_keys_across_arms") is not True
+                or float(objective.get("additional_work_pressure", -1)) != 0.0):
+            raise ValueError("Saved spatial interaction-group objective contract is malformed.")
+    if section_name == "interaction_groups" and not spatial_groups:
         objective = config.get("objective", {})
         if (not isinstance(objective, Mapping)
                 or objective.get("response_microbatch_every_primary_updates") != 4

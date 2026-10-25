@@ -581,10 +581,12 @@ class ThermalContentHypergraphAdapter(nn.Module):
         local_query_points: torch.Tensor | None = None,
         ntheta: int = THERMAL_CONTENT_NATIVE_THETA_COUNT,
         scene_key: Any = None,
+        forced_frontier: Mapping[int, Any] | None = None,
     ) -> PreparedThermalContentHypergraph:
         """Prepare one shared edge bank and union for all native output roles."""
         scene_batch = self.scene_batch(structure, scene_key=scene_key)
-        organization = self.core.prepare(scene_batch)
+        organization = (self.core.prepare(scene_batch) if forced_frontier is None else
+                        self.core.prepare(scene_batch, forced_frontier=forced_frontier))
         (query, union, stencils, solid_mask, curl_stencil, lengths, delta,
          conductivity, role_shapes) = self._query_union(scene_batch, fluid_xy, local_query_points, ntheta)
         if query.scene_key != organization.scene_key:

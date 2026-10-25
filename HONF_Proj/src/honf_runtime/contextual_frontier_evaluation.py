@@ -16,7 +16,7 @@ import torch
 from .compat import load_trusted_checkpoint
 
 
-_EVALUABLE_ARMS = ("J-D", "J-H", "G-EE", "G-F", "G-H", "G-EE-H")
+_EVALUABLE_ARMS = ("J-D", "J-H", "G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1")
 _MAX_OUTPUT_BYTES = 256 * 1024**2
 _OBSERVABLES = (
     "u", "v", "p", "omega", "temperature_fluid", "temperature_surface",
@@ -29,14 +29,17 @@ def _contextual_checkpoint_parts(
 ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     identity = payload.get("experiment_identity")
     if not isinstance(identity, Mapping) or identity.get("workflow") not in {
-            "contextual_frontier_joint_training_v1", "interaction_groups_joint_training_v1"}:
+            "contextual_frontier_joint_training_v1", "interaction_groups_joint_training_v1",
+            "spatial_interaction_groups_joint_training_v1"}:
         raise ValueError("Checkpoint is not a maintained contextual or interaction-groups training checkpoint.")
     provider_identity = identity.get("provider_identity")
     if not isinstance(provider_identity, Mapping):
         raise ValueError("Contextual-frontier checkpoint is missing its provider identity.")
-    expected_provider_schema = ("thermal_interaction_groups_provider_v1"
-                                if identity["workflow"] == "interaction_groups_joint_training_v1"
-                                else "thermal_contextual_frontier_provider_v1")
+    expected_provider_schema = {
+        "interaction_groups_joint_training_v1": "thermal_interaction_groups_provider_v1",
+        "spatial_interaction_groups_joint_training_v1": "thermal_spatial_interaction_groups_provider_v1",
+        "contextual_frontier_joint_training_v1": "thermal_contextual_frontier_provider_v1",
+    }[identity["workflow"]]
     if provider_identity.get("schema") != expected_provider_schema:
         raise ValueError("Checkpoint provider identity does not match its maintained model workflow.")
     adapter_state = provider_identity.get("adapter_state")
@@ -44,9 +47,21 @@ def _contextual_checkpoint_parts(
     if not isinstance(adapter_state, Mapping) or not isinstance(recipe, Mapping):
         raise ValueError("Checkpoint must contain the adapter state payload and the original provider recipe.")
     arm = str(payload.get("arm", provider_identity.get("architecture", "")))
-    supported = ("G-EE", "G-F", "G-H", "G-EE-H") if identity["workflow"] == "interaction_groups_joint_training_v1" else ("J-D", "J-H")
+    supported = {
+        "interaction_groups_joint_training_v1": ("G-EE", "G-F", "G-H", "G-EE-H"),
+        "spatial_interaction_groups_joint_training_v1": ("F13-0", "F13-1"),
+        "contextual_frontier_joint_training_v1": ("J-D", "J-H"),
+    }[identity["workflow"]]
     if arm not in supported or provider_identity.get("architecture") != arm:
         raise ValueError("Checkpoint arm and provider architecture must agree with the workflow schema.")
+    if identity["workflow"] == "spatial_interaction_groups_joint_training_v1":
+        adapter_schema = str(adapter_state.get("schema", ""))
+        core_config = adapter_state.get("core")
+        if (adapter_schema != "thermal_spatial_interaction_groups_adapter_v1"
+                or not isinstance(core_config, Mapping)
+                or core_config.get("schema") != "spatial_interaction_group_fields_v1"
+                or provider_identity.get("spatial_interaction_group_schema") != "spatial_interaction_group_fields_v1"):
+            raise ValueError("Round13 checkpoint adapter and core schemas must match the spatial provider identity.")
     return identity, provider_identity, {"adapter_state": adapter_state, "recipe": recipe, "arm": arm}
 
 
@@ -66,7 +81,7 @@ def load_contextual_checkpoint(
     path: str | Path,
     device: str | torch.device,
 ) -> tuple[torch.nn.Module, Any, dict[str, Any]]:
-    """Load a saved J-D/J-H model and rebuild its matching native data provider.
+    """Load a saved contextual, interaction-group, or Round13 native checkpoint.
 
     The provider factory is run from the recipe embedded in the trusted engine
     checkpoint, which reuses the selected-TRAIN membership and normalization
@@ -82,8 +97,10 @@ def load_contextual_checkpoint(
     # Import through the maintained runner so model/provider reconstruction
     # uses the same task factory as training and resume.
     from .contextual_frontier_training import _build_task
-    interaction_groups = saved["arm"] in ("G-EE", "G-F", "G-H", "G-EE-H")
-    if interaction_groups:
+    workflow = _identity["workflow"]
+    if workflow == "spatial_interaction_groups_joint_training_v1":
+        from channelthermal.spatial_interaction_groups import ThermalSpatialInteractionGroupsAdapter as Adapter
+    elif workflow == "interaction_groups_joint_training_v1":
         from channelthermal.interaction_groups import ThermalInteractionGroupsAdapter as Adapter
     else:
         from channelthermal.contextual_joint import ThermalContextualJointAdapter as Adapter
