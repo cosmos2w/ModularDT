@@ -356,8 +356,22 @@ def _fixed_probe_evidence(model: Any, provider: Any, batches: Mapping[str, Any],
     if not callable(probe):
         raise TypeError("Member-routing provider must expose member_routing_probe for fixed-checkpoint interventions.")
     result: dict[str, Any] = {}
+    native_metrics = getattr(provider, "validation_metrics", None)
+
+    def field_metrics(prediction, batch):
+        if not callable(native_metrics):
+            return None
+        record = native_metrics(prediction, batch.targets, None)
+        rows = record.get("case_rows") if isinstance(record, Mapping) else None
+        if not isinstance(rows, Sequence) or len(rows) != 1:
+            raise ValueError("Fixed routing interventions require one maintained native metric row.")
+        summary = native_evaluation._summarize_nine_observables(rows)
+        return {name: {"rmse": value["mean"], "unit": value["unit"]}
+                for name, value in summary.items()}
+
     for case_id, batch in batches.items():
         case_rows = {}
+        baseline_metrics = field_metrics(base_predictions[case_id], batch)
         for probe_name in PROBE_NAMES:
             with torch.no_grad():
                 measured = probe(model, batch, base_predictions[case_id], query_indices[case_id], probe_name)
@@ -405,6 +419,9 @@ def _fixed_probe_evidence(model: Any, provider: Any, batches: Mapping[str, Any],
                 "field_delta_max_abs": float(np.max(np.abs(field_delta))) if field_delta.size else 0.0,
                 "field_delta_mean_abs": float(np.mean(np.abs(field_delta))) if field_delta.size else 0.0,
                 "native_component_deltas": component_deltas,
+                "native_observable_metrics": field_metrics(prediction, batch),
+                "baseline_native_observable_metrics": baseline_metrics,
+                "native_metric_scope": "same fixed case and maintained physical masks/measures; no error-based control tuning",
                 "baseline_selected_member_counts": _jsonable(baseline_counts),
                 "selected_member_counts": _jsonable(selected_counts),
                 "selected_member_counts_match_baseline": counts_matched,

@@ -17,6 +17,28 @@ from honf_runtime.contextual_frontier_training import load_contextual_frontier_c
 CONFIGS = PROJECT / "configs/research"
 
 
+def test_relative_adapter_payload_roundtrip_preserves_v2_and_rejects_v1_relabelling():
+    import torch
+    from channelthermal.member_routing import (
+        ThermalInteractionReusedMemberRoutingAdapter, ThermalRelativeMemberRoutingAdapter,
+    )
+    from honf_forward_core.interaction_reused_member_routing import RelativeMemberRoutingCore
+    from tests.test_interaction_reused_member_routing import _base_config
+    from tests.test_native_budgeted_postfit import _thermal_stats
+
+    core = RelativeMemberRoutingCore(_base_config(), input_dataset="thermal")
+    model = ThermalRelativeMemberRoutingAdapter(_thermal_stats(), core=core)
+    restored = ThermalRelativeMemberRoutingAdapter.from_state_payload(
+        model.state_payload(), state_dict=model.state_dict(),
+    )
+    assert restored.get_config() == model.get_config()
+    assert restored.architecture == "R13-3-Relative"
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], value, rtol=0, atol=0)
+    with pytest.raises(ValueError, match="Not a Thermal"):
+        ThermalInteractionReusedMemberRoutingAdapter.from_state_payload(model.state_payload())
+
+
 def test_explicit_horizon_extension_keeps_provider_and_schedule_identity():
     import copy
     from honf_runtime.unified_training import _resume_identity_amendment

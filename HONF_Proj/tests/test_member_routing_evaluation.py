@@ -315,6 +315,27 @@ def test_geometry_b_probe_reports_unmatched_selected_counts_without_hiding_them(
     assert geometry["selected_member_counts"] == {"M": 1, "E": 1}
 
 
+def test_fixed_probes_report_native_field_fidelity_beside_prediction_changes():
+    from channelthermal.training.content_hypergraph_task import ThermalContentHypergraphTask
+    from tests.test_native_budgeted_postfit import _thermal_stats
+
+    class NativeProbeProvider(_ProbeProvider):
+        adapter = SimpleNamespace(normalization_stats=_thermal_stats())
+        validation_metrics = ThermalContentHypergraphTask.validation_metrics
+
+    batch, prediction = _native_fixture()
+    result = _fixed_probe_evidence(
+        model=object(), provider=NativeProbeProvider(), batches={"M1": batch},
+        base_predictions={"M1": prediction}, query_indices={"M1": (0, 1, 2)},
+        base_traces={"M1": ({"module_ids": [17]},) * 3},
+    )["M1"]
+    changed = result["geometry_b_comparable_counts"]
+    assert len(changed["native_observable_metrics"]) == 9
+    assert changed["baseline_native_observable_metrics"]["temperature_material"]["rmse"] == 0.
+    assert changed["native_observable_metrics"]["temperature_material"]["rmse"] == 2.
+    assert result["all_candidates_open"]["native_observable_metrics"]["u"]["rmse"] == 0.
+
+
 def test_cost_benchmark_preserves_warmup_repeats_and_all_phases() -> None:
     phases = {name: {"samples_seconds": [0.1, 0.2, 0.3]} for name in (
         "prepare", "cached_decode", "complete_native", "training_macro",
