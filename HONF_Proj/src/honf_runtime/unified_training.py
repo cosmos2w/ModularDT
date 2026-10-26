@@ -345,7 +345,9 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             from .spatial_group_continuation import spatial_group_horizon_amendment
 
             return spatial_group_horizon_amendment(saved, current)
-        if saved.get("workflow") == "interaction_reused_member_routing_joint_training_v1":
+        if saved.get("workflow") in {
+                "interaction_reused_member_routing_joint_training_v1",
+                "interaction_reused_member_routing_joint_training_v2"}:
             if allow_microbatch_change:
                 raise ValueError(message)
             saved, current = (json.loads(json.dumps(value)) for value in (saved, current))
@@ -767,7 +769,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
 
     joint_run = any(row.get("phase") == "joint" for row in history)
     member_routing_run = any(
-        str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route"} for row in history
+        str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative"} for row in history
     )
     canonical_val89_joint = any(
         (isinstance(row.get("validation"), Mapping)

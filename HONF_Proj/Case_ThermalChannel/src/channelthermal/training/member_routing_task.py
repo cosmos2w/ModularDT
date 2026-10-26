@@ -10,7 +10,10 @@ import numpy as np
 import torch
 
 from honf_runtime.unified_training import OptimizerGroupSpec, ScheduleSpec
-from ..member_routing import ThermalInteractionReusedMemberRoutingAdapter
+from ..member_routing import (
+    ThermalInteractionReusedMemberRoutingAdapter,
+    ThermalRelativeMemberRoutingAdapter,
+)
 from .content_hypergraph_task import ThermalContentPredictions, THERMAL_CONTENT_LOSS_WEIGHTS
 from .contextual_joint_task import ThermalContextualJointTask
 from .joint_task import _load_data_binding, _read_selected_cases, validate_full_train_followup_membership
@@ -22,10 +25,16 @@ from ..data.development_split import development_case_ids, read_case_catalog
 WORKFLOW = "interaction_reused_member_routing_joint_training_v1"
 PROVIDER_SCHEMA = "thermal_interaction_reused_member_routing_provider_v1"
 CONFIG_SECTION_SCHEMA = "thermal_member_routing_r13_3_v1"
+RELATIVE_WORKFLOW = "interaction_reused_member_routing_joint_training_v2"
+RELATIVE_PROVIDER_SCHEMA = "thermal_interaction_reused_member_routing_provider_v2"
+RELATIVE_CONFIG_SECTION_SCHEMA = "thermal_member_routing_r13_3_v2"
+RELATIVE_TRAINING_STATE_SCHEMA = "thermal_member_routing_native_training_state_v2"
 
 
 class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
     """Use only the maintained native Thermal observation and objective path."""
+
+    training_state_schema = "thermal_member_routing_native_training_state_v1"
 
     def __init__(self, *, model, training_cases, validation_cases, manifest, data_path,
                  recipe, device, manifest_path=None, catalog=(), source_binding=None):
@@ -39,12 +48,21 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
         if any(not math.isfinite(float(value)) or float(value) < 0
                for value in self.native_weights.values()):
             raise ValueError("Round13-3 native objective weights must be finite and nonnegative.")
+        relative = self.model.CORE_SCHEMA == ThermalRelativeMemberRoutingAdapter.CORE_SCHEMA
+        self.workflow = RELATIVE_WORKFLOW if relative else WORKFLOW
+        self.provider_schema = RELATIVE_PROVIDER_SCHEMA if relative else PROVIDER_SCHEMA
+        self.training_state_schema = RELATIVE_TRAINING_STATE_SCHEMA if relative else self.training_state_schema
+        health_config = recipe.get("member_routing", {}).get("health")
+        self._member_routing_health = None
+        if isinstance(health_config, Mapping) and health_config.get("enabled") is True:
+            from .member_routing_health import MemberRoutingHealth
+            self._member_routing_health = MemberRoutingHealth(self, health_config)
 
     def identity_payload(self):
         payload = super().identity_payload()
         payload.update({
-            "schema": PROVIDER_SCHEMA,
-            "workflow": WORKFLOW,
+            "schema": self.provider_schema,
+            "workflow": self.workflow,
             "architecture": self.model.architecture,
             "member_routing_schema": self.model.CORE_SCHEMA,
             "adapter_state": self.model.state_payload(),
@@ -118,11 +136,15 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
                                       epoch=epoch, update_index=update_index)
 
     def training_state_dict(self):
-        return {**super().training_state_dict(),
-                "schema": "thermal_member_routing_native_training_state_v1"}
+        state = {**super().training_state_dict(),
+                 "schema": self.training_state_schema}
+        health = getattr(self, "_member_routing_health", None)
+        if health is not None:
+            state["member_routing_health"] = health.state_dict()
+        return state
 
     def load_training_state_dict(self, state):
-        if not isinstance(state, Mapping) or state.get("schema") != "thermal_member_routing_native_training_state_v1":
+        if not isinstance(state, Mapping) or state.get("schema") != self.training_state_schema:
             raise ValueError("Saved member-routing provider state is malformed.")
         if min(int(state.get(name, 0)) for name in
                ("primary_updates", "training_samples", "validation_samples")) < 0:
@@ -132,7 +154,67 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
             raise ValueError("Saved member-routing elapsed time must be finite and nonnegative.")
         restored = dict(state)
         restored.pop("schema")
+        health_state = None
+        health = getattr(self, "_member_routing_health", None)
+        if health is not None:
+            health_state = restored.pop("member_routing_health", None)
         super().load_training_state_dict(restored)
+        if health is not None:
+            health.load_state_dict(health_state)
+
+    def on_phase_start(self, *, model, arm, epoch, phase, temperature):
+        delegate = getattr(super(), "on_phase_start", None)
+        receipt = (delegate(model=model, arm=arm, epoch=epoch, phase=phase, temperature=temperature)
+                   if callable(delegate) else None)
+        health = getattr(self, "_member_routing_health", None)
+        if health is None or health.initial_observation is not None:
+            return receipt
+        observation = health.observe(model, training_epoch=int(epoch) - 1)
+        health.record_initial(observation)
+        result = {} if receipt is None else dict(receipt)
+        result["member_routing_health_initial"] = observation
+        return result
+
+    def completed_training_epoch(self, model, engine, epoch, output, row):
+        delegate = getattr(super(), "completed_training_epoch", None)
+        if callable(delegate):
+            delegate(model, engine, epoch, output, row)
+        health = getattr(self, "_member_routing_health", None)
+        if health is None or int(health.state.get("last_observed_epoch", 0)) == int(epoch):
+            return
+        engine_config = getattr(engine, "config", None)
+        stop_after = getattr(engine_config, "total_epochs", None)
+        checkpoint_epochs = getattr(engine_config, "checkpoint_epochs", None) or ()
+        output_dir = Path(output) if output is not None else (
+            None if self._budget_binding is None else Path(self._budget_binding[0])
+        )
+        clean_stop_pending = (output_dir is not None
+                              and (output_dir / "CLEAN_STOP_REQUEST.json").is_file())
+        endpoint = stop_after is not None and int(epoch) == int(stop_after)
+        milestone = int(epoch) in {int(value) for value in checkpoint_epochs}
+        if not (health.scheduled(epoch) or endpoint or milestone or clean_stop_pending):
+            return
+        if health.initial_observation is None:
+            # This is only reachable when resuming before health was enabled and
+            # no phase transition occurs. Treat the first observation as the
+            # comparison origin, then continue with the ordinary cadence.
+            observation = health.observe(model, training_epoch=epoch)
+            health.record_initial(observation)
+            row["member_routing_health_initial"] = observation
+            return
+        observation = health.observe(model, training_epoch=epoch)
+        reason = health.record_epoch(observation)
+        if reason is not None:
+            observation["pause_decision"] = reason
+            if health.pause_on_collapse:
+                from .member_routing_health import request_clean_stop
+                request = ({"written": False, "reason": "no bound output directory"}
+                           if output_dir is None else
+                           request_clean_stop(output_dir, epoch=epoch, reason=reason))
+                observation["clean_stop_request"] = request
+                health.state["clean_stop"] = copy.deepcopy(request)
+        health.state["last_observation"] = copy.deepcopy(observation)
+        row["member_routing_health"] = observation
 
     def predict_native(self, model, scene, receivers, execution_mode, phase, epoch=0,
                        temperature=None, **kwargs):
@@ -272,7 +354,7 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
                                        "coefficient": float(cls._as_numpy(B_E)[address, index])}
                                       for index in e_members],
                     })
-                rows.append({
+                row = {
                     "query_index": int(original_index),
                     "query_id": None if query_ids is None else scalar(np.asarray(query_ids).reshape(-1)[local_index]),
                     "query_coordinates": cls._as_numpy(coordinates)[local_index].astype(float).tolist(),
@@ -300,7 +382,27 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
                         "Decoder member-read support is not the complete input influence graph; upstream directed "
                         "contextual dependencies, including E-to-E exchange, remain separate."
                     ),
-                })
+                }
+                if "member_read_strength_M" in captured:
+                    row["typed_read_state"] = {
+                        role: {
+                            "read_strength": scalar(select(f"member_read_strength_{role}")),
+                            "read_skip_contrast": scalar(select(f"member_read_contrast_{role}")),
+                            "candidate_count": int(np.asarray(select(f"candidate_mask_{role}")).sum()),
+                            "continuous_mass": float(np.asarray(select(f"member_continuous_weights_{role}")).sum()),
+                            "executed_mass": float(np.asarray(select(f"member_weights_{role}")).sum()),
+                            "omitted_mass": scalar(select(f"member_omitted_mass_{role}")),
+                        }
+                        for role in ("M", "E")
+                    }
+                    row["proposal_effective_scores_M"] = np.asarray(
+                        select("proposal_effective_scores_M")
+                    ).astype(float).tolist()
+                    row["member_effective_scores"] = {
+                        role: np.asarray(select(f"member_effective_scores_{role}")).astype(float).tolist()
+                        for role in ("M", "E")
+                    }
+                rows.append(row)
         if len(rows) != len(indices) * subset.batch_size:
             raise ValueError("Core route trace did not return all selected original-query rows.")
         return captured, tuple(rows)
@@ -625,6 +727,8 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
             "training_macro_case_ids": list(macro_ids),
             "training_macro_microbatch_sizes": [len(macro_batches[0].case_keys), len(macro_batches[1].case_keys)],
             "training_macro_optimizer_steps": 1,
+            "training_macro_optimizer_evaluations": int(warmups) + int(repetitions),
+            "training_macro_optimizer_updates_discarded": int(warmups) + int(repetitions),
             "training_macro_path": "maintained ResearchTrainingEngine batching, recovery snapshots, native objective, clipping, and AdamW; fresh optimizer construction and sampling charged",
         }
 
@@ -647,10 +751,14 @@ def build_thermal_member_routing_task(config, *, arm=None, device="cpu"):
     section = recipe.get("member_routing", {})
     model_config = section.get("model")
     selected_arm = str(arm or section.get("arm", ""))
-    if selected_arm not in ThermalInteractionReusedMemberRoutingAdapter.ARCHITECTURES:
-        raise ValueError("Round13-3 builder requires a supported Full or Route arm.")
     if not isinstance(model_config, Mapping) or model_config.get("architecture") != selected_arm:
         raise ValueError("Round13-3 model config must match the selected named arm.")
+    adapter_type = {
+        "interaction_reused_member_routing_v1": ThermalInteractionReusedMemberRoutingAdapter,
+        "interaction_reused_member_routing_v2": ThermalRelativeMemberRoutingAdapter,
+    }.get(model_config.get("schema"))
+    if adapter_type is None or selected_arm not in adapter_type.ARCHITECTURES:
+        raise ValueError("Round13-3 builder requires a supported versioned member-routing arm.")
     manifest, data_path, manifest_path = _load_data_binding(
         recipe["dataset"].get("manifest_path"), recipe["dataset"].get("data_path"),
     )
@@ -670,7 +778,7 @@ def build_thermal_member_routing_task(config, *, arm=None, device="cpu"):
     initialization_seed = int(recipe["initialization"].get("seed", 0))
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(initialization_seed)
-        model = ThermalInteractionReusedMemberRoutingAdapter(
+        model = adapter_type(
             normalizer.stats, core_config=model_config, heat_scale=heat_scale,
         ).to(device)
     source_stat = data_path.stat()
@@ -708,16 +816,32 @@ def load_member_routing_checkpoint(checkpoint, device):
     payload = load_trusted_checkpoint(checkpoint_path, map_location="cpu")
     identity = payload.get("experiment_identity")
     provider_identity = identity.get("provider_identity") if isinstance(identity, Mapping) else None
-    if (not isinstance(identity, Mapping) or identity.get("workflow") != WORKFLOW
+    expected_workflows = {
+        WORKFLOW: PROVIDER_SCHEMA,
+        RELATIVE_WORKFLOW: RELATIVE_PROVIDER_SCHEMA,
+    }
+    workflow = identity.get("workflow") if isinstance(identity, Mapping) else None
+    if (not isinstance(identity, Mapping) or workflow not in expected_workflows
             or not isinstance(provider_identity, Mapping)
-            or provider_identity.get("schema") != PROVIDER_SCHEMA):
+            or provider_identity.get("schema") != expected_workflows[workflow]):
         raise ValueError("Checkpoint is not a maintained Round13-3 member-routing training checkpoint.")
     run_dir = checkpoint_path.parent.parent if checkpoint_path.parent.name == "checkpoints" else checkpoint_path.parent
     manifest = _read_json(run_dir / "run_manifest.json")
     config = manifest.get("config")
     arm = manifest.get("arm")
-    if not isinstance(config, Mapping) or arm not in ThermalInteractionReusedMemberRoutingAdapter.ARCHITECTURES:
+    if not isinstance(config, Mapping) or not isinstance(config.get("member_routing"), Mapping):
         raise ValueError("Member-routing checkpoint run manifest is malformed.")
+    saved_model = config["member_routing"].get("model")
+    schema_to_adapter = {
+        ThermalInteractionReusedMemberRoutingAdapter.CORE_SCHEMA: ThermalInteractionReusedMemberRoutingAdapter,
+        ThermalRelativeMemberRoutingAdapter.CORE_SCHEMA: ThermalRelativeMemberRoutingAdapter,
+    }
+    if not isinstance(saved_model, Mapping):
+        raise ValueError("Member-routing checkpoint model config is malformed.")
+    adapter_type = schema_to_adapter.get(saved_model.get("schema"))
+    if (adapter_type is None or arm not in adapter_type.ARCHITECTURES
+            or workflow != (RELATIVE_WORKFLOW if adapter_type is ThermalRelativeMemberRoutingAdapter else WORKFLOW)):
+        raise ValueError("Member-routing checkpoint workflow, core schema, and arm do not agree.")
     model, provider = _build_task(config, arm, torch.device(device))
     model.load_state_dict(payload["model_state_dict"], strict=True)
     provider.load_training_state_dict(payload.get("provider_training_state", {}))
@@ -729,6 +853,7 @@ def load_member_routing_checkpoint(checkpoint, device):
 
 __all__ = [
     "WORKFLOW", "PROVIDER_SCHEMA", "CONFIG_SECTION_SCHEMA",
+    "RELATIVE_WORKFLOW", "RELATIVE_PROVIDER_SCHEMA", "RELATIVE_CONFIG_SECTION_SCHEMA",
     "ThermalInteractionReusedMemberRoutingTask",
     "build_thermal_member_routing_task", "load_member_routing_checkpoint",
 ]

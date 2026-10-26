@@ -15,6 +15,7 @@ from . import contextual_frontier_evaluation as native_evaluation
 
 
 SCHEMA = "thermal_interaction_reused_member_routing_evaluation_v1"
+RELATIVE_SCHEMA = "thermal_relative_member_routing_evaluation_v2"
 PROBE_NAMES = (
     "b_fixed_candidates_scores",
     "geometry_b_comparable_counts",
@@ -97,9 +98,9 @@ def select_validation_representatives(provider: Any, limit: int = 4) -> tuple[st
 
 def _route_interventions_enabled(model: Any) -> bool:
     architecture = str(getattr(model, "architecture", ""))
-    if architecture not in ("R13-3-Full", "R13-3-Route"):
+    if architecture not in ("R13-3-Full", "R13-3-Route", "R13-3-Relative"):
         raise ValueError(f"Unsupported Round13-3 model architecture: {architecture!r}.")
-    return architecture == "R13-3-Route"
+    return architecture in ("R13-3-Route", "R13-3-Relative")
 
 
 def _query_indices(receivers: Any, prediction: Any) -> tuple[int, ...]:
@@ -464,6 +465,8 @@ def _validate_benchmark(result: Any, *, case_id: str) -> dict[str, Any]:
         "training_macro_case_ids": _jsonable(result.get("training_macro_case_ids", [])),
         "training_macro_microbatch_sizes": _jsonable(result.get("training_macro_microbatch_sizes", [])),
         "training_macro_optimizer_steps": _jsonable(result.get("training_macro_optimizer_steps")),
+        "training_macro_optimizer_evaluations": _jsonable(result.get("training_macro_optimizer_evaluations")),
+        "training_macro_optimizer_updates_discarded": _jsonable(result.get("training_macro_optimizer_updates_discarded")),
         "training_macro_path": str(result.get("training_macro_path", "")),
     }
 
@@ -520,8 +523,10 @@ def evaluate_member_routing(checkpoint: str | Path, device: str | torch.device,
                             output: str | Path) -> dict[str, Any]:
     """Evaluate VAL89, a fixed low-M TRAIN panel, route interventions, and disposable cost.
 
-    The provider is rebuilt from the trusted checkpoint recipe. This routine
-    performs no optimizer updates, solver calls, inverse fitting, or cache writes.
+    The provider is rebuilt from the trusted checkpoint recipe. It performs no
+    retained fitting, solver calls, inverse fitting, or cache writes. Its
+    explicitly disposable training-macro timing benchmark executes optimizer
+    steps, then restores the checkpoint model, provider progress, and RNG state.
     """
     checkpoint_path = Path(checkpoint).expanduser().resolve(strict=True)
     output_path = Path(output).expanduser().resolve(strict=False)
@@ -704,7 +709,7 @@ def evaluate_member_routing(checkpoint: str | Path, device: str | torch.device,
         "solver_attempts": 0,
     }
     result = {
-        "schema": SCHEMA,
+        "schema": RELATIVE_SCHEMA if model.architecture == "R13-3-Relative" else SCHEMA,
         "status": "completed",
         "checkpoint": str(checkpoint_path),
         "checkpoint_epoch": int(payload.get("epoch", payload.get("current_epoch", 0))),
@@ -744,6 +749,11 @@ def evaluate_member_routing(checkpoint: str | Path, device: str | torch.device,
             "new_solver_calls": 0,
             "inverse_fit": False,
             "training_updates": 0,
+            "training_updates_semantics": "retained fitting updates only; disposable training-macro optimizer updates are counted separately",
+            "disposable_benchmark_optimizer_updates_discarded": sum(
+                int(row.get("training_macro_optimizer_updates_discarded", 0)) for row in cost_rows.values()
+            ),
+            "disposable_benchmark_checkpoint_state_restored": True,
             "test_access": False,
             "dataset_copies": 0,
             "new_persistent_caches": 0,

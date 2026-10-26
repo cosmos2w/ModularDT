@@ -1126,7 +1126,10 @@ def evaluate_responses(
     provider_identity = identity.get("provider_identity", {}) if isinstance(identity, Mapping) else {}
     recipe = provider_identity.get("recipe", {}) if isinstance(provider_identity, Mapping) else {}
     workflow = identity.get("workflow") if isinstance(identity, Mapping) else None
-    reference_only_member_routing = workflow == "interaction_reused_member_routing_joint_training_v1"
+    reference_only_member_routing = workflow in {
+        "interaction_reused_member_routing_joint_training_v1",
+        "interaction_reused_member_routing_joint_training_v2",
+    }
     atlas_family_ids = tuple(TRAIN_GEOMETRY_FAMILIES) if reference_only_member_routing else _ALL_FAMILIES
     storage = recipe.get("storage", {}) if isinstance(recipe, Mapping) else {}
     minimum_headroom = int(storage.get("minimum_free_headroom_bytes", 0)) if isinstance(storage, Mapping) else 0

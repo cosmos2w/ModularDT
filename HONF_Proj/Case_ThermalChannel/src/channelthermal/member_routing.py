@@ -22,10 +22,17 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
         if core is None:
             if not isinstance(core_config, Mapping):
                 raise TypeError("InteractionReusedMemberRoutingCore requires a saved model configuration.")
-            from honf_forward_core.interaction_reused_member_routing import (
-                InteractionReusedMemberRoutingCore,
-            )
-            core = InteractionReusedMemberRoutingCore.from_config(dict(core_config))
+            if core_config.get("schema") == "interaction_reused_member_routing_v2":
+                from honf_forward_core.interaction_reused_member_routing.relative import (
+                    RelativeMemberRoutingCore,
+                )
+                core_type = RelativeMemberRoutingCore
+            else:
+                from honf_forward_core.interaction_reused_member_routing import (
+                    InteractionReusedMemberRoutingCore,
+                )
+                core_type = InteractionReusedMemberRoutingCore
+            core = core_type.from_config(dict(core_config))
         if getattr(core, "schema", None) != self.CORE_SCHEMA:
             raise ValueError(f"Thermal member-routing adapter requires {self.CORE_SCHEMA}.")
         super().__init__(normalization_stats, core=core, heat_scale=heat_scale, nx=nx, ny=ny,
@@ -97,4 +104,12 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
         return self.apply_native_with_work_counts(prepared, physical_heat, **kwargs)[0]
 
 
-__all__ = ["ThermalInteractionReusedMemberRoutingAdapter"]
+class ThermalRelativeMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
+    """Thermal-native adapter for the separately versioned relative reader."""
+
+    SCHEMA = "thermal_interaction_reused_member_routing_adapter_v2"
+    CORE_SCHEMA = "interaction_reused_member_routing_v2"
+    ARCHITECTURES = ("R13-3-Relative",)
+
+
+__all__ = ["ThermalInteractionReusedMemberRoutingAdapter", "ThermalRelativeMemberRoutingAdapter"]

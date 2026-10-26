@@ -768,6 +768,7 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
                       "query_E_value_execution_rows", "query_M_dense_candidate_value_rows",
                       "query_E_dense_candidate_value_rows", "query_M_candidate_rows", "query_E_candidate_rows",
                       "query_address_relation_rows", "query_address_coefficient_pair_rows", "query_receiver_rows")
+        count_keys += getattr(self, "_additional_decode_count_keys", ())
         starts = range(0, max(query.num_queries, 1), self.query_tile_size)
         for start in starts:
             stop = min(start + self.query_tile_size, query.num_queries)
