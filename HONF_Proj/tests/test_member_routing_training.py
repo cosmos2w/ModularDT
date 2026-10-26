@@ -60,6 +60,51 @@ def test_native_only_budget_and_elapsed_state_survive_checkpoint_restore(tmp_pat
     assert provider.state["training_elapsed_seconds"] == 16.0
 
 
+def test_native_trace_reports_only_executed_original_ids_and_real_stage_provenance():
+    from types import SimpleNamespace
+    import torch
+    from channelthermal.training.member_routing_task import ThermalInteractionReusedMemberRoutingTask as Task
+    from honf_forward_core.content_hypergraph.contracts import QueryBatch
+
+    trace = {
+        "original_module_ids": torch.tensor([[101]]),
+        "original_environment_ids": torch.tensor([[201, 202]]),
+        "B_M": torch.ones(1, 1, 1), "B_E": torch.ones(1, 1, 2),
+        "proposal_weights_M": torch.ones(1, 3, 1), "proposal_null": torch.zeros(1, 3),
+        "candidate_mask_M": torch.ones(1, 3, 1, dtype=torch.bool),
+        "candidate_mask_E": torch.ones(1, 3, 2, dtype=torch.bool),
+        "member_weights_M": torch.tensor([[[0.3], [0.0], [0.2]]]),
+        "member_weights_E": torch.tensor([[[0.1, 0.0], [0.0, 0.0], [0.4, 0.0]]]),
+        "member_null_M": torch.tensor([[0.7, 1.0, 0.8]]),
+        "member_null_E": torch.tensor([[0.9, 1.0, 0.6]]),
+        "member_logits_M": torch.zeros(1, 3, 1), "member_logits_E": torch.zeros(1, 3, 2),
+        "selected_value_indices_M": torch.tensor([[0, 0, 0], [0, 2, 0]]),
+        "selected_value_indices_E": torch.tensor([[0, 0, 0], [0, 2, 0]]),
+    }
+    scene = SimpleNamespace(
+        module_coordinates=torch.zeros(1, 1, 2), environment_coordinates=torch.zeros(1, 2, 2),
+        module_mask=torch.ones(1, 1, dtype=torch.bool), environment_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+    organization = SimpleNamespace(scene=scene, context_stage_metadata=[{
+        "stage": "cycle1/me", "route": "me", "source_state_version": "cycle1/after_EE_FFN_E",
+        "eligible_edges": 2, "positive_value_edges": 2,
+    }])
+    query = QueryBatch(coordinates=torch.zeros(1, 3, 2))
+    core = SimpleNamespace(capture_interaction_routing_trace=lambda *args, **kwargs: trace)
+    captured, rows = Task._trace_rows(SimpleNamespace(core=core),
+        SimpleNamespace(organization=organization, query_batch=query), (0, 1, 2))
+    assert [row["selected_value_members_E"] for row in rows] == [
+        [{"original_id": 201, "weight": pytest.approx(0.1), "candidate": True}], [],
+        [{"original_id": 201, "weight": pytest.approx(0.4), "candidate": True}],
+    ]
+    assert rows[1]["null_weights"]["M"] == 1.0
+    assert rows[0]["omitted_final_member_ids_E"] == [202]
+    assert rows[0]["context_stage_provenance"][0]["stage"] == "cycle1/me"
+    changes = Task._route_weight_changes(captured, captured)
+    assert changes["M_selected_ids"]["changed_query_member_pairs"] == 0
+    assert changes["E_candidate_ids_unchanged"]
+
+
 @pytest.mark.parametrize(
     "name,arm,membership,horizon,first_segment,normalization",
     (

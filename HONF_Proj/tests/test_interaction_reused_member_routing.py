@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -311,6 +313,81 @@ def test_prepared_route_state_mutation_is_rejected() -> None:
         prepared.B_E[0, 0, 0] += 0.01
     with pytest.raises(ValueError, match="routing state changed"):
         core.decode(prepared, query)
+
+
+def test_typed_nulls_are_independent_and_all_null_reads_no_source_values():
+    torch.manual_seed(39)
+    core = _core("route", tile_size=4).eval()
+    scene, query = _scene(3, 8), _query(3)
+    prepared = core.prepare(scene)
+    pi = torch.full((1, 3, 3), 1 / 3)
+    for empty, active, M_logit, E_logit in (("M", "E", -100.0, 100.0),
+                                          ("E", "M", 100.0, -100.0)):
+        output = core.decode(prepared, query, return_trace=True, intervention={
+            "fixed_pi": pi, "fixed_member_logits_M": torch.full((1, 3, 3), M_logit),
+            "fixed_member_logits_E": torch.full((1, 3, 8), E_logit),
+        })
+        assert output.work_counts[f"query_{empty}_value_execution_rows"] == 0
+        assert output.work_counts[f"query_{active}_value_execution_rows"] > 0
+        assert torch.equal(output.trace[f"member_null_{empty}"], torch.ones(1, 3))
+    control = {"fixed_pi": torch.zeros_like(pi)}
+    empty = core.decode(prepared, query, intervention=control)
+    changed_scene = replace(scene, module_features=scene.module_features + 100,
+        environment_features=scene.environment_features - 100,
+        operating_features=scene.operating_features + 100)
+    changed = core.decode(core.prepare(changed_scene), query, intervention=control)
+    torch.testing.assert_close(empty.joint_fields, changed.joint_fields, rtol=0, atol=0)
+    assert empty.work_counts["query_M_value_execution_rows"] == 0
+    assert empty.work_counts["query_E_value_execution_rows"] == 0
+
+
+def test_original_id_paths_and_member_query_permutations_preserve_reads():
+    torch.manual_seed(39)
+    core = _core("route", tile_size=4).double().eval()
+    scene = _scene(3, 8)
+    scene = replace(scene, **{name: value.double() for name, value in vars(scene).items()
+                              if torch.is_tensor(value) and value.is_floating_point()})
+    query = _query(3)
+    query = replace(query, coordinates=query.coordinates.double())
+    prepared = core.prepare(scene)
+    output = core.decode(prepared, query, return_trace=True)
+    trace = output.trace
+    for role in ("M", "E"):
+        selected = trace[f"selected_value_indices_{role}"]
+        matrix = trace[f"B_{role}"]
+        identifiers = scene.module_ids if role == "M" else scene.environment_ids
+        ids = []
+        for batch, q, member in selected.tolist():
+            assert bool(((trace["proposal_weights_M"][batch, q] > 0)
+                         & (matrix[batch, :, member] > 0)).any())
+            ids.append((int(query.query_ids[batch, q]), int(identifiers[batch, member])))
+        assert len(ids) == len(set(ids))
+        assert len(ids) == output.work_counts[f"query_{role}_value_execution_rows"]
+    module_order, environment_order = torch.tensor([2, 0, 1]), torch.tensor([7, 2, 5, 0, 6, 1, 4, 3])
+    values = {}
+    for name, value in vars(scene).items():
+        if torch.is_tensor(value) and name.startswith("module_") and value.ndim >= 2:
+            values[name] = value.index_select(1, module_order)
+        elif torch.is_tensor(value) and name.startswith("environment_") and value.ndim >= 2:
+            values[name] = value.index_select(1, environment_order)
+    values["local_radius"] = scene.local_radius.index_select(1, module_order)
+    permuted_scene = replace(scene, **values)
+    query_order = torch.tensor([2, 0, 1])
+    permuted_query = select_query_rows_v1(query, query_order)
+    reordered = core.decode(core.prepare(permuted_scene), permuted_query, return_trace=True)
+    torch.testing.assert_close(reordered.joint_fields, output.joint_fields[:, query_order], rtol=1e-10, atol=1e-10)
+    for role, id_name in (("M", "original_module_ids"), ("E", "original_environment_ids")):
+        for new_q, old_q in enumerate(query_order.tolist()):
+            def weights_by_id(t, q):
+                return {int(identifier): float(weight) for identifier, weight in
+                    zip(t[id_name][0], t[f"member_weights_{role}"][0, q]) if weight > 0}
+            before, after = weights_by_id(trace, old_q), weights_by_id(reordered.trace, new_q)
+            assert before.keys() == after.keys()
+            for identifier in before:
+                assert before[identifier] == pytest.approx(after[identifier], abs=1e-10)
+    core.query_tile_size = 1
+    tiled = core.decode(core.prepare(scene), query)
+    torch.testing.assert_close(tiled.joint_fields, output.joint_fields, rtol=1e-10, atol=1e-10)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA checkpoint replay regression")

@@ -167,6 +167,14 @@ def _query_coordinates(prediction: Any, query_indices: Sequence[int]) -> list[li
 
 def _native_arrays_with_residuals(prediction: Any, batch: Any, case_id: str) -> dict[str, np.ndarray]:
     arrays = native_evaluation._native_export_arrays(prediction, batch, case_id)
+    scene = getattr(prediction.native_prepared, "scene_batch", None)
+    for name in ("module_coordinates", "environment_coordinates", "module_ids", "environment_ids",
+                 "module_mask", "environment_mask", "module_measure", "environment_measure",
+                 "module_characteristic_lengths", "environment_characteristic_lengths",
+                 "coordinate_origin", "coordinate_scale"):
+        value = getattr(scene, name, None)
+        if value is not None:
+            arrays[name] = _as_numpy(value)[0]
     pairs = (
         ("field", "pred_field", "target_field"),
         ("surface_temperature", "pred_surface_temperature", "target_surface_temperature"),
@@ -404,6 +412,8 @@ def _fixed_probe_evidence(model: Any, provider: Any, batches: Mapping[str, Any],
                     "reported unmatched; geometry control remains a changed-work comparison"
                 ),
                 "route_weight_changes": _jsonable(routing_changes),
+                "geometry_count_calibration": _jsonable(measured.get("geometry_count_calibration")),
+                "full_native_selected_member_counts": _jsonable(measured.get("full_native_selected_member_counts")),
                 "dense_execution_control": dense_control,
                 "baseline_trace": _jsonable(base_traces[case_id]),
                 "work_counts": _jsonable(work),
@@ -448,8 +458,13 @@ def _validate_benchmark(result: Any, *, case_id: str) -> dict[str, Any]:
         "phases": checked,
         "work_counts": _jsonable(result.get("work_counts", {})),
         "peak_memory_bytes": _jsonable(result.get("peak_memory_bytes")),
+        "peak_memory_increment_bytes": _jsonable(result.get("peak_memory_increment_bytes")),
         "selection_value_rows": _jsonable(result.get("selection_value_rows", {})),
         "context_score_work": _jsonable(result.get("context_score_work", {})),
+        "training_macro_case_ids": _jsonable(result.get("training_macro_case_ids", [])),
+        "training_macro_microbatch_sizes": _jsonable(result.get("training_macro_microbatch_sizes", [])),
+        "training_macro_optimizer_steps": _jsonable(result.get("training_macro_optimizer_steps")),
+        "training_macro_path": str(result.get("training_macro_path", "")),
     }
 
 

@@ -850,7 +850,8 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
                     delta = source_coords[batch, members] - scene.module_coordinates[batch, address]
                     scale = torch.sqrt(source_lengths[batch, members] * scene.module_characteristic_lengths[batch, address])
                     distance = torch.linalg.vector_norm(delta / scale.clamp_min(torch.finfo(scale.dtype).tiny), dim=-1)
-                    weights = torch.softmax(-distance, dim=0)
+                    weights = torch.softmax(-distance, dim=0).clamp_min(torch.finfo(distance.dtype).tiny)
+                    weights = weights / weights.sum()
                     target[batch, address, members] = weights
         # Geometry B control cannot rewrite prescribed M identity coefficients.
         if scene.num_modules:

@@ -235,8 +235,10 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
         metadata = []
         for item in getattr(org, "context_stage_metadata", ()):
             metadata.append({
-                "stage": str(item.get("stage_identity", "")),
+                "stage": str(item.get("stage", item.get("stage_identity", ""))),
                 "route": str(item.get("route", "")),
+                "source_state_version": str(item.get("source_state_version", "")),
+                "application": str(item.get("application", "contextual_value_reduction")),
                 "eligible_pair_rows": int(item.get("eligible_edges", 0)),
                 "executed_positive_value_edges": int(item.get("positive_value_edges", 0)),
             })
@@ -274,12 +276,24 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
                     "query_index": int(original_index),
                     "query_id": None if query_ids is None else scalar(np.asarray(query_ids).reshape(-1)[local_index]),
                     "query_coordinates": cls._as_numpy(coordinates)[local_index].astype(float).tolist(),
+                    "original_module_inventory": [
+                        {"original_id": scalar(value), "coordinates": scalar(org.scene.module_coordinates[batch_index, index]),
+                         "present": bool(org.scene.module_mask[batch_index, index])}
+                        for index, value in enumerate(np.asarray(module_ids).reshape(-1))],
+                    "original_environment_inventory": [
+                        {"original_id": scalar(value), "coordinates": scalar(org.scene.environment_coordinates[batch_index, index]),
+                         "present": bool(org.scene.environment_mask[batch_index, index])}
+                        for index, value in enumerate(np.asarray(environment_ids).reshape(-1))],
+                    "null_weights": {"address": float(select("proposal_null")),
+                                     "M": float(select("member_null_M")), "E": float(select("member_null_E"))},
                     "proposal_members_M": member_rows(module_ids, proposal,
                                                        cls._as_numpy(proposal) > 0),
                     "candidate_members_M": member_rows(module_ids, np.zeros_like(cls._as_numpy(module_ids), dtype=float), candidate_M),
                     "candidate_members_E": member_rows(environment_ids, np.zeros_like(cls._as_numpy(environment_ids), dtype=float), candidate_E),
-                    "selected_value_members_M": member_rows(module_ids, beta_M),
-                    "selected_value_members_E": member_rows(environment_ids, beta_E),
+                    "selected_value_members_M": member_rows(module_ids, beta_M, cls._as_numpy(beta_M) > 0),
+                    "selected_value_members_E": member_rows(environment_ids, beta_E, cls._as_numpy(beta_E) > 0),
+                    "omitted_final_member_ids_M": [scalar(value) for value, weight in zip(np.asarray(module_ids).reshape(-1), cls._as_numpy(beta_M).reshape(-1)) if weight == 0],
+                    "omitted_final_member_ids_E": [scalar(value) for value, weight in zip(np.asarray(environment_ids).reshape(-1), cls._as_numpy(beta_E).reshape(-1)) if weight == 0],
                     "applied_address_support": address_rows,
                     "context_stage_provenance": metadata,
                     "support_scope_note": (
@@ -303,6 +317,7 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
     def _route_weight_changes(cls, baseline, intervention):
         result = {"comparison": "baseline minus intervention trace over the three fixed query rows"}
         for label, key in (("proposal_pi", "proposal_weights_M"),
+                           ("M_cheap_scores", "member_logits_M"), ("E_cheap_scores", "member_logits_E"),
                            ("M_beta", "member_weights_M"), ("E_beta", "member_weights_E"),
                            ("B_M", "B_M"), ("B_E", "B_E")):
             before = baseline.get(key)
@@ -320,12 +335,16 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
             before = cls._as_numpy(baseline[f"selected_value_indices_{role}"])
             after = cls._as_numpy(intervention[f"selected_value_indices_{role}"])
             def selected_set(rows):
-                return {(int(query), scalar(source_ids[int(source)])) for _batch, query, source in rows}
+                return {(int(query), int(source_ids[int(source)])) for _batch, query, source in rows}
             left, right = selected_set(before), selected_set(after)
             result[f"{role}_selected_ids"] = {
                 "baseline_count": len(left), "intervention_count": len(right),
                 "changed_query_member_pairs": len(left.symmetric_difference(right)),
             }
+            result[f"{role}_candidate_ids_unchanged"] = bool(np.array_equal(
+                cls._as_numpy(baseline[f"candidate_mask_{role}"]),
+                cls._as_numpy(intervention[f"candidate_mask_{role}"]),
+            ))
         return result
 
     def member_routing_trace(self, model, prediction, query_indices):
@@ -341,6 +360,41 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
         intervention, prepare_options = core.member_routing_intervention(
             probe_name, base_prepared.organization, subset,
         )
+        baseline_trace, _baseline_rows = self._trace_rows(model, base_prepared, query_indices)
+        geometry_calibration = None
+        if probe_name == "geometry_b_comparable_counts":
+            # A bounded no-fit count match on the declared three queries.
+            # Geometry coefficients stay in [0,1] on the actual allowed IDs;
+            # no field error or physical reference chooses the control.
+            geometry_calibration = {}
+            target_counts = self._trace_selected_counts(baseline_trace)
+            for role in ("M", "E"):
+                key = f"fixed_B_{role}"
+                geometry = intervention[key]
+                original = getattr(base_prepared.organization, f"B_{role}")
+                trials = []
+                best = None
+                for floor in (0.0, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0):
+                    coefficients = torch.where(original > 0,
+                        geometry + floor * (1 - geometry), torch.zeros_like(geometry))
+                    trial = {**intervention, key: coefficients}
+                    captured = core.capture_interaction_routing_trace(
+                        base_prepared.organization, subset, intervention=trial,
+                    )
+                    selected = int(captured[f"selected_value_indices_{role}"].shape[0])
+                    trials.append({"geometry_floor": floor, "selected_rows": selected})
+                    distance = abs(selected - int(target_counts[role]))
+                    if best is None or distance < best[0]:
+                        best = (distance, floor, coefficients, selected)
+                    if distance == 0:
+                        break
+                intervention[key] = best[2]
+                geometry_calibration[role] = {
+                    "target_selected_rows": int(target_counts[role]),
+                    "control_selected_rows": best[3], "geometry_floor": best[1],
+                    "exact_count_match": best[0] == 0, "trials": trials,
+                    "selection_basis": "three fixed query counts only; no field/reference error",
+                }
         prepared = (self._prepare_for_probe(model, batch, **prepare_options)
                     if prepare_options else base_prepared)
         # Query-dependent fixed pi/candidate/logit controls are measured on the
@@ -355,7 +409,6 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
             intervention=native_intervention or None,
         )
         prediction = ThermalContentPredictions(prepared, native, work=decode)
-        baseline_trace, _baseline_rows = self._trace_rows(model, base_prepared, query_indices)
         trace_intervention = {} if prepare_options else intervention
         probe_trace, trace_rows = self._trace_rows(
             model, prepared, query_indices, intervention=trace_intervention,
@@ -376,6 +429,10 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
             "baseline_selected_member_counts": base_counts,
             "selected_member_counts": selected_counts,
             "route_weight_changes": route_changes,
+            "geometry_count_calibration": geometry_calibration,
+            "full_native_selected_member_counts": {
+                role: int(decode.get(f"query_{role}_selected_value_rows", 0))
+                for role in ("M", "E")},
         }
 
     def member_routing_benchmark(self, model, batch, warmups=1, repetitions=3):
