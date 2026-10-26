@@ -158,8 +158,18 @@ def main(argv=None):
     recovery.add_argument("--device", default="cuda:1")
     recovery.add_argument("--stop-after-epoch", type=int, required=True)
     recovery.add_argument("--extend-horizon", action="store_true")
+    evaluation = commands.add_parser("evaluate")
+    evaluation.add_argument("--checkpoint", required=True)
+    evaluation.add_argument("--device", default="cuda:1")
+    evaluation.add_argument("--output", required=True)
     args = vars(parser.parse_args(argv));command = args.pop("command")
-    result = train(args.pop("config"), **args) if command == "train" else resume(**args)
+    if command == "train":
+        result = train(args.pop("config"), **args)
+    elif command == "resume":
+        result = resume(**args)
+    else:
+        from .guided_member_routing_evaluation import evaluate
+        result = evaluate(**args)
     print(json.dumps(result, default=str), flush=True)
     return 0
 

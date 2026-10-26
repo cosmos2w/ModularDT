@@ -30,7 +30,7 @@ from channelthermal.training.member_routing_health import MemberRoutingHealth
 from channelthermal.training.content_hypergraph_task import ThermalContentPredictions
 from honf_forward_core.interaction_reused_member_routing.guided import GuidedMemberRoutingCore
 from honf_runtime.unified_training import SamplingKey
-from tests.test_interaction_reused_member_routing import _base_config
+from tests.test_interaction_reused_member_routing import _base_config, _query
 from tests.test_native_budgeted_postfit import _thermal_stats
 
 
@@ -60,6 +60,7 @@ class _PredictionModel:
                 batch_size=1,
                 local_weights=torch.ones(1, 4),
             ),
+            fluid_xy=torch.zeros(1, 5, 2),
             union=SimpleNamespace(unique_counts=torch.tensor([3])),
             organization=SimpleNamespace(work_counts={"relation_prepare_rows": 7}),
         )
@@ -294,8 +295,8 @@ def test_guided_health_probe_pairs_native_losses_heat_sensitivity_and_prior_capt
         targets: Targets
 
     batch = Batch(
-        Receivers(torch.zeros(1, 8, 2), torch.ones(1, 2)),
-        Targets(torch.zeros(1, 8, 5), torch.ones(1, 8)),
+        Receivers(torch.zeros(1, 1024, 2), torch.ones(1, 2)),
+        Targets(torch.zeros(1, 1024, 5), torch.ones(1, 1024)),
     )
 
     class Provider:
@@ -310,33 +311,55 @@ def test_guided_health_probe_pairs_native_losses_heat_sensitivity_and_prior_capt
             return batch
 
         def _prepare_for_probe(self, model, current_batch):
-            del model, current_batch
-            return object()
+            del model
+            assert current_batch.receivers.fluid_xy.shape[1] == 1024
+            return SimpleNamespace(query_batch=_query(700), organization=object())
+
+        @staticmethod
+        def _query_subset(query, indices):
+            return ThermalGuidedMemberRoutingTask._query_subset(query, indices)
 
         def _role_losses(self, prediction, targets):
-            del targets
+            assert targets.field_targets.shape[1] == 1024
             return {"flow/u": prediction.native_main["role_loss"]}
+
+    class TraceCore(_ReadCore):
+        query_tile_size = 512
+
+        def __init__(self):
+            super().__init__()
+            self.captured_queries = []
+
+        def capture_interaction_routing_trace(self, organization, query, *, intervention):
+            del organization
+            assert query.num_queries <= 8
+            assert intervention["read_mode"] == self._read_execution_override
+            self.captured_queries.append((query.num_queries, intervention["read_mode"]))
+            candidates = torch.zeros(1, query.num_queries, 4, dtype=torch.bool)
+            candidates[..., :2] = True
+            return {
+                "conditional_preference_E": torch.tensor([[[0.4, 0.3, 0.2, 0.1]]]).expand(
+                    1, query.num_queries, 4,
+                ),
+                "prior_P_E": torch.tensor([[[0.4, 0.3, 0.2, 0.1]]]).expand(1, query.num_queries, 4),
+                "full_eligible_mask_E": torch.ones(1, query.num_queries, 4, dtype=torch.bool),
+                "chosen_candidate_mask_E": (
+                    candidates if intervention["read_mode"] == "restricted"
+                    else torch.ones_like(candidates)
+                ),
+                "chosen_candidate_mask_M": torch.ones(1, query.num_queries, 2, dtype=torch.bool),
+            }
 
     class ProbeModel(_PredictionModel):
         def apply_native_with_work_counts(self, prepared, physical_heat=None, *, return_trace=False):
-            del prepared
+            assert return_trace is False
+            assert prepared.query_batch.num_queries == 700
             mode = self.core._read_execution_override
             self.reads.append((mode, return_trace))
             heat_value = float(torch.as_tensor(physical_heat).mean())
             native = {"role_loss": torch.tensor([heat_value])}
-            chosen_e = torch.zeros(1, 8, 4, dtype=torch.bool)
-            chosen_e[..., :2] = True
-            trace = {
-                "conditional_preference_E": torch.tensor([[[0.4, 0.3, 0.2, 0.1]]]).expand(1, 8, 4),
-                "prior_P_E": torch.tensor([[[0.4, 0.3, 0.2, 0.1]]]).expand(1, 8, 4),
-                "full_eligible_mask_E": torch.ones(1, 8, 4, dtype=torch.bool),
-                "chosen_candidate_mask_E": chosen_e if mode == "restricted" else torch.ones_like(chosen_e),
-                "chosen_candidate_mask_M": torch.ones(1, 8, 2, dtype=torch.bool),
-            }
-            rows = 32 if mode == "full" else 16
-            return native, {"query_E_cheap_score_rows": rows}, SimpleNamespace(
-                trace=trace if return_trace else None,
-            )
+            rows = 700 * (4 if mode == "full" else 2)
+            return native, {"query_E_cheap_score_rows": rows}, SimpleNamespace(trace=None)
 
     def field_delta(base, other, model, prepared):
         del model, prepared
@@ -344,14 +367,16 @@ def test_guided_health_probe_pairs_native_losses_heat_sensitivity_and_prior_capt
 
     monkeypatch.setattr(health_module, "_native_field_delta", field_delta)
     model = ProbeModel(GUIDE_ARM, training=False)
+    model.core = TraceCore()
     health = GuidedMemberRoutingHealth.__new__(GuidedMemberRoutingHealth)
     health.provider = Provider()
 
     record = health._paired_probe(model, "case")
 
     assert model.reads == [
-        ("full", True), ("restricted", True), ("full", False), ("restricted", False),
+        ("full", False), ("restricted", False), ("full", False), ("restricted", False),
     ]
+    assert model.core.captured_queries == [(8, "full"), (8, "restricted")]
     assert record["native_role_loss_normalized_mse"]["flow/u"] == {
         "full": 1.0,
         "restricted": 1.0,
@@ -359,8 +384,17 @@ def test_guided_health_probe_pairs_native_losses_heat_sensitivity_and_prior_capt
     }
     assert record["conditional_preference_mass_captured_mean"] == pytest.approx(0.7)
     assert record["relation_prior_mass_captured_mean"] == pytest.approx(0.7)
-    assert record["E_member_score_rows"] == {
-        "full": 32, "restricted": 16, "avoided_before_member_mlp": 16,
+    assert record["native_primary_fluid_query_count"] == 1024
+    assert record["route_trace_query_count"] == 8
+    assert record["native_decode_E_member_score_rows"] == {
+        "full": 2800, "restricted": 1400, "avoided_before_member_mlp": 1400,
+    }
+    assert record["route_trace_E_member_score_rows"] == {
+        "query_count": 8,
+        "full": 32,
+        "restricted": 16,
+        "avoided_before_member_mlp": 16,
+        "scope": "bounded route trace only; native decoder totals are reported separately",
     }
     assert record["prescribed_heat_plus10_fieldwise_native_delta"]["full"]["temperature/fluid"] == pytest.approx(0.1)
     assert record["prescribed_heat_plus10_fieldwise_native_delta"]["restricted"]["temperature/fluid"] == pytest.approx(0.1)

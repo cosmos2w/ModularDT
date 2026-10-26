@@ -64,7 +64,8 @@ class GuidedMemberRoutingHealth(MemberRoutingHealth):
         with model.core.read_execution(mode):
             observation = super().observe(model, training_epoch=training_epoch)
         observation["execution_scope"]["guided_pair_probe"] = (
-            "same prepared fixed TRAIN scene; eight fixed sampled fluid queries; Full and restricted Guide reads"
+            "complete prepared fixed TRAIN native objective and heat controls; Full/restricted reads; "
+            "route trace capped at eight prepared union queries"
         )
         return observation
 
@@ -87,62 +88,66 @@ class GuidedMemberRoutingHealth(MemberRoutingHealth):
             dataset_id=provider.sampling_dataset_id,
         )
         batch = provider.make_batch((case_id,), key)
-        query_count = min(8, int(batch.receivers.fluid_xy.shape[1]))
-        if query_count < 1:
-            raise ValueError("R13-4 health requires at least one fixed TRAIN query.")
-        indices = torch.arange(query_count, device=batch.receivers.fluid_xy.device)
-        probe = replace(
-            batch,
-            receivers=replace(
-                batch.receivers,
-                fluid_xy=batch.receivers.fluid_xy.index_select(1, indices),
-            ),
-            targets=replace(
-                batch.targets,
-                field_targets=batch.targets.field_targets.index_select(1, indices),
-                point_weights=batch.targets.point_weights.index_select(1, indices),
-            ),
-        )
-        prepared = provider._prepare_for_probe(model, probe)
+        prepared = provider._prepare_for_probe(model, batch)
         heat_probe = replace(
-            probe,
-            receivers=replace(probe.receivers, heat=probe.receivers.heat * 1.1),
+            batch,
+            receivers=replace(batch.receivers, heat=batch.receivers.heat * 1.1),
         )
         heat_prepared = provider._prepare_for_probe(model, heat_probe)
         rng_cpu = torch.random.get_rng_state()
         device = torch.device(provider.device)
         rng_cuda = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
 
-        def run_read(prepared_scene, physical_heat, mode, *, trace):
+        def restore_probe_rng():
             torch.random.set_rng_state(rng_cpu)
             if rng_cuda is not None:
                 torch.cuda.set_rng_state(rng_cuda, device)
+
+        def run_read(prepared_scene, physical_heat, mode):
+            restore_probe_rng()
             with model.core.read_execution(mode):
                 return model.apply_native_with_work_counts(
-                    prepared_scene, physical_heat, return_trace=trace,
+                    prepared_scene, physical_heat, return_trace=False,
+                )
+
+        trace_limit = min(8, int(model.core.query_tile_size))
+        if trace_limit < 1:
+            raise ValueError("R13-4 health requires a positive decoder tile for bounded route traces.")
+        trace_query_count = min(trace_limit, int(prepared.query_batch.num_queries))
+        if trace_query_count < 1:
+            raise ValueError("R13-4 health requires at least one prepared route-trace query.")
+        trace_queries = provider._query_subset(prepared.query_batch, range(trace_query_count))
+
+        def capture_trace(mode):
+            restore_probe_rng()
+            with model.core.read_execution(mode):
+                return model.core.capture_interaction_routing_trace(
+                    prepared.organization,
+                    trace_queries,
+                    intervention={"read_mode": mode},
                 )
 
         with torch.no_grad():
-            full_native, full_counts, full_output = run_read(
-                prepared, probe.receivers.heat, "full", trace=True,
+            full_native, full_counts, _full_output = run_read(
+                prepared, batch.receivers.heat, "full",
             )
-            restricted_native, restricted_counts, restricted_output = run_read(
-                prepared, probe.receivers.heat, "restricted", trace=True,
+            restricted_native, restricted_counts, _restricted_output = run_read(
+                prepared, batch.receivers.heat, "restricted",
             )
             full_heat_native, _full_heat_counts, _full_heat_output = run_read(
-                heat_prepared, heat_probe.receivers.heat, "full", trace=False,
+                heat_prepared, heat_probe.receivers.heat, "full",
             )
             restricted_heat_native, _restricted_heat_counts, _restricted_heat_output = run_read(
-                heat_prepared, heat_probe.receivers.heat, "restricted", trace=False,
+                heat_prepared, heat_probe.receivers.heat, "restricted",
             )
+            full_trace = capture_trace("full")
+            restricted_trace = capture_trace("restricted")
 
         full_prediction = ThermalContentPredictions(prepared, full_native, work=full_counts)
         restricted_prediction = ThermalContentPredictions(prepared, restricted_native,
                                                           work=restricted_counts)
-        full_losses = provider._role_losses(full_prediction, probe.targets)
-        restricted_losses = provider._role_losses(restricted_prediction, probe.targets)
-        full_trace = full_output.trace
-        restricted_trace = restricted_output.trace
+        full_losses = provider._role_losses(full_prediction, batch.targets)
+        restricted_losses = provider._role_losses(restricted_prediction, batch.targets)
         required_trace = (
             isinstance(full_trace, Mapping)
             and isinstance(restricted_trace, Mapping)
@@ -172,18 +177,20 @@ class GuidedMemberRoutingHealth(MemberRoutingHealth):
             }
             for name in full_losses
         }
-        candidate_rows = int(restricted_counts.get("query_E_cheap_score_rows", 0))
-        full_score_rows = int(full_counts.get("query_E_cheap_score_rows", 0))
+        full_trace_rows = int(full_trace["chosen_candidate_mask_E"].sum().item())
+        restricted_trace_rows = int(restricted_candidates.sum().item())
         return {
             "case_id": str(case_id),
-            "query_count": query_count,
+            "native_primary_fluid_query_count": int(batch.receivers.fluid_xy.shape[1]),
+            "route_trace_query_count": trace_query_count,
+            "route_trace_query_scope": "first bounded rows of the complete prepared query batch",
             "native_role_loss_normalized_mse": native_losses,
             "prescribed_heat_plus10_fieldwise_native_delta": {
                 "full": _native_field_delta(full_native, full_heat_native, model, prepared),
                 "restricted": _native_field_delta(
                     restricted_native, restricted_heat_native, model, prepared,
                 ),
-                "interpretation": "fixed eight-query TRAIN scene sensitivity; paired path values are not causal claims",
+                "interpretation": "complete fixed TRAIN native batch sensitivity; paired path values are not causal claims",
             },
             "conditional_preference_mass_captured_mean": scalar_mean(captured_preference),
             "relation_prior_mass_captured_mean": scalar_mean(prior_mass_captured),
@@ -192,10 +199,21 @@ class GuidedMemberRoutingHealth(MemberRoutingHealth):
             "M_candidate_count_mean": scalar_mean(
                 restricted_trace["chosen_candidate_mask_M"].sum(-1).to(torch.float32)
             ),
-            "E_member_score_rows": {
-                "full": full_score_rows,
-                "restricted": candidate_rows,
-                "avoided_before_member_mlp": max(0, full_score_rows - candidate_rows),
+            "native_decode_E_member_score_rows": {
+                "full": int(full_counts.get("query_E_cheap_score_rows", 0)),
+                "restricted": int(restricted_counts.get("query_E_cheap_score_rows", 0)),
+                "avoided_before_member_mlp": max(
+                    0,
+                    int(full_counts.get("query_E_cheap_score_rows", 0))
+                    - int(restricted_counts.get("query_E_cheap_score_rows", 0)),
+                ),
+            },
+            "route_trace_E_member_score_rows": {
+                "query_count": trace_query_count,
+                "full": full_trace_rows,
+                "restricted": restricted_trace_rows,
+                "avoided_before_member_mlp": max(0, full_trace_rows - restricted_trace_rows),
+                "scope": "bounded route trace only; native decoder totals are reported separately",
             },
             "physical_field_usefulness_is_measured_by_native_role_losses": True,
             "preference_mass_is_not_a_field_error_bound": True,
@@ -306,7 +324,7 @@ class ThermalGuidedMemberRoutingTask(ThermalInteractionReusedMemberRoutingTask):
                 prepared, physical_heat,
             )
         work = {
-            "native_fluid_queries": int(prepared.query_batch.num_queries * prepared.query_batch.batch_size),
+            "native_fluid_queries": int(prepared.fluid_xy.shape[0] * prepared.fluid_xy.shape[1]),
             "native_union_rows": int(prepared.union.unique_counts.sum()),
             "native_local_pairs": int(prepared.query_batch.local_weights.numel()),
         }
@@ -374,9 +392,6 @@ class ThermalGuidedMemberRoutingTask(ThermalInteractionReusedMemberRoutingTask):
         )
         if model.architecture == GUIDE_ARM and model.training:
             paired = self.paired_native_predictions(model, prepared, receivers.heat)
-            work = dict(paired.work)
-            work["native_fluid_queries"] = int(receivers.fluid_xy.shape[0] * receivers.fluid_xy.shape[1])
-            paired.work = work
             return paired, {"work": dict(paired.work)}
 
         read_mode = getattr(model.core, "_read_execution_override", None)
