@@ -32,8 +32,27 @@ New runs require empty output directories. Recovery uses the latest complete mai
 
 Scientific payloads, plots, histories, and checkpoint aliases belong on the mounted DATA2 filesystem. Keep latest, best-field, declared 100-epoch milestones, and the requested final or clean-stop state. Curves refresh every ten epochs and at completion. Preserve existing runs and shared caches; generated artifacts and one-time analysis helpers remain outside Git.
 
+The maintained `resume-member-routing` command advances an absolute epoch endpoint. Both Round13-3 qualification runs actually resumed from epoch 1 to epoch 2 with this interface. Endpoint checkpoint loading also verifies exact named optimizer and Python/NumPy/Torch/CUDA RNG restoration without fitting. For interruption recovery before the saved horizon, use `--stop-after-epoch 100`. A completed epoch-100 lineage correctly rejects that nonadvancing endpoint. A later user-authorized extension additionally requires `--extend-horizon`; it preserves the provider, normalization, constant optimizer schedule and recovery state. Do not interpret availability of this flag as permission to extend a run.
+
+```bash
+python tools/honf_research.py resume-member-routing \
+  --run /data2/wanglz/ModularDT/round13_3_20261025/full \
+  --device cuda:0 --devices cuda:0 --stop-after-epoch 100
+```
+
 ## Evaluation
 
 Evaluate the retained epoch-100 checkpoint with the maintained member-routing evaluator. The fixed detailed panel includes TRAIN M1 and exposed validation M3/M7/M10 examples. Statistical validation covers canonical exposed VAL89 separately from low-M TRAIN; DEV22 is an exposed subset, not independent TEST evidence. The evaluator retains original-ID query traces, numerical field/residual arrays, all nine native observables, fixed-checkpoint interventions, and measured work/cost records.
 
 B-only interventions keep candidate IDs, proposals, and cheap member scores fixed. Geometry controls change the function and report their actual selected counts. The dense candidate-union executor uses the same weights as the selected executor, including zero weights, to check numerical parity while charging the extra value rows. Removing an applied contextual message requires fresh preparation and dependent-stage recomputation. Saved heat/geometry references provide bounded physical diagnostics; this round adds no reference solves, response-fitting loss, or inverse optimizer.
+
+```bash
+python tools/honf_research.py evaluate-member-routing \
+  --checkpoint /data2/wanglz/ModularDT/round13_3_20261025/route/checkpoints/epoch_0100_model.pt \
+  --device cuda:1 --output /data2/wanglz/ModularDT/round13_3_20261025/evaluation_route
+python tools/honf_research.py evaluate-contextual --kind responses \
+  --checkpoint /data2/wanglz/ModularDT/round13_3_20261025/route/checkpoints/epoch_0100_model.pt \
+  --device cuda:1 --output /data2/wanglz/ModularDT/round13_3_20261025/response_route
+```
+
+These literal evaluation commands were executed for the retained endpoint; their output directories now contain evidence and must not be overwritten. Use a fresh DATA2 output directory for a later authorized re-evaluation. Read [the Round13-3 report](../reports/HONF_Round13-3_Interaction_Reused_Member_Routing_Report.md) for measured outcomes, the all-null member-read failure, costs, selected figures and the bounded recovery handoff.

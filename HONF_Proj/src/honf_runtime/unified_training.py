@@ -766,6 +766,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     from matplotlib.figure import Figure
 
     joint_run = any(row.get("phase") == "joint" for row in history)
+    member_routing_run = any(
+        str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route"} for row in history
+    )
     canonical_val89_joint = any(
         (isinstance(row.get("validation"), Mapping)
          and (row["validation"].get("scope") == "canonical_VAL89_exposed"
@@ -775,6 +778,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     )
     joint_validation_label = "exposed VAL89" if canonical_val89_joint else "exposed DEV"
     budgeted_native_run = any(isinstance(row.get("native_budgeted_routing_state"), Mapping) for row in history)
+    member_routing_native_terms = {
+        "flow/u", "flow/v", "flow/p", "flow/omega",
+        "temperature/fluid", "temperature/surface", "temperature/material", "q_proxy",
+    }
 
     def objective_at(row: Mapping[str, Any]) -> Mapping[str, Any]:
         objective = row.get("validation_objective")
@@ -784,6 +791,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         return objective if isinstance(objective, Mapping) else {}
 
     def term_group(name: str) -> int:
+        if member_routing_run and name in member_routing_native_terms:
+            return 0
         if loss_metadata and name in loss_metadata:
             return {"native_prediction": 0, "physics": 1, "routing": 2}.get(
                 loss_metadata[name].get("panel", "native_prediction"), 0)
@@ -822,6 +831,19 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 "background": "Background-region",
             }
             return f"{role_labels.get(role, role.replace('_', ' ').title())} velocity loss"
+        if member_routing_run:
+            member_routing_labels = {
+                "flow/u": "Flow u loss",
+                "flow/v": "Flow v loss",
+                "flow/p": "Pressure loss",
+                "flow/omega": "Vorticity loss",
+                "temperature/fluid": "Fluid temperature loss",
+                "temperature/surface": "Surface temperature loss",
+                "temperature/material": "Material temperature loss",
+                "q_proxy": "Heat-flux proxy loss",
+            }
+            if name in member_routing_labels:
+                return member_routing_labels[name]
         return name.replace("_", " ")
 
     wind_role_regions = {
@@ -839,6 +861,14 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     }
 
     def term_definition(name: str) -> dict[str, str]:
+        if member_routing_run and name in member_routing_native_terms:
+            return {
+                "panel": "native_prediction",
+                "label": term_label(name),
+                "unit": "dimensionless weighted native prediction loss contribution",
+                "formula": "Native field prediction objective for this output, using the run's TRAIN-fitted normalizer and the native task reduction.",
+                "weight": "Native task configuration; TRAIN history records the weighted contribution.",
+            }
         if loss_metadata and name in loss_metadata:
             return dict(loss_metadata[name])
         if name == "reconstruction":
@@ -974,7 +1004,16 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         axis.set_xlabel("Completed epoch")
         axis.grid(alpha=0.25, which="both")
         if axis.lines:
-            axis.legend(fontsize=7.0, loc="best", frameon=False)
+            if member_routing_run and group_index == 0:
+                handles, labels = axis.get_legend_handles_labels()
+                training_lines = [(handle, label) for handle, label in zip(handles, labels)
+                                  if label.startswith("TRAIN:")]
+                axis.legend([item[0] for item in training_lines],
+                            [item[1] for item in training_lines], ncol=2,
+                            fontsize=6.0, loc="best", frameon=False,
+                            title="TRAIN lines; same-color validation markers", title_fontsize=6.0)
+            else:
+                axis.legend(fontsize=7.0, loc="best", frameon=False)
         else:
             axis.set_yscale("log")
             axis.set_ylim(1.0, 10.0)
@@ -983,6 +1022,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 1: "No physics or response losses saved",
                 2: "No approximation or routing losses saved",
             }.get(group_index, "No losses saved for this group")
+            if member_routing_run and group_index == 1:
+                empty_message = "No separately fitted residual or response objective"
+            elif member_routing_run and group_index == 2:
+                empty_message = "No separately fitted routing loss"
             axis.text(0.5, 0.5, empty_message, ha="center", va="center",
                       transform=axis.transAxes)
 
@@ -1051,17 +1094,25 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         set_panel_title(native_axis, "Prediction losses", "Prediction vs reference; scaled squared error")
     native_axis.set_ylabel("Weighted loss contribution (dimensionless)")
     plot_term_group(physics_axis, 1)
-    set_panel_title(physics_axis, "Physics and response losses",
-                    "Discrete stored-flow residual; response prediction")
+    if member_routing_run:
+        set_panel_title(physics_axis, "No separate residual / response objective",
+                        "Native prediction only; no fitted residual or response loss")
+    else:
+        set_panel_title(physics_axis, "Physics and response losses",
+                        "Discrete stored-flow residual; response prediction")
     physics_axis.set_ylabel("Weighted loss contribution (dimensionless)")
     plot_term_group(routing_axis, 2)
-    set_panel_title(
-        routing_axis, "Other provider objectives" if joint_run else "Approximation and routing losses",
-        "Provider-defined objectives; no detail-gate curriculum" if joint_run else
-        "Coarse/fine prediction mismatch; router probability error vs residual-importance target\n"
-        "Penalty on expected selected fine reads",
-        fontsize=8.9,
-    )
+    if member_routing_run:
+        set_panel_title(routing_axis, "No separate routing penalty",
+                        "Member routing is learned through the joint native field objective")
+    else:
+        set_panel_title(
+            routing_axis, "Other provider objectives" if joint_run else "Approximation and routing losses",
+            "Provider-defined objectives; no detail-gate curriculum" if joint_run else
+            "Coarse/fine prediction mismatch; router probability error vs residual-importance target\n"
+            "Penalty on expected selected fine reads",
+            fontsize=8.9,
+        )
     routing_axis.set_ylabel("Weighted loss contribution (dimensionless)")
 
     selector_points = []
@@ -1113,25 +1164,60 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     }
     work_keys = sorted({key for row in history for key in row.get("work_counts", {})}
                        & set(work_definitions))
-    for index, key in enumerate(work_keys):
-        points = []
-        for row in history:
-            try:
-                points.append((int(row["epoch"]), float(row["work_counts"][key])))
-            except (KeyError, TypeError, ValueError):
-                continue
-        if points:
-            masked_count_total += plot_series(
-                work_axis, [point[0] for point in points], [point[1] for point in points],
-                label=f"{work_definitions[key]} (TRAIN)", color=f"C{index % 10}",
-            )
-    if work_keys and work_axis.lines:
-        work_axis.legend(fontsize=7.0, loc="best", frameon=False)
+    member_routing_work_definitions = {
+        f"core_decode_primary_query_{role}_{quantity}_rows": label
+        for role, quantity, label in (
+            ("M", "selected_value", "M selected value rows"),
+            ("E", "selected_value", "E selected value rows"),
+            ("M", "cheap_score", "M cheap-score rows"),
+            ("E", "cheap_score", "E cheap-score rows"),
+        )
+    }
+    if member_routing_run:
+        for index, (key, label) in enumerate(member_routing_work_definitions.items()):
+            points = []
+            for row in history:
+                try:
+                    values = row["work_counts"]
+                    if key in values:
+                        points.append((int(row["epoch"]), float(values[key])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if points:
+                work_axis.plot(
+                    [point[0] for point in points], [point[1] for point in points],
+                    label=f"{label} (TRAIN)", color=f"C{index % 2}",
+                    linestyle="-" if "selected_value" in key else "--",
+                    marker="o" if "selected_value" in key else ".",
+                    markersize=3.5,
+                )
+        work_axis.set_yscale("symlog", linthresh=1)
+        work_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.55)
+        if work_axis.lines:
+            work_axis.legend(fontsize=7.0, loc="best", frameon=False)
+        else:
+            work_axis.text(0.5, 0.5, "No member-routing query counters saved", ha="center", va="center",
+                           transform=work_axis.transAxes)
     else:
-        work_axis.set_yscale("log")
-        work_axis.set_ylim(1.0, 10.0)
-        work_axis.text(0.5, 0.5, "No recorded work counters", ha="center", va="center",
-                       transform=work_axis.transAxes)
+        for index, key in enumerate(work_keys):
+            points = []
+            for row in history:
+                try:
+                    points.append((int(row["epoch"]), float(row["work_counts"][key])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if points:
+                masked_count_total += plot_series(
+                    work_axis, [point[0] for point in points], [point[1] for point in points],
+                    label=f"{work_definitions[key]} (TRAIN)", color=f"C{index % 10}",
+                )
+        if work_keys and work_axis.lines:
+            work_axis.legend(fontsize=7.0, loc="best", frameon=False)
+        else:
+            work_axis.set_yscale("log")
+            work_axis.set_ylim(1.0, 10.0)
+            work_axis.text(0.5, 0.5, "No recorded work counters", ha="center", va="center",
+                           transform=work_axis.transAxes)
     typed_work_series = False
     if any("joint_native_routing_state" in row for row in history):
         for kind, color in (("M", "C0"), ("E", "C1")):
@@ -1152,11 +1238,20 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         if typed_work_series:
             work_axis.set_ylim(0.,1.02)
             work_axis.legend(fontsize=7.,frameon=False)
-    set_panel_title(work_axis, "Typed native retained work" if typed_work_series else "Recorded TRAIN work counters",
-                    "Equal-case full-catalogue fractions; timings separate" if typed_work_series else
-                    "Counter sums; not measured executor time or savings")
+    if member_routing_run:
+        set_panel_title(work_axis, "Member-routing query work",
+                        "Exact core counters; zero selected value rows remain visible",
+                        fontsize=8.9)
+    else:
+        set_panel_title(work_axis, "Typed native retained work" if typed_work_series else "Recorded TRAIN work counters",
+                        "Equal-case full-catalogue fractions; timings separate" if typed_work_series else
+                        "Counter sums; not measured executor time or savings")
     work_axis.set_xlabel("Completed epoch")
-    work_axis.set_ylabel("Retained fraction" if typed_work_series else "Provider counter sum (rows or pairs / epoch)")
+    work_axis.set_ylabel(
+        "Retained fraction" if typed_work_series else
+        "Core counter sum (rows / epoch)" if member_routing_run else
+        "Provider counter sum (rows or pairs / epoch)"
+    )
     work_axis.grid(alpha=0.25, which="both")
     if masked_count_total:
         routing_axis.text(
@@ -1243,6 +1338,14 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "all requests within each case are aggregated before equal-case means. "
             "Executed native rows remain separate saved counters; no memory or latency claim is inferred."
         )
+    if member_routing_run:
+        metadata["panel_definitions"].update({
+            "native_prediction": "Round13-3 native flow, temperature, and q-proxy prediction losses in TRAIN-fitted scales.",
+            "physics": "No separately fitted residual or response objective is present for this workflow.",
+            "routing": "The routing mechanism is trained through the joint field objective; no separate routing penalty is fitted.",
+            "train_work": "Exact core_decode_primary_query M/E selected-value and cheap-score row counters. Symlog display preserves zero selected-row evidence; row counts are not measured latency or executor savings.",
+        })
+        metadata["work_counter_definitions"].update(member_routing_work_definitions)
     _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"

@@ -171,3 +171,54 @@ def test_wind_role_losses_use_plain_names_with_definition(tmp_path, monkeypatch)
     assert "hub height" in metadata["term_definitions"]["native_role/hub_slab"]["role_region"]
     assert "D is the reference rotor diameter" in metadata["term_definitions"]["native_role/hub_slab"]["role_region"]
     assert "D = reference rotor diameter" in captured[0]["titles"][1]
+
+
+def test_round13_member_routing_native_losses_and_zero_read_work_are_explicit(tmp_path, monkeypatch):
+    loss_names = (
+        "flow/u", "flow/v", "flow/p", "flow/omega", "temperature/fluid",
+        "temperature/surface", "temperature/material", "q_proxy",
+    )
+    work_keys = (
+        "core_decode_primary_query_M_selected_value_rows",
+        "core_decode_primary_query_E_selected_value_rows",
+        "core_decode_primary_query_M_cheap_score_rows",
+        "core_decode_primary_query_E_cheap_score_rows",
+    )
+    history = [
+        {
+            "epoch": epoch,
+            "arm": "R13-3-Route",
+            "phase": "joint",
+            "case_visits": 600,
+            "train_losses": {name: 0.2 / epoch for name in loss_names},
+            "validation": {"field_score": 0.4 / epoch, "scope": "canonical_VAL89_exposed", "case_count": 89},
+            "work_counts": dict(zip(work_keys, values)),
+        }
+        for epoch, values in ((1, (6, 3, 40, 60)), (2, (0, 0, 25, 30)))
+    ]
+    captured = _capture_figures(monkeypatch, tmp_path)
+
+    _render_loss_curves(history, tmp_path, "field_score")
+
+    figure = captured[0]
+    assert figure["titles"][1] == "Prediction losses\nPrediction vs reference; scaled squared error"
+    assert figure["labels"][1] == [
+        "TRAIN: Vorticity loss", "TRAIN: Pressure loss", "TRAIN: Flow u loss", "TRAIN: Flow v loss",
+        "TRAIN: Heat-flux proxy loss", "TRAIN: Fluid temperature loss", "TRAIN: Material temperature loss",
+        "TRAIN: Surface temperature loss",
+    ]
+    assert "No separate residual / response objective" in figure["titles"][2]
+    assert "No separately fitted residual or response objective" in figure["texts"][2]
+    assert "No separate routing penalty" in figure["titles"][4]
+    assert figure["yscales"][5] == "symlog"
+    work_lines = dict(zip(figure["labels"][5], figure["lines"][5]))
+    assert np.asarray(work_lines["M selected value rows (TRAIN)"]).tolist() == [6.0, 0.0]
+    assert np.asarray(work_lines["E selected value rows (TRAIN)"]).tolist() == [3.0, 0.0]
+    assert np.asarray(work_lines["M cheap-score rows (TRAIN)"]).tolist() == [40.0, 25.0]
+    assert np.asarray(work_lines["E cheap-score rows (TRAIN)"]).tolist() == [60.0, 30.0]
+    metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
+    for name in loss_names:
+        assert metadata["term_definitions"][name]["panel"] == "native_prediction"
+    assert "No separately fitted residual or response objective" in metadata["panel_definitions"]["physics"]
+    assert "core_decode_primary_query_M_selected_value_rows" in metadata["work_counter_definitions"]
+    assert "core_decode_primary_query_E_cheap_score_rows" in metadata["work_counter_definitions"]
