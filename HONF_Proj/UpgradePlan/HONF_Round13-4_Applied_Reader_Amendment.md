@@ -1,0 +1,31 @@
+# R13-4 applied reader amendment
+
+The new Full and Guide readers retain the applied two-cycle MM→EM→EE→ME contextual encoder and its original M/E records. They change member-score calibration and, for Guide, choose E candidates from the live relation prior before the expensive query–member scorer. Historical v1/v2 readers and checkpoints retain their equations and defaults. This amendment records the implemented candidate and the initial TRAIN-only decision; experimental completion is recorded separately.
+
+## Equations and execution
+
+For each query and type, use the applied final-stage directory \(B^M=G_{MM,\mathrm{offdiag}}+I\), \(B^E=G_{ME}\), positive M proposals \(\pi\), physical measures \(\nu\), and \(P_i=(\sum_m\pi_m B_{mi})\nu_i/\sum_j(\sum_m\pi_mB_{mj})\nu_j\). A type without an eligible positive path returns zero context before normalization. M-empty scenes cannot access E through this M-address family. No independent record-read branch is added.
+
+Full evaluates every relation-eligible original member. Guide retains every eligible M and selects the shortest descending-P prefix of E whose omitted conditional prior mass is at most \(\epsilon=0.01\), resolving ties by original ID. Each original ID appears once in a query's candidate set even when several addresses contribute. Prior composition, sorting and indexing remain real work; they precede the member MLP. A diffuse prior may retain almost all E. No absolute threshold is applied to the final rho-scaled weights.
+
+On the actual candidate set C, renormalize \(\bar P_i=P_i/\sum_{j\in C}P_j\), compute member scores \(f_i\), \(\mu=\sum_{i\in C}\bar P_i f_i\), \(s^2=1+\sum_{i\in C}\bar P_i(f_i-\mu)^2\), \(\ell_i=4\tanh((f_i-\mu)/(4s))\), and \(p_i\propto\bar P_i\exp(\ell_i)\). Entropy uses the stable scene-eligible count. The inherited smooth typed read-strength network produces \(\rho_t\), separately from preference. Each typed context is \(c_t=\rho_t\sum_{i\in C_t}p_iV_t(z_i)\); one general joint physical head evaluates the M/E contexts and query. Restricted execution computes its own scores and statistics; it never borrows full-pass scores.
+
+Guide minimizes the average of the native Full and restricted physical losses on identical training queries, with shared parameters and sequential tiled checkpointed decoder work. The auxiliary KL coefficient is zero. Full minimizes its native all-eligible physical loss. Guide's extra training reference is counted separately and is absent from the deployed restricted prediction. Both arms use identical weighted calibration, which is a model change rather than an exact optimization of v2.
+
+## Feedback and limits
+
+Positive selected priors, member scores, original values, contextual keys and applied coefficients receive the implemented native physical derivatives. The Full half of Guide's training objective supplies physical feedback through positive eligible members omitted by the restricted hard prefix. There is no derivative through the integer prefix decision, and this formulation does not reopen an exactly zero applied B edge by assertion. Contextual exchange and its applied gates remain trainable through their actual executed pathways. A singleton M scene has no M-address ranking choice; a zero ranking derivative there is legitimate.
+
+Common member-score shifts cancel in the weighted mean. A finite vanishing-prior member fades continuously from the score moments instead of changing another member's calibration solely through an exact-positive count. The unit variance floor and bounded tanh control score scale, while the separately learned read strength can still represent an unnecessary typed read. The deliberate hard candidate cut remains discontinuous. Neither epsilon nor captured p mass bounds the error of the nonlinear physical predictor.
+
+## Initial measured decision
+
+The retained Relative e500 checkpoint was read in place. Four input-selected TRAIN cases spanning M1/M2/M5/M12 received native objective backward replays at full access and epsilon 0.01/0.05. At epsilon 0.01 the eight-query mean E candidate counts were 165, 153.875, 186.125 and 184.375; the minimum captured all-eligible conditional preference mass was 0.987689, 0.989357, 0.992804 and 0.990528 respectively. Live E-relation gradients were positive in the native replays. Epsilon 0.05 omitted substantially more useful preference and produced larger field changes. These TRAIN measurements selected epsilon 0.01 before the fixed VAL detail replay. They do not establish post-training fidelity or end-to-end savings.
+
+The four-scene, eight-query row-mixture simplex diagnostic found almost no proposal-ranking room in the singleton scene and more room in the M12 scene. The conservative initial candidate therefore adds neither new address capacity nor a refinement network. The saved three-member example reproduced the old count-boundary jump and its removal by weighted moments. Numerical evidence, attempt ledger and disposable replay helpers remain under the ignored DATA2 round root, `HONF_Proj/diagnostics/round13_4_20261026`.
+
+## Qualification and transfer policy
+
+Qualification uses the existing TRAIN150/DEV22 input-only membership and its TRAIN-only normalizer, initially six epochs followed by a same-lineage resume to twelve. Initial observations cover twice the earlier three-epoch collapse onset; twelve observations test persistence and real recovery without treating a short run as maturity. Nonfinite computation, disappeared task-relevant paths or lost native sensitivity use the existing clean-stop path. Broad healthy access is measured rather than rejected.
+
+The two TRAIN600 development arms start independently from the identical retained Relative e500 state, preserving compatible weights, named optimizer moments, RNG, sampler, normalization and constant learning-rate schedule. Development is reviewed after every 100 additional epochs. The user's explicit allocation permits at most 1000 additional full-data epochs in aggregate, including a reserved independently initialized final TRAIN600 candidate of exactly 100 epochs; it does not require exhausting the ceiling. Segmented weights are never promoted. The older R13-3 run remains separately paused at epoch 756.

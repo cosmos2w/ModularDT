@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ from channelthermal.training.guided_member_routing_task import (
 )
 from channelthermal.training.member_routing_health import MemberRoutingHealth
 from channelthermal.training.content_hypergraph_task import ThermalContentPredictions
+from channelthermal.training.content_hypergraph_task import THERMAL_CONTENT_LOSS_WEIGHTS
+from channelthermal.training.member_routing_task import ThermalInteractionReusedMemberRoutingTask
 from honf_forward_core.interaction_reused_member_routing.guided import GuidedMemberRoutingCore
 from honf_runtime.unified_training import SamplingKey
 from tests.test_interaction_reused_member_routing import _base_config, _query
@@ -133,6 +136,38 @@ def test_provider_transfer_converts_only_the_state_schema_and_resets_old_health(
     assert same_schema["training_elapsed_seconds"] == 0.0
     with pytest.raises(ValueError, match="R13-3 Relative"):
         provider.source_training_state({"schema": "thermal_member_routing_native_training_state_v1"})
+
+
+def test_identity_loss_role_order_survives_sorted_manifest_recipe_round_trip(monkeypatch):
+    monkeypatch.setattr(ThermalInteractionReusedMemberRoutingTask, "identity_payload", lambda self: {})
+    canonical_weights = {
+        role: value for role, value in THERMAL_CONTENT_LOSS_WEIGHTS.items() if role != "response"
+    }
+    sorted_recipe_weights = json.loads(json.dumps(canonical_weights, sort_keys=True))
+
+    def identity_for(weights):
+        provider = ThermalGuidedMemberRoutingTask.__new__(ThermalGuidedMemberRoutingTask)
+        provider.native_weights = weights
+        provider.provider_schema = "thermal_interaction_reused_member_routing_provider_v3"
+        provider.workflow = "interaction_reused_member_routing_joint_training_v3"
+        provider.training_sampling_arm = "R13-3-Relative"
+        provider.source_kind = "relation_guided_e500_transfer"
+        provider.source_parent_age = 500
+        provider.model = SimpleNamespace(
+            architecture=FULL_ARM,
+            CORE_SCHEMA="interaction_reused_member_routing_v3",
+            state_payload=lambda: {},
+        )
+        return provider.identity_payload()
+
+    original_identity = identity_for(canonical_weights)
+    restored_identity = identity_for(sorted_recipe_weights)
+    expected_roles = [role for role in THERMAL_CONTENT_LOSS_WEIGHTS if role != "response"]
+
+    assert list(sorted_recipe_weights) != list(canonical_weights)
+    assert original_identity["loss_lineage"]["native_loss_roles"] == expected_roles
+    assert restored_identity["loss_lineage"]["native_loss_roles"] == expected_roles
+    assert restored_identity["loss_lineage"]["native_loss_roles"] == original_identity["loss_lineage"]["native_loss_roles"]
 
 
 def test_transferred_health_baseline_is_recorded_at_parent_epoch():

@@ -269,7 +269,10 @@ class ThermalGuidedMemberRoutingTask(ThermalInteractionReusedMemberRoutingTask):
                 "source_kind": self.source_kind,
                 "parent_completed_epoch": self.source_parent_age,
                 "new_reader_epochs_start_at": self.source_parent_age + 1,
-                "native_loss_roles": list(self.native_weights),
+                "native_loss_roles": [
+                    role for role in THERMAL_CONTENT_LOSS_WEIGHTS
+                    if role != "response" and role in self.native_weights
+                ],
                 "guide_path_metrics": ["full_reference", "restricted_guide"],
             },
             "training_reader_objective": (
