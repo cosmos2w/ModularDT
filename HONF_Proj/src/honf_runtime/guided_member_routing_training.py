@@ -145,7 +145,15 @@ def resume(run, *, device="cuda:1", stop_after_epoch, extend_horizon=False,
                             "optimizer_and_recipe_schedule_unchanged": True}
     selected, _ = research.resolve_device(device, permitted_devices=(device,))
     maintained._ensure_workspace_storage_bindings()
-    model, provider = _build(config, selected)
+    # Provider identity retains the original recipe, including its historical
+    # output declarations. Only the engine executes the requested output policy.
+    provider_config = copy.deepcopy(config)
+    saved_training = payload["experiment_identity"].get("provider_identity", {}).get(
+        "recipe", {}).get("training", {})
+    for name in ("checkpoint_epochs", "curve_every"):
+        if name in saved_training:
+            provider_config["training"][name] = copy.deepcopy(saved_training[name])
+    model, provider = _build(provider_config, selected)
     estimated, peak = maintained._storage_estimate(
         model, completed_epoch=payload["epoch"], stop_after=stop, config=config,
         checkpoint_epochs=checkpoint_epochs)

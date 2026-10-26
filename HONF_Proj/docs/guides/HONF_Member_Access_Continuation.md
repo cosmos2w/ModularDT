@@ -1,6 +1,6 @@
 # Relation-guided member-access continuation
 
-Resume a v3 member-access run through the maintained `tools/honf_member_access.py` entrypoint. An explicit horizon extension may also declare checkpoint milestones and a curve interval. These output controls preserve weights, named optimizer moments, RNG, data, normalization, native objectives, query sampling, validation cadence and the optimizer schedule. Historical v1/v2 recovery remains unchanged.
+Resume a v3 member-access run through the maintained `tools/honf_member_access.py` entrypoint. An explicit horizon extension may also declare checkpoint milestones and a curve interval. These output controls preserve weights, named optimizer moments, RNG, data, normalization, native objectives, query sampling, validation cadence and the optimizer schedule. The provider retains the source checkpoint's original recipe, including its historical output declarations; the engine and continuation manifest carry the requested execution outputs. Historical v1/v2 recovery remains unchanged.
 
 The user-directed continuation of `thermal_r13_4_guide_train600_100_v3` starts from its completed epoch 100 and stops at epoch 500 on physical GPU 1. It retains the existing epoch-12/100 scientific checkpoints, adds milestones 200 and 500, and maintains latest/best-field states. No epoch-300/400 milestone is requested. Curves refresh every epoch; validation remains every 100 epochs and at the existing final/clean-stop review.
 

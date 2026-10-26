@@ -138,14 +138,17 @@ def test_guided_resume_restores_custom_output_policy_after_interruption(tmp_path
               "initialization": {"source_parent_age": 0}}
     manifest = {"schema": training.MANIFEST_SCHEMA, "config": config, "config_path": "scratch.json"}
     (tmp_path / "run_manifest.json").write_text(json.dumps(manifest))
+    saved_provider = {"recipe": copy.deepcopy(config)}
     payload = {"epoch": 100, "experiment_identity": {"engine_config": {
-        "total_epochs": 100, "checkpoint_epochs": [100]}}}
+        "total_epochs": 100, "checkpoint_epochs": [100]}, "provider_identity": saved_provider}}
     checkpoint = tmp_path / "latest_model.pt"
     monkeypatch.setattr(training, "resolve_checkpoint", lambda *a: checkpoint)
     monkeypatch.setattr(training, "load_trusted_checkpoint", lambda *a, **kw: payload)
     monkeypatch.setattr(training.research, "resolve_device", lambda *a, **kw: ("cpu", {}))
     monkeypatch.setattr(training.maintained, "_ensure_workspace_storage_bindings", lambda: {})
-    monkeypatch.setattr(training, "_build", lambda *a: (object(), object()))
+    provider_configs = []
+    monkeypatch.setattr(training, "_build",
+                        lambda config, device: (provider_configs.append(copy.deepcopy(config)), object()))
     monkeypatch.setattr(training.maintained, "_storage_estimate", lambda *a, **kw: (0, 0))
     monkeypatch.setattr(training.maintained, "_prepare_storage", lambda *a, **kw: {})
     monkeypatch.setattr(training, "training_identity", lambda c: {"recipe_budget": c["training"]["wall_clock_budget_seconds"]})
@@ -157,12 +160,17 @@ def test_guided_resume_restores_custom_output_policy_after_interruption(tmp_path
     assert calls[-1][0]["training"]["curve_every"] == 1
     assert calls[-1][1]["wall_clock_budget_seconds"] == 36000
     assert calls[-1][1]["training_identity"]["recipe_budget"] == 18000
+    assert provider_configs[-1]["training"]["checkpoint_epochs"] == [100]
+    assert provider_configs[-1]["training"]["curve_every"] == 10
     # A clean pause does not shrink the saved horizon or restore default outputs.
     payload.update(epoch=201, experiment_identity={"engine_config": {
-        "total_epochs": 500, "checkpoint_epochs": [200, 500], "curve_every": 1}})
+        "total_epochs": 500, "checkpoint_epochs": [200, 500], "curve_every": 1},
+        "provider_identity": saved_provider})
     training.resume(tmp_path, stop_after_epoch=500)
     assert calls[-1][1]["engine_horizon"] == 500
     assert calls[-1][1]["engine_checkpoint_epochs"] == [200, 500]
     assert calls[-1][0]["training"]["curve_every"] == 1
     assert calls[-1][1]["wall_clock_budget_seconds"] == 36000
     assert calls[-1][1]["allow_horizon_extension"] is False
+    assert provider_configs[-1]["training"]["checkpoint_epochs"] == [100]
+    assert provider_configs[-1]["training"]["curve_every"] == 10
