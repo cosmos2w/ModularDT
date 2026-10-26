@@ -31,7 +31,7 @@ from .unified_task import DEFAULT_ATLAS_DIRECTORY, _sample_primary, _structure_o
 class ThermalContextualJointTask(ThermalContentHypergraphTask):
     def __init__(self, *, model, training_cases, validation_cases, manifest, data_path,
                  recipe, device, manifest_path=None, catalog=(), source_binding=None,
-                 response_families=None):
+                 response_families=None, native_only=False):
         self.model = self.adapter = model
         self.training_cases = tuple(training_cases)
         self.validation_cases = tuple(validation_cases)
@@ -61,6 +61,7 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
         self.training_samples = self.validation_samples = 0
         self._validation_batches_cache = None
         self.atlas_directory = Path(recipe.get("atlas_directory", DEFAULT_ATLAS_DIRECTORY)).resolve()
+        self.native_only = bool(native_only)
         self.train_families = ()
         self.response_scales = {}
         self.state = {"primary_updates": 0, "response_microbatches": 0,
@@ -68,13 +69,17 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
                       "calibration_scene_visits": 0, "calibrations": [], "baselines": {}}
         self._pending = []
         self.native_weights = dict(recipe.get("objective", {}).get("native_weights", THERMAL_CONTENT_LOSS_WEIGHTS))
-        self.organizer = self._make_organizer()
-        from .contextual_joint_responses import JointResponseSupervision
-        families = (tuple(map(str, response_families)) if response_families is not None else
-                    tuple(v for v in ("0001", "0318", "0333", "0348") if v in self.training_case_ids))
-        if any(family not in self.training_case_ids for family in families):
-            raise ValueError("Joint response families must be admitted selected TRAIN cases.")
-        self.responses = JointResponseSupervision(self.atlas_directory, families, model.normalization_stats)
+        if self.native_only:
+            self.organizer = None
+            self.responses = None
+        else:
+            self.organizer = self._make_organizer()
+            from .contextual_joint_responses import JointResponseSupervision
+            families = (tuple(map(str, response_families)) if response_families is not None else
+                        tuple(v for v in ("0001", "0318", "0333", "0348") if v in self.training_case_ids))
+            if any(family not in self.training_case_ids for family in families):
+                raise ValueError("Joint response families must be admitted selected TRAIN cases.")
+            self.responses = JointResponseSupervision(self.atlas_directory, families, model.normalization_stats)
         self._budget_binding = None
         self._segment_started = time.monotonic()
 
@@ -96,8 +101,12 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
             "objective": {"native_weights": self.native_weights,
                 "joint_fields": ["u", "v", "p", "temperature"],
                 "affine_temperature_constraint": False, "heat_independent_flow_constraint": False},
-            "prescribed_heat_in_context": True, "response_training_family_ids": ["0348"] if self.protocol == "development" else ["0001", "0318", "0333", "0348"],
-            "source_binding": self.source_binding, "response_supervision": self.responses.metadata, "recipe": self.recipe,
+            "prescribed_heat_in_context": True,
+            "response_training_family_ids": ([] if self.native_only else
+                (["0348"] if self.protocol == "development" else ["0001", "0318", "0333", "0348"])),
+            "source_binding": self.source_binding,
+            "response_supervision": None if self.native_only else self.responses.metadata,
+            "recipe": self.recipe,
             "solver_attempts": 0, "test_read": False}
 
     def preparation_summary(self):
@@ -117,7 +126,7 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
     def make_batch(self, case_keys, key):
         if key.sampling_version != self.sampling_version or key.dataset_id != self.sampling_dataset_id:
             raise ValueError("Thermal primary sampler identity mismatch.")
-        if not 1 <= key.epoch <= self.total_epochs:
+        if key.epoch < 1 or (not self.native_only and key.epoch > self.total_epochs):
             raise ValueError("Epoch outside the absolute master schedule.")
         self.model.core.set_organization_clock(key.epoch, key.update_index)
         indices = tuple(self._train_index_by_id[str(v)] for v in case_keys)
@@ -159,7 +168,8 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
     def loss_terms(self, predictions, targets, phase, auxiliary_state):
         from honf_runtime.unified_training import LossTerm
         roles = self._role_losses(predictions, targets)
-        if self.model.training and torch.is_grad_enabled() and targets.epoch > 0:
+        if (not self.native_only and self.model.training and torch.is_grad_enabled()
+                and targets.epoch > 0):
             native = sum(self.native_weights[name] * value for name, value in roles.items())
             self.organizer.collect(predictions, native, targets.epoch, case_ids=targets.case_ids)
         return {name: LossTerm(value.sum(), len(targets.case_ids), self.native_weights[name])
@@ -202,6 +212,13 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
             "raw_full_norm":gradient_norm(raw),"coefficient":coefficient,"cap_scale":cap}
 
     def before_optimizer_step(self, model, optimizer, losses, work, *, epoch, update_index):
+        if self.native_only:
+            self.state["primary_updates"] = (
+                (int(epoch) - 1) * math.ceil(len(self.training_cases) / self.effective_batch_size)
+                + int(update_index) + 1
+            )
+            self._check_wall_clock_budget()
+            return
         named=dict(model.named_parameters())
         native={n:p.grad.detach().clone() for n,p in named.items() if p.grad is not None}
         if update_index==0 and epoch in (1,21,100):
@@ -242,6 +259,9 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
             work["response_microbatches"]=1
             work["response_scene_visits"]=2
         self.state["primary_updates"]=primary_update
+        self._check_wall_clock_budget()
+
+    def _check_wall_clock_budget(self):
         if self._budget_binding is not None:
             from honf_runtime.unified_training import _atomic_json
             output,budget,reserve=self._budget_binding
@@ -259,7 +279,8 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
 
     def training_state_dict(self):
         state=copy.deepcopy(self.state)
-        state["organizer"]=self.organizer.state_dict()
+        if not self.native_only:
+            state["organizer"]=self.organizer.state_dict()
         state["training_samples"]=self.training_samples
         state["validation_samples"]=self.validation_samples
         if self._budget_binding is not None:
@@ -274,7 +295,7 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
         self.state["training_elapsed_seconds"]=max(elapsed,self.state.get("training_elapsed_seconds",0.))
         self.training_samples=int(self.state.pop("training_samples",self.training_samples))
         self.validation_samples=int(self.state.pop("validation_samples",self.validation_samples))
-        if "organizer" in self.state:
+        if "organizer" in self.state and self.organizer is not None:
             self.organizer.load_state_dict(self.state.pop("organizer"))
         self._segment_started=time.monotonic()
         self._pending = []

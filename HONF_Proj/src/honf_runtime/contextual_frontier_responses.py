@@ -93,7 +93,7 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value)
 
 
-def _atlas_paths(provider: Any) -> tuple[Path, ...]:
+def _atlas_paths(provider: Any, family_ids: Sequence[str] = _ALL_FAMILIES) -> tuple[Path, ...]:
     source = getattr(provider, "atlas_directory", None)
     if source is None:
         raise ValueError("The rebuilt contextual provider does not expose its response-atlas directory.")
@@ -101,7 +101,7 @@ def _atlas_paths(provider: Any) -> tuple[Path, ...]:
     family_root = root / "families" if (root / "families").is_dir() else root
     return tuple(
         (family_root / f"train_{family_id}_responses.npz").resolve(strict=True)
-        for family_id in _ALL_FAMILIES
+        for family_id in family_ids
     )
 
 
@@ -223,12 +223,15 @@ def _saved_control_details(stencil: Any) -> dict[str, Any]:
     }
 
 
-def _load_stencils(provider: Any) -> tuple[dict[str, Any], dict[str, dict[str, Any]], str]:
-    paths = _atlas_paths(provider)
+def _load_stencils(provider: Any, family_ids: Sequence[str] = _ALL_FAMILIES) -> tuple[dict[str, Any], dict[str, dict[str, Any]], str]:
+    family_ids = tuple(map(str, family_ids))
+    if not family_ids or len(family_ids) != len(set(family_ids)):
+        raise ValueError("Physical response evaluation requires a fixed unique atlas family panel.")
+    paths = _atlas_paths(provider, family_ids)
     stencils: dict[str, Any] = {}
     metadata_by_family: dict[str, dict[str, Any]] = {}
     seen_physical_families: set[str] = set()
-    for family_id, path in zip(_ALL_FAMILIES, paths, strict=True):
+    for family_id, path in zip(family_ids, paths, strict=True):
         stencil, metadata = load_response_atlas_stencil(path)
         _validate_atlas_family(stencil, metadata, family_id)
         if stencil.physical_family_id in seen_physical_families:
@@ -849,14 +852,21 @@ def _evaluate_family(
 def _cohort_plan(fit_families: Sequence[str]) -> dict[str, list[str]]:
     fit_set = set(map(str, fit_families))
     fit = tuple(family_id for family_id in TRAIN_GEOMETRY_FAMILIES if family_id in fit_set)
-    if not fit:
-        raise ValueError("Response evaluation requires at least one admitted original-TRAIN fit family.")
-    fit_key = "fit_train_0348" if fit == (_FIT_FAMILY,) else "fit_train"
-    cohorts: dict[str, list[str]] = {fit_key: list(fit)}
-    train_reference_only = tuple(family_id for family_id in TRAIN_GEOMETRY_FAMILIES if family_id not in fit_set)
-    if train_reference_only:
-        cohorts["train_reference_only"] = list(train_reference_only)
-    cohorts["response_validation_only"] = list(_RESPONSE_VALIDATION)
+    if fit:
+        fit_key = "fit_train_0348" if fit == (_FIT_FAMILY,) else "fit_train"
+        cohorts: dict[str, list[str]] = {fit_key: list(fit)}
+        train_reference_only = tuple(family_id for family_id in TRAIN_GEOMETRY_FAMILIES if family_id not in fit_set)
+        if train_reference_only:
+            cohorts["train_reference_only"] = list(train_reference_only)
+    else:
+        # A native-only checkpoint may be evaluated against the saved physical
+        # response atlas without fitting any response roles. Keep every source
+        # TRAIN family explicitly in the reference-only cohort; do not expand
+        # this fixed panel into held-out response-validation atlases.
+        cohorts = {"train_reference_only": list(TRAIN_GEOMETRY_FAMILIES)}
+        cohorts["response_validation_only"] = []
+    if fit:
+        cohorts["response_validation_only"] = list(_RESPONSE_VALIDATION)
     return cohorts
 
 
@@ -927,17 +937,19 @@ def _representative_families(
     if limit < 1:
         return ()
     cohorts = _cohort_plan(fit_families)
-    fit_key = next(key for key in cohorts if key.startswith("fit_train"))
-    fit_by_module_count: dict[int, str] = {}
-    for family_id in cohorts[fit_key]:
-        fit_by_module_count.setdefault(int(family_results[family_id]["module_count"]), family_id)
-    fit_counts = sorted(fit_by_module_count)
-    preferred = [fit_by_module_count[fit_counts[0]]]
-    if len(fit_counts) > 1:
-        preferred.append(fit_by_module_count[fit_counts[-1]])
-    if "train_reference_only" in cohorts:
+    fit_key = next((key for key in cohorts if key.startswith("fit_train")), None)
+    source_key = fit_key or "train_reference_only"
+    source_by_module_count: dict[int, str] = {}
+    for family_id in cohorts[source_key]:
+        source_by_module_count.setdefault(int(family_results[family_id]["module_count"]), family_id)
+    source_counts = sorted(source_by_module_count)
+    preferred = [source_by_module_count[source_counts[0]]] if source_counts else []
+    if len(source_counts) > 1:
+        preferred.append(source_by_module_count[source_counts[-1]])
+    if fit_key is not None and "train_reference_only" in cohorts:
         preferred.append(cohorts["train_reference_only"][0])
-    preferred.append(cohorts["response_validation_only"][0])
+    if cohorts.get("response_validation_only"):
+        preferred.append(cohorts["response_validation_only"][0])
     selected = [family_id for family_id in preferred if family_id in family_results][:limit]
     by_module_count: dict[int, str] = {}
     for family_id, row in family_results.items():
@@ -1113,6 +1125,9 @@ def evaluate_responses(
     identity = payload.get("experiment_identity", {})
     provider_identity = identity.get("provider_identity", {}) if isinstance(identity, Mapping) else {}
     recipe = provider_identity.get("recipe", {}) if isinstance(provider_identity, Mapping) else {}
+    workflow = identity.get("workflow") if isinstance(identity, Mapping) else None
+    reference_only_member_routing = workflow == "interaction_reused_member_routing_joint_training_v1"
+    atlas_family_ids = tuple(TRAIN_GEOMETRY_FAMILIES) if reference_only_member_routing else _ALL_FAMILIES
     storage = recipe.get("storage", {}) if isinstance(recipe, Mapping) else {}
     minimum_headroom = int(storage.get("minimum_free_headroom_bytes", 0)) if isinstance(storage, Mapping) else 0
     free_before = _filesystem_free_bytes(output_path.parent)
@@ -1128,8 +1143,8 @@ def evaluate_responses(
     if core is not None and callable(getattr(core, "set_organization_clock", None)):
         epoch = int(payload.get("epoch", payload.get("current_epoch", 0)))
         core.set_organization_clock(epoch, 0)
-    stencils, atlas_metadata, atlas_root = _load_stencils(provider)
-    first_roles = stencils[_ALL_FAMILIES[0]].baseline.output.roles
+    stencils, atlas_metadata, atlas_root = _load_stencils(provider, atlas_family_ids)
+    first_roles = stencils[atlas_family_ids[0]].baseline.output.roles
     floors, response_fit_families, floor_source = _response_native_floors(model, provider, first_roles)
     cohort_plan = _cohort_plan(response_fit_families)
 
@@ -1137,7 +1152,7 @@ def evaluate_responses(
     family_metrics: dict[str, dict[str, Any]] = {}
     panels: dict[str, Any] = {}
     with torch.no_grad():
-        for family_id in _ALL_FAMILIES:
+        for family_id in atlas_family_ids:
             rows, metrics, panel_data = _evaluate_family(
                 model,
                 stencils[family_id],
@@ -1192,10 +1207,27 @@ def evaluate_responses(
             "fit_train_family_ids": list(response_fit_families),
             "train_reference_only_family_ids": list(cohort_plan.get("train_reference_only", ())),
             "response_validation_only_family_ids": list(cohort_plan["response_validation_only"]),
+            "atlas_family_ids_evaluated": list(atlas_family_ids),
+            "response_fit_performed": bool(response_fit_families),
+            "source_train_reference_use": (
+                "saved physical references only; not response-training data"
+                if reference_only_member_routing else "cohort follows saved provider response supervision"
+            ),
             "cohort_labels": {cohort: list(family_ids) for cohort, family_ids in cohort_plan.items()},
-            "original_source_partition": "all eight atlas anchors are recorded as original source TRAIN families",
-            "response_validation_scope": "held out from response fitting; not relabeled as original source DEV or TEST",
+            "original_source_partition": (
+                "the four evaluated atlas anchors are recorded original source TRAIN families"
+                if reference_only_member_routing else "all eight atlas anchors are recorded as original source TRAIN families"
+            ),
+            "response_validation_scope": (
+                "not evaluated for this reference-only native checkpoint"
+                if reference_only_member_routing else
+                "held out from response fitting; not relabeled as original source DEV or TEST"
+            ),
             "mixed_geometry": "reported separately as centered four-corner mixed derivatives, never pooled with single finite changes",
+            "physical_scope_limit": (
+                "Measurements are limited to saved source TRAIN atlas heat and geometry controls, common-valid receiver supports, "
+                "and the recorded finite-change stencils; they do not establish physical causality or generalization beyond those supports."
+            ),
         },
         "query_policy": {
             "fluid_fields": "input-selected 256 common-valid Eulerian points (or all if fewer)",
@@ -1219,7 +1251,7 @@ def evaluate_responses(
                 "response_evaluation_cohort": _cohort_for_family(family_id, response_fit_families),
                 "npz_path": str(Path(atlas_root) / f"train_{family_id}_responses.npz"),
             }
-            for family_id in _ALL_FAMILIES
+            for family_id in atlas_family_ids
         },
         "representative_family_ids": list(representatives),
         "optimizer_updates": 0,

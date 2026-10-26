@@ -345,6 +345,31 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             from .spatial_group_continuation import spatial_group_horizon_amendment
 
             return spatial_group_horizon_amendment(saved, current)
+        if saved.get("workflow") == "interaction_reused_member_routing_joint_training_v1":
+            if allow_microbatch_change:
+                raise ValueError(message)
+            saved, current = (json.loads(json.dumps(value)) for value in (saved, current))
+            previous, proposed = saved.get("engine_config", {}), current.get("engine_config", {})
+            before, after = previous.get("total_epochs"), proposed.get("total_epochs")
+            declared_previous = previous.get("checkpoint_epochs")
+            declared_proposed = proposed.get("checkpoint_epochs")
+            expected_previous = list(range(100, before + 1, 100)) if type(before) is int else None
+            expected_proposed = list(range(100, after + 1, 100)) if type(after) is int else None
+            if (type(before) is not int or type(after) is not int or before < 100 or after <= before
+                    or declared_previous != expected_previous or declared_proposed != expected_proposed):
+                raise ValueError(message)
+            amended = copy.deepcopy(saved)
+            amended["engine_config"]["total_epochs"] = after
+            amended["engine_config"]["checkpoint_epochs"] = copy.deepcopy(declared_proposed)
+            if amended != current:
+                raise ValueError(message)
+            return {
+                "kind": "explicit_member_routing_horizon_extension",
+                "previous_horizon": before,
+                "execution_horizon": after,
+                "optimizer_schedule_unchanged": True,
+                "trajectory_note": "Native objective, constant AdamW rate, provider recipe, data, sampling, and all other run identity fields remain unchanged.",
+            }
         # Checkpoints retain tuples while the identity sidecar is JSON.
         saved, current = (json.loads(json.dumps(value)) for value in (saved, current))
         previous, proposed = saved.get("engine_config", {}), current.get("engine_config", {})
@@ -741,6 +766,14 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     from matplotlib.figure import Figure
 
     joint_run = any(row.get("phase") == "joint" for row in history)
+    canonical_val89_joint = any(
+        (isinstance(row.get("validation"), Mapping)
+         and (row["validation"].get("scope") == "canonical_VAL89_exposed"
+              or row["validation"].get("case_count") == 89))
+        or (str(row.get("arm", "")).startswith("R13-3-") and row.get("case_visits") == 600)
+        for row in history
+    )
+    joint_validation_label = "exposed VAL89" if canonical_val89_joint else "exposed DEV"
     budgeted_native_run = any(isinstance(row.get("native_budgeted_routing_state"), Mapping) for row in history)
 
     def objective_at(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1040,7 +1073,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         except (KeyError, TypeError, ValueError):
             continue
     if selector_points:
-        selector_label = (f"EXPOSED DEV: {field_metric}" if joint_run else
+        selector_label = (f"{joint_validation_label.upper()}: {field_metric}" if joint_run else
                           "HELD-OUT VALIDATION: Held-out field prediction error"
                           if field_metric == "field_score" else f"HELD-OUT VALIDATION: {field_metric}")
         masked_count_total += plot_series(
@@ -1056,7 +1089,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     selector_explanation = ("Normalized field MSE for checkpoint selection; not a loss"
                             if field_metric == "field_score"
                             else "Checkpoint selector, shown separately from loss")
-    set_panel_title(selector_axis, "Exposed DEV checkpoint selector" if joint_run else
+    set_panel_title(selector_axis, f"{joint_validation_label.capitalize()} checkpoint selector" if joint_run else
                     "Held-out field prediction error" if field_metric == "field_score"
                     else "Held-out checkpoint metric", selector_explanation)
     selector_axis.set_xlabel("Completed epoch")
@@ -1141,7 +1174,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     title_parts = [", ".join(arms) if arms else "training"]
     if scope:
         title_parts.append(scope)
-    title_parts.append("TRAIN optimization vs exposed DEV joint inference" if joint_run
+    title_parts.append(f"TRAIN optimization vs {joint_validation_label} joint inference" if joint_run
                        else "TRAIN optimization vs exposed VALIDATION hard inference")
     figure.suptitle(" | ".join(title_parts), fontsize=13)
     epochs = sorted({int(row["epoch"]) for row in history if type(row.get("epoch")) is int})
@@ -1183,12 +1216,16 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         "validation_scope": "exposed held-out validation with hard inference; not an independent TEST result",
     }
     if joint_run:
-        metadata["validation_scope"] = "fixed exposed DEV joint inference; not an independent TEST result"
-        metadata["prediction_path_comparison"] = "TRAIN and DEV execute the same joint model. TRAIN averages macro-update means across updates; DEV pools valid elements at fixed review weights."
+        validation_label = "exposed canonical VAL89" if canonical_val89_joint else "fixed exposed DEV"
+        metadata["validation_scope"] = f"{validation_label} joint inference; not an independent TEST result"
+        metadata["prediction_path_comparison"] = (
+            f"TRAIN and {validation_label} execute the same joint model. TRAIN averages macro-update means across updates; "
+            f"{validation_label} pools valid elements at fixed review weights."
+        )
         metadata["panel_definitions"].update({
-            "shared_name_loss_summary": "Same-named provider physical objectives on TRAIN and exposed DEV. Their reductions differ; this is not a directly comparable objective.",
+            "shared_name_loss_summary": f"Same-named provider physical objectives on TRAIN and {validation_label}. Their reductions differ; this is not a directly comparable objective.",
             "native_prediction": "Provider-defined joint physical field losses against stored references, in TRAIN-fitted scales.",
-            "field_selector": f"Exposed DEV {field_metric} used for checkpoint selection; not independent TEST evidence.",
+            "field_selector": f"{validation_label.title()} {field_metric} used for checkpoint selection; not independent TEST evidence.",
             "routing": "Other provider-defined objectives; this joint family has no B/F gate or routing curriculum.",
             "train_work": "Executed primitive counter sums; counts alone do not establish sparse executor savings.",
         })

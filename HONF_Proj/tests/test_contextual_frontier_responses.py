@@ -406,6 +406,37 @@ def test_full_train_response_cohorts_follow_all_admitted_train_families():
     assert responses._cohort_plan(("0348",))["train_reference_only"] == ["0001", "0318", "0333"]
 
 
+def test_native_only_checkpoint_keeps_all_source_train_responses_reference_only():
+    cohorts = responses._cohort_plan(())
+    assert cohorts == {
+        "train_reference_only": ["0001", "0318", "0333", "0348"],
+        "response_validation_only": [],
+    }
+    assert responses._cohort_for_family("0348", ()) == "train_reference_only"
+    family_results = {
+        family_id: {"module_count": index + 1}
+        for index, family_id in enumerate(("0001", "0318", "0333", "0348"))
+    }
+    family_metrics = {
+        family_id: {"i_plus": {"fluid_fields/u": {
+            "status": "valid",
+            "absolute_mae": 0.1,
+            "absolute_rmse": 0.2,
+            "reference_rms": 1.0,
+            "prediction_rms": 1.0,
+            "relative_rmse_to_reference_rms": 0.2,
+            "relative_metric_applicable": True,
+        }}}
+        for family_id in family_results
+    }
+    summary = responses._summarize_families(family_results, family_metrics, ())
+    assert tuple(summary) == ("train_reference_only", "response_validation_only")
+    assert summary["train_reference_only"]["family_ids"] == ["0001", "0318", "0333", "0348"]
+    assert summary["response_validation_only"]["family_ids"] == []
+    representatives = responses._representative_families(family_results, (), limit=3)
+    assert representatives == ("0001", "0348", "0318")
+
+
 def test_nonfinite_prediction_invalidates_metrics_instead_of_shrinking_denominator():
     metric = responses._component_metric(
         np.asarray([1.0, np.nan]),

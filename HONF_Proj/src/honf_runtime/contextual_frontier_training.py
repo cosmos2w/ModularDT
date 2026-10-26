@@ -27,6 +27,11 @@ from .unified_training import (
 
 CONTEXTUAL_FRONTIER_CONFIG_SCHEMA = "thermal_contextual_frontier_v1"
 SUPPORTED_ARMS = ("J-D", "J-H")
+MEMBER_ROUTING_CONFIG_SCHEMA = "thermal_member_routing_r13_3_v1"
+MEMBER_ROUTING_CORE_SCHEMA = "interaction_reused_member_routing_v1"
+MEMBER_ROUTING_ARMS = ("R13-3-Full", "R13-3-Route")
+MEMBER_ROUTING_MANIFEST_SCHEMA = "honf_member_routing_run_manifest_v1"
+MEMBER_ROUTING_WORKFLOW = "interaction_reused_member_routing_joint_training_v1"
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
 INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1")
 SPATIAL_INTERACTION_GROUP_CORE_SCHEMA = "spatial_interaction_group_fields_v1"
@@ -40,6 +45,8 @@ def _is_spatial_interaction_group_section(section: Mapping[str, Any]) -> bool:
 
 
 def _model_section(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
+    if "member_routing" in config:
+        return "member_routing", config["member_routing"]
     if "interaction_groups" in config:
         return "interaction_groups", config["interaction_groups"]
     return "contextual_frontier", config["contextual_frontier"]
@@ -65,7 +72,8 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
     config = _read_json(config_path)
     if config.get("schema") != research.RESEARCH_SCHEMA:
         raise ValueError(f"Contextual-frontier config must declare schema={research.RESEARCH_SCHEMA}.")
-    section_name = "interaction_groups" if "interaction_groups" in config else "contextual_frontier"
+    section_name = ("member_routing" if "member_routing" in config else
+                    "interaction_groups" if "interaction_groups" in config else "contextual_frontier")
     required = {"name", "dataset", "initialization", "training", "optimizer", "execution", "storage",
                 section_name, "objective"}
     missing = required - set(config)
@@ -76,13 +84,73 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
         if not isinstance(config[section], Mapping):
             raise TypeError(f"{section} must be a JSON object.")
     frontier = config[section_name]
-    expected_schema = INTERACTION_GROUPS_CONFIG_SCHEMA if section_name == "interaction_groups" else CONTEXTUAL_FRONTIER_CONFIG_SCHEMA
+    expected_schema = (MEMBER_ROUTING_CONFIG_SCHEMA if section_name == "member_routing" else
+                       INTERACTION_GROUPS_CONFIG_SCHEMA if section_name == "interaction_groups" else
+                       CONTEXTUAL_FRONTIER_CONFIG_SCHEMA)
     if not isinstance(frontier, Mapping) or frontier.get("schema") != expected_schema:
         raise ValueError(f"{section_name}.schema must be {expected_schema}.")
     arm = frontier.get("arm")
-    supported_arms = INTERACTION_GROUPS_ARMS if section_name == "interaction_groups" else SUPPORTED_ARMS
+    supported_arms = (MEMBER_ROUTING_ARMS if section_name == "member_routing" else
+                      INTERACTION_GROUPS_ARMS if section_name == "interaction_groups" else SUPPORTED_ARMS)
     if arm not in supported_arms:
         raise ValueError(f"{section_name} arm must be one of {supported_arms}.")
+    if section_name == "member_routing":
+        model = frontier.get("model")
+        base = model.get("base_model_config") if isinstance(model, Mapping) else None
+        training = config["training"]
+        initialization = config["initialization"]
+        membership = training.get("membership")
+        if membership == "full_train600":
+            valid_schedule = (training.get("local_horizon") == 100
+                              and training.get("first_segment_epochs") == 100
+                              and training.get("optimizer_schedule_horizon") == 100
+                              and training.get("checkpoint_epochs") == [100]
+                              and training.get("curve_every") == 10
+                              and initialization.get("normalization_mode") == "scratch_train600_stats")
+        elif membership == "fixed25_train150_dev22":
+            valid_schedule = (training.get("local_horizon") == 2
+                              and training.get("first_segment_epochs") == 1
+                              and training.get("optimizer_schedule_horizon") == 2
+                              and training.get("checkpoint_epochs") == [1, 2]
+                              and initialization.get("normalization_mode") == "fixed25_train150_stats")
+        else:
+            valid_schedule = False
+        optimizer = config["optimizer"]
+        objective = config["objective"]
+        if (not isinstance(model, Mapping) or not isinstance(base, Mapping)
+                or model.get("schema") != MEMBER_ROUTING_CORE_SCHEMA
+                or model.get("architecture") != arm
+                or model.get("member_routing_mode") != ("full" if arm == "R13-3-Full" else "route")
+                or model.get("input_dataset") != "thermal"
+                or model.get("input_capability") != "joint_prescribed_records_v1"
+                or base.get("schema") != "content_hypergraph_core_v2"
+                or base.get("architecture") != "A2-D"
+                or base.get("module_input_dim") != 9
+                or base.get("environment_input_dim") != 6
+                or base.get("operating_input_dim") != 12
+                or base.get("coordinate_dim") != 2
+                or base.get("output_dim") != 4
+                or initialization.get("source_kind") != "scratch_interaction_reused_member_routing"
+                or initialization.get("source_checkpoint") is not None
+                or initialization.get("pretrained_weights") is not False
+                or initialization.get("source_parent_age") != 0
+                or initialization.get("seed") != training.get("seed")
+                or not valid_schedule
+                or training.get("seed") != 0
+                or training.get("primary_queries") != 1024
+                or training.get("effective_batch_size") != 48
+                or training.get("microbatch_cases") != 24
+                or optimizer.get("kind") != "fresh_adamw_from_config"
+                or optimizer.get("schedule") != "constant_config_lr"
+                or float(optimizer.get("lr", -1)) != 3e-4
+                or float(optimizer.get("weight_decay", -1)) != 1e-5
+                or tuple(optimizer.get("betas", ())) != (0.9, 0.999)
+                or float(optimizer.get("eps", -1)) != 1e-8
+                or objective.get("native_weights_fixed") is not True
+                or objective.get("response_training_families") != []
+                or objective.get("response_fit") is not False
+                or objective.get("organizer_objective") is not False):
+            raise ValueError("Round13-3 member-routing config differs from its scratch/native-only training contract.")
     spatial_groups = section_name == "interaction_groups" and _is_spatial_interaction_group_section(frontier)
     if spatial_groups:
         model = frontier.get("model")
@@ -280,6 +348,12 @@ def _task_factory() -> Callable[..., tuple[torch.nn.Module, Any]]:
     return build_thermal_contextual_frontier_task
 
 
+def _member_routing_task_factory() -> Callable[..., tuple[torch.nn.Module, Any]]:
+    from channelthermal.training.member_routing_task import build_thermal_member_routing_task
+
+    return build_thermal_member_routing_task
+
+
 def _interaction_group_task_factory(config: Mapping[str, Any]) -> Callable[..., tuple[torch.nn.Module, Any]]:
     section = _model_section(config)[1]
     if _is_spatial_interaction_group_section(section):
@@ -295,7 +369,8 @@ def _interaction_group_task_factory(config: Mapping[str, Any]) -> Callable[..., 
 
 def _build_task(config: Mapping[str, Any], arm: str, device: torch.device,
                 task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None):
-    factory = task_factory or (_interaction_group_task_factory(config)
+    factory = task_factory or (_member_routing_task_factory() if "member_routing" in config else
+                               _interaction_group_task_factory(config)
                                if "interaction_groups" in config else _task_factory())
     model, provider = factory(config, arm=arm, device=device)
     if model is None or provider is None:
@@ -307,17 +382,19 @@ def _build_task(config: Mapping[str, Any], arm: str, device: torch.device,
     return model, provider
 
 
-def _engine_config(config: Mapping[str, Any]) -> EngineConfig:
+def _engine_config(config: Mapping[str, Any], *, total_epochs: int | None = None,
+                   checkpoint_epochs: Sequence[int] | None = None) -> EngineConfig:
     training = config["training"]
     return EngineConfig(
         seed=int(training["seed"]),
         microbatch_cases=int(training["microbatch_cases"]),
         effective_cases=int(training["effective_batch_size"]),
-        total_epochs=int(training["local_horizon"]),
+        total_epochs=int(training["local_horizon"] if total_epochs is None else total_epochs),
         monitor_every=int(training["monitor_every"]),
         gradient_clip=float(config["optimizer"]["gradient_clip"]),
         deterministic_case_order=True,
-        checkpoint_epochs=tuple(map(int, training["checkpoint_epochs"])),
+        checkpoint_epochs=tuple(map(int, training["checkpoint_epochs"] if checkpoint_epochs is None
+                                   else checkpoint_epochs)),
         latest_every=int(training["latest_every"]),
         curve_every=int(training["curve_every"]),
         progress_enabled=bool(training["progress_enabled"]),
@@ -330,15 +407,19 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
     section_name, section = _model_section(config)
     frontier = copy.deepcopy(dict(section))
     interaction_groups = section_name == "interaction_groups"
+    member_routing = section_name == "member_routing"
     spatial_groups = interaction_groups and _is_spatial_interaction_group_section(section)
     return {
-        "schema": ("honf_spatial_interaction_groups_training_v1" if spatial_groups else
+        "schema": ("honf_interaction_reused_member_routing_training_v1" if member_routing else
+                   "honf_spatial_interaction_groups_training_v1" if spatial_groups else
                    "honf_interaction_groups_training_v1" if interaction_groups else
                    "honf_contextual_frontier_training_v1"),
-        "workflow": ("spatial_interaction_groups_joint_training_v1" if spatial_groups else
+        "workflow": (MEMBER_ROUTING_WORKFLOW if member_routing else
+                     "spatial_interaction_groups_joint_training_v1" if spatial_groups else
                      "interaction_groups_joint_training_v1" if interaction_groups else
                      "contextual_frontier_joint_training_v1"),
-        "model_family": ("spatial_interaction_group_fields_joint_field_v1" if spatial_groups else
+        "model_family": ("interaction_reused_original_member_routing_joint_field_v1" if member_routing else
+                         "spatial_interaction_group_fields_joint_field_v1" if spatial_groups else
                          "interaction_groups_joint_field_v1" if interaction_groups else
                          "contextual_organization_joint_field_v1"),
         "dataset": "thermal",
@@ -367,15 +448,18 @@ def _model_state_bytes(model: torch.nn.Module) -> int:
 
 
 def _storage_estimate(model: torch.nn.Module, *, completed_epoch: int, stop_after: int,
-                      config: Mapping[str, Any], fresh_namespace: bool = False) -> tuple[int, int]:
+                      config: Mapping[str, Any], fresh_namespace: bool = False,
+                      checkpoint_epochs: Sequence[int] | None = None) -> tuple[int, int]:
     """Conservatively include model, named Adam moments, aliases, and atomic-save space."""
     state_bytes = max(1, _model_state_bytes(model))
     payload_bytes = 4 * state_bytes + 8 * 1024**2
+    declared_checkpoints = (config["training"]["checkpoint_epochs"] if checkpoint_epochs is None
+                           else checkpoint_epochs)
     milestones = sum(
-        1 for epoch in config["training"]["checkpoint_epochs"]
+        1 for epoch in declared_checkpoints
         if completed_epoch < int(epoch) <= stop_after
     )
-    terminal = int(stop_after not in config["training"]["checkpoint_epochs"])
+    terminal = int(stop_after not in declared_checkpoints)
     if completed_epoch == 0 or fresh_namespace:
         alias_count = 2  # latest and best-field are distinct retained files
     else:
@@ -407,7 +491,8 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
     layout.ensure()
     section_name, section = _model_section(config)
     spatial_groups = section_name == "interaction_groups" and _is_spatial_interaction_group_section(section)
-    manifest_schema = ("honf_spatial_interaction_groups_run_manifest_v1" if spatial_groups else
+    manifest_schema = (MEMBER_ROUTING_MANIFEST_SCHEMA if section_name == "member_routing" else
+                       "honf_spatial_interaction_groups_run_manifest_v1" if spatial_groups else
                        "honf_interaction_groups_run_manifest_v1" if section_name == "interaction_groups" else
                        "honf_contextual_frontier_run_manifest_v1")
     if not resumed:
@@ -565,11 +650,15 @@ def _link_parent_field_selector(output: Path, source_checkpoint: Path,
 def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], output: Path, *,
          device: torch.device, stop_after: int, resume_checkpoint: Path | None = None,
          external_state_continuation: bool = False,
-         wall_clock_budget_seconds: int | None = None) -> dict[str, Any]:
+         wall_clock_budget_seconds: int | None = None,
+         engine_horizon: int | None = None,
+         engine_checkpoint_epochs: Sequence[int] | None = None,
+         allow_horizon_extension: bool = False) -> dict[str, Any]:
     from .research_training import ResearchTrainingEngine
 
     arm = _arm(config)
-    engine_config = _engine_config(config)
+    engine_config = _engine_config(config, total_epochs=engine_horizon,
+                                   checkpoint_epochs=engine_checkpoint_epochs)
     engine = ResearchTrainingEngine(
         engine_config, device=device, parent_age=0,
         selection=SelectionPolicy(field_metric="field_score"),
@@ -596,6 +685,8 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
             "external_state_continuation": True,
             "allow_horizon_extension": True,
         } if external_state_continuation else {})
+        if allow_horizon_extension:
+            continuation_options["allow_horizon_extension"] = True
         return engine.fit(
             model, provider, output,
             identity=_run_identity(config, provider),
@@ -736,6 +827,7 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
                                devices: Sequence[str] | None = None,
                                task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None,
                                wall_clock_budget_seconds: int | None = None,
+                               extend_horizon: bool = False,
                                verify_bindings: bool = True) -> dict[str, Any]:
     run = Path(run_dir).expanduser().resolve(strict=True)
     layout = RunLayout(run)
@@ -743,7 +835,8 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     manifest = _read_json(manifest_path)
     if (manifest.get("schema") not in {"honf_contextual_frontier_run_manifest_v1",
                                         "honf_interaction_groups_run_manifest_v1",
-                                        "honf_spatial_interaction_groups_run_manifest_v1"}
+                                        "honf_spatial_interaction_groups_run_manifest_v1",
+                                        MEMBER_ROUTING_MANIFEST_SCHEMA}
             or manifest.get("artifact_layout_version") != 1):
         raise ValueError("Run is missing the maintained contextual-frontier manifest.")
     config = copy.deepcopy(manifest.get("config"))
@@ -764,8 +857,25 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     current_epoch = int(latest_payload.get("epoch", -1))
     if current_epoch < 1 or stop_after_epoch <= current_epoch:
         raise ValueError("Resume stop must advance the latest completed epoch.")
-    if stop_after_epoch > int(config["training"]["local_horizon"]):
-        raise ValueError(f"Resume stop exceeds the configured absolute {config['training']['local_horizon']}-epoch horizon.")
+    configured_horizon = int(config["training"]["local_horizon"])
+    member_routing = "member_routing" in config
+    horizon_extension = stop_after_epoch > configured_horizon
+    if horizon_extension and not (
+            extend_horizon and member_routing
+            and config["training"].get("membership") == "full_train600"
+            and current_epoch >= configured_horizon):
+        raise ValueError(
+            f"Resume stop exceeds the configured absolute {configured_horizon}-epoch horizon; "
+            "Round13-3 requires --extend-horizon and a completed full-TRAIN100 endpoint."
+        )
+    if extend_horizon and not member_routing:
+        raise ValueError("Explicit horizon extension is supported only for Round13-3 member-routing runs.")
+    engine_checkpoint_epochs = tuple(map(int, config["training"]["checkpoint_epochs"]))
+    if horizon_extension:
+        engine_checkpoint_epochs = tuple(sorted({
+            *engine_checkpoint_epochs,
+            *range(100, stop_after_epoch + 1, 100),
+        }))
     selected_budget, execution_budget = _resume_execution_budget(
         config, manifest, latest_path, latest_payload, wall_clock_budget_seconds,
     )
@@ -778,6 +888,7 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     model, provider = _build_task(config, arm, selected_device, task_factory=task_factory)
     estimated_bytes, peak_temporary = _storage_estimate(
         model, completed_epoch=current_epoch, stop_after=stop_after_epoch, config=config,
+        checkpoint_epochs=engine_checkpoint_epochs,
     )
     storage = _prepare_storage(config, run, estimated_bytes=estimated_bytes,
                                 peak_temporary_bytes=peak_temporary, bindings=binding_info)
@@ -790,27 +901,72 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         "selected_device": device_info,
         "completed_epoch": current_epoch,
         "stop_after_epoch": int(stop_after_epoch),
+        "explicit_horizon_extension": bool(horizon_extension),
         "wall_clock_budget_seconds": selected_budget,
         "wall_clock_budget_scope": "absolute cumulative provider elapsed seconds",
         "storage": storage,
     }, sort_keys=True, default=str, allow_nan=False), flush=True)
     return _fit(model, provider, config, run, device=selected_device,
                 stop_after=stop_after_epoch, resume_checkpoint=latest_path,
-                wall_clock_budget_seconds=selected_budget)
+                wall_clock_budget_seconds=selected_budget,
+                engine_horizon=(stop_after_epoch if horizon_extension else None),
+                engine_checkpoint_epochs=engine_checkpoint_epochs,
+                allow_horizon_extension=horizon_extension)
 
 
 def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
     """Validate a manifest-held config without resolving its external input files."""
-    section_name = "interaction_groups" if "interaction_groups" in config else "contextual_frontier"
+    section_name = ("member_routing" if "member_routing" in config else
+                    "interaction_groups" if "interaction_groups" in config else "contextual_frontier")
     frontier = config.get(section_name, {})
-    expected_schema = INTERACTION_GROUPS_CONFIG_SCHEMA if section_name == "interaction_groups" else CONTEXTUAL_FRONTIER_CONFIG_SCHEMA
-    supported_arms = INTERACTION_GROUPS_ARMS if section_name == "interaction_groups" else SUPPORTED_ARMS
+    expected_schema = (MEMBER_ROUTING_CONFIG_SCHEMA if section_name == "member_routing" else
+                       INTERACTION_GROUPS_CONFIG_SCHEMA if section_name == "interaction_groups" else
+                       CONTEXTUAL_FRONTIER_CONFIG_SCHEMA)
+    supported_arms = (MEMBER_ROUTING_ARMS if section_name == "member_routing" else
+                      INTERACTION_GROUPS_ARMS if section_name == "interaction_groups" else SUPPORTED_ARMS)
     spatial_groups = section_name == "interaction_groups" and isinstance(frontier, Mapping) and _is_spatial_interaction_group_section(frontier)
     if (config.get("schema") != research.RESEARCH_SCHEMA
             or not isinstance(frontier, Mapping)
             or frontier.get("schema") != expected_schema
             or frontier.get("arm") not in supported_arms):
         raise ValueError("Saved contextual model config is malformed or uses an unsupported arm.")
+    if section_name == "member_routing":
+        model = frontier.get("model")
+        arm = frontier.get("arm")
+        base = model.get("base_model_config") if isinstance(model, Mapping) else None
+        training = config.get("training", {})
+        initialization = config.get("initialization", {})
+        membership = training.get("membership") if isinstance(training, Mapping) else None
+        expected = ((100, 100, 100, [100], "scratch_train600_stats") if membership == "full_train600" else
+                    (2, 1, 2, [1, 2], "fixed25_train150_stats") if membership == "fixed25_train150_dev22" else None)
+        actual = (training.get("local_horizon"), training.get("first_segment_epochs"),
+                  training.get("optimizer_schedule_horizon"),
+                  training.get("checkpoint_epochs"), initialization.get("normalization_mode"))
+        optimizer = config.get("optimizer", {})
+        objective = config.get("objective", {})
+        if (not isinstance(model, Mapping) or not isinstance(base, Mapping)
+                or model.get("schema") != MEMBER_ROUTING_CORE_SCHEMA
+                or model.get("architecture") != arm
+                or model.get("member_routing_mode") != ("full" if arm == "R13-3-Full" else "route")
+                or model.get("input_dataset") != "thermal"
+                or model.get("input_capability") != "joint_prescribed_records_v1"
+                or base.get("schema") != "content_hypergraph_core_v2"
+                or base.get("architecture") != "A2-D"
+                or (base.get("module_input_dim"), base.get("environment_input_dim"),
+                    base.get("operating_input_dim"), base.get("coordinate_dim"),
+                    base.get("output_dim")) != (9, 6, 12, 2, 4)
+                or expected is None or actual != expected
+                or initialization.get("source_kind") != "scratch_interaction_reused_member_routing"
+                or initialization.get("source_checkpoint") is not None
+                or initialization.get("pretrained_weights") is not False
+                or initialization.get("source_parent_age") != 0
+                or training.get("seed") != 0 or training.get("primary_queries") != 1024
+                or optimizer.get("schedule") != "constant_config_lr"
+                or float(optimizer.get("lr", -1)) != 3e-4
+                or objective.get("response_training_families") != []
+                or objective.get("response_fit") is not False
+                or objective.get("organizer_objective") is not False):
+            raise ValueError("Saved Round13-3 member-routing config violates its bounded scratch contract.")
     if spatial_groups:
         model = frontier.get("model")
         arm = frontier.get("arm")

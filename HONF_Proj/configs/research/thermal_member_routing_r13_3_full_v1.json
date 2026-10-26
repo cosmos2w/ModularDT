@@ -1,0 +1,106 @@
+{
+  "schema": "honf_thermal_research_run_v1",
+  "name": "thermal_member_routing_r13_3_full_v1",
+  "dataset": {
+    "name": "thermal",
+    "data_path": "/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "manifest_path": "/data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json",
+    "base_recipe_path": "../../src/config_core/forward/content_hypergraph/thermal_a2-h6_development.json"
+  },
+  "initialization": {
+    "source_kind": "scratch_interaction_reused_member_routing",
+    "source_checkpoint": null,
+    "pretrained_weights": false,
+    "source_arm": "scratch_common_seed0",
+    "source_parent_age": 0,
+    "normalization_mode": "scratch_train600_stats",
+    "seed": 0
+  },
+  "optimizer": {
+    "kind": "fresh_adamw_from_config",
+    "schedule": "constant_config_lr",
+    "lr": 0.0003,
+    "weight_decay": 0.00001,
+    "betas": [0.9, 0.999],
+    "eps": 1e-8,
+    "gradient_clip": 1.0
+  },
+  "execution": {
+    "preferred_devices": ["cuda:0"],
+    "precision": "fp32"
+  },
+  "storage": {
+    "output_root": "/data2/wanglz/ModularDT/round13_3_20261025",
+    "max_output_bytes": 4294967296,
+    "max_peak_temporary_bytes": 536870912,
+    "minimum_free_headroom_bytes": 214748364800
+  },
+  "evaluation": {
+    "validation_split": "canonical_VAL89",
+    "representative_case_limit": 4,
+    "max_output_bytes": 268435456
+  },
+  "training": {
+    "membership": "full_train600",
+    "local_horizon": 100,
+    "first_segment_epochs": 100,
+    "optimizer_schedule_horizon": 100,
+    "effective_batch_size": 48,
+    "microbatch_cases": 24,
+    "primary_queries": 1024,
+    "seed": 0,
+    "monitor_every": 100,
+    "checkpoint_epochs": [100],
+    "latest_every": 1,
+    "curve_every": 10,
+    "progress_enabled": true,
+    "wall_clock_budget_seconds": 18000,
+    "clean_save_reserve_seconds": 600
+  },
+  "objective": {
+    "native_weights": {
+      "flow/u": 0.125,
+      "flow/v": 0.125,
+      "flow/p": 0.125,
+      "flow/omega": 0.125,
+      "temperature/fluid": 0.16666666666666666,
+      "temperature/surface": 0.16666666666666666,
+      "temperature/material": 0.16666666666666666,
+      "q_proxy": 0.05
+    },
+    "native_weights_fixed": true,
+    "joint_fields": ["u", "v", "p", "temperature"],
+    "response_training_families": [],
+    "response_fit": false,
+    "organizer_objective": false
+  },
+  "member_routing": {
+    "schema": "thermal_member_routing_r13_3_v1",
+    "arm": "R13-3-Full",
+    "model": {
+      "schema": "interaction_reused_member_routing_v1",
+      "architecture": "R13-3-Full",
+      "member_routing_mode": "full",
+      "base_model_config": {
+        "schema": "content_hypergraph_core_v2",
+        "architecture": "A2-D",
+        "module_input_dim": 9,
+        "environment_input_dim": 6,
+        "operating_input_dim": 12,
+        "coordinate_dim": 2,
+        "query_input_dim": 0,
+        "output_dim": 4,
+        "context_dim": 128,
+        "num_heads": 4,
+        "context_depth": 2,
+        "local_hidden_dim": 128,
+        "dropout": 0.0,
+        "init_seed": 0
+      },
+      "input_dataset": "thermal",
+      "input_capability": "joint_prescribed_records_v1",
+      "entmax_temperature": 1.0,
+      "query_tile_size": 512
+    }
+  }
+}

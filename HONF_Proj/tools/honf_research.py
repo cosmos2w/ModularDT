@@ -42,6 +42,17 @@ def _parser() -> argparse.ArgumentParser:
     train_contextual.add_argument("--epochs", type=int, help="local stop; defaults to the configured first segment")
     train_contextual.add_argument("--output", required=True)
 
+    train_member_routing = commands.add_parser(
+        "train-member-routing", help="start one Round13-3 Thermal joint member-routing run",
+    )
+    train_member_routing.add_argument("--config", required=True)
+    train_member_routing.add_argument("--device", required=True)
+    train_member_routing.add_argument("--devices", nargs="+")
+    train_member_routing.add_argument("--epochs", type=int)
+    train_member_routing.add_argument("--output", required=True)
+    train_member_routing.add_argument("--dry-run", action="store_true",
+                                      help="build the provider and print its identity without creating run output")
+
     continue_contextual = commands.add_parser(
         "continue-contextual", help="continue an F13 development checkpoint with full state in a fresh namespace",
     )
@@ -88,6 +99,25 @@ def _parser() -> argparse.ArgumentParser:
         help=("absolute cumulative provider elapsed-time cap for a supported F13 full-TRAIN resume; "
               "omitting it reuses any saved run-manifest value"),
     )
+
+    resume_member_routing = commands.add_parser(
+        "resume-member-routing", help="resume a Round13-3 run, with explicit opt-in for post-100 continuation",
+    )
+    resume_member_routing.add_argument("--run", required=True)
+    resume_member_routing.add_argument("--device", required=True)
+    resume_member_routing.add_argument("--devices", nargs="+")
+    resume_member_routing.add_argument("--stop-after-epoch", type=int, required=True)
+    resume_member_routing.add_argument(
+        "--extend-horizon", action="store_true",
+        help="explicitly continue a completed full-TRAIN100 endpoint with the same constant optimizer schedule",
+    )
+
+    evaluate_member_routing = commands.add_parser(
+        "evaluate-member-routing", help="evaluate native VAL89, routing probes, and measured work for a checkpoint",
+    )
+    evaluate_member_routing.add_argument("--checkpoint", required=True)
+    evaluate_member_routing.add_argument("--device", default="cpu")
+    evaluate_member_routing.add_argument("--output", required=True)
 
     cut = commands.add_parser("activate-cut", help="activate and persist the Round12 R1 hard cut after local e40")
     cut.add_argument("--run", required=True)
@@ -156,6 +186,31 @@ def main(argv: list[str] | None = None) -> int:
             epochs=args.epochs,
             output=args.output,
         )
+    elif args.command == "train-member-routing":
+        import torch
+        from honf_runtime.contextual_frontier_training import (
+            _arm, _build_task, load_contextual_frontier_config, train_contextual_frontier,
+        )
+        if args.dry_run:
+            config, config_path = load_contextual_frontier_config(args.config)
+            arm = _arm(config)
+            model, provider = _build_task(config, arm, torch.device(args.device))
+            result = {
+                "event": "member_routing_dry_run_ready",
+                "config_path": str(config_path),
+                "arm": arm,
+                "architecture": model.architecture,
+                "training_cases": len(provider.training_case_ids),
+                "validation_cases": len(provider.validation_case_ids),
+                "validation_scope": provider.validation_scope,
+                "provider_identity": provider.identity_payload(),
+                "output_created": False,
+            }
+        else:
+            result = train_contextual_frontier(
+                args.config, device=args.device, devices=args.devices,
+                epochs=args.epochs, output=args.output,
+            )
     elif args.command == "continue-contextual":
         from honf_runtime.contextual_frontier_training import continue_contextual_frontier
         result = continue_contextual_frontier(
@@ -189,6 +244,12 @@ def main(argv: list[str] | None = None) -> int:
             devices=args.devices,
             stop_after_epoch=args.stop_after_epoch,
             wall_clock_budget_seconds=args.wall_clock_budget_seconds,
+        )
+    elif args.command == "resume-member-routing":
+        from honf_runtime.contextual_frontier_training import resume_contextual_frontier
+        result = resume_contextual_frontier(
+            args.run, device=args.device, devices=args.devices,
+            stop_after_epoch=args.stop_after_epoch, extend_horizon=args.extend_horizon,
         )
     elif args.command == "activate-cut":
         result = research.activate_round12_cut(args.run)
@@ -233,6 +294,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             result = evaluate(args.checkpoint, args.device, args.output)
+    elif args.command == "evaluate-member-routing":
+        from honf_runtime.member_routing_evaluation import evaluate_member_routing
+        result = evaluate_member_routing(args.checkpoint, args.device, args.output)
     else:
         result = research.assess(args.run, dataset=args.dataset)
     if isinstance(result, dict):
