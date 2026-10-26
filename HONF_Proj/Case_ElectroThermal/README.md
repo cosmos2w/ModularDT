@@ -2,7 +2,7 @@
 
 HET-MF is a dimensionless steady electro-thermal field-prediction case for the general HONF model. Each example supplies variable-count electrical contacts and 144 environmental material records; the model predicts potential, two cell-centered current components, temperature rise, and total Joule heat.
 
-Shared read-only locations are `/data/public/ModularDT-HETMF` for the case repository and `/data/public/ModularDT-HETMF-Dataset/v1` for the dataset and evidence bundle. Browse the shared repository read-only. For code changes, clone the GitHub repository into your own private worktree and use a working branch.
+Shared read-only locations are `/data/public/ModularDT-HETMF` for the case repository and `/data/public/ModularDT-HETMF-Dataset/v1` for the dataset and evidence bundle. Browse the shared repository read-only. For code changes before this PR merges, clone `codex/hetmf-main-handoff` from GitHub into your own account and create a working branch; a plain `main` checkout does not contain this case until merge.
 
 ## Start here
 

@@ -64,7 +64,14 @@ The loader metadata includes provenance, split labels, family/root identities, s
 
 ## Install and dry-run commands
 
-From the ModularDT repository root, install the general core and case packages, then work from the case directory:
+Until this PR is merged into `main`, clone the preparation branch into your own account:
+
+```bash
+git clone --branch codex/hetmf-main-handoff https://github.com/cosmos2w/ModularDT.git ModularDT
+cd ModularDT
+```
+
+After merge, a normal `main` checkout contains the same case. The host's shared checkout already uses the preparation branch; it is for read-only browsing. From the ModularDT repository root, install the general core and case packages, then work from the case directory:
 
 ```bash
 python -m pip install -e HONF_Proj -e HONF_Proj/Case_ElectroThermal
