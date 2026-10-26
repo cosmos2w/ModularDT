@@ -74,7 +74,9 @@ def gpu2_status() -> dict:
 def require_exclusive_gpu2() -> dict:
     status = gpu2_status()
     required_mib = max(8192, int(status["total_mib"] * 0.2))
-    if status["compute_processes"] or status["free_mib"] < required_mib:
+    foreign_processes = [row for row in status["compute_processes"]
+                         if row.split(",", 1)[0].strip() != str(os.getpid())]
+    if foreign_processes or status["free_mib"] < required_mib:
         raise RuntimeError(f"GPU2 not exclusive/available: {status}")
     return status
 
