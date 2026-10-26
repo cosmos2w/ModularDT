@@ -2,5 +2,7 @@
 
 from .core import InteractionJointOutput, InteractionReusedMemberRoutingCore
 from .relative import RelativeMemberRoutingCore
+from .guided import GuidedMemberRoutingCore
 
-__all__ = ["InteractionJointOutput", "InteractionReusedMemberRoutingCore", "RelativeMemberRoutingCore"]
+__all__ = ["InteractionJointOutput", "InteractionReusedMemberRoutingCore", "RelativeMemberRoutingCore",
+           "GuidedMemberRoutingCore"]

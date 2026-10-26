@@ -347,7 +347,8 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             return spatial_group_horizon_amendment(saved, current)
         if saved.get("workflow") in {
                 "interaction_reused_member_routing_joint_training_v1",
-                "interaction_reused_member_routing_joint_training_v2"}:
+                "interaction_reused_member_routing_joint_training_v2",
+                "interaction_reused_member_routing_joint_training_v3"}:
             if allow_microbatch_change:
                 raise ValueError(message)
             saved, current = (json.loads(json.dumps(value)) for value in (saved, current))
@@ -355,8 +356,10 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             before, after = previous.get("total_epochs"), proposed.get("total_epochs")
             declared_previous = previous.get("checkpoint_epochs")
             declared_proposed = proposed.get("checkpoint_epochs")
-            expected_previous = list(range(100, before + 1, 100)) if type(before) is int else None
-            expected_proposed = list(range(100, after + 1, 100)) if type(after) is int else None
+            first_milestone = (600 if saved.get("workflow") == "interaction_reused_member_routing_joint_training_v3"
+                               and saved.get("initialization", {}).get("source_parent_age") == 500 else 100)
+            expected_previous = list(range(first_milestone, before + 1, 100)) if type(before) is int else None
+            expected_proposed = list(range(first_milestone, after + 1, 100)) if type(after) is int else None
             if (type(before) is not int or type(after) is not int or before < 100 or after <= before
                     or declared_previous != expected_previous or declared_proposed != expected_proposed):
                 raise ValueError(message)
@@ -769,13 +772,14 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
 
     joint_run = any(row.get("phase") == "joint" for row in history)
     member_routing_run = any(
-        str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative"} for row in history
+        str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
+                                      "R13-4-Full", "R13-4-Guide"} for row in history
     )
     canonical_val89_joint = any(
         (isinstance(row.get("validation"), Mapping)
          and (row["validation"].get("scope") == "canonical_VAL89_exposed"
               or row["validation"].get("case_count") == 89))
-        or (str(row.get("arm", "")).startswith("R13-3-") and row.get("case_visits") == 600)
+        or (str(row.get("arm", "")).startswith(("R13-3-", "R13-4-")) and row.get("case_visits") == 600)
         for row in history
     )
     joint_validation_label = "exposed VAL89" if canonical_val89_joint else "exposed DEV"
@@ -1183,6 +1187,11 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                     values = row["work_counts"]
                     if key in values:
                         points.append((int(row["epoch"]), float(values[key])))
+                    elif str(row.get("arm", "")) == "R13-4-Guide":
+                        suffix = key.removeprefix("core_decode_primary_")
+                        paired = [f"core_decode_guide_{path}_{suffix}" for path in ("full", "restricted")]
+                        if all(name in values for name in paired):
+                            points.append((int(row["epoch"]), sum(float(values[name]) for name in paired)))
                 except (KeyError, TypeError, ValueError):
                     continue
             if points:
@@ -1269,6 +1278,16 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     elif case_counts:
         scope = f"{case_counts[0]}–{case_counts[-1]} TRAIN cases/epoch"
     title_parts = [", ".join(arms) if arms else "training"]
+    guided_rows = [row for row in history if isinstance(row.get("reader_epoch_context"), Mapping)]
+    if guided_rows:
+        reader = guided_rows[-1]["reader_epoch_context"]
+        origin = int(reader["source_parent_completed_epoch"])
+        title_parts.append(f"parent {origin}; new reader {reader['additional_epochs_after_parent']} epochs")
+        if origin:
+            for axis in axes:
+                axis.axvline(origin, color="grey", linewidth=0.9, linestyle=":", alpha=0.8)
+        if any(row.get("arm") == "R13-4-Guide" for row in guided_rows):
+            work_axis.set_title("Guide TRAIN work sums full + restricted reads", fontsize=9, pad=18)
     if scope:
         title_parts.append(scope)
     title_parts.append(f"TRAIN optimization vs {joint_validation_label} joint inference" if joint_run
@@ -3317,6 +3336,7 @@ class TrainingEngine:
         joint_native_child: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
+        relation_guided_transfer: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
@@ -3359,6 +3379,11 @@ class TrainingEngine:
                 raise ValueError("Exact resume requires this run's current latest checkpoint; historical checkpoints cannot rewind history.")
         identity = dict(identity)
         provider_identity = dict(provider.identity_payload())
+        if relation_guided_transfer is not None and (
+                identity.get("workflow") != "interaction_reused_member_routing_joint_training_v3"
+                or branch_from_checkpoint is None or resume_checkpoint is not None
+                or optimizer_seed is not None or self.config.training_mode != "joint"):
+            raise ValueError("A relation-guided transfer attaches one retained e500 state to a new joint branch.")
         fresh_initialization = identity.get("fresh_initialization")
         source_reader_variant = provider_identity.get("source_reader_variant")
         is_source_read_sparse = source_reader_variant in ("S-Utility", "S-Complete")
@@ -3936,7 +3961,12 @@ class TrainingEngine:
                         or source_epoch != 100 or len(source_history) != source_epoch
                         or [row.get("epoch") for row in source_history] != list(range(1, source_epoch + 1))):
                     raise ValueError("External F13 continuation lacks its literal source age and complete history.")
-            if identity_is_joint_native and branch_from_checkpoint is not None:
+            if relation_guided_transfer is not None:
+                from .guided_member_routing_child import prepare_guided_transfer
+                amendment = prepare_guided_transfer(
+                    model, provider, source_payload, sealed_identity, relation_guided_transfer,
+                    source_path=source_path)
+            elif identity_is_joint_native and branch_from_checkpoint is not None:
                 from .joint_native_child import prepare_joint_native_child
                 if identity_is_continuous_joint:
                     from .continuous_joint_child import prepare_continuous_joint_child as prepare_joint_native_child
@@ -4056,6 +4086,7 @@ class TrainingEngine:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
             elif (joint_core_revision is None and diagnostic_age_branch is None
+                  and relation_guided_transfer is None
                   and architecture_child_initialization is None and source_read_child is None
                   and inherited_attention_sparse_child is None
                   and hyperedge_readout_child is None
@@ -4083,7 +4114,9 @@ class TrainingEngine:
             restored_rng = source_payload["rng_state"]
             restore_provider_state = getattr(provider, "load_training_state_dict", None)
             provider_state = source_payload.get("provider_training_state", {})
-            if source_read_child is not None:
+            if relation_guided_transfer is not None:
+                provider_state = provider.source_training_state(provider_state)
+            elif source_read_child is not None:
                 from .source_read_child import source_read_child_provider_state
 
                 provider_state = source_read_child_provider_state(provider, provider_state)
@@ -4169,6 +4202,8 @@ class TrainingEngine:
                 raise ValueError("Exact resume optimizer group membership/order differs from its checkpoint.")
         if restored_rng is not None:
             restore_rng_state(restored_rng)
+        if relation_guided_transfer is not None:
+            provider.prepare_transfer_health(model, source_epoch=int(source_payload["epoch"]))
         if source_read_child is not None:
             from .source_read_child import run_source_read_child_auxiliary_fit
 
@@ -4246,10 +4281,12 @@ class TrainingEngine:
                 "preserved_case_visits": sum(int(row["case_visits"]) for row in history),
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
-            if amendment.get("kind") != "explicit_spatial_group_full_state_continuation":
+            if (amendment.get("kind") != "explicit_spatial_group_full_state_continuation"
+                    and relation_guided_transfer is None):
                 amendment["source_checkpoint_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
             resume_amendments.append(amendment)
-            amendment_name = ('joint_native_child' if identity_is_joint_native and branch_from_checkpoint is not None else
+            amendment_name = ('relation_guided_transfer' if relation_guided_transfer is not None else
+                              'joint_native_child' if identity_is_joint_native and branch_from_checkpoint is not None else
                               'joint_native_resume' if identity_is_joint_native else
                               'moment_hyperedge_child' if identity_is_moment_hyperedge and branch_from_checkpoint is not None else
                               'moment_hyperedge_resume' if identity_is_moment_hyperedge else
@@ -4268,7 +4305,7 @@ class TrainingEngine:
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if (identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
+                category='logs' if (relation_guided_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
                                     or identity_is_native_budgeted
                                     or identity_is_native_retrieval
@@ -4290,11 +4327,18 @@ class TrainingEngine:
         if branch_from_checkpoint is not None:
             branch_parent = {
                 "path": str(source_path),
-                "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                **({} if relation_guided_transfer is not None else
+                   {"sha256": hashlib.sha256(source_path.read_bytes()).hexdigest()}),
                 "identity": source_payload.get("experiment_identity"),
                 "epoch": int(source_payload["epoch"]),
             }
-            if inherited_attention_sparse_child is not None:
+            if relation_guided_transfer is not None:
+                branch_parent.update(
+                    relation_guided_transfer=copy.deepcopy(amendment),
+                    inherited_history_scope="Relative parent epochs1–500; new reader/objective rows begin at epoch501",
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in history),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in history))
+            elif inherited_attention_sparse_child is not None:
                 branch_parent.update(
                     inherited_attention_sparse_child=copy.deepcopy(amendment),
                     inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),

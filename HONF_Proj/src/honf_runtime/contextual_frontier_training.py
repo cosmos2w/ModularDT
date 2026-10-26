@@ -719,7 +719,10 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
          wall_clock_budget_seconds: int | None = None,
          engine_horizon: int | None = None,
          engine_checkpoint_epochs: Sequence[int] | None = None,
-         allow_horizon_extension: bool = False) -> dict[str, Any]:
+         allow_horizon_extension: bool = False,
+         training_identity: Mapping[str, Any] | None = None,
+         branch_from_checkpoint: Path | None = None,
+         relation_guided_transfer: Mapping[str, Any] | None = None) -> dict[str, Any]:
     from .research_training import ResearchTrainingEngine
 
     arm = _arm(config)
@@ -753,9 +756,12 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
         } if external_state_continuation else {})
         if allow_horizon_extension:
             continuation_options["allow_horizon_extension"] = True
+        if branch_from_checkpoint is not None:
+            continuation_options.update(branch_from_checkpoint=branch_from_checkpoint,
+                                        relation_guided_transfer=relation_guided_transfer)
         return engine.fit(
             model, provider, output,
-            identity=_run_identity(config, provider),
+            identity=_run_identity(config, provider) if training_identity is None else training_identity,
             arm=arm,
             stop_after=int(stop_after),
             resume_checkpoint=resume_checkpoint,
