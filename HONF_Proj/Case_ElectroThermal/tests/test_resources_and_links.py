@@ -4,6 +4,9 @@ from hetmf.resources import require_data2, require_owned_root, link_dataset
 
 
 def test_real_data2_mount_and_scope():
+    import os
+    if os.environ.get("HETMF_REAL_STORAGE_TEST") != "1":
+        pytest.skip("Set HETMF_REAL_STORAGE_TEST=1 to check the owner's /data2 mount")
     assert require_data2()["mount"][0] == "/data2"
     with pytest.raises(ValueError):
         require_owned_root(Path("/tmp/not-hetmf"))
