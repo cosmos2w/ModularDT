@@ -242,6 +242,37 @@ def test_observation_restores_rng_modes_counters_clocks_and_existing_gradients()
     torch.testing.assert_close(torch.random.get_rng_state(), torch_rng, rtol=0, atol=0)
 
 
+def test_cuda_diagnostic_events_record_and_wait_on_the_provider_device(monkeypatch):
+    provider, model, health = _health_fixture()
+    provider.device = "cuda:1"
+    events = []
+    stream = object()
+    class Event:
+        def __init__(self, **kwargs):
+            self.waited = False
+            events.append(self)
+        def record(self, selected_stream):
+            assert selected_stream is stream
+        def synchronize(self):
+            self.waited = True
+        def elapsed_time(self, end):
+            assert end.waited
+            return 1250.
+    monkeypatch.setattr(torch.cuda, "Event", Event)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: stream if str(device) == "cuda:1" else None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device: None)
+    monkeypatch.setattr(torch.cuda, "get_rng_state", lambda device: torch.zeros(1, dtype=torch.uint8))
+    monkeypatch.setattr(torch.cuda, "set_rng_state", lambda state, device: None)
+    def fake_case(self, observed_model, case_id):
+        case = next(c for c in provider.training_cases if c["case_id"] == case_id)
+        count = int(np.asarray(case["structure"]["module_present"]).sum())
+        return _case(case_id, count, m_support=1, e_support=1, gradient=.1)
+    health._run_case = MethodType(fake_case, health)
+    observation = health.observe(model, training_epoch=10)
+    assert len(events) == 2
+    assert observation["diagnostic_runtime"]["cuda_seconds"] == 1.25
+
+
 def test_health_state_is_compact_and_clean_stop_never_replaces_an_existing_request(tmp_path):
     provider, _model, health = _health_fixture()
     initial = _summary([

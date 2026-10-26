@@ -683,14 +683,14 @@ class MemberRoutingHealth:
         if device.type == "cuda":
             cuda_start, cuda_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             torch.cuda.synchronize(device)
-            cuda_start.record()
+            cuda_start.record(torch.cuda.current_stream(device))
         wall_start = time.perf_counter()
         try:
             with torch.enable_grad():
                 case_records = [self._run_case(model, case_id) for case_id in self.panel_case_ids]
             if cuda_end is not None:
-                cuda_end.record()
-                torch.cuda.synchronize(device)
+                cuda_end.record(torch.cuda.current_stream(device))
+                cuda_end.synchronize()
             wall_seconds = time.perf_counter() - wall_start
             cuda_seconds = None if cuda_start is None else float(cuda_start.elapsed_time(cuda_end)) / 1000.0
             paths = {path: _path_summary(case_records, path) for path in TYPED_PATHS}
