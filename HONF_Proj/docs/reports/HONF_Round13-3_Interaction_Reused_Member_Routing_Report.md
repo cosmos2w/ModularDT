@@ -1,5 +1,7 @@
 # HONF Round13-3: applied interaction reuse and original-member routing
 
+Historical endpoint report. The implemented correction, native diagnosis, new TRAIN600 epoch-100 lineage, measured approximation costs and tested continuation are recorded in the [corrective relative-member report](HONF_Round13-3_Corrective_Relative_Member_Routing_Report.md). The measurements below remain the original failed Route and Full evidence.
+
 Completed first segments, 26 October 2026 UTC. ThermalChannel only. Both scratch TRAIN600 lineages stopped at epoch 100; no later training is authorized or running for this round.
 
 The new versioned model applies MM, EM, EE and ME contextual exchanges to original M/E records, reuses the final applied M←M and M←E gates as an M-address directory, and performs query-conditioned original-member selection with independent M/E null routes before one joint physical head. Full reads all eligible original members; Route executes values only for exact-positive selected weights. The implementation and recovery paths work, but Route loses all final member reads by epoch 3. Its lower training runtime at epoch 100 accompanies a serious loss of input sensitivity, rather than useful learned sparse retrieval.
