@@ -7,8 +7,8 @@ rtk proxy env PYTHONPATH=src:Case_ThermalChannel/src /home/wanglz/miniconda3/env
   docs/reports/run1501_1502_comparison/cost/benchmark_inference_cost.py \
   --checkpoint 1404=Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise/best_by_field_mse_model.pt \
   --checkpoint 1804=Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1804_20260905_081349_dense_pairwise_field_adaptation/best_by_field_mse_model.pt \
-  --checkpoint 1501=Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/best_by_field_mse_model.pt \
-  --checkpoint 1502=Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/best_by_field_mse_model.pt \
+  --checkpoint 1501=Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/best_by_field_mse_model.pt \
+  --checkpoint 1502=Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/05_20260919_20260925_AdaptiveGroups_and_Coalescence/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/best_by_field_mse_model.pt \
   --case-list docs/reports/run1501_1502_comparison/accuracy/evaluation/logs/selected_cases.csv \
   --output docs/reports/run1501_1502_comparison/cost/inference_cost_cuda2.json \
   --dataset /data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5 \

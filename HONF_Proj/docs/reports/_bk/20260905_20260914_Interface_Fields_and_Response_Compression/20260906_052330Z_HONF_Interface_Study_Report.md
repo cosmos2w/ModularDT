@@ -64,11 +64,11 @@ Run 1401 best-field at epoch 4585 was evaluated separately on the same 90 cases.
 
 Primary output:
 
-`Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case`
+`Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case`
 
 Mature output:
 
-`Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_MatureBestField_Epoch4585_90Case`
+`Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_MatureBestField_Epoch4585_90Case`
 
 ## Matched accuracy at epoch 500
 
@@ -267,7 +267,7 @@ rtk env CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:Case_ThermalChannel/src \
   --split test --case-ratio 1.0 --device cuda:0 --query-batch-size 32768 \
   --local-port-condition-mode predicted --return-routing-maps \
   --anchor-case-id 0273 --anchor-case-id 0653 \
-  --output-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case
+  --output-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case
 ```
 
 Mature Run-1401 evaluation used the same split/query/normalization settings and the trusted checkpoint that records epoch 4585:
@@ -280,7 +280,7 @@ rtk env CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:Case_ThermalChannel/src \
   --label 'Run 1401 mature best-field @4585' --split test --case-ratio 1.0 \
   --device cuda:0 --query-batch-size 32768 --local-port-condition-mode predicted \
   --return-routing-maps --anchor-case-id 0273 --anchor-case-id 0653 \
-  --output-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_MatureBestField_Epoch4585_90Case
+  --output-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_MatureBestField_Epoch4585_90Case
 ```
 
 Focused ordinary verification:

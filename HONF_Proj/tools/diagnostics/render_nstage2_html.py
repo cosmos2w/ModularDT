@@ -118,7 +118,7 @@ TIMING_ARCHITECTURE_LABELS = {
 
 OLD_DEBUG_ROOTS = {
     "Dense": (
-        "Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case/debug_npz",
+        "Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage2_Run1401_1804_1801_1802_Epoch500_20Case/debug_npz",
     ),
     "Reader": ("diagnostics/generated/interface_operator_study/group_reader_recovery/endpoint/debug_npz",),
     "Regional": ("diagnostics/generated/interface_operator_study/regional_response/endpoint500/debug_npz",),

@@ -168,7 +168,7 @@ Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1804_20260905_081349_dense_
 Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1805_20260908_002326_sparse_interface_geometry_read/epoch_2500_model.pt
 ```
 
-Epoch-500 inputs were reused from `Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case/tables/` and `diagnostics/generated/interface_operator_study/group_reader_recovery/endpoint/tables/`; they were not regenerated or altered. The reduction records source paths and uses raw components from those tables.
+Epoch-500 inputs were reused from `Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case/tables/` and `diagnostics/generated/interface_operator_study/group_reader_recovery/endpoint/tables/`; they were not regenerated or altered. The reduction records source paths and uses raw components from those tables.
 
 ## Research recommendation
 

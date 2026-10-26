@@ -33,7 +33,7 @@ DEFAULT_RUN_DIRS = {
     "2100": RUN_ROOT / "bk/04_20260915_20260918_DecoderAblation_and_Routing/Run_2100_20260916_002148_routed_mean_shift",
 }
 DEFAULT_BASELINE_TABLE = PROJECT / (
-    "Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/"
+    "Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/09_Comparisons_and_LaunchLogs/CompareModels/"
     "Stage3_Run1401_1804_1801_1802_Epoch500_90Case/tables/per_case_metrics.csv"
 )
 DEFAULT_ENDPOINTS = {

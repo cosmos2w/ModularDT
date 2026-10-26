@@ -51,7 +51,7 @@ def source_directory(root, run, epoch):
             return STUDIES / "group_reader_recovery/endpoint/tables"
         if run == "1806":
             return STUDIES / "regional_response/endpoint500/tables"
-        return PROJECT / "Trained_Results/ThermalChannel/HONF_Forward_Runs/bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case/tables"
+        return PROJECT / "Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/09_Comparisons_and_LaunchLogs/CompareModels/Stage3_Run1401_1804_1801_1802_Epoch500_90Case/tables"
     if run in ("1801", "1806"):
         return root / "evaluation/tables"
     return STUDIES / f"epoch{epoch}_comparison/evaluation/tables"
