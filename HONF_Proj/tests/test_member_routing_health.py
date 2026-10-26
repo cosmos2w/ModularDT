@@ -92,6 +92,24 @@ def test_one_empty_case_or_query_does_not_trigger_widespread_collapse():
     assert evaluate_pause(None, {"M": True, "E": True}, current, (1, 2, 5, 12)) is None
 
 
+def test_native_output_insensitivity_pauses_even_when_other_task_gradients_are_live():
+    roles = ("temperature/fluid", "temperature/surface", "temperature/material")
+    def observation(signal):
+        cases = [_case(str(count), count, m_support=1, e_support=1, gradient=.1)
+                 for count in (1, 2, 5, 12)]
+        for case in cases:
+            case["heat_sensitivity"] = {
+                "heat_plus10_fieldwise_native_delta": dict.fromkeys(roles, signal),
+                "repeatability_fieldwise_native_delta": dict.fromkeys(roles, 1e-7),
+            }
+        return _summary(cases)
+    initial, current = observation(.02), observation(0.)
+    decision = evaluate_pause(initial, {"M": True, "E": True}, current, (1, 2, 5, 12))
+    assert decision["kind"] == "native_temperature_heat_response_became_unresolved"
+    current["cases"][-1]["heat_sensitivity"]["heat_plus10_fieldwise_native_delta"][roles[0]] = .01
+    assert evaluate_pause(initial, {"M": True, "E": True}, current, (1, 2, 5, 12)) is None
+
+
 def test_native_health_trace_tiles_full_observation_union_and_keeps_task_gradients():
     from types import SimpleNamespace
     from honf_forward_core.content_hypergraph.contracts import QueryBatch

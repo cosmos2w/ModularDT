@@ -382,6 +382,30 @@ def evaluate_pause(initial: Mapping[str, Any] | None, previously_active: Mapping
     if any(count not in initial_by_count or count not in current_by_count for count in low_high):
         return None
 
+    # A live parameter gradient need not imply sensitivity in the prescribed
+    # heat direction. Compare actual native outputs with their own numerical
+    # repeatability, separately from score/value connectivity. Requiring the
+    # complete input-stratified panel avoids treating one legitimate empty or
+    # locally heat-insensitive observation as a failed scene path.
+    temperature_roles = ("temperature/fluid", "temperature/surface", "temperature/material")
+    def lost_native_heat_response(count):
+        if count not in initial_by_count or count not in current_by_count:
+            return False
+        before = initial_by_count[count].get("heat_sensitivity", {})
+        now = current_by_count[count].get("heat_sensitivity", {})
+        first_signal = before.get("heat_plus10_fieldwise_native_delta", {})
+        first_noise = before.get("repeatability_fieldwise_native_delta", {})
+        signal = now.get("heat_plus10_fieldwise_native_delta", {})
+        noise = now.get("repeatability_fieldwise_native_delta", {})
+        return all(role in first_signal and role in first_noise and role in signal and role in noise
+                   and float(first_signal[role]) > float(first_noise[role])
+                   and float(signal[role]) <= float(noise[role]) for role in temperature_roles)
+
+    if all(lost_native_heat_response(count) for count in counts):
+        return {"kind": "native_temperature_heat_response_became_unresolved",
+                "panel_module_counts": sorted(counts),
+                "comparison": "initially resolved native temperatures versus each case's same-input repeatability"}
+
     def path_gradient_zero(record, path):
         gradients = record.get("live_gradient_norms", {})
         names = (("score_M", "key_M", "value_M", "B_M") if path == "M"
