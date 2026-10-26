@@ -100,6 +100,12 @@ def run_pilot_stage(root: Path, plan: dict, config: dict, stage: str, *,
     if len(plan["scenes"]) > config["pilot"]["max_distinct_states"]:
         raise RuntimeError("pilot physical-state ceiling exceeded")
     accepted, reused, failed = 0, 0, 0
+    from .io import initialize_root
+
+    initialize_root(root, {key: reservation[key] for key in (
+        "retained_budget_bytes", "temporary_budget_bytes", "peak_new_bytes",
+        "minimum_free_bytes",
+    )})
     with single_writer(root):
         for index in range(0, len(cases), batch_size):
             if (root / "receipts" / "STOP").exists():
