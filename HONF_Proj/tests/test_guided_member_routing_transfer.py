@@ -20,7 +20,11 @@ def attachment(tmp_path):
     }
     identity = {
         "provider_identity": {"training_case_ids": ["0001"], "validation_case_ids": ["0274"],
-                              "adapter_state": adapter},
+                              "adapter_state": adapter,
+                              "source_binding": {"dataset_path": "/original/packed_dataset.h5",
+                                                 "dataset_size_bytes": 1234,
+                                                 "dataset_mtime_ns": 5678,
+                                                 "manifest_path": "/original/manifest.json"}},
         "optimizer": {"lr": 3e-4}, "optimizer_schedule_contract": [{"kind": "constant"}],
         "sampling_dataset_id": "same-original-dataset",
         "engine_config": {"seed": 0, "effective_cases": 48, "microbatch_cases": 24},
@@ -45,7 +49,8 @@ def test_attachment_preserves_parent_state_and_declares_changed_reader(tmp_path)
     assert result["target_arm"] == "R13-4-Guide"
 
 
-@pytest.mark.parametrize("change", ["normalization", "membership", "packing", "optimizer", "parent_age"])
+@pytest.mark.parametrize("change", ["normalization", "membership", "packing", "optimizer", "parent_age",
+                                  "dataset_binding", "missing_dataset_binding"])
 def test_attachment_rejects_silent_training_state_changes(tmp_path, change):
     model, parent, current, declaration, source = attachment(tmp_path)
     if change == "normalization":
@@ -56,6 +61,10 @@ def test_attachment_rejects_silent_training_state_changes(tmp_path, change):
         current["engine_config"]["microbatch_cases"] = 12
     elif change == "optimizer":
         current["optimizer"]["lr"] = 1e-3
+    elif change == "dataset_binding":
+        current["provider_identity"]["source_binding"]["dataset_mtime_ns"] += 1
+    elif change == "missing_dataset_binding":
+        del current["provider_identity"]["source_binding"]
     else:
         parent["epoch"] = 501
     with pytest.raises(ValueError):

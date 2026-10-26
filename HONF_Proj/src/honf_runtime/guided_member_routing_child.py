@@ -44,6 +44,11 @@ def prepare_guided_transfer(model, provider, source, current, declaration, *, so
     for name in ("training_case_ids", "validation_case_ids"):
         if old_provider[name] != new_provider[name]:
             raise ValueError(f"Guided transfer changed {name}.")
+    # The versioned provider identity changes for this attachment, so retain
+    # its existing dataset/manifest binding explicitly alongside membership.
+    if (not isinstance(old_provider.get("source_binding"), Mapping)
+            or not same_state(old_provider["source_binding"], new_provider.get("source_binding"))):
+        raise ValueError("Guided transfer changed the existing dataset/manifest source binding.")
     for name in ("normalization_stats", "heat_scale", "native_grid_nx_ny", "environment_grid_nx_ny"):
         if not same_state(old_provider["adapter_state"][name], new_provider["adapter_state"][name]):
             raise ValueError(f"Guided transfer changed original TRAIN normalization/adapter field {name}.")
