@@ -1,0 +1,71 @@
+schema: hetmf_pilot_config_v1
+rng:
+  root_seed: 20261017
+  key_hash: sha256_canonical_namespace_v1
+  pilot_namespace_disjoint_from_formal: true
+physics:
+  domain: [1.0, 1.0]
+  sheet_model: scalar_thin_sheet_one_way_electrothermal
+  lateral_electrical_bc: insulating
+  lateral_thermal_bc: insulating
+  contact_heat_fraction_to_sheet: 1.0
+  temperature_dependent_coefficients: false
+  units: dimensionless_fixed_reference_scales
+environment:
+  tile_shape: [12, 12]
+  reconstruction: log_bilinear_centers_border_v1
+  family_weights: {correlated_mosaic: 0.40, layered_barrier: 0.20, inclusions: 0.20, corridors: 0.20}
+  electrical_contrast_bound: [3.0, 30.0]
+  thermal_contrast_bound: [1.5, 6.0]
+  cooling_level: [2.0, 12.0]
+  cooling_contrast_bound: [1.0, 3.0]
+  latent_correlation_modes: [0.0, 0.7]
+contacts:
+  counts: [2, 3, 4, 6, 8, 12]
+  radius: [0.06, 0.09]
+  total_conductance: [1.0, 10.0]
+  footprint: normalized_compact_quartic_v1
+  quadrature_order_per_axis: 4
+  edge_extra_clearance: 0.025
+  interpad_extra_clearance: 0.015
+  core_voltage_range: 1.0
+grid:
+  first_representative: [96, 96]
+  refinement_levels: [48, 96, 192]
+  optional_reference: 384
+solver:
+  method: batched_matrix_free_pcg
+  preconditioner: jacobi
+  precision_policy: qualify_fp64_and_fp32_refined
+  fast_true_rtol: 1.0e-6
+  fast_absolute_residual_tolerance: 1.0e-10
+  reference_true_rtol: 1.0e-10
+  reference_absolute_residual_tolerance: 1.0e-13
+  max_iterations: 4000
+  max_refinement_corrections: 3
+  stopping_check_interval: 10
+  near_zero_power_absolute_tolerance: 1.0e-11
+  nonnegative_absolute_tolerance: 1.0e-10
+pilot:
+  representative_count: 12
+  counterfactual_quartets: 6
+  throughput_states: 256
+  batch_sizes: [1, 4, 16, 32]
+  timing_repeats: 3
+  max_distinct_states: 320
+  max_coupled_evaluations: 4000
+  max_linear_system_attempts: 10000
+resources:
+  physical_gpu: 2
+  required_gpu_uuid: GPU-f6a4ddbb-ad44-5ef5-0421-eecf7120df39
+  min_free_gpu_gib: 8
+  min_free_gpu_fraction: 0.20
+  initial_process_allocation_cap_gib: 4
+  elapsed_budget_hours: 6
+  gpu_associated_budget_hours: 2
+  retained_budget_gib: 15
+  temporary_budget_gib: 5
+  minimum_free_disk_gib: 50
+  data2_base: /data2/wanglz/ModularDT/datasets/hetmf
+formal_generation_authorized: false
+ml_training_authorized: false

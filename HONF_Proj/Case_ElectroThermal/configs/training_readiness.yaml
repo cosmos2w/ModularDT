@@ -1,0 +1,40 @@
+# Interface contract for future experiments; this file does not start training.
+schema: hetmf_training_readiness_v1
+dataset_schema: hetmf_training_h5_v1
+adapter: hetmf.honf_adapter:ElectroThermalHONFAdapter
+field_order: [potential, jx_cell, jy_cell, temperature_rise, q_total]
+coordinates:
+  frame: hetmf_unit_square_xy_v1
+  origin: [0.0, 0.0]
+  scale: [1.0, 1.0]
+module_features: [radius, log_total_contact_conductance, terminal_voltage]
+environment_features: [log_sheet_conductance, log_thermal_conductance, log_cooling_strength]
+contact_identity: hetmf_contact_literal_sha256_int63_v1
+physical_measures:
+  module: pi_times_radius_squared
+  environment: supplied_sampling_area
+local_radius_factor: 3.0
+model:
+  schema: content_hypergraph_core_v2
+  architecture: A2-D
+  module_input_dim: 3
+  environment_input_dim: 3
+  coordinate_dim: 2
+  query_input_dim: 0
+  operating_input_dim: 0
+  output_dim: 5
+  context_dim: 32
+  num_heads: 4
+  context_depth: 2
+  num_hyperedges: 0
+  thermal_response_rank: 0
+  local_hidden_dim: 32
+  dropout: 0.0
+  init_seed: 0
+readiness:
+  optimizer_steps: 0
+  training_schedule: not_selected
+  organizer_and_inverse_validation: not_performed
+  target_transform: loader_option_with_saved_train_only_statistics
+  dataloader_workers: CPU_adapter_only_then_batch_to_model_device_in_main_process
+  dataloader_context_after_parent_torch_threads: spawn

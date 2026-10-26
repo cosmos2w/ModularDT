@@ -4,6 +4,10 @@
 
 The checkpoint-compatible default forward profile is `enhanced_honf_pairwise`; the opt-in upgraded profile is `adaptive_sparse_additive`. The default preserves fixed-projection organization, context-fusion decoding, softmax routing, and dense execution for old saved configurations and checkpoints. The upgraded profile uses exchangeable candidate edges, descriptor-first mechanism states, entmax15 locality-aware routing, gathered pre-MLP execution, and an exact background-plus-edge additive field.
 
+## Electro-thermal shared-data case
+
+`Case_ElectroThermal` provides a standalone HDF5 reader, dimensionless physical reference generator, and portable field-training interface for **Six-hyperedge organization controlling contextualized member reads**, **Dense MM/ME/EM interaction and direct field reads**, and **A2-D**. All three predict the same five fields jointly, with prescribed contact voltage and material records entering before interaction. Start with [the coworker handoff](Case_ElectroThermal/docs/COWORKER_HANDOFF.md) and [dataset introduction report](Case_ElectroThermal/HETMF_DATASET_AND_TRAINING_READINESS_REPORT.md). The shared epoch trainer is `honf_runtime.field_training`; case-owned features, normalization, and physical metrics are in `hetmf.training`. These commands use `python -m hetmf`, independently of the historical Thermal launcher and local-surrogate checkpoints. Shared data and generated report figures remain outside Git.
+
 ## 1. Quick default forward run with the local Stage-A checkpoint
 
 Run commands from `HONF_Proj` in the `ModularDT` environment. This dry-run validates the default profile, dataset, GPU 0, output location, and the exact local checkpoint without creating a run:

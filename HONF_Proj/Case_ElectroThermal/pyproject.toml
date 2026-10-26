@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hetmf"
+version = "0.1.0"
+description = "Conservative HET-MF electro-thermal dataset reference"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "torch", "h5py", "matplotlib", "PyYAML"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

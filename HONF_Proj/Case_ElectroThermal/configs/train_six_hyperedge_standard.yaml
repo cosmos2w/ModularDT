@@ -1,0 +1,26 @@
+schema: hetmf_fit_v1
+profile: standard
+model:
+  name: six_hyperedge
+  display_name: Six-hyperedge organization controlling contextualized member reads
+  hidden_dim: 256
+  num_hyperedges: 6
+  init_seed: 0
+  position_fourier_frequencies: 4
+  query_fourier_frequencies: 4
+  pairwise_kernel_hidden_dim: 256
+  pairwise_kernel_num_layers: 4
+  pairwise_kernel_fourier_frequencies: 4
+training:
+  epochs: 100
+  batch_size: 48
+  queries: 1024
+  validation_queries: 1024
+  seed: 0
+  learning_rate: 0.0003
+  weight_decay: 0.00001
+  gradient_clip_norm: 1.0
+  num_workers: 0
+storage:
+  retained_budget_gib: 2
+  minimum_free_gib: 100

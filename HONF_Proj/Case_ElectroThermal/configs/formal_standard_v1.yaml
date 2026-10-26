@@ -1,0 +1,8 @@
+schema: hetmf_formal_proposal_v1
+profile: standard
+proposed_states: 4608
+input_namespace: formal_disjoint_from_pilot
+primary_grid_proposal: 96
+raw_reference_dtype_proposal: float64
+status: completed_release_see_dataset_registry
+requires_bound_user_approval: true
