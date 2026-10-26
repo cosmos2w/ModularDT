@@ -16,7 +16,7 @@ for _directory in (PROJECT / "src", PROJECT / "Case_ThermalChannel/src"):
         sys.path.insert(0, str(_directory))
 
 from channelthermal.training.member_routing_health import (
-    MemberRoutingHealth, evaluate_pause, request_clean_stop,
+    MemberRoutingHealth, evaluate_pause, request_clean_stop, _native_with_first_tile_trace,
 )
 
 
@@ -90,6 +90,34 @@ def test_one_empty_case_or_query_does_not_trigger_widespread_collapse():
     ])
 
     assert evaluate_pause(None, {"M": True, "E": True}, current, (1, 2, 5, 12)) is None
+
+
+def test_native_health_trace_tiles_full_observation_union_and_keeps_task_gradients():
+    from types import SimpleNamespace
+    from honf_forward_core.content_hypergraph.contracts import QueryBatch
+
+    calls = []
+    parameter = torch.nn.Parameter(torch.tensor(2.))
+    class Core:
+        query_tile_size = 4
+        def decode(self, organization, query, *, return_trace):
+            calls.append((query.num_queries, return_trace))
+            scores = parameter * query.coordinates[..., :1]
+            fields = scores.expand(-1, -1, 4)
+            return SimpleNamespace(joint_fields=fields, work_counts={"rows": query.num_queries},
+                                   trace={"proposal_logits_M": scores} if return_trace else None)
+    model = SimpleNamespace(core=Core(), _extract_native_roles=lambda prepared, temperature, flow:
+                            {"temperature": temperature, "flow": flow})
+    prepared = SimpleNamespace(organization=object(), query_batch=QueryBatch(
+        coordinates=torch.ones(1, 11, 2)))
+    native, counts, trace = _native_with_first_tile_trace(model, prepared)
+    assert calls == [(4, True), (4, False), (3, False)]
+    assert counts == {"rows": 11}
+    assert native["temperature"].shape == (1, 11, 1)
+    score_gradient, parameter_gradient = torch.autograd.grad(
+        native["temperature"].sum(), (trace["proposal_logits_M"], parameter))
+    assert torch.equal(score_gradient, torch.ones_like(score_gradient))
+    assert parameter_gradient == 11
 
 
 def test_pause_when_both_paths_lose_initial_native_signal_beyond_repeatability():

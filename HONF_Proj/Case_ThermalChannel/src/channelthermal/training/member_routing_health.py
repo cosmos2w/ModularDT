@@ -180,6 +180,8 @@ def _score_targets(trace: Mapping[str, torch.Tensor], prepared) -> dict[str, tup
     query_mask = (torch.ones(query.coordinates.shape[:2], dtype=torch.bool,
                              device=query.coordinates.device)
                   if query.query_mask is None else query.query_mask)
+    trace_queries = trace["proposal_logits_M"].shape[1]
+    query_mask = query_mask[:, :trace_queries]
     scene = prepared.organization.scene
     def address_log(role):
         value = trace.get(f"address_coefficients_{role}")
@@ -292,6 +294,40 @@ def _score_gradient_observation(objective: torch.Tensor,
         for (name, _value), gradient in zip(live, gradients):
             result[name] = _tensor_norm(gradient)
     return result
+
+
+def _native_with_first_tile_trace(model, prepared):
+    """Keep native extraction on the full union and trace its first legal tile.
+
+    The traced scores are the actual tensors used by that tile's prediction,
+    so its native-loss gradients remain meaningful. Other tiles retain the
+    normal no-trace decoder, including its training checkpoint behavior.
+    """
+    from honf_forward_core.content_hypergraph.query_chunks_v1 import slice_query_v1
+
+    fields, counts, first_trace = [], {}, None
+    query = prepared.query_batch
+    size = int(model.core.query_tile_size)
+    for start in range(0, query.num_queries, size):
+        tile = slice_query_v1(query, start, min(start + size, query.num_queries))
+        output = model.core.decode(prepared.organization, tile, return_trace=start == 0)
+        fields.append(output.joint_fields)
+        for name, value in output.work_counts.items():
+            counts[name] = counts.get(name, 0) + int(value)
+        if start == 0:
+            first_trace = output.trace
+    joint = torch.cat(fields, dim=1)
+    native = model._extract_native_roles(prepared, joint[..., 3:4], joint[..., :3])
+    return native, counts, first_trace
+
+
+def _first_query_rows(trace, count):
+    rows = int(trace["proposal_logits_M"].shape[1])
+    return {name: (value[:, :count] if torch.is_tensor(value) and value.ndim >= 2
+                   and value.shape[1] == rows and name not in {
+                       "B_M", "B_E", "original_module_ids", "original_environment_ids"}
+                   and not name.startswith(("selected_value_indices_", "B_M_edge", "B_E_edge")) else value)
+            for name, value in trace.items()}
 
 
 def _path_summary(case_records: list[dict[str, Any]], path: str) -> dict[str, Any]:
@@ -490,12 +526,15 @@ class MemberRoutingHealth:
 
         def prepare_and_run(batch, *, capture_trace):
             prepared = provider._prepare_for_probe(model, batch)
-            native, decode, output = model.apply_native_with_work_counts(
-                prepared, batch.receivers.heat, return_trace=capture_trace,
-            )
+            if capture_trace:
+                native, decode, trace = _native_with_first_tile_trace(model, prepared)
+            else:
+                native, decode, output = model.apply_native_with_work_counts(
+                    prepared, batch.receivers.heat,
+                )
+                trace = getattr(output, "trace", None)
             prediction = ThermalContentPredictions(prepared, native, work=decode)
             roles = provider._role_losses(prediction, batch.targets)
-            trace = getattr(output, "trace", None)
             if capture_trace and not isinstance(trace, Mapping):
                 raise RuntimeError("Native member-routing observation did not expose its actual route trace.")
             return prepared, native, trace or {}, roles
@@ -517,17 +556,23 @@ class MemberRoutingHealth:
         weighted_trace_loss = sum(float(provider.native_weights[name]) * value.mean()
                                   for name, value in roles.items())
         live_norms.update(_score_gradient_observation(weighted_trace_loss, trace))
+        score_gradient_queries = int(trace["proposal_logits_M"].shape[1])
+        trace = _first_query_rows(trace, query_count)
 
         torch.random.set_rng_state(trace_rng_cpu)
         if trace_rng_cuda is not None:
             torch.cuda.set_rng_state(trace_rng_cuda, torch.device(provider.device))
-        repeat_prepared, repeat_native, repeat_trace, _repeat_roles = prepare_and_run(probe_batch, capture_trace=True)
+        with torch.no_grad():
+            repeat_prepared, repeat_native, repeat_trace, _repeat_roles = prepare_and_run(probe_batch, capture_trace=True)
+        repeat_trace = _first_query_rows(repeat_trace, query_count)
         perturbed_receivers = replace(probe_batch.receivers, heat=probe_batch.receivers.heat * 1.1)
         heat_batch = replace(probe_batch, receivers=perturbed_receivers)
         torch.random.set_rng_state(trace_rng_cpu)
         if trace_rng_cuda is not None:
             torch.cuda.set_rng_state(trace_rng_cuda, torch.device(provider.device))
-        heat_prepared, heat_native, heat_trace, _heat_roles = prepare_and_run(heat_batch, capture_trace=True)
+        with torch.no_grad():
+            heat_prepared, heat_native, heat_trace, _heat_roles = prepare_and_run(heat_batch, capture_trace=True)
+        heat_trace = _first_query_rows(heat_trace, query_count)
 
         supports = {
             "proposal_M": _support_with_ids(trace.get("proposal_weights_M"),
@@ -578,7 +623,8 @@ class MemberRoutingHealth:
             "raw_centered_scores_and_margins": score_summaries,
             "objective_gradient_group_norms": group_norms,
             "live_gradient_norms": live_norms,
-            "score_gradient_query_scope": "fixed eight-query trace with full native surface/material roles",
+            "score_gradient_query_scope": "actual first decoder tile under eight-fluid-query plus full native surface/material objective",
+            "score_gradient_query_count": score_gradient_queries,
             "typed_read_strength_l2": read_strength,
             "typed_read_repeatability_l2": read_noise,
             "typed_read_heat_sensitivity_l2": read_heat_delta,
