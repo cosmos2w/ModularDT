@@ -4,7 +4,7 @@ The new Full and Guide readers retain the applied two-cycle MM→EM→EE→ME co
 
 ## Equations and execution
 
-For each query and type, use the applied final-stage directory \(B^M=G_{MM,\mathrm{offdiag}}+I\), \(B^E=G_{ME}\), positive M proposals \(\pi\), physical measures \(\nu\), and \(P_i=(\sum_m\pi_m B_{mi})\nu_i/\sum_j(\sum_m\pi_mB_{mj})\nu_j\). A type without an eligible positive path returns zero context before normalization. M-empty scenes cannot access E through this M-address family. No independent record-read branch is added.
+For each query and type, use the applied final-stage directory \(B^M=G_{MM,\mathrm{offdiag}}+I\), \(B^E=G_{ME}\), positive M proposals \(\pi\), the inherited information measures \(\nu\), and \(P_i=(\sum_m\pi_m B_{mi})\nu_i/\sum_j(\sum_m\pi_mB_{mj})\nu_j\). The actual reader uses one unit per present M record and E physical area divided by the scene's positive mean E area; physical module area remains separate preserved metadata. A type without an eligible positive path returns zero context before normalization. M-empty scenes cannot access E through this M-address family. No independent record-read branch is added.
 
 Full evaluates every relation-eligible original member. Guide retains every eligible M and selects the shortest descending-P prefix of E whose omitted conditional prior mass is at most \(\epsilon=0.01\), resolving ties by original ID. Each original ID appears once in a query's candidate set even when several addresses contribute. Prior composition, sorting and indexing remain real work; they precede the member MLP. A diffuse prior may retain almost all E. No absolute threshold is applied to the final rho-scaled weights.
 
