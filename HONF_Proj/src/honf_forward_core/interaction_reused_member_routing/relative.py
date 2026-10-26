@@ -70,6 +70,8 @@ class RelativeMemberRoutingCore(InteractionReusedMemberRoutingCore):
     _additional_decode_count_keys = (
         "query_address_softmax_rows", "query_M_continuous_value_rows", "query_E_continuous_value_rows",
         "query_M_member_softmax_rows", "query_E_member_softmax_rows", "query_M_sorted_rows", "query_E_sorted_rows",
+        "query_address_support_pair_rows", "query_address_index_scan_rows", "query_typed_read_gate_rows",
+        "query_routing_normalization_rows", "query_M_id_sort_rows", "query_E_id_sort_rows",
     )
 
     def __init__(self, base_model_config: Mapping[str, Any], *, member_routing_mode="route",
@@ -207,8 +209,16 @@ class RelativeMemberRoutingCore(InteractionReusedMemberRoutingCore):
         coefficients = {}
         candidates = {}
         relation_rows = 0
+        index_scan_rows = 0
         for role, matrix, n in (("M", B_M, M), ("E", B_E, E)):
-            a, possible, _, _, visits = self._expand_live_coefficients(pi, matrix, Q, n)
+            cached = matrix is getattr(prepared, f"B_{role}")
+            a, possible, _, _, visits = self._expand_live_coefficients(
+                pi, matrix, Q, n,
+                cached_index=getattr(prepared, f"B_{role}_edge_index") if cached else None,
+                cached_values=getattr(prepared, f"B_{role}_edge_values") if cached else None,
+            )
+            if not cached:
+                index_scan_rows += matrix.numel()
             eligible = scene.module_mask if role == "M" else scene.environment_mask & (scene.environment_measure > 0)
             candidate = possible & eligible[:, None, :] & qmask[..., None]
             fixed = controls.get(f"fixed_candidate_mask_{role}")
@@ -220,6 +230,11 @@ class RelativeMemberRoutingCore(InteractionReusedMemberRoutingCore):
             relation_rows += visits
         counts = {"query_M_proposal_score_rows": proposal_rows, "query_address_relation_rows": relation_rows,
                   "query_address_coefficient_pair_rows": scene.batch_size * Q * M * (M + E),
+                  "query_address_support_pair_rows": scene.batch_size * Q * M * (M + E),
+                  "query_address_index_scan_rows": index_scan_rows,
+                  "query_typed_read_gate_rows": 2 * scene.batch_size * Q,
+                  "query_routing_normalization_rows": 2 * scene.batch_size * Q + (
+                      scene.batch_size * (Q + M) if proposal_rows else 0),
                   "query_receiver_rows": scene.batch_size * Q, "query_address_softmax_rows": int(allowed.sum())}
         trace = {"proposal_logits_M": raw_proposal, "proposal_effective_scores_M": normalized_proposal,
                  "proposal_weights_M": pi, "proposal_null": (1. - pi.sum(-1)).clamp_min(0.),
@@ -230,6 +245,8 @@ class RelativeMemberRoutingCore(InteractionReusedMemberRoutingCore):
             candidate, a = candidates[role], coefficients[role]
             raw, scored = self._member_base_logits(prepared, query, qstates, role, candidate,
                                                    controls.get("member_score_mode", "learned"))
+            if scored and controls.get("member_score_mode", "learned") == "learned":
+                counts["query_routing_normalization_rows"] += scene.batch_size * (Q + candidate.shape[-1])
             fixed_raw = controls.get(f"fixed_member_logits_{role}")
             if fixed_raw is not None:
                 if fixed_raw.shape != raw.shape or fixed_raw.device != raw.device or not bool(torch.isfinite(fixed_raw).all()):
@@ -274,6 +291,7 @@ class RelativeMemberRoutingCore(InteractionReusedMemberRoutingCore):
                            f"query_{role}_dense_candidate_value_rows": int(candidate.sum()) if execution == "dense_candidate_union" else 0,
                            f"query_{role}_continuous_value_rows": int(candidate.sum()) if mode == "continuous" else 0,
                            f"query_{role}_member_softmax_rows": int(candidate.sum()),
+                           f"query_{role}_id_sort_rows": ids.numel() if mode == "sparse" else 0,
                            f"query_{role}_sorted_rows": int(candidate.numel()) if mode == "sparse" else 0})
             if return_trace:
                 trace.update({f"candidate_mask_{role}": candidate, f"address_coefficients_{role}": a,
