@@ -360,12 +360,31 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                                and saved.get("initialization", {}).get("source_parent_age") == 500 else 100)
             expected_previous = list(range(first_milestone, before + 1, 100)) if type(before) is int else None
             expected_proposed = list(range(first_milestone, after + 1, 100)) if type(after) is int else None
+            guided = saved.get("workflow") == "interaction_reused_member_routing_joint_training_v3"
+            if guided:
+                # v3 continuation may explicitly change output cadence while
+                # extending execution. Keep every scientific identity field exact.
+                def valid_milestones(values, horizon):
+                    return (type(horizon) is int and isinstance(values, list) and bool(values)
+                            and all(type(value) is int and 0 < value <= horizon for value in values)
+                            and values == sorted(set(values)))
+
+                if (not valid_milestones(declared_previous, before)
+                        or not valid_milestones(declared_proposed, after)
+                        or type(current["engine_config"].get("curve_every", 10)) is not int
+                        or current["engine_config"].get("curve_every", 10) < 1):
+                    raise ValueError(message)
+                expected_previous, expected_proposed = declared_previous, declared_proposed
             if (type(before) is not int or type(after) is not int or before < 100 or after <= before
                     or declared_previous != expected_previous or declared_proposed != expected_proposed):
                 raise ValueError(message)
             amended = copy.deepcopy(saved)
             amended["engine_config"]["total_epochs"] = after
             amended["engine_config"]["checkpoint_epochs"] = copy.deepcopy(declared_proposed)
+            if guided:
+                amended["engine_config"].pop("curve_every", None)
+                if "curve_every" in current["engine_config"]:
+                    amended["engine_config"]["curve_every"] = current["engine_config"]["curve_every"]
             if amended != current:
                 raise ValueError(message)
             return {
@@ -373,6 +392,9 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                 "previous_horizon": before,
                 "execution_horizon": after,
                 "optimizer_schedule_unchanged": True,
+                **({"output_policy": {"checkpoint_epochs": declared_proposed,
+                                      "curve_every": current["engine_config"].get("curve_every", 10)}}
+                   if guided else {}),
                 "trajectory_note": "Native objective, constant AdamW rate, provider recipe, data, sampling, and all other run identity fields remain unchanged.",
             }
         # Checkpoints retain tuples while the identity sidecar is JSON.

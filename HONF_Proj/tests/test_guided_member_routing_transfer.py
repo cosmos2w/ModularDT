@@ -1,5 +1,6 @@
 """State and membership behavior of the narrow relation-guided attachment."""
 import copy
+import json
 
 import pytest
 import torch
@@ -82,3 +83,86 @@ def test_scratch_extension_interface_changes_only_execution_horizon():
     current["optimizer"]["lr"] = 1e-3
     with pytest.raises(ValueError):
         _resume_identity_amendment(saved, current, allow_horizon_extension=True)
+
+
+def output_extension_identities():
+    saved = {"workflow": WORKFLOW, "initialization": {"source_parent_age": 0},
+             "engine_config": {"total_epochs": 100, "checkpoint_epochs": [100],
+                               "monitor_every": 100, "latest_every": 1, "seed": 0},
+             "optimizer": {"lr": 3e-4}, "provider_identity": {"normalization": "TRAIN600"}}
+    current = copy.deepcopy(saved)
+    current["engine_config"].update(total_epochs=500, checkpoint_epochs=[200, 500], curve_every=1)
+    return saved, current
+
+
+def test_guided_extension_accepts_explicit_output_policy_without_mutating_source():
+    saved, current = output_extension_identities()
+    original = copy.deepcopy((saved, current))
+    amendment = _resume_identity_amendment(saved, current, allow_horizon_extension=True)
+    assert amendment["output_policy"] == {"checkpoint_epochs": [200, 500], "curve_every": 1}
+    assert (saved, current) == original
+    with pytest.raises(ValueError):
+        _resume_identity_amendment(saved, current)
+
+
+@pytest.mark.parametrize("change", ["optimizer", "normalization", "validation", "seed", "bad_curves",
+                                  "duplicate_checkpoint", "checkpoint_after_horizon", "legacy_reader"])
+def test_guided_output_extension_keeps_scientific_and_historical_resume_checks(change):
+    saved, current = output_extension_identities()
+    if change == "optimizer":
+        current["optimizer"]["lr"] = 1e-3
+    elif change == "normalization":
+        current["provider_identity"]["normalization"] = "changed"
+    elif change == "validation":
+        current["engine_config"]["monitor_every"] = 1
+    elif change == "seed":
+        current["engine_config"]["seed"] = 1
+    elif change == "bad_curves":
+        current["engine_config"]["curve_every"] = 0
+    elif change == "duplicate_checkpoint":
+        current["engine_config"]["checkpoint_epochs"] = [200, 200, 500]
+    elif change == "checkpoint_after_horizon":
+        current["engine_config"]["checkpoint_epochs"] = [200, 600]
+    else:
+        saved["workflow"] = current["workflow"] = "interaction_reused_member_routing_joint_training_v2"
+    with pytest.raises(ValueError):
+        _resume_identity_amendment(saved, current, allow_horizon_extension=True)
+
+
+def test_guided_resume_restores_custom_output_policy_after_interruption(tmp_path, monkeypatch):
+    from honf_runtime import guided_member_routing_training as training
+
+    config = {"member_routing": {"arm": "R13-4-Guide"},
+              "training": {"local_horizon": 100, "checkpoint_epochs": [100], "curve_every": 10,
+                            "wall_clock_budget_seconds": 18000},
+              "initialization": {"source_parent_age": 0}}
+    manifest = {"schema": training.MANIFEST_SCHEMA, "config": config, "config_path": "scratch.json"}
+    (tmp_path / "run_manifest.json").write_text(json.dumps(manifest))
+    payload = {"epoch": 100, "experiment_identity": {"engine_config": {
+        "total_epochs": 100, "checkpoint_epochs": [100]}}}
+    checkpoint = tmp_path / "latest_model.pt"
+    monkeypatch.setattr(training, "resolve_checkpoint", lambda *a: checkpoint)
+    monkeypatch.setattr(training, "load_trusted_checkpoint", lambda *a, **kw: payload)
+    monkeypatch.setattr(training.research, "resolve_device", lambda *a, **kw: ("cpu", {}))
+    monkeypatch.setattr(training.maintained, "_ensure_workspace_storage_bindings", lambda: {})
+    monkeypatch.setattr(training, "_build", lambda *a: (object(), object()))
+    monkeypatch.setattr(training.maintained, "_storage_estimate", lambda *a, **kw: (0, 0))
+    monkeypatch.setattr(training.maintained, "_prepare_storage", lambda *a, **kw: {})
+    monkeypatch.setattr(training, "training_identity", lambda c: {"recipe_budget": c["training"]["wall_clock_budget_seconds"]})
+    calls = []
+    monkeypatch.setattr(training.maintained, "_fit", lambda *a, **kw: calls.append((a[2], kw)))
+    training.resume(tmp_path, stop_after_epoch=500, extend_horizon=True,
+                    checkpoint_epochs=[200, 500], curve_every=1, wall_clock_budget_seconds=36000)
+    assert calls[-1][1]["engine_checkpoint_epochs"] == [200, 500]
+    assert calls[-1][0]["training"]["curve_every"] == 1
+    assert calls[-1][1]["wall_clock_budget_seconds"] == 36000
+    assert calls[-1][1]["training_identity"]["recipe_budget"] == 18000
+    # A clean pause does not shrink the saved horizon or restore default outputs.
+    payload.update(epoch=201, experiment_identity={"engine_config": {
+        "total_epochs": 500, "checkpoint_epochs": [200, 500], "curve_every": 1}})
+    training.resume(tmp_path, stop_after_epoch=500)
+    assert calls[-1][1]["engine_horizon"] == 500
+    assert calls[-1][1]["engine_checkpoint_epochs"] == [200, 500]
+    assert calls[-1][0]["training"]["curve_every"] == 1
+    assert calls[-1][1]["wall_clock_budget_seconds"] == 36000
+    assert calls[-1][1]["allow_horizon_extension"] is False

@@ -61,12 +61,13 @@ def _build(config, device):
         config, arm=config["member_routing"]["arm"], device=device)
 
 
-def _write_manifest(output, config, config_path, storage, *, resumed):
+def _write_manifest(output, config, config_path, storage, *, resumed, execution_budget=None):
     RunLayout(output).ensure()
     _atomic_json(output / "run_manifest.json", {
         "schema": MANIFEST_SCHEMA, "artifact_layout_version": 1,
         "arm": config["member_routing"]["arm"], "config": config,
         "config_path": str(config_path), "resumed": resumed, "storage": storage,
+        **({"execution_budget": execution_budget} if execution_budget is not None else {}),
     })
 
 
@@ -100,7 +101,8 @@ def train(config_path, *, output, device="cuda:1", stop_after_epoch=None):
         relation_guided_transfer=declaration)
 
 
-def resume(run, *, device="cuda:1", stop_after_epoch, extend_horizon=False):
+def resume(run, *, device="cuda:1", stop_after_epoch, extend_horizon=False,
+           checkpoint_epochs=None, curve_every=None, wall_clock_budget_seconds=None):
     run = Path(run).expanduser().resolve(strict=True)
     manifest = json.loads((run / "run_manifest.json").read_text())
     if manifest.get("schema") != MANIFEST_SCHEMA:
@@ -111,22 +113,51 @@ def resume(run, *, device="cuda:1", stop_after_epoch, extend_horizon=False):
     stop = int(stop_after_epoch)
     if stop <= payload["epoch"]:
         raise ValueError("Resume must advance the latest completed epoch.")
-    extension = stop > config["training"]["local_horizon"]
+    saved_engine = payload["experiment_identity"]["engine_config"]
+    saved_horizon = int(saved_engine["total_epochs"])
+    extension = stop > saved_horizon
     if extension and not extend_horizon:
         raise ValueError("An explicit horizon extension is required beyond the saved execution horizon.")
+    if (checkpoint_epochs is not None or curve_every is not None) and not extension:
+        raise ValueError("Output changes require an explicit execution-horizon extension.")
+    if checkpoint_epochs is None:
+        checkpoint_epochs = (list(range(600 if config["initialization"]["source_parent_age"] else 100,
+                                       stop + 1, 100)) if extension
+                             else list(saved_engine["checkpoint_epochs"]))
+    if (not isinstance(checkpoint_epochs, (list, tuple)) or not checkpoint_epochs
+            or any(type(value) is not int or not 0 < value <= max(saved_horizon, stop)
+                   for value in checkpoint_epochs)
+            or list(checkpoint_epochs) != sorted(set(checkpoint_epochs))):
+        raise ValueError("Checkpoint epochs must be sorted, unique, positive epochs within the execution horizon.")
+    if curve_every is None:
+        curve_every = saved_engine.get("curve_every", 10)
+    if type(curve_every) is not int or curve_every < 1:
+        raise ValueError("Curve frequency must be a positive epoch interval.")
+    config["training"]["checkpoint_epochs"] = list(checkpoint_epochs)
+    config["training"]["curve_every"] = curve_every
+    execution_budget = manifest.get("execution_budget")
+    if wall_clock_budget_seconds is not None:
+        if (type(wall_clock_budget_seconds) is not int
+                or wall_clock_budget_seconds < config["training"]["wall_clock_budget_seconds"]):
+            raise ValueError("An explicit cumulative execution budget cannot reduce the saved recipe allowance.")
+        execution_budget = {"cumulative_wall_clock_budget_seconds": wall_clock_budget_seconds,
+                            "source_epoch": int(payload["epoch"]),
+                            "optimizer_and_recipe_schedule_unchanged": True}
     selected, _ = research.resolve_device(device, permitted_devices=(device,))
     maintained._ensure_workspace_storage_bindings()
     model, provider = _build(config, selected)
     estimated, peak = maintained._storage_estimate(
-        model, completed_epoch=payload["epoch"], stop_after=stop, config=config)
+        model, completed_epoch=payload["epoch"], stop_after=stop, config=config,
+        checkpoint_epochs=checkpoint_epochs)
     storage = maintained._prepare_storage(config, run, estimated_bytes=estimated, peak_temporary_bytes=peak)
-    _write_manifest(run, config, Path(manifest["config_path"]), storage, resumed=True)
+    _write_manifest(run, config, Path(manifest["config_path"]), storage, resumed=True,
+                    execution_budget=execution_budget)
     return maintained._fit(
         model, provider, config, run, device=selected, stop_after=stop,
         resume_checkpoint=checkpoint, training_identity=training_identity(config),
-        engine_horizon=stop if extension else None,
-        engine_checkpoint_epochs=(list(range(600 if config["initialization"]["source_parent_age"] else 100,
-                                             stop + 1, 100)) if extension else None),
+        engine_horizon=max(saved_horizon, stop), engine_checkpoint_epochs=checkpoint_epochs,
+        wall_clock_budget_seconds=(execution_budget["cumulative_wall_clock_budget_seconds"]
+                                   if execution_budget is not None else None),
         allow_horizon_extension=extension)
 
 
@@ -158,6 +189,10 @@ def main(argv=None):
     recovery.add_argument("--device", default="cuda:1")
     recovery.add_argument("--stop-after-epoch", type=int, required=True)
     recovery.add_argument("--extend-horizon", action="store_true")
+    recovery.add_argument("--checkpoint-epochs", nargs="+", type=int)
+    recovery.add_argument("--curve-every", type=int, help="Redraw saved curves every this many epochs.")
+    recovery.add_argument("--wall-clock-budget-seconds", type=int,
+                          help="Explicit cumulative execution allowance; scientific schedules stay unchanged.")
     evaluation = commands.add_parser("evaluate")
     evaluation.add_argument("--checkpoint", required=True)
     evaluation.add_argument("--device", default="cuda:1")
