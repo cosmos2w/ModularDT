@@ -1,0 +1,21 @@
+schema: hetmf_fit_v1
+model:
+  name: a2d
+  display_name: A2-D
+  context_dim: 256
+  num_heads: 4
+  init_seed: 0
+training:
+  epochs: 100
+  batch_size: 48
+  queries: 1024
+  validation_queries: 1024
+  seed: 0
+  learning_rate: 0.0003
+  weight_decay: 0.00001
+  gradient_clip_norm: 1.0
+  num_workers: 0
+  progress: true
+storage:
+  retained_budget_gib: 2
+  minimum_free_gib: 100

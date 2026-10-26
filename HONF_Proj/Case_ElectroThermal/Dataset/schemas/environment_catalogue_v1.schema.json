@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HET-MF 12x12 environment control catalogue v1",
+  "type": "object",
+  "required": ["family", "s", "kappa", "beta"],
+  "properties": {
+    "family": {"type": "string"},
+    "s": {"$ref": "#/$defs/positive_grid"},
+    "kappa": {"$ref": "#/$defs/positive_grid"},
+    "beta": {"$ref": "#/$defs/positive_grid"}
+  },
+  "$defs": {"positive_grid": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"type": "number", "exclusiveMinimum": 0}}}}
+}

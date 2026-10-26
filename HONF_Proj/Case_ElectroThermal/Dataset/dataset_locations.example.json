@@ -1,0 +1,5 @@
+{
+  "hetmf_standard_training_v1": "/data/public/ModularDT-HETMF-Dataset/v1/standard.h5",
+  "hetmf_expanded_training_v1": "/data/public/ModularDT-HETMF-Dataset/v1/expanded.h5",
+  "hetmf_shared_evidence_v1": "/data/public/ModularDT-HETMF-Dataset/v1/evidence"
+}
