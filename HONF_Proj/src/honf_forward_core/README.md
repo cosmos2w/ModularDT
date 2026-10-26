@@ -36,3 +36,11 @@ Core code may depend on PyTorch and NumPy only. A physical case must adapt its
 samples to this contract and interpret output channels itself. See the root
 `Model_Explain.md` for equations and `docs/case_plugin.md` for the extension
 boundary.
+
+## HET-MF field interfaces on the research branch
+
+The HET-MF integration adds the case adapters and shared epoch trainer from GitHub `main` while retaining the research branch's complete forward-core implementation. In particular, the research configuration options, contextual value policies, native route capture, source-read execution, and package exports remain available. The smaller source selection documented on `main` does not replace these research implementations.
+
+HET-MF uses `HONFNeuralField` for six-hyperedge contextualized member reads, `InterfaceFieldCore` with `forward_architecture="dense_pairwise_field"` for dense MM/ME/EM interaction, and `ContentHypergraphCoreV2` for A2-D. Case-specific fields, units, material/contact features, record identity, physical measures, normalization, and HDF5 loading remain in `Case_ElectroThermal`.
+
+The `InterfaceFieldCore` call boundary is `encode_case(batch)`, `prepare(encoded, encoded.module_tokens)`, and `decode_queries(prepared, query_xy, query_features)`; `HONFNeuralField` retains its `forward(BatchData)` interface. `ContentHypergraphCoreV2` accepts its own `SceneBatch` and `QueryBatch` contracts. See [the coworker handoff](../../Case_ElectroThermal/docs/COWORKER_HANDOFF.md) for the three model configurations and CPU interface checks.

@@ -1,7 +1,5 @@
 {
-  "hetmf_pilot_20261017_v1": "/data2/wanglz/ModularDT/datasets/hetmf/pilots/pilot_20261017_v1",
-  "hetmf_standard_release_v1": "/data2/wanglz/ModularDT/datasets/hetmf/releases/standard_20261017_v1",
-  "hetmf_expanded_release_v1": "/data2/wanglz/ModularDT/datasets/hetmf/releases/expanded_20261018_v1",
-  "hetmf_standard_training_v1": "/data2/wanglz/ModularDT/datasets/hetmf/processed/hetmf_standard_v1.h5",
-  "hetmf_expanded_training_v1": "/data2/wanglz/ModularDT/datasets/hetmf/processed/hetmf_expanded_v1.h5"
+  "hetmf_standard_training_v1": "/data/public/ModularDT-HETMF-Dataset/v1/standard.h5",
+  "hetmf_expanded_training_v1": "/data/public/ModularDT-HETMF-Dataset/v1/expanded.h5",
+  "hetmf_shared_evidence_v1": "/data/public/ModularDT-HETMF-Dataset/v1/evidence"
 }

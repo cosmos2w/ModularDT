@@ -98,7 +98,34 @@ def main(argv: list[str] | None = None) -> None:
     diagnostic.add_argument("--retained-budget-gib", type=float, required=True)
     diagnostic.add_argument("--temporary-budget-gib", type=float, required=True)
     diagnostic.add_argument("--minimum-free-gib", type=float, default=100)
+    fitting = commands.add_parser("train", help="Fit one selected field model, or qualify its interface without fitting")
+    fitting.add_argument("--config", type=Path, required=True)
+    fitting.add_argument("--dataset", type=Path, required=True)
+    fitting.add_argument("--output", type=Path, required=True)
+    fitting.add_argument("--device", default="cpu")
+    fitting.add_argument("--dry-run", action="store_true")
+    fitting.add_argument("--yes", action="store_true")
+    fitting.add_argument("--resume", type=Path)
+    fitting.add_argument("--epochs", type=int)
+    evaluation = commands.add_parser("evaluate", help="Evaluate a saved HET-MF field model")
+    evaluation.add_argument("--run", type=Path, required=True)
+    evaluation.add_argument("--dataset", type=Path)
+    evaluation.add_argument("--checkpoint", default="best_field.pt")
+    evaluation.add_argument("--split", choices=("dev", "test", "panel_new_environment", "panel_new_layout", "panel_new_pair", "panel_extrapolation", "audit"), default="dev")
+    evaluation.add_argument("--device", default="cpu")
+    evaluation.add_argument("--queries", type=int)
+    shared = commands.add_parser("link-shared", help="Browse published read-only archives and report evidence")
+    shared.add_argument("--bundle", type=Path, required=True)
+    shared.add_argument("--case-dir", type=Path, default=CASE_DIR)
     args = parser.parse_args(argv)
+    if args.command == "link-shared":
+        from .resources import link_shared_bundle
+        print(json.dumps(link_shared_bundle(args.bundle, args.case_dir), indent=2))
+        return
+    if args.command in ("train", "evaluate"):
+        from .training import train_command, evaluate_command
+        print(json.dumps(train_command(args) if args.command == "train" else evaluate_command(args), indent=2))
+        return
 
     if args.command == "preflight":
         config = load_config(args.config)

@@ -1,0 +1,32 @@
+schema: hetmf_fit_v1
+profile: standard
+model:
+  name: dense_pairwise
+  display_name: Dense MM/ME/EM interaction and direct field reads
+  hidden_dim: 256
+  init_seed: 0
+  position_fourier_frequencies: 4
+  query_fourier_frequencies: 4
+  message_hidden_dim: 128
+  attention_heads: 4
+  receiver_chunk_size: 128
+  relative_fourier_frequencies: 4
+  coarse_latent_count: 8
+  coarse_blocks: 1
+  main_latent_count: 16
+  main_latent_blocks: 2
+  local_radius_factor: 2.5
+  activation_checkpointing: false
+training:
+  epochs: 100
+  batch_size: 48
+  queries: 1024
+  validation_queries: 1024
+  seed: 0
+  learning_rate: 0.0003
+  weight_decay: 0.00001
+  gradient_clip_norm: 1.0
+  num_workers: 0
+storage:
+  retained_budget_gib: 2
+  minimum_free_gib: 100

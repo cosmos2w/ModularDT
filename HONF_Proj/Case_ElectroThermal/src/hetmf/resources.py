@@ -74,7 +74,9 @@ def gpu2_status() -> dict:
 def require_exclusive_gpu2() -> dict:
     status = gpu2_status()
     required_mib = max(8192, int(status["total_mib"] * 0.2))
-    if status["compute_processes"] or status["free_mib"] < required_mib:
+    foreign_processes = [row for row in status["compute_processes"]
+                         if row.split(",", 1)[0].strip() != str(os.getpid())]
+    if foreign_processes or status["free_mib"] < required_mib:
         raise RuntimeError(f"GPU2 not exclusive/available: {status}")
     return status
 
@@ -154,3 +156,37 @@ def link_training_artifacts(case_dir: Path, targets: dict[str, Path]) -> dict[st
         if not destination.is_symlink():
             destination.symlink_to(target, target_is_directory=target.is_dir())
     return {name: str(target) for name, target in checked.items()}
+
+
+def link_shared_bundle(bundle: Path, case_dir: Path) -> dict[str, str]:
+    """Link read-only published inputs; generation keeps its owned-root checks."""
+    import h5py
+    bundle = Path(bundle).expanduser().resolve(strict=True)
+    case_dir = Path(case_dir).expanduser().resolve(strict=True)
+    dataset = case_dir / 'Dataset'
+    if (case_dir.name != 'Case_ElectroThermal' or not (case_dir / 'pyproject.toml').is_file()
+            or dataset.is_symlink() or not dataset.is_dir()):
+        raise ValueError('expected a real Case_ElectroThermal/Dataset directory')
+    targets = {'standard.h5': bundle / 'standard.h5', 'expanded.h5': bundle / 'expanded.h5'}
+    targets.update({name: bundle / 'evidence' / name
+                    for name in ('readiness', 'formal_standard', 'formal_expanded', 'pilot')})
+    for name, target in targets.items():
+        if not target.exists():
+            raise FileNotFoundError(target)
+        if name.endswith('.h5'):
+            with h5py.File(target, 'r') as handle:
+                if handle.attrs.get('schema') != 'hetmf_training_h5_v1' or not handle.attrs.get('accepted'):
+                    raise ValueError('published file is not an accepted training archive')
+        elif not target.is_dir():
+            raise ValueError('expected an evidence directory')
+        dest = dataset / name
+        if dest.is_symlink():
+            if dest.resolve(strict=False) != target.resolve():
+                raise FileExistsError(f'refusing foreign link: {dest}')
+        elif dest.exists():
+            raise FileExistsError(f'refusing regular destination: {dest}')
+    for name, target in targets.items():
+        destination = dataset / name
+        if not destination.is_symlink():
+            destination.symlink_to(target, target_is_directory=target.is_dir())
+    return {name: str(target) for name, target in targets.items()}

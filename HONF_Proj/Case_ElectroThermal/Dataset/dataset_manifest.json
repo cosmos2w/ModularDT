@@ -63,5 +63,12 @@
     "integrity_receipt": "/data2/wanglz/ModularDT/datasets/hetmf/releases/expanded_20261018_v1/diagnostics/formal_progress.json",
     "raw_shards": 0,
     "processed_shards": 0
+  },
+  "distribution": {
+    "public_root": "/data/public/ModularDT-HETMF-Dataset/v1",
+    "standard_file": "standard.h5",
+    "expanded_file": "expanded.h5",
+    "original_roots_are_provenance_only": true,
+    "shared_bundle_contains_original_raw_arrays": false
   }
 }

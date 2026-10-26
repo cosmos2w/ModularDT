@@ -1,23 +1,24 @@
 # HET-MF dataset storage and browsing
 
-All numerical payloads live beneath `/data2/wanglz/ModularDT/datasets/hetmf/`. This real `Dataset` directory contains tracked contracts, schemas, and six ignored browsing symlinks. Do not replace it with a symlink or store generated arrays on `/home`.
+The shared training bundle lives at `/data/public/ModularDT-HETMF-Dataset/v1`. Run `python -m hetmf link-shared --bundle /data/public/ModularDT-HETMF-Dataset/v1 --case-dir .` from the case directory to create six ignored browsing symlinks. This real `Dataset` directory keeps tracked contracts and schemas; preserve it as a directory. The original simulation archive remains protected beneath `/data2/wanglz/ModularDT/datasets/hetmf/` and is not required to read or train on the standalone H5 files.
 
 ## Current data and evidence
 
-| Browsing entry | Canonical path relative to the `/data2` HET-MF root | Contents |
+| Browsing entry | Path in the public bundle | Contents |
 |---|---|---|
-| [standard.h5](standard.h5) | `processed/hetmf_standard_v1.h5` | Self-contained processed Standard archive: 4,608 states |
-| [expanded.h5](expanded.h5) | `processed/hetmf_expanded_v1.h5` | Self-contained processed Expanded archive: 9,216 states |
-| [formal_standard](formal_standard) | `releases/standard_20261017_v1/` | Original FP64 cases, frozen inputs, approvals, solver ledgers, and release evidence |
-| [formal_expanded](formal_expanded) | `releases/expanded_20261018_v1/` | Expanded originals and lineage, including 4,608 Standard sources shared through hardlinks |
-| [readiness](readiness) | `readiness/readiness_20261018_v1/` | Physical and archive audits, fourteen native-192 references, interface checks, report figures, and receipts |
-| [pilot](pilot) | `pilots/pilot_20261017_v1/` | Historical pilot inputs, 320 raw files across four grids, 286 processed cases, diagnostics, and figures |
+| [standard.h5](standard.h5) | `standard.h5` | Standalone Standard archive: 4,608 states |
+| [expanded.h5](expanded.h5) | `expanded.h5` | Standalone Expanded archive: 9,216 states |
+| [formal_standard](formal_standard) | `evidence/formal_standard/` | Selected Standard release receipts and saved-field figures |
+| [formal_expanded](formal_expanded) | `evidence/formal_expanded/` | Source-lineage information; full provenance is embedded in the archive |
+| [readiness](readiness) | `evidence/readiness/` | Archive/physics reviews, selected figures, and compact receipts |
+| [pilot](pilot) | `evidence/pilot/` | Historical pilot report figures and inventory |
+
 
 Open the current H5 files with `hetmf.training_data.HETMFDataset`, choosing an explicit split. The original FP64 references retain native face currents, heat fluxes, separate heat contributions, and terminal currents; the training targets use the five-channel contract in [PHYSICS_AND_DATA.md](PHYSICS_AND_DATA.md). The two archives have separate frozen memberships and TRAIN normalizers. Expanded sharing does not authorize deleting Standard or editing shared files in place.
 
-## Linking and processing
+## Owner archive and processing history
 
-Run `python -m hetmf link-training --standard-h5 <data2-standard.h5> --expanded-h5 <data2-expanded.h5> --standard-release <release-root> --expanded-release <release-root> --readiness <audit-root> --case-dir <absolute-case-directory>` to create the five current data/evidence links. Run `python -m hetmf link --root <pilot-root> --case-dir <absolute-case-directory>` to create only `Dataset/pilot`. Both helpers refuse regular destinations and foreign symlinks. Pilot material is browsed through `pilot/raw`, `pilot/processed`, `pilot/figures`, `pilot/inputs`, and `pilot/manifest.json`.
+The following owner-only commands refer to the protected original archive, not the public training bundle. Run `python -m hetmf link-training --standard-h5 <data2-standard.h5> --expanded-h5 <data2-expanded.h5> --standard-release <release-root> --expanded-release <release-root> --readiness <audit-root> --case-dir <absolute-case-directory>` to create the five current data/evidence links. Run `python -m hetmf link --root <pilot-root> --case-dir <absolute-case-directory>` to create only `Dataset/pilot`. Both helpers refuse regular destinations and foreign symlinks. Pilot material is browsed through `pilot/raw`, `pilot/processed`, `pilot/figures`, `pilot/inputs`, and `pilot/manifest.json`.
 
 Simulation, processing, verification, and visualization are maintained in `src/hetmf/`, exposed through `python -m hetmf`, and documented in the [generation guide](../docs/HETMF_GENERATION_GUIDE.md). Exact past launch wrappers and their logs remain in the `/data2` `approvals/` and readiness `inputs/` directories as provenance. Source worktrees remain retained; their retirement is deferred.
 

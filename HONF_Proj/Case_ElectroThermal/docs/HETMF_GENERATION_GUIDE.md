@@ -1,5 +1,7 @@
 # HET-MF generation guide
 
+For shared-dataset processing and the three portable model configurations, start with [the coworker handoff](COWORKER_HANDOFF.md). The private paths and approval-bound generation commands below reproduce the owner archive; training on the published H5 files does not require these original paths or fresh simulations.
+
 The case is independent of ThermalChannel and Round9. Use `/home/wanglz/miniconda3/envs/ModularDT/bin/python` with `PYTHONPATH=src` from `HONF_Proj/Case_ElectroThermal`; the system Python's torch installation was not used for the pilot. Set `PYTHONDONTWRITEBYTECODE=1` so Python bytecode is not written into the source tree. Generated input plans, arrays, diagnostics, figures, caches, and logs belong below the verified `/data2/wanglz/ModularDT/datasets/hetmf/` root.
 
 ## Pilot
