@@ -1,6 +1,8 @@
 # HONF Round 13-5: joint M/E organization and original-member access
 
-**Completed endpoint:** 27 October 2026, independent seed-0 TRAIN600 epoch 100. **Selected run:** `thermal_r13_5_me_joint95_train600_formal_v1`. **Decision:** continue this same state to the authorized absolute epoch 500 after report validation, cleanup and push; this report contains completed epoch 100 evidence, not an epoch 500 result.
+**Latest completed evidence:** the original formal run has reached epoch 500. The [matched R13-4/R13-5 epoch500 supplement](#independent-epoch-500-comparison-r13-4-versus-the-original-r13-5) below reports newly completed physical-field and organizer evaluation; the preceding epoch100 decisions and launch instructions are preserved as historical records.
+
+**Initial completed endpoint (historical):** 27 October 2026, independent seed-0 TRAIN600 epoch 100. **Selected run:** `thermal_r13_5_me_joint95_train600_formal_v1`. **Decision:** continue this same state to the authorized absolute epoch 500 after report validation, cleanup and push; this report contains completed epoch 100 evidence, not an epoch 500 result.
 
 R13-5 gives both original M and E records their own organizational views, composes those views through four captured contextual exchange blocks, and chooses one joint 95% prefix of original members before member scoring. The independent model is learning useful query-dependent access, including in M1 scenes. At epoch 100, its restricted reader improves all nine global VAL89 mean, p90 and worst errors over the saved independent R13-4 epoch 100 reference. Local reconstruction remains mixed, and reduced member work has not produced a complete inference speedup.
 
@@ -37,6 +39,7 @@ The formal and R13-4 first 100 histories match TRAIN600 order, VAL89 order, exis
 | M1 proposal→prior→candidate flow and typed reads | Figures 5–6 |
 | Four applied stages, self ledger and distant/shared tails | Figures 7–8 |
 | Matched learning and prescribed-input sensitivity | Figures 9–10 |
+| Independent epoch500 fields, learning, local fidelity and organizer access | Figures 11–18 |
 
 ## Predictor: completed independent epoch 100
 
@@ -227,3 +230,119 @@ The implementation/runtime fixes are already pushed as `9e1ce8e7` and `dae6138f`
 | Typed graph/prefix identity and stage readout | [formal organization readout](../../diagnostics/round13_5_20261027/organization_formal_e100_readout.json) |
 | Fixed local module values | [local fidelity](../../diagnostics/round13_5_20261027/reviews/fixed_panel_local_fidelity.json) |
 | Fit budget and preserved state | [epoch budget](../../diagnostics/round13_5_20261027/epoch_budget.json), [formal100 monitor receipt](../../diagnostics/round13_5_20261027/formal_first100_monitoring.json) |
+
+## Independent epoch-500 comparison: R13-4 versus the original R13-5
+
+**Added 27 October 2026.** The original R13-5 model improves all nine VAL89 mean, p90 and worst-case errors over R13-4 at the same 500-epoch age. Mean reductions span 14.44–35.48%, and all 36 field-by-module-count mean comparisons improve. Its organizer also makes a concrete execution change: E addresses give even the single-M scene query-dependent early member access, while substantially fewer original members reach the expensive scorer. These are the results of the original joint95 model, not of the newer consistency/organization-conditioned supplement, which is outside this comparison.
+
+The remaining work is specific. Local material/surface errors still redistribute between original modules; normalized E views remain highly overlapping, and joint95 retains a small fraction of full-reader conditional E preference in some scenes. The model achieves better reconstruction with much smaller member reads, but complete latency has not been remeasured at this endpoint. No inverse result or new physical simulation is part of this supplement.
+
+### Fixed sources, alignment and completed measurement
+
+The comparison uses the literal [R13-4 epoch500 checkpoint](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_r13_4_guide_train600_100_v3/checkpoints/epoch_0500_model.pt) and [original R13-5 epoch500 checkpoint](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_r13_5_me_joint95_train600_formal_v1/checkpoints/epoch_0500_model.pt), never a changing latest/best alias. Both payloads record epoch 500, 500 complete TRAIN600 histories and 300000 training-case visits. They are independent seed-0 starts, with no transferred development/segmented weights, and have the same 194 model-state tensors and 1410578 parameter elements.
+
+The training/validation membership, source binding, TRAIN-only normalization, heat scale, native/E grids, native physical roles/weights and optimizer settings agree. All 500 saved case orders and query-sampling records match. Their relation composition, address eligibility, member admission and integration equations differ, so this measures the complete architecture change at matched age rather than attributing every gain solely to E addresses. Both train paired full/restricted physical paths. R13-5 adds paired-objective metadata absent from the older schema without changing the shared physical weights. [Checkpoint and history reconciliation](../../diagnostics/round13_5_20261027/e500_comparison_20261027/identity_and_health.json).
+
+The comparison reuses R13-4’s saved [all-VAL89 full/restricted native evaluation](../../diagnostics/r13_4_e500_comparison_20261027/evaluation_v3/result.json). The original R13-5 checkpoint was newly evaluated in both modes on all 89 cases and the fixed TRAIN detail case using the maintained native evaluator; the [new evaluation](../../diagnostics/round13_5_20261027/e500_comparison_20261027/evaluation_v5/result.json) took 570.6 CPU seconds with no fitting. GPUs were occupied by existing work and were not used. A two-case R13-4 CPU replay against its retained GPU arrays differs by at most 2.81e-4 in native field entries, 2.48e-5 in material temperature and 2.27e-4 in q_proxy, small relative to the changes below. [Numerical replay](../../diagnostics/round13_5_20261027/e500_comparison_20261027/cpu_replay_against_saved_r13_4.json).
+
+The detailed panel remains TRAIN0003 and VAL0274/0293/0678. Targets, native receiver coordinates/order, masks, original IDs, geometry and prescribed controls align; material maps reuse the existing exact local receiver template after ID/mask/target checks. There is no new interpolation, dataset copy, case selection by error or solver reference. VAL89 is the repeatedly exposed canonical partition, excluding duplicate 0273. [Physical alignment](../../diagnostics/round13_5_20261027/e500_comparison_20261027/physical_alignment.json).
+
+### Physical reconstruction: improvements persist beyond the initial endpoint
+
+| Observable | R13-4 mean | R13-5 mean | Mean change | p90 change | Worst change | Improved cases /89 |
+| --- | --- | --- | --- | --- | --- | --- |
+| u | 0.05570447 | 0.04056972 | -27.17% | -34.71% | -31.00% | 86 |
+| v | 0.008623474 | 0.005564074 | -35.48% | -40.39% | -38.73% | 89 |
+| p | 0.02605212 | 0.02026671 | -22.21% | -32.04% | -21.20% | 88 |
+| Vorticity | 0.1426947 | 0.1124944 | -21.16% | -31.75% | -30.51% | 87 |
+| Fluid temperature | 1.257279 | 1.075678 | -14.44% | -18.07% | -26.62% | 72 |
+| Surface temperature | 1.093098 | 0.8070877 | -26.17% | -20.87% | -35.80% | 81 |
+| Material temperature | 1.074879 | 0.8548742 | -20.47% | -20.69% | -24.42% | 71 |
+| Interface q_proxy | 2.884346 | 2.421129 | -16.06% | -24.99% | -37.73% | 73 |
+| Module peak endpoint | 1.025581 | 0.7530944 | -26.57% | -23.06% | -23.73% | 68 |
+
+Errors are equal-case native RMSE in packed dataset units; negative changes mean improvement. This is improvement across both means and tails: u/v/p/vorticity means fall 27.17/35.48/22.21/21.16%, and surface/material/peak means fall 26.17/20.47/26.57%. All four populated module-count strata improve for every observable. The earlier e100 M3-peak miss reverses at e500: its mean is now 23.76% below R13-4. Complete absolute means, p90, worst identities, per-case values and strata remain in the native result and [comparison summary](../../diagnostics/round13_5_20261027/e500_comparison_20261027/comparison_summary.json); the compact [metric table](../../diagnostics/round13_5_20261027/e500_comparison_20261027/field_metrics.csv) is retained separately.
+
+R13-5 full access also improves all nine means over R13-4 full access, by 16.73–36.68%. Its joint95 restriction adds only 0.43–3.15% to its own full mean errors: 0.43% for surface/material temperature, 1.28% for peak and 1.66% for q_proxy. The gains therefore include a stronger full predictor and useful restricted access, rather than a favorable cutoff alone. Within the original R13-5 lineage, all nine restricted means fall 46.24–70.10% from e100 to e500. The complete histories show sustained learning; this comparison retains one seed and does not change the training recipe.
+
+![Matched epoch500 native mean and p90 improvements, per-M improvements, own-full admission effects and actual scorer rows](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/accuracy_and_work_e500.png)
+
+Figure 11. All 89 cases, original independent epoch500 checkpoints. Every displayed mean and p90 change is favorable, including all 36 per-M means. The own-full panel separates approximation from predictor quality. Scorer counts include M/E entrances as a separate cost; they are not elapsed time. [PDF master](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/accuracy_and_work_e500.pdf).
+
+![All eight native weighted training contributions for R13-4 and original R13-5 through epoch500](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/learning_e500.png)
+
+Figure 12. Thin lines are complete saved training histories; thick lines are 11-epoch medians. Both objectives average full and restricted physical reads, whose equations differ. The epoch100 marker separates the initial report from the completed continuation. These sampled training contributions accompany, and do not replace, complete-native validation metrics. [PDF master](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/learning_e500.pdf).
+
+### Fixed fields and local original-member fidelity
+
+| Fixed scene | u RMSE, R13-4 → R13-5 | Material-T RMSE | Surface-T RMSE | q_proxy RMSE |
+| --- | --- | --- | --- | --- |
+| TRAIN0003 | 0.05708 → 0.04929 | 0.38139 → 0.44700 | 0.63519 → 0.28005 | 1.22661 → 1.62067 |
+| VAL0274 | 0.04126 → 0.03402 | 0.46219 → 0.39039 | 0.64983 → 0.35658 | 1.61972 → 1.18067 |
+| VAL0293 | 0.06107 → 0.05040 | 2.64170 → 2.49371 | 1.93877 → 2.42225 | 5.86749 → 3.29580 |
+| VAL0678 | 0.05069 → 0.04116 | 0.66993 → 0.94202 | 0.95712 → 0.86521 | 2.56458 → 2.49212 |
+
+![Native u target, both epoch500 predictions and both signed residual maps on the fixed four-scene panel](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/native_u_e500.png)
+
+Figure 13. Reference and predictions share one field scale; both models and all scenes share the signed residual scale. Native masks, physical radius 0.45, original module IDs and prescribed controls are unchanged. The maps locate remaining wake/interface errors and case variation behind the lower VAL89 errors. [PDF master](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/native_u_e500.pdf).
+
+![Fluid and original-module material temperature reference, both epoch500 predictions and signed residuals](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/native_temperature_e500.png)
+
+Figure 14. One common temperature scale includes valid fluid and original-material receivers, and a second common scale displays both residuals. Original material points retain their native local recipe and target masks. Global improvement coexists with visible regional errors, especially in the already fixed VAL0293/0678 layouts. [PDF master](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/native_temperature_e500.pdf).
+
+The local exceptions are worth retaining because they identify the next precision problem. TRAIN0003 material RMSE rises 0.38139→0.44700 while surface RMSE falls 0.63519→0.28005. In VAL0293, M2 material error falls 1.6560→0.5832, but M4 rises 3.4158→4.6834. In VAL0678, M6 rises 0.4438→1.2467 and M9 rises 0.4835→1.3925 even though the full M10 validation stratum improves on every mean. Thus better global and tail statistics are accompanied by unresolved local redistribution; a subset of local records remains less accurately reconstructed. No favorable examples replace the fixed panel.
+
+![Per-original-M material RMSE and signed native surface residuals for both epoch500 models](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/original_module_detail_e500.png)
+
+Figure 15. All original IDs on the fixed detail panel are shown. Material errors and surface traces identify both improved and worsened modules; solid/dashed surface lines distinguish R13-5/R13-4. The [per-module values](../../diagnostics/round13_5_20261027/e500_comparison_20261027/local_module_metrics.json) retain q_proxy as well. These pointwise/local measurements remain separate from case-mean and peak statistics. [PDF master](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/original_module_detail_e500.pdf).
+
+### Organizer: narrower member access and independent E perspectives
+
+The same 512 fixed native query IDs and coordinates are used in TRAIN0003/M1 and VAL0678/M10, with active original IDs aligned. All 512 are admitted generic queries; 507/469 respectively are fluid-geometry-valid, and that mask is retained separately. R13-4 uses M-address MM/ME rows, while R13-5 makes the actually applied MM/ME/EM/EE rows available as M/E views. R13-4 already executed EE in its encoder; the new capability is using E receiver rows as retrieval entrances. Raw H, separate M identity, whole-row R and πR composition reconcile in the saved extraction. [Actual four-block traces](../../diagnostics/round13_5_20261027/e500_comparison_20261027/organization_v5_e500.npz); [stage provenance](../../diagnostics/round13_5_20261027/e500_comparison_20261027/organization_v5_e500.json).
+
+| Measurement | TRAIN0003 R13-4 | TRAIN0003 R13-5 | VAL0678 R13-4 | VAL0678 R13-5 |
+| --- | --- | --- | --- | --- |
+| Positive applied M←E relations | 192 | 8 | 1025 | 136 |
+| M candidates / query | 1.000 | 1.000 | 10.000 | 7.707 |
+| E candidates / query | 188.000 | 9.443 | 185.826 | 0.877 |
+| Distinct joint candidate sets /512 | 1 | 70 | 205 | 87 |
+| E-address mass, mean | No E entrance | 85.31% | No E entrance | 11.98% |
+| Joint E-member prior mass, mean | Typewise normalization | 7.41% | Typewise normalization | 4.34% |
+| M-only / mixed / E-only queries | 0 /512 /0 | 59 /453 /0 | 0 /512 /0 | 259 /253 /0 |
+| Own-full E preference retained | 99.49% | 30.03% | 99.08% | 14.16% |
+
+The strongest new capability is the M1 case. Its R13-4 prior is query independent, and all queries score the same 188 E. R13-5 gives different queries different combinations of E views, allowing E candidate counts from 0 to 33 and 70 distinct original-member sets. Its E-address mass ranges 3.34–99.94%, demonstrating that E views can dominate addressing even with only one M. This is actual organization-controlled access before member scoring; individual values are retained to the query read.
+
+In VAL0678, applied M←E incidence falls 1025→136 and final E reads range 0–5; M reads range 3–10. This is a substantial change in the executed access pattern. The number of distinct candidate sets falls 205→87, so fewer candidates do not imply more unique organizations. The comparison also changes admission semantics: R13-4 preserves a separate E99 prefix and all eligible M, while R13-5 uses one joint95 prefix. Both their learned relations and their read policies contribute to the measured difference.
+
+![Same-scene R13-4 M view, R13-5 M view and R13-5 E view with applied relation coefficients](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/organization_spatial_views_e500.png)
+
+Figure 16. Rows retain TRAIN0003/M0 and VAL0678/M7. Positive E degrees change 192→8 and 102→9 for those literal M views. The additional E156/E106 views contain 56/5 E relations at fixed query locations. Gray squares are zero entries, stars mark entrances and crosses mark queries. Each row uses a common raw-gate scale; remote relationships are preserved and not reinterpreted as geometric neighborhoods or physical causality. [PDF master](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/organization_spatial_views_e500.pdf).
+
+![Spatial early E counts, E-address mass and joint E-member prior mass over identical query locations](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/organization_query_access_e500.png)
+
+Figure 17. Counts use the same 0–192 scale for both models; proposal and member-prior fractions have separate labelled scales. E-address use and E-member access are distinct: at M1 the mean E proposal is 85.31%, while joint E-member prior is 7.41%. Views can organize M access even when few E values are directly read. [PDF master](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/organization_query_access_e500.pdf).
+
+![Actual original M/E candidate records selected by three fixed query locations in each scene](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/query_selected_members_e500.png)
+
+Figure 18. For the three fixed M1 queries, R13-5 selects 1M+3E, 1M+0E and 1M+17E; the M10 queries select 7M+0E, 8M+3E and 9M+0E. Blue circles and orange squares are original records admitted before nonlinear member scoring; gray E are not scored. Contextual M may already contain E information, so M-only reads do not mean environment information was removed from the encoder. [Exact IDs and read strengths](../../diagnostics/round13_5_20261027/e500_comparison_20261027/selected_query_members.json). [PDF master](../../diagnostics/round13_5_20261027/e500_comparison_20261027/figures/query_selected_members_e500.pdf).
+
+### Useful feedback, remaining overlap and actual executed work
+
+The e500 checkpoint also retains native training-path evidence on fixed M1/M2/M5/M12 TRAIN cases. Restricted-read E-value gradient norms are 5.26e-5, 7.86e-6, 1.45e-4 and 6.53e-5; E-address score gradients and applied EM/EE/ME positive-edge adjoints remain nonzero. MM is legitimately absent for M1. A +10% prescribed-heat input change produces material-output normalized RMS changes 0.0175–0.1003 against same-input variation 1.50e-7–3.35e-7. These saved native observations locate active learning and input dependence, with no new fit or solver-response claim. The original R13-5 history contains 65 health epochs through 500; its latest native objectives use Q1024 with the separately bounded score/trace scope preserved.
+
+The next organizational opportunity is sharing differentiated views without erasing members. E-only EE row cosine averages remain 0.9342/0.9708 in M1/M10, so many E views still overlap strongly. In M10, M-row E-support Jaccard changes only 0.3875→0.3912 and weight cosine rises 0.3762→0.5072 despite the lower edge count: several narrower views share common members. Joint95 retains about 95.33%/95.72% of its joint prior but only 30.03%/14.16% of the own-full conditional E preference. The latter distribution is normalized separately within E and is not a joint contribution or field-error bound. Neither fixed panel contains a pure-E prefix. These measurements motivate contribution-consistent integration and reduced redundant organization, while preserving broad cooperative relationships. [Complete organizer metrics](../../diagnostics/round13_5_20261027/e500_comparison_20261027/organizer_metrics.json).
+
+| VAL89 work / native query | R13-4 full | R13-4 restricted | R13-5 full | R13-5 joint95 |
+| --- | --- | --- | --- | --- |
+| M member scores | 5.865 | 5.865 | 5.865 | 4.791 |
+| E member scores | 191.753 | 181.354 | 73.584 | 1.499 |
+| Address scores | 5.865 | 5.865 | 197.865 | 197.865 |
+
+Across VAL89, original-member scores fall from 187.219/query for deployed R13-4 to 6.290/query for R13-5, a 96.64% reduction; its own full reader scores 79.449/query. These are actual skipped member MLP rows, not a mask applied after full scoring. R13-5 still evaluates 197.865 address rows/query and performs relation composition/support and prefix work. No new isolated complete GPU timing is claimed here, and the earlier e100 latency measurements are not relabelled as e500 performance. The measured improvement is better matched-age physical reconstruction and much smaller organized member execution; reducing complete latency remains a separate optimization task.
+
+This section evaluates the original formal_v1 only. It changes no architecture, run state, loss, checkpoint retention or ongoing supplemental experiment. Its evidence strengthens the case for the existing HONF path—actual interaction relationships, query-conditioned organizational views and original-member reads—and identifies concrete precision/overlap issues for the separately planned work.
+
+### No-fit evaluation closeout
+
+This supplement retains eight new PDF/PNG figure pairs, the all-native evaluation, fixed-panel arrays, compact quantitative/provenance evidence, complete-history plotting data and local source helpers under the ignored DATA2 comparison directory, about 23.2 MB in total. It copied no dataset or checkpoint and added no fitting epochs. Cleanup removed 43 verified disposable files totaling 12,317,362 bytes, including the isolated browser profile/cache, matplotlib cache, review screenshot and redundant console/excerpt outputs; source checkpoint size/inode/mtime remained unchanged. DATA2 free capacity after the main cleanup was 3,209,934,618,624 bytes (3.210 TB), with 77,460,414,464 bytes free on home. New output stayed below the 1 GiB hard budget and 256 MiB temporary cap. All 18 inline PNGs and PDF masters and all local links were checked, the new figures were visually inspected, and the source-backed report table/accuracy figure was browser-rendered and inspected. The completed evaluation used CPU and left ongoing supplemental training untouched. [Numerical and visual checks](../../diagnostics/round13_5_20261027/e500_comparison_20261027/visual_and_numerical_review.json); [cleanup](../../diagnostics/round13_5_20261027/e500_comparison_20261027/cleanup_receipt.json), [small final cleanup](../../diagnostics/round13_5_20261027/e500_comparison_20261027/cleanup_small_receipt.json).
