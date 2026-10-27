@@ -231,4 +231,6 @@ R136_RUN=/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalCha
 
 ## Continuation handoff
 
-At this review commit, H is selected and the final continuation has not yet launched. The single startup confirmation will be appended before task closeout; completed epoch-100 evidence is already retained.
+The single startup confirmation at `2026-10-27T21:02:46.917626+00:00` succeeded: the maintained command restored source epoch 100 and executed epoch 101 on physical GPU 1 (logical `cuda:0`), with absolute stop 500 and milestones 100/200/300/400/500. The epoch-100 checkpoint is unchanged; the same weights, Adam/RNG/provider/sampler state and constant schedule were recovered. The owned process is PID `3450268` in tmux `r13_6_H_formal500`; ordinary in-process log, progress, curves and checkpoints remain under the canonical lineage. [Single startup receipt](../../diagnostics/round13_6_20261027/continuation_startup_receipt.json).
+
+No monitor, observer, polling loop, completion wait or follow-up automation is attached to this final continuation. Epoch-500 completion is unobserved at handoff. The completed H100 review is pushed in `9c27c56`; this final handoff update follows the same full outgoing-range audit and remote-tip verification. [Final upload receipt](../../diagnostics/round13_6_20261027/final_outgoing_audit.json).
