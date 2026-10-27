@@ -5,6 +5,7 @@ import torch
 from honf_forward_core.content_hypergraph import ContentHypergraphCoreV2
 from honf_forward_core.interaction_reused_member_routing.typed_organization import (
     bounded_four_cycle_perturbation,
+    bounded_row_member_transfer,
     organization_conditioned_role_contribution,
 )
 from honf_forward_core.interaction_reused_member_routing.typed_organization_core import (
@@ -235,6 +236,23 @@ def test_fixed_marginal_four_cycle_changes_h_and_preserves_me() -> None:
     assert (clipped >= 0).all()
     torch.testing.assert_close(clipped.sum(0), path_mass.sum(0), rtol=0, atol=1e-15)
     torch.testing.assert_close(clipped.sum(1), path_mass.sum(1), rtol=0, atol=1e-15)
+
+
+def test_bounded_row_transfer_is_a_separate_p_changing_finite_control() -> None:
+    retrieval = torch.tensor([[0.7, 0.3], [0.0, 1.0]], dtype=torch.double)
+    proposal = torch.tensor([[0.4, 0.6]], dtype=torch.double)
+    perturbed, applied = bounded_row_member_transfer(retrieval, 0, 0, 1, 0.35)
+    assert applied == 0.35
+    torch.testing.assert_close(perturbed.sum(-1), retrieval.sum(-1), rtol=0, atol=1e-15)
+    assert torch.equal((perturbed > 0)[1], (retrieval > 0)[1])
+    assert perturbed[0, 1] > retrieval[0, 1]
+    assert not torch.allclose(proposal @ perturbed, proposal @ retrieval, rtol=0, atol=1e-8)
+
+    sparse = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.double)
+    expanded, clipped_dose = bounded_row_member_transfer(sparse, 0, 0, 1, 0.9)
+    assert clipped_dose == 0.9
+    assert expanded[0, 1] > 0
+    torch.testing.assert_close(expanded.sum(-1), sparse.sum(-1), rtol=0, atol=1e-15)
 
 
 def test_exact_degeneracies_match_the_original_role_marginal_law() -> None:

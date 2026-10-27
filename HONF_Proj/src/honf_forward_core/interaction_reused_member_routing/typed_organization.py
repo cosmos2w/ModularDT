@@ -142,7 +142,47 @@ def bounded_four_cycle_perturbation(
     return path_mass + changes, applied_dose
 
 
+def bounded_row_member_transfer(
+    row_mass: Tensor,
+    row: int,
+    losing_member: int,
+    gaining_member: int,
+    requested_dose: float,
+) -> tuple[Tensor, float]:
+    """Move finite mass between members inside one retrieval row.
+
+    The row total is preserved, while the member marginal can change. This is
+    a separately labeled support control when a fixed-marginal four-cycle
+    does not exist in a native selected candidate set.
+    """
+    if row_mass.ndim != 2 or not row_mass.is_floating_point():
+        raise ValueError("Row mass must be a floating-point [A,N] matrix.")
+    if not bool(torch.isfinite(row_mass).all()) or bool((row_mass < 0).any()):
+        raise ValueError("Row mass must be finite and nonnegative.")
+    indices = (row, losing_member, gaining_member)
+    if any(isinstance(index, bool) or not isinstance(index, int) for index in indices):
+        raise TypeError("Row and member indices must be integers.")
+    if not 0 <= row < row_mass.shape[0]:
+        raise IndexError("Row index is outside the row-mass matrix.")
+    if not 0 <= losing_member < row_mass.shape[1] or not 0 <= gaining_member < row_mass.shape[1]:
+        raise IndexError("Member index is outside the row-mass matrix.")
+    if losing_member == gaining_member:
+        raise ValueError("A row transfer requires distinct members.")
+    if isinstance(requested_dose, bool) or not isinstance(requested_dose, (int, float)):
+        raise TypeError("Row-transfer dose must be a real number.")
+    if not math.isfinite(float(requested_dose)) or requested_dose < 0:
+        raise ValueError("Row-transfer dose must be finite and nonnegative.")
+
+    capacity = float(row_mass[row, losing_member])
+    applied_dose = min(float(requested_dose), capacity)
+    changes = torch.zeros_like(row_mass)
+    changes[row, losing_member] = -applied_dose
+    changes[row, gaining_member] = applied_dose
+    return row_mass + changes, applied_dose
+
+
 __all__ = [
     "bounded_four_cycle_perturbation",
+    "bounded_row_member_transfer",
     "organization_conditioned_role_contribution",
 ]
