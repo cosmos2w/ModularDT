@@ -1,0 +1,163 @@
+# HONF Round13-6: Faithful Integration, Useful Organization, and Measured Execution
+
+Prepared 27 October 2026. This is an execution plan for the next round, developed by reviewing the completed R13-5 supplement and original ME500 with separate equation, organization/execution and workflow reviews. Preparing this document does not launch training. When instructed to execute it, carry the bounded investigation through implementation, actual qualification, selected full-data experiments and reporting; do not stop at preparation or reinterpret a short fit as an architectural verdict.
+
+## Purpose and scientific anchor
+
+Preserve the successful original R13-5 route: records exchange information through applied relations; M and E provide organization views; a query uses those relations to select original members before expensive reading; the joint physical head integrates their contextual information. Improve the full predictor before blaming its restricted execution. Recover equivalent execution improvements independently of changes to the prediction equation. Investigate whether the composition of overlapping memberships has a useful role beyond its member marginal, with individual records still available throughout.
+
+The scientific anchor is the original `thermal_r13_5_me_joint95_train600_formal_v1`, especially its retained epochs 100 and 500. Its matched-age report finds all nine global mean, p90 and worst errors lower than R13-4 at 500, with actual skipped member-scoring work. It has active E entrances and original-member learning paths. Its overlapping E views and remaining local errors provide concrete improvement targets; neither a fixed number of groups nor geometric locality is the objective. Keep this model, its loaders and its historical evidence intact.
+
+Primary sources are the [original R13-5 report and epoch 500 comparison](../docs/reports/HONF_Round13-5_Joint_ME_Organization_and_Member_Routing_Report.md), [A/B supplement report](../docs/reports/HONF_Round13-5_Supplement_Consistency_Latency_and_Organization_Conditioned_Read_Report.md), [original reader](../src/honf_forward_core/interaction_reused_member_routing/joint.py), [score calibration](../src/honf_forward_core/interaction_reused_member_routing/guided.py), [A execution and integration implementation](../src/honf_forward_core/interaction_reused_member_routing/consistent.py), [B implementation](../src/honf_forward_core/interaction_reused_member_routing/organization_conditioned.py), and [Thermal qualification protocol](../docs/guides/Thermal_Model_Development_Protocol.md). Start from the live working branch containing `7ccfcf7`, preserving subsequent user work and unrelated runs. Do not reset to that commit or reinterpret the completed supplement's historical authorization.
+
+## What the supplement changed, and what to learn from it
+
+### A changed the full prediction equation
+
+Let the actual directed interaction directory be H, its measured row-normalized retrieval view be R, query view weights be w, and the early joint member prior be P_i = Σ_a w_a R_ai. Let C be the joint95 candidate prefix; F is the corresponding full legal candidate set, not a bypass over unrelated records. For role t in {M,E}, define positive member likelihood e_i = exp(ell_i), original contextual value V_i, and Z_t = Σ_{i∈C_t} P_i e_i. The original ME reader uses
+
+\[
+p_i^t=\frac{P_i e_i}{Z_t},\qquad c_t^{ME}=\rho_t\sum_{i\in C_t}p_i^tV_i.
+\]
+
+The supplement's A instead uses one contribution denominator across both roles, then retains the original typed strength:
+
+\[
+d_t=\frac{Z_t}{Z_M+Z_E},\qquad c_t^A=\rho_t d_t\sum_{i\in C_t}p_i^tV_i=d_t c_t^{ME}.
+\]
+
+The last identity holds at identical weights, context, candidates and inherited calibration: conditional role statistics, hence the inherited strength, agree. It also holds for full reading. Thus A adds a second role-amplitude factor; it is not an equivalent rewrite of ME. M/E are complementary input roles, so requiring their contextual amplitudes to share one probability budget needs evidence. Probability normalization alone does not make physical integration more consistent. This corrects the previous plan's overly favorable interpretation of a single joint contribution mass.
+
+Saved A100/B100 organization arrays give a concrete scale. On TRAIN0003, which has one actual module despite a padded 12-column M axis, full E contribution mass after strength is 4.277% for A and 2.729% for B. On VAL0678/M10 it is 0.609% and 0.794%. The sampled full E-strength medians are approximately 0.64/0.41 for A and 0.57/0.39 for B; low E contribution is not simply a closed E gate. These are saved query-panel measurements, not population averages. Value norms, head weights and training adaptation also matter, so trace them rather than equating coefficient mass with physical importance.
+
+Both A and B have all nine means above original ME100 in their full and restricted readers. Within-candidate restriction usually changes mean errors by only about 0.4–2.6%; the main quality difference already exists in full prediction. The shared amplitude change is therefore a specific causal hypothesis to isolate. It does not explain every trained error by itself. Matching 194 initial tensors between A and B establishes their common start, not a clean original-ME-versus-optimized-ME comparison.
+
+### Cross-role competition inherited within-role calibration
+
+The retained likelihood law subtracts a prior-weighted mean and scales variance separately within M and E before applying the bounded nonlinearity. A constant offset for one role is removed; a singleton role has ell=0 exactly. Scores convenient for within-role relative selection are not automatically calibrated cross-role evidence. Meanwhile R is formed from Hμ with a discrete normalized M measure and normalized E cell measure. A/B additionally turn that access allocation into contextual amplitude. Preserve physical measures, but keep numerical access measure, probability mass and feature amplitude conceptually distinct.
+
+A four-case frozen-weight switch to candidate-independent scores worsened the native objective. That measures compatibility with weights trained under the inherited law, not the alternative's learnability. Keep the current calibration initially; if a native stencil identifies survivor-score changes as an actual dominant defect, qualify one matched alternative with training. Do not reopen a calibration portfolio or reject every alternative through a zero-fit swap.
+
+### B retains organization, but its experiment needs stronger controls
+
+For B, let d_a=Σ_{i∈C}R_ai, Z_a=Σ_{i∈C}R_ai e_i and D=Σ_a w_a d_a. Its contribution is
+
+\[
+b_i^B={\bf1}_{i\in C}\,e_i\sum_a\frac{w_a d_a}{D Z_a}R_{ai},\qquad c_t^B=\rho_t\sum_{i\in C_t}b_i^BV_i.
+\]
+
+Each row competes among its retained members before contributions coalesce onto original IDs. This is a legitimate way to retain membership information without pooling away members. B also inherits A's global role-amplitude decision, so its small mixed difference from A does not isolate the value of organization-conditioned competition against successful original ME.
+
+B's matched-marginal native control changed the largest R entry by only 4.36e-6 and 9.34e-5, with fields changing at FP32 scale. The test was positivity-limited and too weak to settle practical organization sensitivity. Constant likelihoods, identical conditional rows, one active row, or singleton candidate sets also produce exact marginal-law degeneracies. Saved full member scores are not generally flat; on VAL0678 every nonempty restricted E set is a singleton, whereas TRAIN0003 retains larger E sets. Measure these circumstances explicitly instead of assigning one explanation to all cases.
+
+### Execution improvements are valuable independently
+
+The supplement measured shared paired planning at 3.742→2.547 seconds for a fixed prepared 48-case forward/native-loss/backward pass, and a separate scorer-factor trial at 2.549→2.069 seconds, with allocated peak 12.16→8.63 GiB. These separate timings exclude fresh sampling and parameter application; do not add their percentages. Scene-local normalized keys, shared affine computation, a shared live entrance plan and paired checkpoint replay are reusable ideas. The missing comparison is the unchanged original ME equation with and without those execution rewrites.
+
+Complete native inference did not speed up. Fewer selected value rows did not remove address scoring, relation composition, sorting/indexing or synchronization. B also added three contractions, each about 17.37 billion pair products per measured 48-case pass. Its independently trained endpoint being near A's timing does not make those contractions free. Retain actual complete costs and optimize the measured dominant work.
+
+## Development sequence and candidate definitions
+
+### 1. Recover the original read law with equivalent execution
+
+Implement O: the original ME equation, H/R construction, calibration, strengths, joint95 candidates, head, losses and schedule, with only equivalent execution rewrites. Port live scene-prepared member-key normalization, first-affine factoring and shared paired entrance planning. Keep separate candidate-dependent member scores/calibration and role statistics for full and restricted branches. Share context, qstates, entrance scores and P only where their dependencies agree. Preserve autograd, RNG semantics and checkpoint replay; no cross-scene or persistent detached feature cache.
+
+Use small transparent tests and actual fixed ME100/ME500 replays to compare O against original ME: member IDs and candidate masks, full/restricted fields, native derivatives/stencils, live gradients by parameter group, non-reentrant checkpoint replay, and save/resume. Check FP32 error against ordinary repeat variation; semantic equality does not require bitwise GPU reduction identity. Existing A equivalence tests are useful but do not replace this original-ME comparison. Confirm that the shared path charges preparation once and the two separate reads correctly.
+
+Profile instrumented regions and ordinary synchronized end-to-end calls independently. Include scene exchange/preparation, normalized keys/projections, entrance scoring, P/support composition, prefix sorting/indexing, member scoring/calibration, value reduction, head, native extraction, backward/replay, data handling and a complete training epoch. Avoid summing overlapping profiler regions. Reuse checkpoint/data evidence and compare identical scene/query/candidate work. Use warmup plus a small alternating repeat sample; broaden only when spread prevents interpretation.
+
+First inspect repeated scalar extraction, per-tile nonzero/indexing, CPU work counters and candidate-independent scene support. Defer diagnostics and aggregate counters on device until an ordinary reporting boundary where safe. Preserve exact candidates, native observations, precision and training semantics. An optimized dense/shared execution can be the right result when fine-grained sparse kernels cost more. Do not manufacture speed by omitting index/preparation costs, using full-member scores before restricted inference, disabling EE, changing microbatch physics, or adding a new engine.
+
+### 2. Diagnose role amplitudes before changing them again
+
+On fixed original ME100/ME500 and saved A100/B100 evidence, measure P_t, Z_t/(Z_M+Z_E), rho_t, final contribution mass, contextual value/context norms, downstream head sensitivity and parameter-group gradients. Separate description across differently trained endpoints from same-state causal equation controls. Verify c_A=d_t c_ME directly. On the small fixed native field/stencil panel, locate where candidate membership, calibrated scores and role amplitude change; reuse original saved arrays whenever the protocol is unchanged.
+
+If a weak surviving fraction of a role is amplified by its conditional normalization, test only one minimal retention law K first:
+
+\[
+\kappa_t(q)=\frac{\sum_{i\in C_t}P_i(q)}{\sum_{i\in F_t}P_i(q)},\qquad c_t^K=\rho_t\kappa_t\sum_{i\in C_t}p_i^tV_i.
+\]
+
+For full reading κ_t=1, so the full original ME predictor is preserved exactly at fixed weights. The factor uses P already available before member scoring; it does not compute full-member likelihoods to decide restricted execution. A zero legal role returns zero context; an empty selected role returns zero context. Handle zero denominators by that exact empty rule, not an artificial mass floor or a forced winner.
+
+K measures the retained fraction of a role's own available prior, not its absolute share of M+E mass. It is neither an error bound nor a continuity guarantee: a one-member role retains κ=1 whenever selected and can still jump at a 0↔1 support change. Survivor-dependent calibration and gate statistics also remain. Compare K against O on the same complete native stencil before one short matched qualification; retain O unless the change addresses an observed integration defect without an unexplained full-reader change. Keep joint95 as the single hard cutoff initially; do not add entrance truncation here.
+
+Call the resulting reference C: O by default, or O+K if that isolated comparison justifies K. Do not change row measure, strength law, score calibration and organization competition together. If a score-law issue is directly demonstrated, substitute one justified score-law experiment for K within the same budget rather than adding another arm.
+
+### 3. Test organization-conditioned competition without A's role bottleneck
+
+Investigate H, a minimal typed version of B's operator. First compare it against O without K. For each role, use the same selected original members and likelihoods, and define
+
+\[
+d_{at}=\sum_{i\in C_t}R_{ai},\quad Z_{at}=\sum_{i\in C_t}R_{ai}e_i,\quad L_t=\sum_a w_a d_{at},
+\]
+
+\[
+p_i^{H,t}={\bf1}_{i\in C_t}\sum_a\underbrace{\frac{w_a d_{at}}{L_t}}_{\text{view mass within role}}\underbrace{\frac{R_{ai}e_i}{Z_{at}}}_{\text{member competition within view}},\qquad c_t^H=\rho_t\sum_{i\in C_t}p_i^{H,t}V_i.
+\]
+
+Empty row-role terms are zero. Nonempty p^{H,t} sums to one within its role. For this initial isolation, rho_t uses the unchanged original-ME marginal role statistics; changing gate inputs to H statistics would be a separate experiment. The same joint95 prefix can omit M or E entirely; there is no per-role quota, separate 95% requirement or mandatory M. M/E contexts feed the existing joint physical predictor and do not allocate output physics.
+
+This explicitly tests which members cooperate within each view while retaining the original typed amplitude. Its marginal-law degeneracies remain useful diagnostic controls. It is a changed read law for general scores, so do not call it equivalent to original ME or expect a zero-fit transplant to establish its trained quality. Keep actual member identity, location, contextual values and relation provenance; coalesce overlapping paths onto original IDs before value reduction. There is no pre-query pooled replacement.
+
+The initial implementation may use the existing three-contraction pattern split by role. The summed arithmetic is still roughly three QAN contractions, potentially with extra smaller-kernel overhead. Do not allocate a dense batch×query×view×member tensor. Only optimize selected incidence or reuse after measuring its actual cost and gradient behavior. If C eventually includes K, combine K with H only after the two changes have been isolated; compare final H and C with the same retention law so the formal comparison isolates organization competition.
+
+Before proposing a new organization-conditioned scorer, measure whether row overlap, singleton supports, likelihood contrast or the inherited normalization already explain weak effect. If the row-independent likelihood is a demonstrated limitation, one small replacement using existing contextual entrance/member projections may test s(q,z_a,z_i) on selected memberships. It replaces a scorer; it does not add a decoder stack, pooled bottleneck, raw bypass or another formal arm. Do not launch this fallback merely because a tiny perturbation was inconclusive. Document the actual equation and cost, and drop the earlier H variant if the replacement is selected.
+
+### 4. Make the organization experiment informative
+
+Use support/mass-selected local four-cycle perturbations at fixed q. Set Q_ai=w_aR_ai and add a feasible 2×2 cycle with signs [+δ,−δ;−δ,+δ]. Row sums and column sums P are preserved, while membership pairing changes. Bound δ by the two decremented entries in that cycle rather than the smallest unrelated matrix entry. Report moved path mass, relative L1 change, feasible dose, changed Z_at, effective view coefficients, member contributions, contexts and fields against same-layout numerical repeat variation. Show at least a small dose range using already positive shared support; choose entries from input/support mass, not target errors.
+
+A q-specific Q perturbation yields a q-specific derived R and is a decoder mechanism control, not a new scene directory or evidence that a different exchange ran. For native finite-difference observables, use one common modified directory across the full stencil and report residual P changes at every stencil point. Otherwise report pointwise field response only. Do not assemble a derivative from separately tailored query-specific organizations. If positive support permits only a tiny dose, report that bound and use a clearly labeled finite row intervention plus a transparent synthetic positive control; neither an infinitesimal result nor failure to find a useful cycle should terminate the whole round.
+
+Distinguish three questions: do applied relations affect contextual formation; does their reused directory constrain accessible original members; and does row composition change the read beyond the same member marginal? Preserve the successful answers to the first two while testing the third. A learned relation row is an overlapping multi-member organization view; its existence alone is not a recovered physical many-body interaction. Nonlinear row-conditioned competition provides an operational grouping effect, which should be traced to native field usefulness rather than celebrated solely in a toy test.
+
+## Actual experiments, early diagnosis and finite scope
+
+Thermal is the development case; the shared architecture remains generic. Retain MM→EM→EE→ME and the existing two cycles for this controlled round. Geometry, material, boundary conditions and controls enter their owning records before interaction. Use the joint physical head and native objectives; add no heat-affine branch, flow/temperature split, heat-independent routing/flow assumption, analytical correction, geometric-neighbor mandate, group-count target, forced leaf period, forced M/E winner or artificial diversity reward. Wind and other future adapters own units and targets, not a different organizational principle. No inverse fitting, new solver campaign or pristine TEST use is included.
+
+Start with fixed-state execution and small CPU/synthetic tests, then the existing input-only TRAIN150/VAL22 qualification manifest. Normally 6–12 segmented epochs per changed candidate suffice to observe execution, learning paths, initial/final curves, a clean pause and exact resume. Use only what is needed. This round's total segmented allowance is72 epochs across controls, retries and replacements, below the standing500-epoch ceiling. It is not a target; no epoch-based permission switch or merge warmup is introduced. If a concrete defect persists, inspect equations, traces and real execution, repair and requalify within that allowance; do not consume long fits to conceal it or declare the whole direction failed.
+
+Inspect ordinary early-epoch health evidence for input dependence and learning-path loss. A single query legitimately choosing no E or no M is not collapse. Actionable abnormalities include a rapid scene-wide all-empty route, nonfinite computation, widespread loss of gradients through previously active relations/member values, or loss curves falling while fixed-query predictions lose scene/control dependence. On such evidence, stop the owned candidate at the next safe checkpoint, retain failure evidence, identify the source and repair before a longer fit. Include a small stratified native path probe and fixed-input/control comparison in normal early diagnostics rather than another monitoring system. No special flow-invariance check is requested. Eligibility/emptiness, role mass and field dependence must be interpreted together; a zero gradient on an intentionally unselected role is not automatically a defect.
+
+Proceed from stable qualification to at most two independently named scratch TRAIN600 formal candidates: C, the recovered integration/execution reference, and H, the one selected organization-conditioned change. If C is exactly O and equivalent original-ME replay plus the historical matching lineage supplies the needed control, do not retrain C just to fill a slot. If H is not yet useful but C offers a measured improvement, C may be the sole formal candidate. Do not force H into full training for appearance, and do not stop with diagnosis when a repaired, qualified candidate is ready for the authorized full-data experiment. No additional A/B extension is part of this plan.
+
+Each selected formal lineage first trains through 100 total epochs, with seed 0, common TRAIN-only normalization, the same original TRAIN600 membership/case order, query sampling, physical objectives, precision and schedule. Match common parameter initialization and record unavoidable differences; scratch formal weights do not come from qualification. Optional declared transfer probes from ME500 are diagnosis only and remain separately named. Reuse saved original ME100/ME500 validation and figures when protocol identities match. A500 reference is training-age context for a new 100-epoch model; compare 100 against 100 for endpoint quality and reserve mature claims for sufficient histories. Do not select cases by model errors.
+
+### Final formal 100-epoch review and authorized continuation
+
+Complete the full VAL89 review and fixed representative detail/organization/response/cost panels at 100 for each selected candidate. Review all nine mean/p90/worst field errors, per-M sample counts and local module/peak errors; own-full versus restricted differences; role contributions and live learning paths; meaningful organization perturbations; complete loss/validation trajectories; and actual latency/memory. A small best-checkpoint gain, one aggregate score or a reduced nonzero count is not the selection rule. Compare mechanisms and trajectories and explain gains and regressions; do not require every early metric to beat ME100 to justify longer learning.
+
+The user explicitly authorizes Codex to decide whether to resume **one proposed final formal candidate from 100 to 500 total epochs** in this task. Use the 100-epoch review to choose C or H and record the reason. A coherent improving trajectory, intact native scene dependence and a useful precision/organization/execution hypothesis can justify continuation despite remaining misses. Diagnose an actual collapse or inconsistent equation rather than blindly extending it. If neither candidate merits continuation, deliver the evidence, repaired resumable states and specific next action; do not call that a mature architectural failure. This research judgment is not a new metric gate, admission service or all-fields threshold.
+
+The maximum new full-data fitting budget is 600 epochs: two initial 100-epoch fits plus 400 more for one selected lineage. With one initial candidate it is 500; unused allowance does not authorize another arm. Continue the same lineage and exact saved weights, parameter state, RNG, normalizer, membership, sampling, physical laws and established schedule; do not restart, add response losses at 101, or silently turn a short diagnostic into a formal run. Preserve latest, one best-field alias and 100-epoch milestones. Refresh actual loss curves every 10 epochs and retain full histories across resume.
+
+After deciding to continue, establish actual successful resume/startup once, confirm the intended run and absolute 500 endpoint, then finish the task. **Do not monitor this final continuation:** no Luna observer, polling, near-completion check, completion wait, daemon or follow-up automation. Training itself continues saving its ordinary curves/checkpoints. State explicitly that 500 completion is unobserved at handoff. If no continuation is chosen, the task also ends after its evidence/report/code closeout. The first 100-epoch reviews are completed work, not delegated to an unattended continuation.
+
+## GPU use, monitoring, storage and layout
+
+Use available physical GPU 0 and GPU 1 for independent work where this shortens the critical path. Check live ownership and map the chosen device before launch; do not disturb unrelated jobs, add device-identity locks or assume a historical UUID is current. Parallelize independent qualifications or the selected full100 lineages after their dependencies are resolved. Isolate or record contention for timing comparisons. No multi-device training framework is needed.
+
+For every segmented and initial formal100 launch, delegate read-only monitoring to an explicitly selected Luna agent with minimal context: exact owned run, epoch stop, log/checkpoint/curve paths, startup/ETA check and notification conditions. Estimate remaining time once; the next inspection is normally near 80–90% of the remaining duration, or a declared early health checkpoint. Earlier inspection needs a concrete failure or changed estimate. Luna stays quiet absent completion, failure, meaningful delay or needed action; the parent does useful independent work or rests. Do not duplicate polling. Luna can also handle small independent evidence/layout subtasks. The final selected 100→500 continuation is the startup-only exception described above.
+
+All Thermal forward formal/development TRAIN600 aliases belong under `HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/`. Proposed names are `thermal_r13_6c_faithful_train600_formal_v1` and `thermal_r13_6h_typed_organization_train600_formal_v1`; declare the actual equation in each config/manifest rather than hiding a changed law behind a name. Qualification and one-time diagnostics stay under a verified ignored DATA2 diagnostics root. A physical round-local payload is acceptable with its canonical alias. Never place new aliases directly under `Trained_Results`. Repair a misplaced alias without moving run payloads or rewriting historical identities, manifests or report evidence.
+
+Before producing outputs, verify the standing DATA2 symlinks/mount and record free bytes, peak temporary space, headroom and an explicit disk budget. Reuse shared dataset/query recipes and caches, never copy the dataset. Proposed round caps are 24 GiB retained output and 2 GiB additional temporary output, with at least 100 GiB DATA2 headroom; reduce if estimates exceed either. Include up to two formal lineages through their authorized horizons, reference arrays, qualification states, histories, figures and caches in that estimate. Keep home output to small tracked text; direct caches/temp output to DATA2. Estimate storage before launching, not after generating all fields.
+
+## Implementation and verification boundaries
+
+Prefer a small internal seam for constructing the read plan and another for the contribution law. A prepared scene owns its live scene invariants; a query plan owns reusable entrance work; a contribution function owns candidate-conditioned normalization. Keep those implementation details inside the existing member-routing capability and runner. Extract equivalent routines where it removes duplication, without another engine, plugin registry, compatibility layer, selection service or broad runtime rewrite. Preserve historical loading and security. Tests should demonstrate substantive equality or failure mechanisms, not mirror each implementation line.
+
+Required verification covers original-law output/native-gradient equivalence under exact rewrites, paired replay and resume; exact zero behavior for empty/invalid roles, padded IDs and legal pure-E/M candidate sets; K full-reader identity and its singleton limitation if selected; H normalization, toy row sensitivity and its exact degenerate cases; actual finite-dose organization controls; and real native prepare/decode/backward plus checkpoint recovery. Run focused tests for modified paths and the necessary existing checks. Static assertions or preflight heuristics do not replace execution or saved measurements. Do not repeat unchanged suites simply to accumulate a large test count.
+
+Default-deny new cryptographic hashes, freezes, baseline snapshots, hard permission schedules and blocking research gates. An exception requires a concrete failure and an explanation of why ordinary Git history, existing manifests/IDs, types, atomic writes and focused tests cannot address it. Preserve existing security, data/TEST boundaries, job ownership, checkpoint and upload protections. Research measurements guide repair and selection without creating a new admission framework.
+
+## Evidence, visual explanation and completion
+
+Write an English report beginning with what changed and the positive measured results, followed by specific misses and next steps for predictor, organizer and execution. Inverse is outside scope. Distinguish saved prior evidence, frozen-weight swaps, qualification, completed formal 100-epoch and any startup-only continuation. Include a compact figure index. Retain numerical evidence sufficient to reproduce the selected figures; Python plots, PDF masters and small inline PNG previews use matching scales and English labels. Inspect the figures and rendered Markdown, resolve every relative link, and keep paragraphs/captions on one continuous source line.
+
+The key evidence set is: complete sampled-training and full-validation loss curves across resume; nine-field mean/p90/worst and per-M/local detail; common-scale physical fields and signed residuals on the existing small representative panel; same-scene spatial organization maps in the established “three ways to organize the same original scene” style; fixed-q entrance→row competition→original-member contribution traces; role-mass/context diagnostics; a finite-dose organization control with its actual changed mass/noise; and measured fidelity versus executed work plus complete latency/memory. Use small selected panels and reuse unchanged reference arrays. Do not bury losses/local errors behind a single topology score or generate exhaustive arrays for all 89 scenes.
+
+Deliver relevant code/tests/configs, the source-backed report, canonical run links and tested launch/resume commands, including the final continuation decision. The maintained command is `HONF_Proj/tools/honf_research.py resume-member-routing --run <canonical_run_alias> --device cuda:0 --stop-after-epoch 500 --extend-horizon`, run with the chosen physical device mapped through `CUDA_VISIBLE_DEVICES`; confirm actual support for the selected config before handoff. Preserve user edits and unrelated active jobs. Retain the completed 100-epoch state even if its 500-epoch continuation is running.
+
+Perform proportionate round-owned cleanup under the standing rules: retain scientific checkpoints, histories, selected native references, metrics/provenance and key figure pairs; remove only verified disposable caches/intermediates and superseded renders. Record exact removals/bytes, retained evidence and actual free space. Commit/push durable changes on the current non-default branch through existing hooks after auditing the entire outgoing range; generated figures/data/one-time diagnostics stay ignored locally. Before the final unattended continuation, finish substantive tests, evidence/report review and cleanup as far as possible so closeout does not become a hidden observer. Report successful startup as startup; completion at 500 is unobserved at this handoff and can be assessed later if requested.
