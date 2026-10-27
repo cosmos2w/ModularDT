@@ -1,0 +1,11 @@
+# R13-5 execution prompt
+
+Execute `HONF_Proj/UpgradePlan/HONF_Round13-5_Joint_ME_Organization_and_Member_Routing_Work_Plan.md` in `cosmos2w/ModularDT` on the current non-default branch, preserving user edits, historical evidence and unrelated jobs. Read the revised R13-4 independent e500 results: retain faithful organized access while investigating the separate full-reader field-quality gap.
+
+Implement stage-traceable four-block H, independent E organizational views and one joint M/E95% member prefix before member scoring. Preserve original members, continuous learning, paired full/restricted physical losses and one general joint head. Empirically check calibration and paired-loss behavior; no pooled replacement, forced locality/K/type quota, new hashes/freezes/admission framework or speculative decoder expansion.
+
+Qualify briefly on fixed TRAIN150/DEV22; diagnose and repair early abnormalities rather than abandoning the first attempt. The aggregate segmented ceiling is500 epochs. Compare M-joint95 and ME-joint95 from the same fixed R13-4 e500 checkpoint for100 additional TRAIN600 epochs each, preferably concurrently on physical GPU0 and1. Preserve occupied jobs; no new distributed-training framework.
+
+Select one tested M/E design and launch independent seed-0 TRAIN600 run `thermal_r13_5_me_joint95_train600_formal_v1`. Train to100 epochs, review saved organizer, fieldwise means/tails and native learning against the matched-age references specified in the plan. If promising, continue that same state directly to500 epochs; this extension is already authorized. Do not require all fields to win, a pure-E quota or a speedup. Diagnose genuine defects before spending the remaining epochs; do not launch another formal model automatically. Maximum new full-data fitting is700 epochs including development.
+
+No Luna/external monitoring, progress polling or monitoring service. Retain normal in-run health, curves, checkpoints and clean-stop behavior; use process completion and requested endpoint reviews. After member selection works, perform bounded address-cut/overlap diagnostics without extra fitting. Deliver inspected English figures/report, actual endpoints, cleanup and tested resume commands; audit, commit and push durable changes through existing safeguards.
