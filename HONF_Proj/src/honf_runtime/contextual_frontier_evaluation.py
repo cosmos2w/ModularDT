@@ -18,7 +18,8 @@ from .compat import load_trusted_checkpoint
 
 _EVALUABLE_ARMS = ("J-D", "J-H", "G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1",
                    "R13-3-Full", "R13-3-Route", "R13-3-Relative",
-                   "R13-5-M-Joint95", "R13-5-ME-Joint95")
+                   "R13-5-M-Joint95", "R13-5-ME-Joint95",
+                   "R13-6-O-ME-FaithfulJoint95", "R13-6-H-ME-TypedOrganizationJoint95")
 _MAX_OUTPUT_BYTES = 256 * 1024**2
 _OBSERVABLES = (
     "u", "v", "p", "omega", "temperature_fluid", "temperature_surface",
@@ -35,7 +36,9 @@ def _contextual_checkpoint_parts(
             "spatial_interaction_groups_joint_training_v1",
             "interaction_reused_member_routing_joint_training_v1",
             "interaction_reused_member_routing_joint_training_v2",
-            "interaction_reused_joint_member_routing_joint_training_v1"}:
+            "interaction_reused_joint_member_routing_joint_training_v1",
+            "interaction_reused_faithful_member_routing_training_v1",
+            "interaction_reused_typed_organization_member_routing_training_v1"}:
         raise ValueError("Checkpoint is not a maintained contextual or interaction-groups training checkpoint.")
     provider_identity = identity.get("provider_identity")
     if not isinstance(provider_identity, Mapping):
@@ -47,6 +50,8 @@ def _contextual_checkpoint_parts(
         "interaction_reused_member_routing_joint_training_v1": "thermal_interaction_reused_member_routing_provider_v1",
         "interaction_reused_member_routing_joint_training_v2": "thermal_interaction_reused_member_routing_provider_v2",
         "interaction_reused_joint_member_routing_joint_training_v1": "thermal_joint_member_routing_provider_v1",
+        "interaction_reused_faithful_member_routing_training_v1": "thermal_r13_6_faithful_member_routing_provider_v1",
+        "interaction_reused_typed_organization_member_routing_training_v1": "thermal_r13_6_typed_organization_member_routing_provider_v1",
     }[identity["workflow"]]
     if provider_identity.get("schema") != expected_provider_schema:
         raise ValueError("Checkpoint provider identity does not match its maintained model workflow.")
@@ -63,6 +68,10 @@ def _contextual_checkpoint_parts(
         "interaction_reused_member_routing_joint_training_v2": ("R13-3-Relative",),
         "interaction_reused_joint_member_routing_joint_training_v1": (
             "R13-5-M-Joint95", "R13-5-ME-Joint95"),
+        "interaction_reused_faithful_member_routing_training_v1": (
+            "R13-6-O-ME-FaithfulJoint95",),
+        "interaction_reused_typed_organization_member_routing_training_v1": (
+            "R13-6-H-ME-TypedOrganizationJoint95",),
     }[identity["workflow"]]
     if arm not in supported or provider_identity.get("architecture") != arm:
         raise ValueError("Checkpoint arm and provider architecture must agree with the workflow schema.")
@@ -101,6 +110,30 @@ def _contextual_checkpoint_parts(
                 or core_config.get("joint_member_coverage") != 0.95
                 or provider_identity.get("member_routing_schema") != "interaction_reused_joint_member_routing_v1"):
             raise ValueError("R13-5 adapter, core, address mode, and provider identities must match the joint95 workflow.")
+    r13_6_adapters = {
+        "interaction_reused_faithful_member_routing_training_v1": (
+            "thermal_interaction_reused_faithful_member_routing_adapter_v1",
+            "interaction_reused_faithful_joint_member_routing_v1",
+            "R13-6-O-ME-FaithfulJoint95",
+        ),
+        "interaction_reused_typed_organization_member_routing_training_v1": (
+            "thermal_interaction_reused_typed_organization_member_routing_adapter_v1",
+            "interaction_reused_typed_organization_member_routing_v1",
+            "R13-6-H-ME-TypedOrganizationJoint95",
+        ),
+    }
+    if identity["workflow"] in r13_6_adapters:
+        adapter_schema, core_schema, expected_arm = r13_6_adapters[identity["workflow"]]
+        core_config = adapter_state.get("core")
+        if (adapter_state.get("schema") != adapter_schema
+                or not isinstance(core_config, Mapping)
+                or core_config.get("schema") != core_schema
+                or core_config.get("architecture") != expected_arm
+                or core_config.get("address_mode") != "ME"
+                or core_config.get("joint_member_coverage") != 0.95
+                or core_config.get("retained_prior_law") != "none"
+                or provider_identity.get("member_routing_schema") != core_schema):
+            raise ValueError("R13-6 adapter, core, address mode, prior law and provider identities must agree.")
     return identity, provider_identity, {"adapter_state": adapter_state, "recipe": recipe, "arm": arm}
 
 
@@ -145,6 +178,10 @@ def load_contextual_checkpoint(
         from channelthermal.member_routing import ThermalRelativeMemberRoutingAdapter as Adapter
     elif workflow == "interaction_reused_joint_member_routing_joint_training_v1":
         from channelthermal.joint_member_routing import ThermalJointMemberRoutingAdapter as Adapter
+    elif workflow == "interaction_reused_faithful_member_routing_training_v1":
+        from channelthermal.member_routing import ThermalFaithfulMemberRoutingAdapter as Adapter
+    elif workflow == "interaction_reused_typed_organization_member_routing_training_v1":
+        from channelthermal.member_routing import ThermalTypedOrganizationMemberRoutingAdapter as Adapter
     elif workflow == "interaction_groups_joint_training_v1":
         from channelthermal.interaction_groups import ThermalInteractionGroupsAdapter as Adapter
     else:

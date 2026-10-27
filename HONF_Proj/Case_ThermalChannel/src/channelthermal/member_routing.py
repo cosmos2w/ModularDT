@@ -27,6 +27,14 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
                     RelativeMemberRoutingCore,
                 )
                 core_type = RelativeMemberRoutingCore
+            elif core_config.get("schema") == "interaction_reused_faithful_joint_member_routing_v1":
+                from honf_forward_core.interaction_reused_member_routing.faithful import FaithfulMECore
+                core_type = FaithfulMECore
+            elif core_config.get("schema") == "interaction_reused_typed_organization_member_routing_v1":
+                from honf_forward_core.interaction_reused_member_routing.typed_organization_core import (
+                    TypedOrganizationMemberRoutingCore,
+                )
+                core_type = TypedOrganizationMemberRoutingCore
             else:
                 from honf_forward_core.interaction_reused_member_routing import (
                     InteractionReusedMemberRoutingCore,
@@ -112,4 +120,25 @@ class ThermalRelativeMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingA
     ARCHITECTURES = ("R13-3-Relative",)
 
 
-__all__ = ["ThermalInteractionReusedMemberRoutingAdapter", "ThermalRelativeMemberRoutingAdapter"]
+class ThermalFaithfulMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
+    """Thermal-native adapter for the versioned R13-6 faithful O reader."""
+
+    SCHEMA = "thermal_interaction_reused_faithful_member_routing_adapter_v1"
+    CORE_SCHEMA = "interaction_reused_faithful_joint_member_routing_v1"
+    ARCHITECTURES = ("R13-6-O-ME-FaithfulJoint95",)
+
+
+class ThermalTypedOrganizationMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
+    """Thermal-native adapter for the versioned R13-6 typed-organization H reader."""
+
+    SCHEMA = "thermal_interaction_reused_typed_organization_member_routing_adapter_v1"
+    CORE_SCHEMA = "interaction_reused_typed_organization_member_routing_v1"
+    ARCHITECTURES = ("R13-6-H-ME-TypedOrganizationJoint95",)
+
+
+__all__ = [
+    "ThermalFaithfulMemberRoutingAdapter",
+    "ThermalInteractionReusedMemberRoutingAdapter",
+    "ThermalRelativeMemberRoutingAdapter",
+    "ThermalTypedOrganizationMemberRoutingAdapter",
+]

@@ -533,6 +533,28 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
         )
         return contribution, log_weight, common_offset, {}
 
+    def _role_read_contributions(
+        self,
+        marginal_contribution: Tensor,
+        member_prior: Tensor,
+        ell: Tensor,
+        candidate: Tensor,
+        *,
+        full_candidate: Tensor,
+        proposal: Tensor,
+        retrieval_R: Tensor,
+        row_mass: Tensor,
+        module_count: int,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        """Return gate and value distributions for each typed read role.
+
+        Candidate A uses one M+E contribution normalizer for both statistics
+        and values. Subclasses can preserve those marginal gate statistics
+        while changing only how role contributions are assembled.
+        """
+        del member_prior, ell, candidate, full_candidate, proposal, retrieval_R, row_mass, module_count
+        return marginal_contribution, marginal_contribution, {}
+
     @staticmethod
     def _score_values(raw_scores: Tensor, prior: Tensor, candidate: Tensor, law: str) -> Tensor:
         if law == "inherited":
@@ -789,6 +811,21 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
             row_mass=row_mass[:, :active_address_count],
             retrieval_calibration=retrieval_calibration,
         )
+        gate_contribution, value_contribution, read_law_trace = self._role_read_contributions(
+            contribution,
+            member_prior,
+            ell,
+            joint_candidate,
+            full_candidate=full_candidate,
+            proposal=active_pi,
+            retrieval_R=active_R,
+            row_mass=row_mass[:, :active_address_count],
+            module_count=modules,
+        )
+        if (gate_contribution.shape != contribution.shape or value_contribution.shape != contribution.shape
+                or gate_contribution.device != contribution.device or value_contribution.device != contribution.device
+                or gate_contribution.dtype != contribution.dtype or value_contribution.dtype != contribution.dtype):
+            raise ValueError("Role read contributions must preserve the joint contribution tensor's shape, device and dtype.")
         role_candidates = {"M": candidate_M, "E": candidate_E}
         role_offsets = {"M": (0, modules), "E": (modules, total)}
         contexts: dict[str, Tensor] = {}
@@ -799,10 +836,11 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
         ):
             start, stop = role_offsets[role]
             candidate = role_candidates[role]
-            b_role = contribution[..., start:stop]
+            b_role = value_contribution[..., start:stop]
+            gate_role = gate_contribution[..., start:stop]
             ell_role = ell[..., start:stop]
             p_role, expectation, entropy = joint_role_statistics(
-                contribution[..., start:stop], ell_role, candidate,
+                gate_role, ell_role, candidate,
                 eligible_scene.sum(-1),
             )
             gate_inputs = torch.cat((normalized_query, expectation[..., None], entropy[..., None]), -1)
@@ -820,6 +858,7 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
                 "candidate": candidate,
                 "raw_scores": member_logits[role],
                 "ell": ell_role,
+                "gate_contribution": gate_role,
                 "pre_strength": b_role,
                 "conditional": p_role,
                 "conditional_prior": conditional_prior,
@@ -977,11 +1016,11 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
                                                               dtype=torch.long, device=qstates.device),
                 "member_joint_log_weight": log_weight,
                 "member_joint_log_weight_offset": common_offset,
-                "member_joint_likelihood": contribution,
-                "member_joint_likelihood_M": contribution[..., :modules],
-                "member_joint_likelihood_E": contribution[..., modules:],
-                "member_contribution_pre_strength_M": contribution[..., :modules],
-                "member_contribution_pre_strength_E": contribution[..., modules:],
+                "member_joint_likelihood": gate_contribution,
+                "member_joint_likelihood_M": gate_contribution[..., :modules],
+                "member_joint_likelihood_E": gate_contribution[..., modules:],
+                "member_contribution_pre_strength_M": value_contribution[..., :modules],
+                "member_contribution_pre_strength_E": value_contribution[..., modules:],
                 "member_contribution_M": role_states["M"]["post_strength"],
                 "member_contribution_E": role_states["E"]["post_strength"],
                 "candidate_ids_M": self._candidate_id_rows(candidate_M, scene.module_ids),
@@ -994,6 +1033,7 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
                 "context_E": contexts["E"],
             })
             trace.update(law_trace)
+            trace.update(read_law_trace)
             trace.update(_applied_block_mass_trace(
                 prepared, active_pi, active_address_count, modules, environments, retrieval_calibration,
             ))

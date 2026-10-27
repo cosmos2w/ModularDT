@@ -55,6 +55,26 @@ ORGANIZATION_MEMBER_ROUTING_WORKFLOW = "interaction_reused_organization_conditio
 SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMAS = (
     SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMA, ORGANIZATION_MEMBER_ROUTING_CORE_SCHEMA,
 )
+R13_6_MEMBER_ROUTING_CONFIG_SCHEMA = "thermal_r13_6_member_routing_v1"
+R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA = "interaction_reused_faithful_joint_member_routing_v1"
+R13_6_TYPED_ORGANIZATION_CORE_SCHEMA = "interaction_reused_typed_organization_member_routing_v1"
+R13_6_FAITHFUL_MEMBER_ROUTING_ARM = "R13-6-O-ME-FaithfulJoint95"
+R13_6_TYPED_ORGANIZATION_ARM = "R13-6-H-ME-TypedOrganizationJoint95"
+R13_6_MEMBER_ROUTING_CORE_SCHEMAS = (
+    R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA, R13_6_TYPED_ORGANIZATION_CORE_SCHEMA,
+)
+R13_6_MEMBER_ROUTING_ARMS = (
+    R13_6_FAITHFUL_MEMBER_ROUTING_ARM, R13_6_TYPED_ORGANIZATION_ARM,
+)
+R13_6_FAITHFUL_MEMBER_ROUTING_WORKFLOW = "interaction_reused_faithful_member_routing_training_v1"
+R13_6_TYPED_ORGANIZATION_WORKFLOW = "interaction_reused_typed_organization_member_routing_training_v1"
+R13_6_MEMBER_ROUTING_WORKFLOWS = (
+    R13_6_FAITHFUL_MEMBER_ROUTING_WORKFLOW, R13_6_TYPED_ORGANIZATION_WORKFLOW,
+)
+R13_6_FAITHFUL_PROVIDER_SCHEMA = "thermal_r13_6_faithful_member_routing_provider_v1"
+R13_6_TYPED_ORGANIZATION_PROVIDER_SCHEMA = "thermal_r13_6_typed_organization_member_routing_provider_v1"
+R13_6_FAITHFUL_MANIFEST_SCHEMA = "honf_r13_6_faithful_member_routing_run_manifest_v1"
+R13_6_TYPED_ORGANIZATION_MANIFEST_SCHEMA = "honf_r13_6_typed_organization_member_routing_run_manifest_v1"
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
 INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1")
 SPATIAL_INTERACTION_GROUP_CORE_SCHEMA = "spatial_interaction_group_fields_v1"
@@ -84,8 +104,16 @@ def _member_routing_core_schema(section: Mapping[str, Any]) -> str | None:
     return str(model.get("schema")) if isinstance(model, Mapping) else None
 
 
+def _is_r13_6_member_routing(section: Mapping[str, Any]) -> bool:
+    return _member_routing_core_schema(section) in R13_6_MEMBER_ROUTING_CORE_SCHEMAS
+
+
 def _member_routing_workflow(section: Mapping[str, Any]) -> str:
     core_schema = _member_routing_core_schema(section)
+    if core_schema == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA:
+        return R13_6_FAITHFUL_MEMBER_ROUTING_WORKFLOW
+    if core_schema == R13_6_TYPED_ORGANIZATION_CORE_SCHEMA:
+        return R13_6_TYPED_ORGANIZATION_WORKFLOW
     if core_schema == ORGANIZATION_MEMBER_ROUTING_CORE_SCHEMA:
         return ORGANIZATION_MEMBER_ROUTING_WORKFLOW
     if core_schema == SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMA:
@@ -99,6 +127,10 @@ def _member_routing_workflow(section: Mapping[str, Any]) -> str:
 
 def _member_routing_arms(section: Mapping[str, Any]) -> tuple[str, ...]:
     core_schema = _member_routing_core_schema(section)
+    if core_schema == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA:
+        return (R13_6_FAITHFUL_MEMBER_ROUTING_ARM,)
+    if core_schema == R13_6_TYPED_ORGANIZATION_CORE_SCHEMA:
+        return (R13_6_TYPED_ORGANIZATION_ARM,)
     if core_schema == ORGANIZATION_MEMBER_ROUTING_CORE_SCHEMA:
         return ORGANIZATION_MEMBER_ROUTING_ARMS
     if core_schema == SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMA:
@@ -165,6 +197,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
     allowed_member_schemas = {
         MEMBER_ROUTING_CONFIG_SCHEMA, RELATIVE_MEMBER_ROUTING_CONFIG_SCHEMA,
         JOINT_MEMBER_ROUTING_CONFIG_SCHEMA, SUPPLEMENT_MEMBER_ROUTING_CONFIG_SCHEMA,
+        R13_6_MEMBER_ROUTING_CONFIG_SCHEMA,
     }
     valid_schema = (frontier.get("schema") in allowed_member_schemas if section_name == "member_routing"
                     and isinstance(frontier, Mapping) else
@@ -270,12 +303,47 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                 and model.get("address_temperature") == 1.0
                 and model.get("joint_member_coverage") == 0.95
             )
+        elif (core_schema in R13_6_MEMBER_ROUTING_CORE_SCHEMAS
+              and config_schema == R13_6_MEMBER_ROUTING_CONFIG_SCHEMA):
+            if membership == "fixed25_train150_dev22":
+                valid_schedule = (
+                    training.get("local_horizon") == 6
+                    and training.get("first_segment_epochs") == 3
+                    and training.get("optimizer_schedule_horizon") == 6
+                    and training.get("checkpoint_epochs") == [3, 6]
+                    and training.get("curve_every") == 10
+                    and initialization.get("normalization_mode") == "fixed25_train150_stats"
+                )
+            elif (membership == "full_train600"
+                  and initialization.get("source_kind") == "scratch_r13_6_member_routing"):
+                valid_schedule = (
+                    training.get("local_horizon") == 100
+                    and training.get("first_segment_epochs") == 100
+                    and training.get("optimizer_schedule_horizon") == 500
+                    and training.get("checkpoint_epochs") == [100]
+                    and training.get("curve_every") == 10
+                    and initialization.get("normalization_mode") == "scratch_train600_stats"
+                )
+            else:
+                valid_schedule = False
+            valid_model = (
+                model.get("architecture") == arm
+                and model.get("address_mode") == "ME"
+                and model.get("address_temperature") == 1.0
+                and model.get("joint_member_coverage") == 0.95
+                and model.get("retained_prior_law") == "none"
+                and ((core_schema == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA
+                      and arm == R13_6_FAITHFUL_MEMBER_ROUTING_ARM)
+                     or (core_schema == R13_6_TYPED_ORGANIZATION_CORE_SCHEMA
+                         and arm == R13_6_TYPED_ORGANIZATION_ARM))
+            )
         else:
             valid_schedule = False
             valid_model = False
         optimizer = config["optimizer"]
         objective = config["objective"]
         joint_member_routing = core_schema == JOINT_MEMBER_ROUTING_CORE_SCHEMA
+        r13_6_member_routing = core_schema in R13_6_MEMBER_ROUTING_CORE_SCHEMAS
         source_kind = initialization.get("source_kind")
         supplement_member_routing = core_schema in SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMAS
         if supplement_member_routing:
@@ -298,6 +366,14 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                  and initialization.get("pretrained_weights") is True
                  and initialization.get("source_parent_age") == 500
                  and initialization.get("source_arm") == "R13-4-Guide")
+            )
+        elif r13_6_member_routing:
+            valid_source = (
+                source_kind == "scratch_r13_6_member_routing"
+                and initialization.get("source_checkpoint") is None
+                and initialization.get("pretrained_weights") is False
+                and initialization.get("source_parent_age") == 0
+                and initialization.get("source_arm") == "scratch_common_seed0"
             )
         else:
             valid_source = (
@@ -334,15 +410,15 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                 or objective.get("response_training_families") != []
                 or objective.get("response_fit") is not False
                 or objective.get("organizer_objective") is not False):
-            raise ValueError("Round13-3 member-routing config differs from its scratch/native-only training contract.")
-        if (joint_member_routing or supplement_member_routing) and (
+            raise ValueError("Member-routing config differs from its scratch/native-only training contract.")
+        if (joint_member_routing or supplement_member_routing or r13_6_member_routing) and (
                 objective.get("paired_full_restricted") is not True
                 or float(objective.get("guide_kl_weight", -1)) != 0.0
                 or model.get("input_dataset") != "thermal"
                 or model.get("input_capability") != "joint_prescribed_records_v1"
                 or training.get("seed") != 0
                 or initialization.get("seed") != 0):
-            raise ValueError("R13-5 paired objective, input contract, and seed must retain the declared values.")
+            raise ValueError("Paired member-routing objective, input contract, and seed must retain declared values.")
     spatial_groups = section_name == "interaction_groups" and _is_spatial_interaction_group_section(frontier)
     if spatial_groups:
         model = frontier.get("model")
@@ -543,6 +619,12 @@ def _task_factory() -> Callable[..., tuple[torch.nn.Module, Any]]:
 
 
 def _member_routing_task_factory(config: Mapping[str, Any] | None = None) -> Callable[..., tuple[torch.nn.Module, Any]]:
+    if config is not None and _is_r13_6_member_routing(_model_section(config)[1]):
+        from channelthermal.training.r13_6_member_routing_task import (
+            build_thermal_r13_6_member_routing_task,
+        )
+
+        return build_thermal_r13_6_member_routing_task
     if (config is not None
             and _member_routing_core_schema(_model_section(config)[1]) in SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMAS):
         from channelthermal.training.supplement_member_routing_task import build_thermal_supplement_member_routing_task
@@ -618,6 +700,7 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
     frontier = copy.deepcopy(dict(section))
     interaction_groups = section_name == "interaction_groups"
     member_routing = section_name == "member_routing"
+    r13_6_member_routing = member_routing and _is_r13_6_member_routing(section)
     supplement_member_routing = (member_routing and
                                  _member_routing_workflow(section) in (SUPPLEMENT_MEMBER_ROUTING_WORKFLOW,
                                                                      ORGANIZATION_MEMBER_ROUTING_WORKFLOW))
@@ -627,7 +710,8 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
                             _member_routing_workflow(section) == JOINT_MEMBER_ROUTING_WORKFLOW)
     spatial_groups = interaction_groups and _is_spatial_interaction_group_section(section)
     return {
-        "schema": ("honf_supplement_member_routing_training_v1" if supplement_member_routing else
+        "schema": ("honf_r13_6_member_routing_training_v1" if r13_6_member_routing else
+                   "honf_supplement_member_routing_training_v1" if supplement_member_routing else
                    "honf_joint_member_routing_training_v1" if joint_member_routing else
                    "honf_interaction_reused_member_routing_training_v2" if relative_member_routing else
                    "honf_interaction_reused_member_routing_training_v1" if member_routing else
@@ -638,7 +722,12 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
                      "spatial_interaction_groups_joint_training_v1" if spatial_groups else
                      "interaction_groups_joint_training_v1" if interaction_groups else
                      "contextual_frontier_joint_training_v1"),
-        "model_family": ("organized_joint95_member_routing_joint_field_v1" if supplement_member_routing else
+        "model_family": ("faithful_joint95_member_routing_joint_field_v1"
+                         if r13_6_member_routing and
+                         _member_routing_core_schema(section) == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA else
+                         "typed_organization_joint95_member_routing_joint_field_v1"
+                         if r13_6_member_routing else
+                         "organized_joint95_member_routing_joint_field_v1" if supplement_member_routing else
                          "joint95_member_routing_joint_field_v1" if joint_member_routing else
                          "relative_original_member_routing_joint_field_v2" if relative_member_routing else
                          "interaction_reused_original_member_routing_joint_field_v1" if member_routing else
@@ -714,12 +803,17 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
     layout.ensure()
     section_name, section = _model_section(config)
     spatial_groups = section_name == "interaction_groups" and _is_spatial_interaction_group_section(section)
-    manifest_schema = ((SUPPLEMENT_MEMBER_ROUTING_MANIFEST_SCHEMA
-                        if _member_routing_core_schema(section) in SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMAS else
+    core_schema = _member_routing_core_schema(section) if section_name == "member_routing" else None
+    manifest_schema = ((R13_6_FAITHFUL_MANIFEST_SCHEMA
+                        if core_schema == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA else
+                        R13_6_TYPED_ORGANIZATION_MANIFEST_SCHEMA
+                        if core_schema == R13_6_TYPED_ORGANIZATION_CORE_SCHEMA else
+                        SUPPLEMENT_MEMBER_ROUTING_MANIFEST_SCHEMA
+                        if core_schema in SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMAS else
                         JOINT_MEMBER_ROUTING_MANIFEST_SCHEMA
-                        if _member_routing_core_schema(section) == JOINT_MEMBER_ROUTING_CORE_SCHEMA else
+                        if core_schema == JOINT_MEMBER_ROUTING_CORE_SCHEMA else
                         RELATIVE_MEMBER_ROUTING_MANIFEST_SCHEMA
-                        if _member_routing_core_schema(section) == RELATIVE_MEMBER_ROUTING_CORE_SCHEMA else
+                        if core_schema == RELATIVE_MEMBER_ROUTING_CORE_SCHEMA else
                         MEMBER_ROUTING_MANIFEST_SCHEMA) if section_name == "member_routing" else
                        "honf_spatial_interaction_groups_run_manifest_v1" if spatial_groups else
                        "honf_interaction_groups_run_manifest_v1" if section_name == "interaction_groups" else
@@ -1091,7 +1185,9 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
                                     MEMBER_ROUTING_MANIFEST_SCHEMA,
                                     RELATIVE_MEMBER_ROUTING_MANIFEST_SCHEMA,
                                     JOINT_MEMBER_ROUTING_MANIFEST_SCHEMA,
-                                    SUPPLEMENT_MEMBER_ROUTING_MANIFEST_SCHEMA}
+                                    SUPPLEMENT_MEMBER_ROUTING_MANIFEST_SCHEMA,
+                                    R13_6_FAITHFUL_MANIFEST_SCHEMA,
+                                    R13_6_TYPED_ORGANIZATION_MANIFEST_SCHEMA}
             or manifest.get("artifact_layout_version") != 1):
         raise ValueError("Run is missing the maintained contextual-frontier manifest.")
     config = copy.deepcopy(manifest.get("config"))
@@ -1121,10 +1217,10 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
             and current_epoch >= configured_horizon):
         raise ValueError(
             f"Resume stop exceeds the configured absolute {configured_horizon}-epoch horizon; "
-            "Round13-3 requires --extend-horizon and a completed full-TRAIN100 endpoint."
+            "the maintained member-routing runner requires --extend-horizon and a completed configured endpoint."
         )
     if extend_horizon and not member_routing:
-        raise ValueError("Explicit horizon extension is supported only for Round13-3 member-routing runs.")
+        raise ValueError("Explicit horizon extension is supported only for maintained member-routing runs.")
     engine_checkpoint_epochs = tuple(map(int, config["training"]["checkpoint_epochs"]))
     if horizon_extension:
         engine_checkpoint_epochs = tuple(sorted({
@@ -1183,7 +1279,8 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
     member_schema_ok = (frontier.get("schema") in {MEMBER_ROUTING_CONFIG_SCHEMA,
                                                      RELATIVE_MEMBER_ROUTING_CONFIG_SCHEMA,
                                                      JOINT_MEMBER_ROUTING_CONFIG_SCHEMA,
-                                                     SUPPLEMENT_MEMBER_ROUTING_CONFIG_SCHEMA}
+                                                     SUPPLEMENT_MEMBER_ROUTING_CONFIG_SCHEMA,
+                                                     R13_6_MEMBER_ROUTING_CONFIG_SCHEMA}
                         if section_name == "member_routing" and isinstance(frontier, Mapping) else False)
     if (config.get("schema") != research.RESEARCH_SCHEMA
             or not isinstance(frontier, Mapping)
@@ -1237,9 +1334,30 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                            and model.get("address_mode") == ("M" if arm == JOINT_MEMBER_ROUTING_ARMS[0] else "ME")
                            and model.get("address_temperature") == 1.0
                            and model.get("joint_member_coverage") == 0.95)
+        elif (core_schema in R13_6_MEMBER_ROUTING_CORE_SCHEMAS
+              and frontier.get("schema") == R13_6_MEMBER_ROUTING_CONFIG_SCHEMA):
+            if membership == "fixed25_train150_dev22":
+                valid_schedule = actual == (6, 3, 6, [3, 6], "fixed25_train150_stats")
+            elif (membership == "full_train600"
+                  and initialization.get("source_kind") == "scratch_r13_6_member_routing"):
+                valid_schedule = actual == (100, 100, 500, [100], "scratch_train600_stats")
+            else:
+                valid_schedule = False
+            valid_model = (
+                model.get("architecture") == arm
+                and model.get("address_mode") == "ME"
+                and model.get("address_temperature") == 1.0
+                and model.get("joint_member_coverage") == 0.95
+                and model.get("retained_prior_law") == "none"
+                and ((core_schema == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA
+                      and arm == R13_6_FAITHFUL_MEMBER_ROUTING_ARM)
+                     or (core_schema == R13_6_TYPED_ORGANIZATION_CORE_SCHEMA
+                         and arm == R13_6_TYPED_ORGANIZATION_ARM))
+            )
         else:
             valid_schedule = valid_model = False
         joint_member_routing = core_schema == JOINT_MEMBER_ROUTING_CORE_SCHEMA
+        r13_6_member_routing = core_schema in R13_6_MEMBER_ROUTING_CORE_SCHEMAS
         source_kind = initialization.get("source_kind")
         supplement_member_routing = core_schema in SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMAS
         if supplement_member_routing:
@@ -1263,6 +1381,14 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                  and initialization.get("source_parent_age") == 500
                  and initialization.get("source_arm") == "R13-4-Guide")
             )
+        elif r13_6_member_routing:
+            valid_source = (
+                source_kind == "scratch_r13_6_member_routing"
+                and initialization.get("source_checkpoint") is None
+                and initialization.get("pretrained_weights") is False
+                and initialization.get("source_parent_age") == 0
+                and initialization.get("source_arm") == "scratch_common_seed0"
+            )
         else:
             valid_source = (
                 source_kind == "scratch_interaction_reused_member_routing"
@@ -1282,17 +1408,18 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                 or not valid_schedule
                 or not valid_source
                 or training.get("seed") != 0 or training.get("primary_queries") != 1024
+                or (r13_6_member_routing and initialization.get("seed") != 0)
                 or optimizer.get("schedule") != "constant_config_lr"
                 or float(optimizer.get("lr", -1)) != 3e-4
                 or objective.get("response_training_families") != []
                 or objective.get("response_fit") is not False
                 or objective.get("organizer_objective") is not False):
-            raise ValueError("Saved Round13-3 member-routing config violates its bounded scratch contract.")
-        if (joint_member_routing or supplement_member_routing) and (
+            raise ValueError("Saved member-routing config violates its bounded scratch contract.")
+        if (joint_member_routing or supplement_member_routing or r13_6_member_routing) and (
                 objective.get("paired_full_restricted") is not True
                 or float(objective.get("guide_kl_weight", -1)) != 0.0
                 or objective.get("native_weights_fixed") is not True):
-            raise ValueError("Saved R13-5 config changed its paired native objective contract.")
+            raise ValueError("Saved paired member-routing config changed its native objective contract.")
     if spatial_groups:
         model = frontier.get("model")
         arm = frontier.get("arm")

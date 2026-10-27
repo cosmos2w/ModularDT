@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     train_contextual.add_argument("--output", required=True)
 
     train_member_routing = commands.add_parser(
-        "train-member-routing", help="start one Round13-3 or Round13-5 Thermal member-routing run",
+        "train-member-routing", help="start one maintained Thermal member-routing run",
     )
     train_member_routing.add_argument("--config", required=True)
     train_member_routing.add_argument("--device", required=True)
@@ -101,7 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     resume_member_routing = commands.add_parser(
-        "resume-member-routing", help="resume a maintained Round13-3 or Round13-5 Thermal member-routing run",
+        "resume-member-routing", help="resume a maintained Thermal member-routing run",
     )
     resume_member_routing.add_argument("--run", required=True)
     resume_member_routing.add_argument("--device", required=True)
@@ -109,7 +109,7 @@ def _parser() -> argparse.ArgumentParser:
     resume_member_routing.add_argument("--stop-after-epoch", type=int, required=True)
     resume_member_routing.add_argument(
         "--extend-horizon", action="store_true",
-        help="explicitly continue a completed full-TRAIN100 endpoint with the same constant optimizer schedule",
+        help="explicitly continue a completed configured endpoint with the same optimizer schedule",
     )
 
     evaluate_member_routing = commands.add_parser(
@@ -126,6 +126,14 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_joint_member_routing.add_argument("--checkpoint", required=True)
     evaluate_joint_member_routing.add_argument("--device", default="cpu")
     evaluate_joint_member_routing.add_argument("--output", required=True)
+
+    evaluate_r13_6_member_routing = commands.add_parser(
+        "evaluate-r13-6-member-routing",
+        help="evaluate a maintained R13-6 C/H checkpoint on all canonical VAL89 cases",
+    )
+    evaluate_r13_6_member_routing.add_argument("--checkpoint", required=True)
+    evaluate_r13_6_member_routing.add_argument("--device", default="cpu")
+    evaluate_r13_6_member_routing.add_argument("--output", required=True)
 
     evaluate_supplement = commands.add_parser(
         "evaluate-supplement-member-routing",
@@ -269,6 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "evaluate-joint-member-routing":
         from honf_runtime.joint_member_routing_evaluation import evaluate
+        result = evaluate(args.checkpoint, args.device, args.output)
+    elif args.command == "evaluate-r13-6-member-routing":
+        from honf_runtime.r13_6_member_routing_evaluation import evaluate
         result = evaluate(args.checkpoint, args.device, args.output)
     elif args.command == "evaluate-supplement-member-routing":
         from honf_runtime.supplement_member_routing import evaluate
