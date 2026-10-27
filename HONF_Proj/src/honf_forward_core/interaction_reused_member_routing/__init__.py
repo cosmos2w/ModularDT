@@ -3,6 +3,7 @@
 from .core import InteractionJointOutput, InteractionReusedMemberRoutingCore
 from .relative import RelativeMemberRoutingCore
 from .guided import GuidedMemberRoutingCore
+from .joint import JointMemberRoutingCore
 
 __all__ = ["InteractionJointOutput", "InteractionReusedMemberRoutingCore", "RelativeMemberRoutingCore",
-           "GuidedMemberRoutingCore"]
+           "GuidedMemberRoutingCore", "JointMemberRoutingCore"]

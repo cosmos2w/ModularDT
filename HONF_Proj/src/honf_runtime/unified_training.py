@@ -793,15 +793,20 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     from matplotlib.figure import Figure
 
     joint_run = any(row.get("phase") == "joint" for row in history)
+    joint_member_routing_run = any(
+        str(row.get("arm", "")).startswith("R13-5-") for row in history
+    )
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
-                                      "R13-4-Full", "R13-4-Guide"} for row in history
+                                      "R13-4-Full", "R13-4-Guide"}
+        or str(row.get("arm", "")).startswith("R13-5-") for row in history
     )
     canonical_val89_joint = any(
         (isinstance(row.get("validation"), Mapping)
          and (row["validation"].get("scope") == "canonical_VAL89_exposed"
               or row["validation"].get("case_count") == 89))
-        or (str(row.get("arm", "")).startswith(("R13-3-", "R13-4-")) and row.get("case_visits") == 600)
+        or (str(row.get("arm", "")).startswith(("R13-3-", "R13-4-", "R13-5-"))
+            and row.get("case_visits") == 600)
         for row in history
     )
     joint_validation_label = "exposed VAL89" if canonical_val89_joint else "exposed DEV"
@@ -1090,6 +1095,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         )
     adaptive_run = any(str(row.get("arm", "")) == "adaptive_detail" for row in history)
     train_validation_path_note = (
+        "TRAIN: mean of per-update means\nEach native loss = 0.5 full + 0.5 joint95 restricted\n"
+        "VALIDATION: pooled valid-element mean; joint95 restricted inference"
+        if joint_member_routing_run else
         "TRAIN: mean of per-update means\nVALIDATION: pooled valid-element mean\n"
         "All physical heads and shared blocks train jointly\nVALIDATION: same deployed joint path"
         if joint_run else
@@ -1122,7 +1130,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         set_panel_title(native_axis, "Prediction losses", "Prediction vs reference; scaled squared error")
     native_axis.set_ylabel("Weighted loss contribution (dimensionless)")
     plot_term_group(physics_axis, 1)
-    if member_routing_run:
+    if joint_member_routing_run:
+        set_panel_title(physics_axis, "No separate residual / response objective",
+                        "No fitted residual or response loss")
+    elif member_routing_run:
         set_panel_title(physics_axis, "No separate residual / response objective",
                         "Native prediction only; no fitted residual or response loss")
     else:
@@ -1130,7 +1141,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                         "Discrete stored-flow residual; response prediction")
     physics_axis.set_ylabel("Weighted loss contribution (dimensionless)")
     plot_term_group(routing_axis, 2)
-    if member_routing_run:
+    if joint_member_routing_run:
+        set_panel_title(routing_axis, "No separate routing penalty",
+                        "Routing learns through the paired native field objective")
+    elif member_routing_run:
         set_panel_title(routing_axis, "No separate routing penalty",
                         "Member routing is learned through the joint native field objective")
     else:
@@ -1201,7 +1215,54 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             ("E", "cheap_score", "E cheap-score rows"),
         )
     }
-    if member_routing_run:
+    joint_member_routing_work_definitions = {
+        f"core_decode_joint_{path}_query_{role}_{quantity}_rows":
+            f"{path} decode: {role} {quantity.replace('_', ' ')} rows"
+        for path in ("full", "restricted")
+        for role, quantity in (("M", "selected_value"), ("E", "selected_value"),
+                               ("M", "cheap_score"), ("E", "cheap_score"))
+    }
+    if joint_member_routing_run:
+        paired_work_series = {}
+        plotted_paired_work = False
+        for index, (role, quantity, label) in enumerate((
+                ("M", "selected_value", "M selected value"),
+                ("E", "selected_value", "E selected value"),
+                ("M", "cheap_score", "M cheap-score"),
+                ("E", "cheap_score", "E cheap-score"))):
+            full_key = f"core_decode_joint_full_query_{role}_{quantity}_rows"
+            restricted_key = f"core_decode_joint_restricted_query_{role}_{quantity}_rows"
+            series_label = f"{label} rows (full + joint95 restricted TRAIN)"
+            paired_work_series[series_label] = {
+                "source_counters": [full_key, restricted_key],
+                "aggregation": "sum actual full + joint95 restricted decode work",
+            }
+            points = []
+            for row in history:
+                try:
+                    values = row["work_counts"]
+                    if full_key in values and restricted_key in values:
+                        points.append((int(row["epoch"]),
+                                       float(values[full_key]) + float(values[restricted_key])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if points:
+                plotted_paired_work = True
+                work_axis.plot(
+                    [point[0] for point in points], [point[1] for point in points],
+                    label=series_label, color=f"C{index % 2}",
+                    linestyle="-" if quantity == "selected_value" else "--",
+                    marker="o" if quantity == "selected_value" else ".",
+                    markersize=3.5,
+                )
+        work_axis.set_yscale("symlog", linthresh=1)
+        work_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.55)
+        if plotted_paired_work:
+            work_axis.legend(fontsize=6.5, loc="best", frameon=False)
+        else:
+            work_axis.text(0.5, 0.5, "No paired joint-reader query counters saved", ha="center", va="center",
+                           transform=work_axis.transAxes)
+    elif member_routing_run:
         for index, (key, label) in enumerate(member_routing_work_definitions.items()):
             points = []
             for row in history:
@@ -1271,7 +1332,11 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         if typed_work_series:
             work_axis.set_ylim(0.,1.02)
             work_axis.legend(fontsize=7.,frameon=False)
-    if member_routing_run:
+    if joint_member_routing_run:
+        set_panel_title(work_axis, "R13-5 paired reader work",
+                        "Sum full + joint95 restricted TRAIN counts\nWork counts are separate from 0.5 loss weights",
+                        fontsize=8.9)
+    elif member_routing_run:
         set_panel_title(work_axis, "Member-routing query work",
                         "Exact core counters; zero selected value rows remain visible",
                         fontsize=8.9)
@@ -1312,9 +1377,13 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             work_axis.set_title("Guide TRAIN work sums full + restricted reads", fontsize=9, pad=18)
     if scope:
         title_parts.append(scope)
-    title_parts.append(f"TRAIN optimization vs {joint_validation_label} joint inference" if joint_run
-                       else "TRAIN optimization vs exposed VALIDATION hard inference")
-    figure.suptitle(" | ".join(title_parts), fontsize=13)
+    if joint_member_routing_run:
+        title_parts.append("paired loss: 0.5 full + 0.5 joint95 restricted")
+        title_parts.append(f"{joint_validation_label} joint95 inference")
+    else:
+        title_parts.append(f"TRAIN optimization vs {joint_validation_label} joint inference" if joint_run
+                           else "TRAIN optimization vs exposed VALIDATION hard inference")
+    figure.suptitle(" | ".join(title_parts), fontsize=10.8 if joint_member_routing_run else 13)
     epochs = sorted({int(row["epoch"]) for row in history if type(row.get("epoch")) is int})
     if epochs:
         limits = (epochs[0] - 0.5, epochs[-1] + 0.5) if len(epochs) == 1 else (epochs[0], epochs[-1])
@@ -1381,7 +1450,42 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "all requests within each case are aggregated before equal-case means. "
             "Executed native rows remain separate saved counters; no memory or latency claim is inferred."
         )
-    if member_routing_run:
+    if joint_member_routing_run:
+        for name in member_routing_native_terms & set(all_names):
+            metadata["term_definitions"][name]["formula"] = (
+                "TRAIN is 0.5 * matching all-eligible full-reader native field loss + 0.5 * matching joint95 "
+                "restricted-reader native field loss. Validation uses the joint95 restricted path and the maintained native reduction. "
+                "Both use the run's TRAIN-fitted normalizer."
+            )
+        metadata["panel_definitions"].update({
+            "shared_name_loss_summary": (
+                "TRAIN native terms average 0.5 all-eligible full-reader loss and 0.5 joint95 restricted-reader loss. "
+                "Validation uses the joint95 restricted reader; TRAIN macro-update means and pooled validation reductions differ."
+            ),
+            "native_prediction": (
+                "R13-5 native flow, temperature, and q-proxy losses in TRAIN-fitted scales; TRAIN pairs full and joint95 "
+                "restricted paths at equal weight, while validation uses joint95 restricted inference."
+            ),
+            "physics": "No separately fitted residual or response objective is present for this workflow.",
+            "routing": "Member routing is learned through the paired native field objective; no separate routing penalty is fitted.",
+            "train_work": (
+                "Exact R13-5 M/E selected-value and cheap-score counters summed across full and joint95 restricted TRAIN decodes. "
+                "These are actual work counts, not loss weights, latency, or executor savings."
+            ),
+        })
+        metadata["training_objective_pairing"] = {
+            "training_loss": "0.5 * full native field loss + 0.5 * joint95 restricted native field loss",
+            "validation_loss": "joint95 restricted native field path",
+            "full_loss_weight": 0.5,
+            "restricted_loss_weight": 0.5,
+        }
+        metadata["paired_work_series"] = paired_work_series
+        metadata["work_counter_definitions"].update(joint_member_routing_work_definitions)
+        metadata["prediction_path_comparison"] = (
+            "TRAIN pairs all-eligible full-reader and joint95 restricted-reader native losses at 0.5 each, then averages "
+            "macro-update means. Validation uses the joint95 restricted reader and pools valid elements at fixed review weights."
+        )
+    elif member_routing_run:
         metadata["panel_definitions"].update({
             "native_prediction": "Round13-3 native flow, temperature, and q-proxy prediction losses in TRAIN-fitted scales.",
             "physics": "No separately fitted residual or response objective is present for this workflow.",
@@ -3359,6 +3463,7 @@ class TrainingEngine:
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
         relation_guided_transfer: Mapping[str, Any] | None = None,
+        joint_member_routing_transfer: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
@@ -3406,6 +3511,24 @@ class TrainingEngine:
                 or branch_from_checkpoint is None or resume_checkpoint is not None
                 or optimizer_seed is not None or self.config.training_mode != "joint"):
             raise ValueError("A relation-guided transfer attaches one retained e500 state to a new joint branch.")
+        identity_is_joint_member_routing = (
+            identity.get("workflow") == "interaction_reused_joint_member_routing_joint_training_v1"
+        )
+        if joint_member_routing_transfer is not None and (
+                not identity_is_joint_member_routing
+                or branch_from_checkpoint is None or resume_checkpoint is not None
+                or optimizer_seed is not None or self.config.training_mode != "joint"):
+            raise ValueError("An R13-5 transfer attaches one retained R13-4 Guide e500 state to a fresh joint95 branch.")
+        if (identity_is_joint_member_routing
+                and identity.get("initialization", {}).get("source_kind")
+                == "relation_guided_joint_member_routing_e500_transfer"
+                and (joint_member_routing_transfer is None or branch_from_checkpoint is None)):
+            raise ValueError("R13-5 transferred arms require the explicit state-preserving R13-4 e500 branch.")
+        if joint_member_routing_transfer is not None and (
+                branch_from_checkpoint is not None
+                and Path(branch_from_checkpoint).resolve()
+                != Path(str(identity.get("initialization", {}).get("source_checkpoint", ""))).resolve()):
+            raise ValueError("R13-5 branch path must equal its configured literal source checkpoint.")
         fresh_initialization = identity.get("fresh_initialization")
         source_reader_variant = provider_identity.get("source_reader_variant")
         is_source_read_sparse = source_reader_variant in ("S-Utility", "S-Complete")
@@ -3988,6 +4111,11 @@ class TrainingEngine:
                 amendment = prepare_guided_transfer(
                     model, provider, source_payload, sealed_identity, relation_guided_transfer,
                     source_path=source_path)
+            elif joint_member_routing_transfer is not None:
+                from .joint_member_routing_child import prepare_joint_member_routing_transfer
+                amendment = prepare_joint_member_routing_transfer(
+                    model, provider, source_payload, sealed_identity, joint_member_routing_transfer,
+                    source_path=source_path)
             elif identity_is_joint_native and branch_from_checkpoint is not None:
                 from .joint_native_child import prepare_joint_native_child
                 if identity_is_continuous_joint:
@@ -4109,6 +4237,7 @@ class TrainingEngine:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
             elif (joint_core_revision is None and diagnostic_age_branch is None
                   and relation_guided_transfer is None
+                  and joint_member_routing_transfer is None
                   and architecture_child_initialization is None and source_read_child is None
                   and inherited_attention_sparse_child is None
                   and hyperedge_readout_child is None
@@ -4137,6 +4266,8 @@ class TrainingEngine:
             restore_provider_state = getattr(provider, "load_training_state_dict", None)
             provider_state = source_payload.get("provider_training_state", {})
             if relation_guided_transfer is not None:
+                provider_state = provider.source_training_state(provider_state)
+            elif joint_member_routing_transfer is not None:
                 provider_state = provider.source_training_state(provider_state)
             elif source_read_child is not None:
                 from .source_read_child import source_read_child_provider_state
@@ -4223,8 +4354,17 @@ class TrainingEngine:
                     != [_optimizer_spec_payload(spec) for spec in optimizer_specs]):
                 raise ValueError("Exact resume optimizer group membership/order differs from its checkpoint.")
         if restored_rng is not None:
-            restore_rng_state(restored_rng)
-        if relation_guided_transfer is not None:
+            if joint_member_routing_transfer is not None:
+                from .joint_member_routing_child import restore_joint_member_routing_transfer_rng_state
+
+                amendment["cuda_rng_transfer"] = restore_joint_member_routing_transfer_rng_state(
+                    restored_rng,
+                    source_device=amendment.get("source_training_device"),
+                    target_device=self.device,
+                )
+            else:
+                restore_rng_state(restored_rng)
+        if relation_guided_transfer is not None or joint_member_routing_transfer is not None:
             provider.prepare_transfer_health(model, source_epoch=int(source_payload["epoch"]))
         if source_read_child is not None:
             from .source_read_child import run_source_read_child_auxiliary_fit
@@ -4304,10 +4444,12 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             if (amendment.get("kind") != "explicit_spatial_group_full_state_continuation"
-                    and relation_guided_transfer is None):
+                    and relation_guided_transfer is None
+                    and joint_member_routing_transfer is None):
                 amendment["source_checkpoint_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
             resume_amendments.append(amendment)
-            amendment_name = ('relation_guided_transfer' if relation_guided_transfer is not None else
+            amendment_name = ('joint_member_routing_transfer' if joint_member_routing_transfer is not None else
+                              'relation_guided_transfer' if relation_guided_transfer is not None else
                               'joint_native_child' if identity_is_joint_native and branch_from_checkpoint is not None else
                               'joint_native_resume' if identity_is_joint_native else
                               'moment_hyperedge_child' if identity_is_moment_hyperedge and branch_from_checkpoint is not None else
@@ -4327,7 +4469,7 @@ class TrainingEngine:
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if (relation_guided_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
+                category='logs' if (relation_guided_transfer is not None or joint_member_routing_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
                                     or identity_is_native_budgeted
                                     or identity_is_native_retrieval
@@ -4349,7 +4491,7 @@ class TrainingEngine:
         if branch_from_checkpoint is not None:
             branch_parent = {
                 "path": str(source_path),
-                **({} if relation_guided_transfer is not None else
+                **({} if relation_guided_transfer is not None or joint_member_routing_transfer is not None else
                    {"sha256": hashlib.sha256(source_path.read_bytes()).hexdigest()}),
                 "identity": source_payload.get("experiment_identity"),
                 "epoch": int(source_payload["epoch"]),
@@ -4360,6 +4502,13 @@ class TrainingEngine:
                     inherited_history_scope="Relative parent epochs1–500; new reader/objective rows begin at epoch501",
                     inherited_case_visits=sum(int(row["case_visits"]) for row in history),
                     inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in history))
+            elif joint_member_routing_transfer is not None:
+                branch_parent.update(
+                    joint_member_routing_transfer=copy.deepcopy(amendment),
+                    inherited_case_visits=sum(int(row["case_visits"]) for row in source_payload.get("history", [])),
+                    inherited_optimizer_updates=sum(int(row["optimizer_updates"]) for row in source_payload.get("history", [])),
+                    inherited_history_scope="R13-4 Guide paired physical history through epoch500; R13-5 joint95 reader rows begin at epoch501",
+                )
             elif inherited_attention_sparse_child is not None:
                 branch_parent.update(
                     inherited_attention_sparse_child=copy.deepcopy(amendment),

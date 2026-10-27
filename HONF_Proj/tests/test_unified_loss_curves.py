@@ -222,3 +222,96 @@ def test_round13_member_routing_native_losses_and_zero_read_work_are_explicit(tm
     assert "No separately fitted residual or response objective" in metadata["panel_definitions"]["physics"]
     assert "core_decode_primary_query_M_selected_value_rows" in metadata["work_counter_definitions"]
     assert "core_decode_primary_query_E_cheap_score_rows" in metadata["work_counter_definitions"]
+
+
+def test_r13_5_paired_native_losses_and_actual_full_restricted_work_are_explicit(tmp_path, monkeypatch):
+    loss_names = (
+        "flow/u", "flow/v", "flow/p", "flow/omega", "temperature/fluid",
+        "temperature/surface", "temperature/material", "q_proxy",
+    )
+    work_counts = {
+        "core_decode_joint_full_query_M_selected_value_rows": 6,
+        "core_decode_joint_restricted_query_M_selected_value_rows": 7,
+        "core_decode_joint_full_query_E_selected_value_rows": 3,
+        "core_decode_joint_restricted_query_E_selected_value_rows": 5,
+        "core_decode_joint_full_query_M_cheap_score_rows": 40,
+        "core_decode_joint_restricted_query_M_cheap_score_rows": 25,
+        "core_decode_joint_full_query_E_cheap_score_rows": 60,
+        "core_decode_joint_restricted_query_E_cheap_score_rows": 30,
+    }
+    history = [{
+        "epoch": 6,
+        "arm": "R13-5-ME-Joint95",
+        "phase": "joint",
+        "case_visits": 150,
+        "train_losses": {name: 0.2 for name in loss_names},
+        "validation": {"field_score": 0.3, "scope": "fixed25_v1_DEV22_exposed", "case_count": 22},
+        "validation_objective": _objective(
+            {name: 0.1 for name in loss_names}, list(loss_names), 0.8, 0.4,
+        ),
+        "work_counts": work_counts,
+    }]
+    before = copy.deepcopy(history)
+    captured = _capture_figures(monkeypatch, tmp_path)
+
+    _render_loss_curves(history, tmp_path, "field_score")
+
+    figure = captured[0]
+    assert "paired loss: 0.5 full + 0.5 joint95 restricted" in figure["title"]
+    assert figure["titles"][1] == "Prediction losses\nPrediction vs reference; scaled squared error"
+    expected_native_train_labels = [
+        "TRAIN: Vorticity loss", "TRAIN: Pressure loss", "TRAIN: Flow u loss", "TRAIN: Flow v loss",
+        "TRAIN: Heat-flux proxy loss", "TRAIN: Fluid temperature loss", "TRAIN: Material temperature loss",
+        "TRAIN: Surface temperature loss",
+    ]
+    assert [label for label in figure["labels"][1] if label.startswith("TRAIN:")] == expected_native_train_labels
+    assert sum(label.startswith("HELD-OUT VALIDATION:") for label in figure["labels"][1]) == len(loss_names)
+    assert "No prediction losses saved" not in figure["texts"][1]
+    assert "exposed DEV joint95 inference" in figure["title"]
+    work_series = dict(zip(figure["labels"][5], figure["lines"][5]))
+    assert np.asarray(work_series[
+        "M selected value rows (full + joint95 restricted TRAIN)"
+    ]).tolist() == [13.0]
+    assert np.asarray(work_series[
+        "E selected value rows (full + joint95 restricted TRAIN)"
+    ]).tolist() == [8.0]
+    assert np.asarray(work_series[
+        "M cheap-score rows (full + joint95 restricted TRAIN)"
+    ]).tolist() == [65.0]
+    assert np.asarray(work_series[
+        "E cheap-score rows (full + joint95 restricted TRAIN)"
+    ]).tolist() == [90.0]
+    assert "No recorded work counters" not in figure["texts"][5]
+    assert "Sum full + joint95 restricted TRAIN counts" in figure["titles"][5]
+    metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
+    assert metadata["validation_scope"] == "fixed exposed DEV joint inference; not an independent TEST result"
+    assert metadata["training_objective_pairing"]["full_loss_weight"] == 0.5
+    assert metadata["training_objective_pairing"]["restricted_loss_weight"] == 0.5
+    assert "joint95 restricted" in metadata["training_objective_pairing"]["validation_loss"]
+    for name in loss_names:
+        assert metadata["term_definitions"][name]["panel"] == "native_prediction"
+        assert "0.5 * matching all-eligible full-reader" in metadata["term_definitions"][name]["formula"]
+    assert "core_decode_joint_full_query_M_selected_value_rows" in metadata["work_counter_definitions"]
+    assert "core_decode_joint_restricted_query_E_cheap_score_rows" in metadata["work_counter_definitions"]
+    assert "full + joint95 restricted" in metadata["paired_work_series"][
+        "M selected value rows (full + joint95 restricted TRAIN)"
+    ]["aggregation"]
+    assert history == before
+
+
+def test_r13_5_full_train_history_uses_canonical_val89_label(tmp_path, monkeypatch):
+    history = [{
+        "epoch": 1,
+        "arm": "R13-5-M-Joint95",
+        "phase": "joint",
+        "case_visits": 600,
+        "train_losses": {"flow/u": 0.2},
+        "validation": {"field_score": 0.3},
+    }]
+    captured = _capture_figures(monkeypatch, tmp_path)
+
+    _render_loss_curves(history, tmp_path, "field_score")
+
+    assert "exposed VAL89 joint95 inference" in captured[0]["title"]
+    metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
+    assert metadata["validation_scope"] == "exposed canonical VAL89 joint inference; not an independent TEST result"

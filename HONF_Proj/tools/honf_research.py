@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     train_contextual.add_argument("--output", required=True)
 
     train_member_routing = commands.add_parser(
-        "train-member-routing", help="start one Round13-3 Thermal joint member-routing run",
+        "train-member-routing", help="start one Round13-3 or Round13-5 Thermal member-routing run",
     )
     train_member_routing.add_argument("--config", required=True)
     train_member_routing.add_argument("--device", required=True)
@@ -101,7 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     resume_member_routing = commands.add_parser(
-        "resume-member-routing", help="resume a Round13-3 run, with explicit opt-in for post-100 continuation",
+        "resume-member-routing", help="resume a maintained Round13-3 or Round13-5 Thermal member-routing run",
     )
     resume_member_routing.add_argument("--run", required=True)
     resume_member_routing.add_argument("--device", required=True)
@@ -118,6 +118,14 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_member_routing.add_argument("--checkpoint", required=True)
     evaluate_member_routing.add_argument("--device", default="cpu")
     evaluate_member_routing.add_argument("--output", required=True)
+
+    evaluate_joint_member_routing = commands.add_parser(
+        "evaluate-joint-member-routing",
+        help="evaluate both full and joint95 native paths on VAL89 plus the fixed R13-5 detail panel",
+    )
+    evaluate_joint_member_routing.add_argument("--checkpoint", required=True)
+    evaluate_joint_member_routing.add_argument("--device", default="cpu")
+    evaluate_joint_member_routing.add_argument("--output", required=True)
 
     cut = commands.add_parser("activate-cut", help="activate and persist the Round12 R1 hard cut after local e40")
     cut.add_argument("--run", required=True)
@@ -251,6 +259,9 @@ def main(argv: list[str] | None = None) -> int:
             args.run, device=args.device, devices=args.devices,
             stop_after_epoch=args.stop_after_epoch, extend_horizon=args.extend_horizon,
         )
+    elif args.command == "evaluate-joint-member-routing":
+        from honf_runtime.joint_member_routing_evaluation import evaluate
+        result = evaluate(args.checkpoint, args.device, args.output)
     elif args.command == "activate-cut":
         result = research.activate_round12_cut(args.run)
     elif args.command == "fork-common":
