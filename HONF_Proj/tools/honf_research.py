@@ -127,6 +127,14 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_joint_member_routing.add_argument("--device", default="cpu")
     evaluate_joint_member_routing.add_argument("--output", required=True)
 
+    evaluate_supplement = commands.add_parser(
+        "evaluate-supplement-member-routing",
+        help="evaluate the R13-5 supplement full and joint95 native paths on the fixed panel",
+    )
+    evaluate_supplement.add_argument("--checkpoint", required=True)
+    evaluate_supplement.add_argument("--device", default="cpu")
+    evaluate_supplement.add_argument("--output", required=True)
+
     cut = commands.add_parser("activate-cut", help="activate and persist the Round12 R1 hard cut after local e40")
     cut.add_argument("--run", required=True)
 
@@ -261,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "evaluate-joint-member-routing":
         from honf_runtime.joint_member_routing_evaluation import evaluate
+        result = evaluate(args.checkpoint, args.device, args.output)
+    elif args.command == "evaluate-supplement-member-routing":
+        from honf_runtime.supplement_member_routing import evaluate
         result = evaluate(args.checkpoint, args.device, args.output)
     elif args.command == "activate-cut":
         result = research.activate_round12_cut(args.run)
