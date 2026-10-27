@@ -6,6 +6,7 @@ from pathlib import Path
 
 import matplotlib.figure
 import numpy as np
+import pytest
 from honf_runtime.unified_training import _render_loss_curves
 
 
@@ -224,7 +225,12 @@ def test_round13_member_routing_native_losses_and_zero_read_work_are_explicit(tm
     assert "core_decode_primary_query_E_cheap_score_rows" in metadata["work_counter_definitions"]
 
 
-def test_r13_5_paired_native_losses_and_actual_full_restricted_work_are_explicit(tmp_path, monkeypatch):
+@pytest.mark.parametrize("arm", [
+    "R13-5-ME-Joint95",
+    "R13-5A-ME-ConsistentJoint95",
+    "R13-5B-ME-OrganizationConditionedJoint95",
+])
+def test_r13_5_paired_native_losses_and_actual_full_restricted_work_are_explicit(tmp_path, monkeypatch, arm):
     loss_names = (
         "flow/u", "flow/v", "flow/p", "flow/omega", "temperature/fluid",
         "temperature/surface", "temperature/material", "q_proxy",
@@ -238,10 +244,11 @@ def test_r13_5_paired_native_losses_and_actual_full_restricted_work_are_explicit
         "core_decode_joint_restricted_query_M_cheap_score_rows": 25,
         "core_decode_joint_full_query_E_cheap_score_rows": 60,
         "core_decode_joint_restricted_query_E_cheap_score_rows": 30,
+        "core_decode_shared_query_joint_address_score_rows": 11,
     }
     history = [{
         "epoch": 6,
-        "arm": "R13-5-ME-Joint95",
+        "arm": arm,
         "phase": "joint",
         "case_visits": 150,
         "train_losses": {name: 0.2 for name in loss_names},
@@ -281,8 +288,10 @@ def test_r13_5_paired_native_losses_and_actual_full_restricted_work_are_explicit
     assert np.asarray(work_series[
         "E cheap-score rows (full + joint95 restricted TRAIN)"
     ]).tolist() == [90.0]
+    assert np.asarray(work_series["Shared joint-address score rows (TRAIN)"]).tolist() == [11.0]
     assert "No recorded work counters" not in figure["texts"][5]
     assert "Sum full + joint95 restricted TRAIN counts" in figure["titles"][5]
+    assert "Shared address score once" in figure["titles"][5]
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     assert metadata["validation_scope"] == "fixed exposed DEV joint inference; not an independent TEST result"
     assert metadata["training_objective_pairing"]["full_loss_weight"] == 0.5
@@ -293,16 +302,25 @@ def test_r13_5_paired_native_losses_and_actual_full_restricted_work_are_explicit
         assert "0.5 * matching all-eligible full-reader" in metadata["term_definitions"][name]["formula"]
     assert "core_decode_joint_full_query_M_selected_value_rows" in metadata["work_counter_definitions"]
     assert "core_decode_joint_restricted_query_E_cheap_score_rows" in metadata["work_counter_definitions"]
+    assert "core_decode_shared_query_joint_address_score_rows" in metadata["work_counter_definitions"]
     assert "full + joint95 restricted" in metadata["paired_work_series"][
         "M selected value rows (full + joint95 restricted TRAIN)"
     ]["aggregation"]
+    shared_series = metadata["paired_work_series"]["Shared joint-address score rows (TRAIN)"]
+    assert shared_series["source_counters"] == ["core_decode_shared_query_joint_address_score_rows"]
+    assert "once per paired decode" in shared_series["aggregation"]
     assert history == before
 
 
-def test_r13_5_full_train_history_uses_canonical_val89_label(tmp_path, monkeypatch):
+@pytest.mark.parametrize("arm", [
+    "R13-5-M-Joint95",
+    "R13-5A-ME-ConsistentJoint95",
+    "R13-5B-ME-OrganizationConditionedJoint95",
+])
+def test_r13_5_full_train_history_uses_canonical_val89_label(tmp_path, monkeypatch, arm):
     history = [{
         "epoch": 1,
-        "arm": "R13-5-M-Joint95",
+        "arm": arm,
         "phase": "joint",
         "case_visits": 600,
         "train_losses": {"flow/u": 0.2},

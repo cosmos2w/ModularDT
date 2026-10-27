@@ -793,19 +793,21 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     from matplotlib.figure import Figure
 
     joint_run = any(row.get("phase") == "joint" for row in history)
+    joint_member_routing_arm_prefixes = ("R13-5-", "R13-5A-", "R13-5B-")
     joint_member_routing_run = any(
-        str(row.get("arm", "")).startswith("R13-5-") for row in history
+        str(row.get("arm", "")).startswith(joint_member_routing_arm_prefixes) for row in history
     )
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
                                       "R13-4-Full", "R13-4-Guide"}
-        or str(row.get("arm", "")).startswith("R13-5-") for row in history
+        or str(row.get("arm", "")).startswith(joint_member_routing_arm_prefixes) for row in history
     )
     canonical_val89_joint = any(
         (isinstance(row.get("validation"), Mapping)
          and (row["validation"].get("scope") == "canonical_VAL89_exposed"
               or row["validation"].get("case_count") == 89))
-        or (str(row.get("arm", "")).startswith(("R13-3-", "R13-4-", "R13-5-"))
+        or (str(row.get("arm", "")).startswith(
+                ("R13-3-", "R13-4-", *joint_member_routing_arm_prefixes))
             and row.get("case_visits") == 600)
         for row in history
     )
@@ -1222,6 +1224,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         for role, quantity in (("M", "selected_value"), ("E", "selected_value"),
                                ("M", "cheap_score"), ("E", "cheap_score"))
     }
+    shared_joint_address_score_key = "core_decode_shared_query_joint_address_score_rows"
+    shared_joint_address_score_label = "Shared joint-address score rows (TRAIN)"
     if joint_member_routing_run:
         paired_work_series = {}
         plotted_paired_work = False
@@ -1255,6 +1259,28 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                     marker="o" if quantity == "selected_value" else ".",
                     markersize=3.5,
                 )
+        shared_address_points = []
+        for row in history:
+            try:
+                values = row["work_counts"]
+                if shared_joint_address_score_key in values:
+                    shared_address_points.append(
+                        (int(row["epoch"]), float(values[shared_joint_address_score_key]))
+                    )
+            except (KeyError, TypeError, ValueError):
+                continue
+        paired_work_series[shared_joint_address_score_label] = {
+            "source_counters": [shared_joint_address_score_key],
+            "aggregation": "use the shared address-score counter once per paired decode; do not sum it across full and restricted branches",
+        }
+        if shared_address_points:
+            plotted_paired_work = True
+            work_axis.plot(
+                [point[0] for point in shared_address_points],
+                [point[1] for point in shared_address_points],
+                label=shared_joint_address_score_label, color="C4", linestyle=":",
+                marker="s", markersize=3.5,
+            )
         work_axis.set_yscale("symlog", linthresh=1)
         work_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.55)
         if plotted_paired_work:
@@ -1333,8 +1359,12 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             work_axis.set_ylim(0.,1.02)
             work_axis.legend(fontsize=7.,frameon=False)
     if joint_member_routing_run:
+        shared_work_note = (
+            "Shared address score once; 0.5 loss weights"
+            if shared_address_points else "Work counts are separate from 0.5 loss weights"
+        )
         set_panel_title(work_axis, "R13-5 paired reader work",
-                        "Sum full + joint95 restricted TRAIN counts\nWork counts are separate from 0.5 loss weights",
+                        f"Sum full + joint95 restricted TRAIN counts\n{shared_work_note}",
                         fontsize=8.9)
     elif member_routing_run:
         set_panel_title(work_axis, "Member-routing query work",
@@ -1470,7 +1500,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "routing": "Member routing is learned through the paired native field objective; no separate routing penalty is fitted.",
             "train_work": (
                 "Exact R13-5 M/E selected-value and cheap-score counters summed across full and joint95 restricted TRAIN decodes. "
-                "These are actual work counts, not loss weights, latency, or executor savings."
+                "Shared joint-address score counters are counted once per paired decode. These are actual work counts, "
+                "not loss weights, latency, or executor savings."
             ),
         })
         metadata["training_objective_pairing"] = {
@@ -1481,6 +1512,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         }
         metadata["paired_work_series"] = paired_work_series
         metadata["work_counter_definitions"].update(joint_member_routing_work_definitions)
+        metadata["work_counter_definitions"][shared_joint_address_score_key] = (
+            "Shared address-score rows computed once for the full/restricted paired decode"
+        )
         metadata["prediction_path_comparison"] = (
             "TRAIN pairs all-eligible full-reader and joint95 restricted-reader native losses at 0.5 each, then averages "
             "macro-update means. Validation uses the joint95 restricted reader and pools valid elements at fixed review weights."
