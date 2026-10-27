@@ -162,6 +162,7 @@ def test_guided_resume_restores_custom_output_policy_after_interruption(tmp_path
     assert calls[-1][1]["training_identity"]["recipe_budget"] == 18000
     assert provider_configs[-1]["training"]["checkpoint_epochs"] == [100]
     assert provider_configs[-1]["training"]["curve_every"] == 10
+
     # A clean pause does not shrink the saved horizon or restore default outputs.
     payload.update(epoch=201, experiment_identity={"engine_config": {
         "total_epochs": 500, "checkpoint_epochs": [200, 500], "curve_every": 1},
@@ -174,3 +175,50 @@ def test_guided_resume_restores_custom_output_policy_after_interruption(tmp_path
     assert calls[-1][1]["allow_horizon_extension"] is False
     assert provider_configs[-1]["training"]["checkpoint_epochs"] == [100]
     assert provider_configs[-1]["training"]["curve_every"] == 10
+
+
+@pytest.mark.parametrize("scientific_change", [None, "source_binding", "physical_objective"])
+def test_guided_evaluation_after_output_continuation_keeps_strict_identity(
+        tmp_path, monkeypatch, scientific_change):
+    from honf_runtime import guided_member_routing_training as training
+
+    original = {"training": {"checkpoint_epochs": [100], "curve_every": 10},
+                "dataset": {"data_path": "/original/packed.h5"},
+                "objective": {"native_weights": {"temperature/material": 1.}}}
+    current = copy.deepcopy(original)
+    current["training"].update(checkpoint_epochs=[200, 500], curve_every=1)
+    if scientific_change == "source_binding":
+        current["dataset"]["data_path"] = "/different/packed.h5"
+    elif scientific_change == "physical_objective":
+        current["objective"]["native_weights"]["temperature/material"] = 2.
+    (tmp_path / "run_manifest.json").write_text(json.dumps({"config": current}))
+    checkpoint = tmp_path / "checkpoints" / "epoch_0500_model.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.touch()
+    model = torch.nn.Linear(2, 1)
+    payload = {"workflow": WORKFLOW, "model_state_dict": copy.deepcopy(model.state_dict()),
+               "provider_training_state": {},
+               "experiment_identity": {"provider_identity": {"recipe": original}}}
+    before = copy.deepcopy(payload)
+    monkeypatch.setattr(training, "load_trusted_checkpoint", lambda *a, **kw: payload)
+
+    class Provider:
+        def __init__(self, config):
+            self.config = config
+
+        def load_training_state_dict(self, state):
+            assert state == {}
+
+        def identity_payload(self):
+            return {"recipe": self.config}
+
+    monkeypatch.setattr(training, "_build", lambda config, device: (model, Provider(config)))
+    if scientific_change:
+        with pytest.raises(ValueError, match="differs from the saved guided capability"):
+            training.load_checkpoint(checkpoint)
+    else:
+        loaded, provider, _ = training.load_checkpoint(checkpoint)
+        assert not loaded.training
+        assert provider.config == original
+    assert same_state(payload, before)
+    assert json.loads((tmp_path / "run_manifest.json").read_text())["config"] == current

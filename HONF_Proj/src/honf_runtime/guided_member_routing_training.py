@@ -101,6 +101,22 @@ def train(config_path, *, output, device="cuda:1", stop_after_epoch=None):
         relation_guided_transfer=declaration)
 
 
+def _provider_config_for_checkpoint(config, payload):
+    """Retain saved provider output declarations while rebuilding its identity.
+
+    Continuation can change the engine's checkpoint/curve policy without
+    changing the provider recipe. All scientific and source-binding fields
+    still come from the current manifest and undergo the ordinary identity check.
+    """
+    result = copy.deepcopy(config)
+    saved_training = payload["experiment_identity"].get("provider_identity", {}).get(
+        "recipe", {}).get("training", {})
+    for name in ("checkpoint_epochs", "curve_every"):
+        if name in saved_training:
+            result["training"][name] = copy.deepcopy(saved_training[name])
+    return result
+
+
 def resume(run, *, device="cuda:1", stop_after_epoch, extend_horizon=False,
            checkpoint_epochs=None, curve_every=None, wall_clock_budget_seconds=None):
     run = Path(run).expanduser().resolve(strict=True)
@@ -147,12 +163,7 @@ def resume(run, *, device="cuda:1", stop_after_epoch, extend_horizon=False,
     maintained._ensure_workspace_storage_bindings()
     # Provider identity retains the original recipe, including its historical
     # output declarations. Only the engine executes the requested output policy.
-    provider_config = copy.deepcopy(config)
-    saved_training = payload["experiment_identity"].get("provider_identity", {}).get(
-        "recipe", {}).get("training", {})
-    for name in ("checkpoint_epochs", "curve_every"):
-        if name in saved_training:
-            provider_config["training"][name] = copy.deepcopy(saved_training[name])
+    provider_config = _provider_config_for_checkpoint(config, payload)
     model, provider = _build(provider_config, selected)
     estimated, peak = maintained._storage_estimate(
         model, completed_epoch=payload["epoch"], stop_after=stop, config=config,
@@ -175,7 +186,8 @@ def load_checkpoint(checkpoint, device="cpu"):
     if payload.get("workflow") != WORKFLOW:
         raise ValueError("Not an R13-4 relation-guided checkpoint.")
     manifest = json.loads((checkpoint.parents[1] / "run_manifest.json").read_text())
-    model, provider = _build(manifest["config"], torch.device(device))
+    model, provider = _build(
+        _provider_config_for_checkpoint(manifest["config"], payload), torch.device(device))
     model.load_state_dict(payload["model_state_dict"], strict=True)
     provider.load_training_state_dict(payload["provider_training_state"])
     if provider.identity_payload() != payload["experiment_identity"]["provider_identity"]:
