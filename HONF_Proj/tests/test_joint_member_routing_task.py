@@ -557,3 +557,41 @@ def test_named_optimizer_seed_loader_preserves_each_compatible_guide_moment():
     for name, source_state in source["state_by_name"].items():
         for key, value in source_state.items():
             torch.testing.assert_close(restored["state_by_name"][name][key], value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("address_mode", ["M", "ME"])
+def test_joint_thermal_adapter_reprepares_removed_applied_message(address_mode):
+    from channelthermal.joint_member_routing import ThermalJointMemberRoutingAdapter
+    from honf_forward_core.interaction_reused_member_routing import JointMemberRoutingCore
+    from tests.test_joint_me_member_routing import _base_config
+    from tests.test_native_budgeted_postfit import _thermal_stats
+    from tests.test_thermal_content_hypergraph_v2 import _receivers, _structure
+
+    model = ThermalJointMemberRoutingAdapter(
+        _thermal_stats(),
+        core=JointMemberRoutingCore(_base_config(), address_mode=address_mode),
+        nx=8, ny=6, environment_nx=3, environment_ny=2,
+    ).eval()
+    structure = {**_structure(), "heat_powers": torch.tensor([[0.4, 0.8]])}
+    fluid, local = _receivers()
+    arguments = dict(local_query_points=local, ntheta=16, scene_key="message-removal-test")
+    with torch.no_grad():
+        original = model.prepare_native(structure, fluid, **arguments)
+        organization = original.organization
+        before = organization.H_ME_applied.clone()
+        b, receiver, donor = (before > 0).nonzero(as_tuple=False)[0].tolist()
+        stage = organization.final_applied_context_stages["me"]["snapshot"]
+        removal = {
+            "stage": stage.stage_identity, "route": "me",
+            "destination_id": int(stage.destination_ids[b, receiver]),
+            "donor_id": int(stage.donor_ids[b, donor]),
+        }
+        changed = model.prepare_native(
+            structure, fluid, context_message_removal=removal, **arguments,
+        ).organization
+    assert before[b, receiver, donor] > 0
+    assert changed.H_ME_applied[b, receiver, donor] == 0
+    torch.testing.assert_close(organization.H_ME_applied, before, rtol=0, atol=0)
+    assert not torch.equal(changed.module_states, organization.module_states)
+    assert model.core._context_message_removal is None
+    assert changed.H_route_provenance["ME"]["stage_identity"] == stage.stage_identity

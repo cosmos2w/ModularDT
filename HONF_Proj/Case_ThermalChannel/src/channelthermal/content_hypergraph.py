@@ -589,9 +589,9 @@ class ThermalContentHypergraphAdapter(nn.Module):
         if context_message_removal is not None:
             if (getattr(self.core, "schema", None) not in {
                     "interaction_reused_member_routing_v1", "interaction_reused_member_routing_v2",
-                    "interaction_reused_member_routing_v3"}
+                    "interaction_reused_member_routing_v3", "interaction_reused_joint_member_routing_v1"}
                     or forced_frontier is not None):
-                raise ValueError("Context-message removal is supported only by the Round13-3 member-routing core.")
+                raise ValueError("Context-message removal requires a maintained interaction-reused member-routing core.")
             organization = self.core.prepare(
                 scene_batch, context_message_removal=dict(context_message_removal),
             )
