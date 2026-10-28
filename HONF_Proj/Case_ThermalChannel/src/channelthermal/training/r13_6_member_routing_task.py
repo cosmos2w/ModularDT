@@ -128,7 +128,8 @@ class ThermalR136MemberRoutingTask(ThermalJointMemberRoutingTask):
 
 def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_type=None,
                                        variants=None, section_schema=CONFIG_SECTION_SCHEMA,
-                                       source_kind=SOURCE_KIND, lineage="R13-6"):
+                                       source_kind=SOURCE_KIND, lineage="R13-6",
+                                       required_address_mode="ME"):
     """Build a versioned adapter and the shared native TRAIN/VAL provider."""
     recipe = copy.deepcopy(dict(config))
     section = recipe.get("member_routing", {})
@@ -143,7 +144,8 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
     if (variant is None or selected_arm != variant["arm"]
             or not isinstance(model_config, Mapping)
             or model_config.get("architecture") != selected_arm
-            or model_config.get("address_mode") != "ME"):
+            or (required_address_mode is not None
+                and model_config.get("address_mode") != required_address_mode)):
         raise ValueError(f"{lineage} model config must match its strict ME candidate schema and arm.")
     if recipe.get("initialization", {}).get("source_kind") != source_kind:
         raise ValueError(f"{lineage} initialization must declare {source_kind}.")

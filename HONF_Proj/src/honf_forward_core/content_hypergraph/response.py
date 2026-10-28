@@ -19,7 +19,8 @@ def _versions(values) -> tuple[tuple[int, int, int], ...]:
 def _query_versions(query: QueryBatch):
     return _versions((query.coordinates, query.features, query.query_mask, query.query_ids,
                       query.local_batch_indices, query.local_query_indices,
-                      query.local_module_indices, query.local_weights))
+                      query.local_module_indices, query.local_weights,
+                      query.anchor_indices, query.anchor_weights))
 
 
 @dataclass(frozen=True)

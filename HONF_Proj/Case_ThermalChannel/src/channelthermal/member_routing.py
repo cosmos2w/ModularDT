@@ -40,6 +40,11 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
                     SingleDistributionMemberRoutingCore,
                 )
                 core_type = SingleDistributionMemberRoutingCore
+            elif core_config.get("schema") == "interaction_reused_e_anchored_member_routing_v1":
+                from honf_forward_core.interaction_reused_member_routing.anchored import (
+                    AnchoredMemberRoutingCore,
+                )
+                core_type = AnchoredMemberRoutingCore
             else:
                 from honf_forward_core.interaction_reused_member_routing import (
                     InteractionReusedMemberRoutingCore,
@@ -149,8 +154,17 @@ class ThermalSingleDistributionMemberRoutingAdapter(ThermalInteractionReusedMemb
     ARCHITECTURES = ("R13-7-U-ME-SingleDistributionJoint95",)
 
 
+class ThermalAnchoredMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
+    """Thermal-native R13-8 E-directory adapter for the A and L locators."""
+
+    SCHEMA = "thermal_interaction_reused_e_anchored_member_routing_adapter_v1"
+    CORE_SCHEMA = "interaction_reused_e_anchored_member_routing_v1"
+    ARCHITECTURES = ("R13-8-A-EAnchor", "R13-8-L-LocalECover")
+
+
 __all__ = [
     "ThermalFaithfulMemberRoutingAdapter",
+    "ThermalAnchoredMemberRoutingAdapter",
     "ThermalInteractionReusedMemberRoutingAdapter",
     "ThermalRelativeMemberRoutingAdapter",
     "ThermalSingleDistributionMemberRoutingAdapter",

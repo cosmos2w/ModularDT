@@ -351,7 +351,8 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                 "interaction_reused_member_routing_joint_training_v3",
                 "interaction_reused_faithful_member_routing_training_v1",
                 "interaction_reused_typed_organization_member_routing_training_v1",
-                "interaction_reused_single_distribution_member_routing_training_v1"}:
+                "interaction_reused_single_distribution_member_routing_training_v1",
+                "interaction_reused_e_anchored_member_routing_training_v1"}:
             if allow_microbatch_change:
                 raise ValueError(message)
             saved, current = (json.loads(json.dumps(value)) for value in (saved, current))

@@ -121,6 +121,8 @@ def _query_tensor_versions(query: QueryBatch) -> tuple[tuple[int, int, int], ...
         query.local_query_indices,
         query.local_module_indices,
         query.local_weights,
+        query.anchor_indices,
+        query.anchor_weights,
     )
     return tuple(_tensor_version(value) for value in values if value is not None)
 
@@ -1253,6 +1255,8 @@ class ContentHypergraphCoreV2(nn.Module):
             query.local_query_indices,
             query.local_module_indices,
             query.local_weights,
+            query.anchor_indices,
+            query.anchor_weights,
         ):
             if value is not None and value.device != device:
                 raise ValueError("All supplied query tensors must be on the prepared organization's device.")
@@ -1271,6 +1275,15 @@ class ContentHypergraphCoreV2(nn.Module):
                 torch._assert_async(in_bounds, "Packed local-pair indices are outside the scene/query axes.")
             elif not bool(in_bounds):
                 raise ValueError("Packed local-pair indices are outside the scene/query axes.")
+        if query.anchor_indices is not None:
+            active = query.anchor_weights > 0
+            in_bounds = (((query.anchor_indices >= 0)
+                          & (query.anchor_indices < organization.scene.num_environment_tokens))
+                         | ~active).all()
+            if in_bounds.device.type == "cuda":
+                torch._assert_async(in_bounds, "Sparse query anchor slots are outside the environment axis.")
+            elif not bool(in_bounds):
+                raise ValueError("Sparse query anchor slots are outside the environment axis.")
         if organization.scene.scene_key is not None and query.scene_key is not None:
             if organization.scene.scene_key != query.scene_key:
                 raise ValueError("Query scene key does not match the prepared organization.")

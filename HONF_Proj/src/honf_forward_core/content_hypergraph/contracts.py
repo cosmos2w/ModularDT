@@ -228,6 +228,10 @@ class QueryBatch:
     scene_key: Any = None
     coordinate_frame_key: Any = None
     receiver_key: Any = None
+    # Optional adapter-owned sparse service-directory coverage. Indices are
+    # prepared environment slots; zero weights mark padded/deduplicated rows.
+    anchor_indices: Tensor | None = None
+    anchor_weights: Tensor | None = None
 
     @property
     def batch_size(self) -> int:
@@ -253,6 +257,36 @@ class QueryBatch:
         _require_tensor_condition(torch.isfinite(self.coordinates).all(), "query coordinates must be finite.")
         if self.query_mask is not None and self.query_mask.dtype != torch.bool:
             raise TypeError("query_mask must be a boolean tensor.")
+        anchors = (self.anchor_indices, self.anchor_weights)
+        if any(value is not None for value in anchors):
+            if not all(value is not None for value in anchors):
+                raise ValueError("Sparse query anchors require both anchor_indices and anchor_weights.")
+            if self.anchor_indices.ndim != 3 or self.anchor_weights.ndim != 3:
+                raise ValueError("Sparse query anchors must have [B,Q,K] axes.")
+            if self.anchor_indices.shape[:2] != self.coordinates.shape[:2] or (
+                self.anchor_indices.shape != self.anchor_weights.shape
+                or self.anchor_indices.shape[-1] < 1
+            ):
+                raise ValueError("Sparse query anchor axes must align with query coordinates and have K>=1.")
+            if self.anchor_indices.dtype not in (torch.int32, torch.int64):
+                raise TypeError("Sparse query anchor indices must use an integer tensor dtype.")
+            if not self.anchor_weights.is_floating_point() or self.anchor_weights.dtype != self.coordinates.dtype:
+                raise TypeError("Sparse query anchor weights must use the query coordinate floating dtype.")
+            if self.anchor_indices.device != self.coordinates.device or self.anchor_weights.device != self.coordinates.device:
+                raise ValueError("Sparse query anchors must share the query coordinate device.")
+            active = self.anchor_weights > 0
+            _require_tensor_condition(
+                torch.isfinite(self.anchor_weights).all() & (self.anchor_weights >= 0).all()
+                & ((self.anchor_indices >= 0) | ~active).all(),
+                "Sparse query anchors must have finite nonnegative weights and valid active slots.",
+            )
+            anchor_mass = self.anchor_weights.sum(-1)
+            valid_queries = (torch.ones_like(anchor_mass, dtype=torch.bool) if self.query_mask is None
+                             else self.query_mask)
+            _require_tensor_condition(
+                (~valid_queries | torch.isclose(anchor_mass, torch.ones_like(anchor_mass), rtol=1e-5, atol=1e-6)).all(),
+                "Every valid query must have a unit-mass E coverage row.",
+            )
         packed = (
             self.local_batch_indices,
             self.local_query_indices,

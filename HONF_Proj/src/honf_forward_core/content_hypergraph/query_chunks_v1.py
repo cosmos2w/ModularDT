@@ -19,7 +19,8 @@ def slice_query_v1(query: QueryBatch, start: int, stop: int) -> QueryBatch:
     if not 0 <= start <= stop <= query.num_queries:
         raise ValueError("Query slice is outside the original receiver axis.")
     values = {name: getattr(query, name)[:, start:stop] if getattr(query, name) is not None else None
-              for name in ("coordinates", "features", "query_mask", "query_ids")}
+              for name in ("coordinates", "features", "query_mask", "query_ids",
+                           "anchor_indices", "anchor_weights")}
     if query.local_query_indices is not None:
         keep = (query.local_query_indices >= start) & (query.local_query_indices < stop)
         for name in ("local_batch_indices", "local_module_indices", "local_weights"):
@@ -46,7 +47,8 @@ def select_query_rows_v1(query: QueryBatch, indices: torch.Tensor) -> QueryBatch
     elif not bool(in_bounds):
         raise ValueError("Query row selection is outside the receiver axis.")
     values = {name: getattr(query, name).index_select(1, indices) if getattr(query, name) is not None else None
-              for name in ("coordinates", "features", "query_mask", "query_ids")}
+              for name in ("coordinates", "features", "query_mask", "query_ids",
+                           "anchor_indices", "anchor_weights")}
     if query.local_query_indices is not None:
         mapping = indices.new_full((query.num_queries,), -1).index_copy(
             0, indices, torch.arange(indices.numel(), device=indices.device))

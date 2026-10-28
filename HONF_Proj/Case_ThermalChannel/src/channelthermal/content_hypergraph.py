@@ -600,6 +600,13 @@ class ThermalContentHypergraphAdapter(nn.Module):
                             self.core.prepare(scene_batch, forced_frontier=forced_frontier))
         (query, union, stencils, solid_mask, curl_stencil, lengths, delta,
          conductivity, role_shapes) = self._query_union(scene_batch, fluid_xy, local_query_points, ntheta)
+        if getattr(self.core, "locator_mode", None) is not None:
+            if query.anchor_indices is None or query.anchor_weights is None:
+                raise ValueError("Anchored Thermal preparation omitted its E coverage carrier.")
+            organization.work_counts.update({
+                "query_anchor_locator_rows": int(query.coordinates.shape[0] * query.coordinates.shape[1]),
+                "query_anchor_index_rows": int((query.anchor_weights > 0).sum().item()),
+            })
         if query.scene_key != organization.scene_key:
             raise ValueError("Thermal query union and shared organization belong to different scenes.")
         adapter_transform_snapshot = {
@@ -1264,6 +1271,20 @@ class ThermalContentHypergraphAdapterV2(ThermalContentHypergraphAdapter):
             coordinate_frame_key=THERMAL_CONTENT_COORDINATE_FRAME_V2,
             receiver_key=("thermal_native_union_v2", self.nx, self.ny, ntheta, tuple(union.grid_indices.shape)),
         )
+        locator_mode = getattr(self.core, "locator_mode", None)
+        if locator_mode is not None:
+            from .e_anchor_locator import attach_thermal_e_anchor_query
+
+            scene = args[0] if args else kwargs.get("scene")
+            if scene is None:
+                raise ValueError("Anchored Thermal queries require the prepared scene carrier.")
+            query = attach_thermal_e_anchor_query(
+                query,
+                scene,
+                locator_mode,
+                environment_nx=self.environment_nx,
+                environment_ny=self.environment_ny,
+            )
         return (query, *result[1:])
 
 

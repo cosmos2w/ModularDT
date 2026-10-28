@@ -461,6 +461,8 @@ class ContentHypergraphCore(nn.Module):
             query.local_query_indices,
             query.local_module_indices,
             query.local_weights,
+            query.anchor_indices,
+            query.anchor_weights,
         ):
             if value is not None and value.device != organization.module_states.device:
                 raise ValueError("All supplied query tensors must be on the prepared organization's device.")
@@ -479,6 +481,15 @@ class ContentHypergraphCore(nn.Module):
                 torch._assert_async(indices_ok, "Packed local-pair indices are outside the scene/query axes.")
             elif not bool(indices_ok):
                 raise ValueError("Packed local-pair indices are outside the scene/query axes.")
+        if query.anchor_indices is not None:
+            active = query.anchor_weights > 0
+            indices_ok = (((query.anchor_indices >= 0)
+                           & (query.anchor_indices < organization.scene.num_environment_tokens))
+                          | ~active).all()
+            if indices_ok.device.type == "cuda":
+                torch._assert_async(indices_ok, "Sparse query anchor slots are outside the environment axis.")
+            elif not bool(indices_ok):
+                raise ValueError("Sparse query anchor slots are outside the environment axis.")
         if (
             organization.scene.scene_key is not None
             and query.scene_key is not None

@@ -82,6 +82,16 @@ R13_7_SINGLE_DISTRIBUTION_WORKFLOW = "interaction_reused_single_distribution_mem
 R13_7_SINGLE_DISTRIBUTION_PROVIDER_SCHEMA = "thermal_r13_7_single_distribution_member_routing_provider_v1"
 R13_7_SINGLE_DISTRIBUTION_MANIFEST_SCHEMA = "honf_r13_7_single_distribution_member_routing_run_manifest_v1"
 R13_7_SINGLE_DISTRIBUTION_SOURCE_KIND = "scratch_r13_7_single_distribution_member_routing"
+R13_8_SUBSET_CHECKPOINT_EPOCHS = [100, 200, 300, 400, 500]
+R13_8_E_ANCHORED_CONFIG_SCHEMA = "thermal_r13_8_e_anchored_member_routing_v1"
+R13_8_E_ANCHORED_CORE_SCHEMA = "interaction_reused_e_anchored_member_routing_v1"
+R13_8_A_ARM = "R13-8-A-EAnchor"
+R13_8_L_ARM = "R13-8-L-LocalECover"
+R13_8_E_ANCHORED_ARMS = (R13_8_A_ARM, R13_8_L_ARM)
+R13_8_E_ANCHORED_WORKFLOW = "interaction_reused_e_anchored_member_routing_training_v1"
+R13_8_E_ANCHORED_PROVIDER_SCHEMA = "thermal_r13_8_e_anchored_member_routing_provider_v1"
+R13_8_E_ANCHORED_MANIFEST_SCHEMA = "honf_r13_8_e_anchored_member_routing_run_manifest_v1"
+R13_8_E_ANCHORED_SOURCE_KIND = "scratch_r13_8_e_anchored_member_routing"
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
 INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1")
 SPATIAL_INTERACTION_GROUP_CORE_SCHEMA = "spatial_interaction_group_fields_v1"
@@ -121,6 +131,8 @@ def _is_r13_7_single_distribution_member_routing(section: Mapping[str, Any]) -> 
 
 def _member_routing_workflow(section: Mapping[str, Any]) -> str:
     core_schema = _member_routing_core_schema(section)
+    if core_schema == R13_8_E_ANCHORED_CORE_SCHEMA:
+        return R13_8_E_ANCHORED_WORKFLOW
     if core_schema == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA:
         return R13_6_FAITHFUL_MEMBER_ROUTING_WORKFLOW
     if core_schema == R13_6_TYPED_ORGANIZATION_CORE_SCHEMA:
@@ -140,6 +152,8 @@ def _member_routing_workflow(section: Mapping[str, Any]) -> str:
 
 def _member_routing_arms(section: Mapping[str, Any]) -> tuple[str, ...]:
     core_schema = _member_routing_core_schema(section)
+    if core_schema == R13_8_E_ANCHORED_CORE_SCHEMA:
+        return R13_8_E_ANCHORED_ARMS
     if core_schema == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA:
         return (R13_6_FAITHFUL_MEMBER_ROUTING_ARM,)
     if core_schema == R13_6_TYPED_ORGANIZATION_CORE_SCHEMA:
@@ -213,6 +227,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
         MEMBER_ROUTING_CONFIG_SCHEMA, RELATIVE_MEMBER_ROUTING_CONFIG_SCHEMA,
         JOINT_MEMBER_ROUTING_CONFIG_SCHEMA, SUPPLEMENT_MEMBER_ROUTING_CONFIG_SCHEMA,
         R13_6_MEMBER_ROUTING_CONFIG_SCHEMA, R13_7_MEMBER_ROUTING_CONFIG_SCHEMA,
+        R13_8_E_ANCHORED_CONFIG_SCHEMA,
     }
     valid_schema = (frontier.get("schema") in allowed_member_schemas if section_name == "member_routing"
                     and isinstance(frontier, Mapping) else
@@ -355,7 +370,13 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
         elif (core_schema == R13_7_SINGLE_DISTRIBUTION_CORE_SCHEMA
               and config_schema == R13_7_MEMBER_ROUTING_CONFIG_SCHEMA):
             if membership == "fixed25_train150_dev22":
-                valid_schedule = (
+                actual_schedule = (training.get("local_horizon"), training.get("first_segment_epochs"),
+                                   training.get("optimizer_schedule_horizon"),
+                                   training.get("checkpoint_epochs"),
+                                   initialization.get("normalization_mode"))
+                valid_schedule = (actual_schedule == (
+                    500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS, "fixed25_train150_stats",
+                ) and training.get("curve_every") == 10) or (
                     training.get("local_horizon") == 6
                     and training.get("first_segment_epochs") == 3
                     and training.get("optimizer_schedule_horizon") == 6
@@ -382,6 +403,33 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                 and model.get("joint_member_coverage") == 0.95
                 and model.get("retained_prior_law") == "none"
             )
+        elif (core_schema == R13_8_E_ANCHORED_CORE_SCHEMA
+              and config_schema == R13_8_E_ANCHORED_CONFIG_SCHEMA):
+            actual_schedule = (training.get("local_horizon"), training.get("first_segment_epochs"),
+                               training.get("optimizer_schedule_horizon"),
+                               training.get("checkpoint_epochs"),
+                               initialization.get("normalization_mode"))
+            if membership == "fixed25_train150_dev22":
+                valid_schedule = (
+                    actual_schedule == (500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
+                                        "fixed25_train150_stats")
+                    and training.get("curve_every") == 10
+                )
+            elif (membership == "full_train600"
+                  and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND):
+                valid_schedule = (
+                    actual_schedule == (100, 100, 500, [100], "scratch_train600_stats")
+                    and training.get("curve_every") == 10
+                )
+            else:
+                valid_schedule = False
+            expected_locator = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}.get(arm)
+            valid_model = (
+                model.get("architecture") == arm
+                and model.get("locator_mode") == expected_locator
+                and model.get("retained_mass") == 0.95
+                and model.get("score_calibration") == "inherited"
+            )
         else:
             valid_schedule = False
             valid_model = False
@@ -390,6 +438,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
         joint_member_routing = core_schema == JOINT_MEMBER_ROUTING_CORE_SCHEMA
         r13_6_member_routing = core_schema in R13_6_MEMBER_ROUTING_CORE_SCHEMAS
         r13_7_single_distribution = core_schema == R13_7_SINGLE_DISTRIBUTION_CORE_SCHEMA
+        r13_8_e_anchored = core_schema == R13_8_E_ANCHORED_CORE_SCHEMA
         source_kind = initialization.get("source_kind")
         supplement_member_routing = core_schema in SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMAS
         if supplement_member_routing:
@@ -424,6 +473,14 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
         elif r13_7_single_distribution:
             valid_source = (
                 source_kind == R13_7_SINGLE_DISTRIBUTION_SOURCE_KIND
+                and initialization.get("source_checkpoint") is None
+                and initialization.get("pretrained_weights") is False
+                and initialization.get("source_parent_age") == 0
+                and initialization.get("source_arm") == "scratch_common_seed0"
+            )
+        elif r13_8_e_anchored:
+            valid_source = (
+                source_kind == R13_8_E_ANCHORED_SOURCE_KIND
                 and initialization.get("source_checkpoint") is None
                 and initialization.get("pretrained_weights") is False
                 and initialization.get("source_parent_age") == 0
@@ -465,7 +522,8 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                 or objective.get("response_fit") is not False
                 or objective.get("organizer_objective") is not False):
             raise ValueError("Member-routing config differs from its scratch/native-only training contract.")
-        if (joint_member_routing or supplement_member_routing or r13_6_member_routing) and (
+        if (joint_member_routing or supplement_member_routing or r13_6_member_routing
+                or r13_7_single_distribution or r13_8_e_anchored) and (
                 objective.get("paired_full_restricted") is not True
                 or float(objective.get("guide_kl_weight", -1)) != 0.0
                 or model.get("input_dataset") != "thermal"
@@ -674,6 +732,13 @@ def _task_factory() -> Callable[..., tuple[torch.nn.Module, Any]]:
 
 def _member_routing_task_factory(config: Mapping[str, Any] | None = None) -> Callable[..., tuple[torch.nn.Module, Any]]:
     if (config is not None
+            and _member_routing_core_schema(_model_section(config)[1]) == R13_8_E_ANCHORED_CORE_SCHEMA):
+        from channelthermal.training.r13_8_anchored_task import (
+            build_thermal_r13_8_anchored_member_routing_task,
+        )
+
+        return build_thermal_r13_8_anchored_member_routing_task
+    if (config is not None
             and _is_r13_7_single_distribution_member_routing(_model_section(config)[1])):
         from channelthermal.training.r13_7_single_distribution_task import (
             build_thermal_single_distribution_member_routing_task,
@@ -763,6 +828,7 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
     member_routing = section_name == "member_routing"
     r13_6_member_routing = member_routing and _is_r13_6_member_routing(section)
     r13_7_single_distribution = member_routing and _is_r13_7_single_distribution_member_routing(section)
+    r13_8_e_anchored = member_routing and _member_routing_core_schema(section) == R13_8_E_ANCHORED_CORE_SCHEMA
     supplement_member_routing = (member_routing and
                                  _member_routing_workflow(section) in (SUPPLEMENT_MEMBER_ROUTING_WORKFLOW,
                                                                      ORGANIZATION_MEMBER_ROUTING_WORKFLOW))
@@ -774,6 +840,7 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
     return {
         "schema": ("honf_r13_7_single_distribution_member_routing_training_v1"
                    if r13_7_single_distribution else
+                   "honf_r13_8_e_anchored_member_routing_training_v1" if r13_8_e_anchored else
                    "honf_r13_6_member_routing_training_v1" if r13_6_member_routing else
                    "honf_supplement_member_routing_training_v1" if supplement_member_routing else
                    "honf_joint_member_routing_training_v1" if joint_member_routing else
@@ -788,6 +855,7 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
                      "contextual_frontier_joint_training_v1"),
         "model_family": ("single_distribution_joint95_member_routing_joint_field_v1"
                          if r13_7_single_distribution else
+                         "e_anchored_joint_field_member_routing_v1" if r13_8_e_anchored else
                          "faithful_joint95_member_routing_joint_field_v1"
                          if r13_6_member_routing and
                          _member_routing_core_schema(section) == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA else
@@ -872,6 +940,8 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
     core_schema = _member_routing_core_schema(section) if section_name == "member_routing" else None
     manifest_schema = ((R13_7_SINGLE_DISTRIBUTION_MANIFEST_SCHEMA
                         if core_schema == R13_7_SINGLE_DISTRIBUTION_CORE_SCHEMA else
+                        R13_8_E_ANCHORED_MANIFEST_SCHEMA
+                        if core_schema == R13_8_E_ANCHORED_CORE_SCHEMA else
                         R13_6_FAITHFUL_MANIFEST_SCHEMA
                         if core_schema == R13_6_FAITHFUL_MEMBER_ROUTING_CORE_SCHEMA else
                         R13_6_TYPED_ORGANIZATION_MANIFEST_SCHEMA
@@ -1256,7 +1326,8 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
                                     SUPPLEMENT_MEMBER_ROUTING_MANIFEST_SCHEMA,
                                     R13_6_FAITHFUL_MANIFEST_SCHEMA,
                                     R13_6_TYPED_ORGANIZATION_MANIFEST_SCHEMA,
-                                    R13_7_SINGLE_DISTRIBUTION_MANIFEST_SCHEMA}
+                                    R13_7_SINGLE_DISTRIBUTION_MANIFEST_SCHEMA,
+                                    R13_8_E_ANCHORED_MANIFEST_SCHEMA}
             or manifest.get("artifact_layout_version") != 1):
         raise ValueError("Run is missing the maintained contextual-frontier manifest.")
     config = copy.deepcopy(manifest.get("config"))
@@ -1350,7 +1421,8 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                                                      JOINT_MEMBER_ROUTING_CONFIG_SCHEMA,
                                                      SUPPLEMENT_MEMBER_ROUTING_CONFIG_SCHEMA,
                                                      R13_6_MEMBER_ROUTING_CONFIG_SCHEMA,
-                                                     R13_7_MEMBER_ROUTING_CONFIG_SCHEMA}
+                                                     R13_7_MEMBER_ROUTING_CONFIG_SCHEMA,
+                                                     R13_8_E_ANCHORED_CONFIG_SCHEMA}
                         if section_name == "member_routing" and isinstance(frontier, Mapping) else False)
     if (config.get("schema") != research.RESEARCH_SCHEMA
             or not isinstance(frontier, Mapping)
@@ -1427,7 +1499,12 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
         elif (core_schema == R13_7_SINGLE_DISTRIBUTION_CORE_SCHEMA
               and frontier.get("schema") == R13_7_MEMBER_ROUTING_CONFIG_SCHEMA):
             if membership == "fixed25_train150_dev22":
-                valid_schedule = actual == (6, 3, 6, [3, 6], "fixed25_train150_stats")
+                valid_schedule = (actual == (500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
+                                             "fixed25_train150_stats")
+                                  and training.get("curve_every") == 10) or (
+                    actual == (6, 3, 6, [3, 6], "fixed25_train150_stats")
+                    and training.get("curve_every") == 10
+                )
             elif (membership == "full_train600"
                   and initialization.get("source_kind") == R13_7_SINGLE_DISTRIBUTION_SOURCE_KIND):
                 valid_schedule = actual == (100, 100, 500, [100], "scratch_train600_stats")
@@ -1440,11 +1517,31 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                 and model.get("joint_member_coverage") == 0.95
                 and model.get("retained_prior_law") == "none"
             )
+        elif (core_schema == R13_8_E_ANCHORED_CORE_SCHEMA
+              and frontier.get("schema") == R13_8_E_ANCHORED_CONFIG_SCHEMA):
+            if membership == "fixed25_train150_dev22":
+                valid_schedule = (actual == (500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
+                                             "fixed25_train150_stats")
+                                  and training.get("curve_every") == 10)
+            elif (membership == "full_train600"
+                  and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND):
+                valid_schedule = (actual == (100, 100, 500, [100], "scratch_train600_stats")
+                                  and training.get("curve_every") == 10)
+            else:
+                valid_schedule = False
+            expected_locator = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}.get(arm)
+            valid_model = (
+                model.get("architecture") == arm
+                and model.get("locator_mode") == expected_locator
+                and model.get("retained_mass") == 0.95
+                and model.get("score_calibration") == "inherited"
+            )
         else:
             valid_schedule = valid_model = False
         joint_member_routing = core_schema == JOINT_MEMBER_ROUTING_CORE_SCHEMA
         r13_6_member_routing = core_schema in R13_6_MEMBER_ROUTING_CORE_SCHEMAS
         r13_7_single_distribution = core_schema == R13_7_SINGLE_DISTRIBUTION_CORE_SCHEMA
+        r13_8_e_anchored = core_schema == R13_8_E_ANCHORED_CORE_SCHEMA
         source_kind = initialization.get("source_kind")
         supplement_member_routing = core_schema in SUPPLEMENT_MEMBER_ROUTING_CORE_SCHEMAS
         if supplement_member_routing:
@@ -1484,6 +1581,14 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                 and initialization.get("source_parent_age") == 0
                 and initialization.get("source_arm") == "scratch_common_seed0"
             )
+        elif r13_8_e_anchored:
+            valid_source = (
+                source_kind == R13_8_E_ANCHORED_SOURCE_KIND
+                and initialization.get("source_checkpoint") is None
+                and initialization.get("pretrained_weights") is False
+                and initialization.get("source_parent_age") == 0
+                and initialization.get("source_arm") == "scratch_common_seed0"
+            )
         else:
             valid_source = (
                 source_kind == "scratch_interaction_reused_member_routing"
@@ -1503,7 +1608,7 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                 or not valid_schedule
                 or not valid_source
                 or training.get("seed") != 0 or training.get("primary_queries") != 1024
-                or ((r13_6_member_routing or r13_7_single_distribution)
+                or ((r13_6_member_routing or r13_7_single_distribution or r13_8_e_anchored)
                     and initialization.get("seed") != 0)
                 or optimizer.get("schedule") != "constant_config_lr"
                 or float(optimizer.get("lr", -1)) != 3e-4
@@ -1512,7 +1617,7 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                 or objective.get("organizer_objective") is not False):
             raise ValueError("Saved member-routing config violates its bounded scratch contract.")
         if (joint_member_routing or supplement_member_routing or r13_6_member_routing
-                or r13_7_single_distribution) and (
+                or r13_7_single_distribution or r13_8_e_anchored) and (
                 objective.get("paired_full_restricted") is not True
                 or float(objective.get("guide_kl_weight", -1)) != 0.0
                 or objective.get("native_weights_fixed") is not True):
