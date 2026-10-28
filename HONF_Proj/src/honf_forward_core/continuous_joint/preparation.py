@@ -94,7 +94,10 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
         mass = (z / denominator).squeeze(-1).transpose(1, 2)
     if gates.shape != allowed.shape:
         raise ValueError("Contextual incidence must match [B,R,D].")
-    if gates.device.type == 'cpu' and (bool((gates < 0).any()) or bool((gates > 1).any())
+    # A convex head mixture at its unit peak can round a few ulps above one.
+    # This validates the same live equation without clipping gates or gradients.
+    upper_roundoff = 4 * torch.finfo(scores.dtype).eps
+    if gates.device.type == 'cpu' and (bool((gates < 0).any()) or bool((gates > 1 + upper_roundoff).any())
             or bool((gates.masked_select(~allowed) != 0).any())):
         raise ValueError("Contextual incidence must lie in [0,1] on eligible pairs only.")
     if getattr(policy, "all_open", False) and not isinstance(selected, FrozenContextPlan):

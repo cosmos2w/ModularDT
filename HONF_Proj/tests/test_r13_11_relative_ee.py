@@ -65,6 +65,31 @@ def test_relative_tied_peak_and_continuous_tail():
     assert results[0][0, 0, 2] == 0 and results[1][0, 0, 2] > 0
 
 
+def test_fp32_convex_peak_roundoff_is_legal_in_actual_contextual_reduction():
+    from types import SimpleNamespace
+    from honf_forward_core.continuous_joint.preparation import contextual_value_update
+
+    policy = AppliedInteractionIncidence(4)
+    policy.set_relative_ee_gate('relative_quadratic', 1.49)
+    with torch.no_grad():
+        policy.routes['ee'].head_logits.copy_(torch.tensor([0.021946797, -0.038930506, 0.152425826, 0.114050463]))
+    attention = SimpleNamespace(width=4, heads=4, head_width=1, output=torch.nn.Linear(4, 4))
+    query = torch.zeros(1, 4, 1, 1)
+    allowed = torch.ones(1, 1, 1, dtype=torch.bool)
+    kwargs = dict(route_name='ee', stage_identity='cycle0/ee',
+                  destination_ids=torch.zeros(1, 1, dtype=torch.long),
+                  donor_ids=torch.zeros(1, 1, dtype=torch.long))
+    update, _, gates, _ = contextual_value_update(
+        attention, query, query, torch.ones_like(query), torch.zeros_like(query),
+        torch.ones(1, 1), allowed, allowed[..., 0], policy, **kwargs)
+    assert float(gates.detach().max()) > 1
+    assert torch.isfinite(update).all()
+    with pytest.raises(ValueError, match='must lie'):
+        contextual_value_update(attention, query, query, torch.ones_like(query), torch.zeros_like(query),
+                                torch.ones(1, 1), allowed, allowed[..., 0],
+                                lambda *a, **kw: torch.full((1, 1, 1), 1.01), **kwargs)
+
+
 @pytest.mark.parametrize('mode', ['relative_quadratic', 'relative_sigmoid'])
 def test_live_message_removal_accepts_physical_measure_metadata(mode):
     model, scene, _ = make_model('e_anchor', mode)
