@@ -19,11 +19,16 @@ class HETMFTask:
     def __init__(self, path, config):
         self.path, self.config = str(Path(path).resolve()), config
         name = config['model']['name']
-        if name == 'a2d':
+        if name in ('a2d', 'routed_anchored'):
             self.adapter = ElectroThermalHONFAdapter(device='cpu')
         else:
             from .classic_models import HETMFClassicAdapter
             self.adapter = HETMFClassicAdapter(device='cpu')
+        panel = config.get('qualification_panel')
+        self._panel = None
+        if panel is not None:
+            from .routed_qualification import select_panel
+            self._panel = {split: select_panel(self.path, split, int(panel[split])) for split in ('train', 'dev')}
         reference = self.dataset('train', 0)
         self._identity = {'schema': 'hetmf_training_h5_v1',
                           'payload_sha256': reference.dataset_payload_sha256,
@@ -31,6 +36,18 @@ class HETMFTask:
                           'normalization_train_membership_sha256': reference.normalization_train_membership_sha256,
                           'field_order': list(FIELD_ORDER)}
         self._normalization = reference.normalization
+        if self._panel is not None:
+            self._identity['qualification_state_ids'] = {
+                split: [state for _, state in members] for split, members in self._panel.items()
+            }
+        if name == 'routed_anchored':
+            fields = self._normalization['fields']
+            self._identity['field_normalizer'] = {
+                'mean': np.asarray(fields['mean']).tolist(),
+                'std': np.asarray(fields['std']).tolist(),
+                'count': int(fields['count']),
+                'fit_split': 'train',
+            }
         reference.close()
 
     def dataset(self, split, epoch):
@@ -39,12 +56,26 @@ class HETMFTask:
                               query_count=int(settings['queries'] if split == 'train' else settings['validation_queries']),
                               seed=int(settings['seed']), normalize=True)
         dataset.set_epoch(epoch if split == 'train' else 0)
+        if self._panel is not None:
+            if split not in ('train', 'dev'):
+                dataset.close()
+                raise ValueError('qualification panel permits only TRAIN and DEV')
+            selected = self._panel[split]
+            dataset.indices = dataset.indices[[i for i, _ in selected]]
         return dataset
 
     def collate(self, samples):
         return self.adapter.collate(samples)
 
     def predict(self, model, batch):
+        if self.config['model']['name'] == 'routed_anchored':
+            from .e_anchor_locator import attach_e_coverage
+            query = attach_e_coverage(batch.query, batch.scene, model.locator_mode)
+            prepared = model.prepare(batch.scene)
+            if model.training:
+                full, restricted, _ = model.decode_paired(prepared, query)
+                return full.joint_fields, restricted.joint_fields
+            return model.decode(prepared, query, intervention={'read_mode': 'restricted'}).joint_fields
         if self.config['model']['name'] == 'a2d':
             return model.decode(model.prepare(batch.scene), batch.query).nonlinear_field
         return model(batch.scene)
@@ -60,8 +91,8 @@ def read_config(path):
     value = yaml.safe_load(Path(path).read_text())
     if not isinstance(value, dict) or value.get('schema') != 'hetmf_fit_v1':
         raise ValueError('expected a hetmf_fit_v1 YAML configuration')
-    if value['model']['name'] not in ('six_hyperedge', 'dense_pairwise', 'a2d'):
-        raise ValueError('choose six_hyperedge, dense_pairwise, or a2d')
+    if value['model']['name'] not in ('six_hyperedge', 'dense_pairwise', 'a2d', 'routed_anchored'):
+        raise ValueError('choose six_hyperedge, dense_pairwise, a2d, or routed_anchored')
     settings = value['training']
     for key in ('epochs', 'batch_size', 'queries', 'validation_queries'):
         if type(settings[key]) is not int or settings[key] < 1:
@@ -83,6 +114,10 @@ def build_model(config, device='cpu'):
     options = dict(config['model'])
     name = options.pop('name')
     options.pop('display_name', None)
+    if name == 'routed_anchored':
+        from honf_forward_core.interaction_reused_member_routing import AnchoredMemberRoutingCore
+        base = ElectroThermalHONFAdapter.model_config(context_dim=options.pop('context_dim'), num_heads=options.pop('num_heads'), init_seed=int(config['training']['seed']))
+        return AnchoredMemberRoutingCore(base, input_dataset='hetmf_standard', **options).to(device)
     if name == 'a2d':
         return ElectroThermalHONFAdapter(device=device).build_model(**options)
     from .classic_models import build_classic_model
@@ -94,12 +129,16 @@ def dry_run(config, dataset, *, device='cpu'):
     task = HETMFTask(dataset, config)
     data = HETMFDataset(dataset, split='train', query_count=17, seed=config['training']['seed'], normalize=True)
     try:
+        if task._panel is not None:
+            data.indices = data.indices[[i for i, _ in task._panel['train']]]
         batch = task.collate([data[0], data[1]]).to(device)
         model = build_model(config, device)
         prediction = task.predict(model, batch)
-        if prediction.shape != (2, 17, 5) or not torch.isfinite(prediction).all():
+        predictions = prediction if isinstance(prediction, tuple) else (prediction,)
+        if any(value.shape != (2, 17, 5) or not torch.isfinite(value).all() for value in predictions):
             raise RuntimeError('field interface failed')
-        loss = (prediction - batch.targets).square().mean()
+        from honf_runtime.field_training import field_loss
+        loss = field_loss(prediction, batch)
         loss.backward()
         gradients = [p.grad for p in model.parameters() if p.grad is not None]
         if not gradients or not all(torch.isfinite(g).all() for g in gradients):
@@ -107,7 +146,7 @@ def dry_run(config, dataset, *, device='cpu'):
         return {'model': config['model']['display_name'], 'dataset': task.identity(),
                 'train_cases': len(data), 'declared_epochs': config['training']['epochs'],
                 'qualification_cases': 2, 'qualification_queries': 17,
-                'field_shape': list(prediction.shape), 'finite_backward': True,
+                'field_shape': list(predictions[0].shape), 'finite_backward': True,
                 'fitting_performed': False, 'requested_batch_memory_qualified': False}
     finally:
         data.close()

@@ -1,0 +1,24 @@
+schema: hetmf_fit_v1
+profile: standard
+qualification_panel: {train: 32, dev: 16}
+model:
+  name: routed_anchored
+  display_name: HET-MF anchored U qualification
+  context_dim: 32
+  num_heads: 4
+  locator_mode: e_anchor
+  access_measure: inventory_unit_total
+  ee_incidence_aggregation: post_gate
+training:
+  epochs: 20
+  batch_size: 2
+  queries: 128
+  validation_queries: 128
+  seed: 0
+  learning_rate: 0.0003
+  weight_decay: 0.00001
+  gradient_clip_norm: 1.0
+  num_workers: 0
+storage:
+  retained_budget_gib: 1
+  minimum_free_gib: 100

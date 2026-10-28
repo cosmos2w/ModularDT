@@ -65,6 +65,8 @@ def _loader(task, split, epoch, settings):
 
 
 def field_loss(prediction, batch):
+    if isinstance(prediction, tuple):
+        return sum(field_loss(field, batch) for field in prediction) / len(prediction)
     if prediction.shape != batch.targets.shape or not torch.isfinite(prediction).all():
         raise ValueError('model must return finite [B,Q,C] fields aligned with targets')
     weights = batch.query_weights
