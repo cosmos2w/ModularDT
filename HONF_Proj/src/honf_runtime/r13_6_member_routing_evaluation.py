@@ -22,6 +22,11 @@ _VARIANTS = {
         "workflow": "interaction_reused_typed_organization_member_routing_training_v1",
         "candidate": "H",
     },
+    "R13-7-U-ME-SingleDistributionJoint95": {
+        "workflow": "interaction_reused_single_distribution_member_routing_training_v1",
+        "candidate": "U",
+        "evaluation_schema": "thermal_r13_7_single_distribution_member_routing_native_evaluation_v1",
+    },
 }
 
 
@@ -37,13 +42,13 @@ def evaluate(checkpoint: str | Path, device: str, output: str | Path) -> dict:
     variant = _VARIANTS.get(str(model.architecture))
     if (variant is None or identity.get("workflow") != variant["workflow"]
             or identity.get("training_membership") != "full_train600"):
-        raise ValueError("R13-6 evaluation requires a maintained full-TRAIN600 C or H checkpoint.")
+        raise ValueError("R13-6/U evaluation requires a maintained full-TRAIN600 C, H, or U checkpoint.")
     if (len(provider.training_case_ids) != 600 or len(provider.validation_case_ids) != 89
             or provider.validation_scope != "canonical_VAL89_exposed"):
-        raise ValueError("R13-6 all-VAL89 evaluation requires full TRAIN600 and canonical exposed VAL89.")
+        raise ValueError("R13-6/U all-VAL89 evaluation requires full TRAIN600 and canonical exposed VAL89.")
     if TRAIN_DETAIL_ID not in provider.training_case_ids or any(
             case_id not in provider.validation_case_ids for case_id in VAL_DETAIL_IDS):
-        raise ValueError("The fixed R13-6 detail panel is absent from the saved partitions.")
+        raise ValueError("The fixed R13-6/U detail panel is absent from the saved partitions.")
 
     recipe = provider.recipe
     output_root = Path(recipe["storage"]["output_root"]).expanduser().resolve(strict=True)
@@ -80,7 +85,7 @@ def evaluate(checkpoint: str | Path, device: str, output: str | Path) -> dict:
         executions[mode] = {"validation": validation, "train_detail": train}
 
     result = {
-        "schema": "thermal_r13_6_member_routing_native_evaluation_v1",
+        "schema": variant.get("evaluation_schema", "thermal_r13_6_member_routing_native_evaluation_v1"),
         "status": "completed",
         "candidate": variant["candidate"],
         "checkpoint": str(checkpoint_path),

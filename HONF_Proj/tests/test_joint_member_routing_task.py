@@ -66,7 +66,13 @@ class _ReadCore:
         query_count = int(query.num_queries)
         self.decode_calls.append((mode, return_trace, query_count))
         score = owner.score.expand(1, query_count, -1)
-        scalar = score.sum(-1)
+        contrast_m = owner.read_contrast_M.expand(1, query_count)
+        contrast_e = owner.read_contrast_E.expand(1, query_count)
+        strength_m = 0.5 * (1.0 + contrast_m / torch.hypot(contrast_m, torch.ones_like(contrast_m)))
+        strength_e = 0.5 * (1.0 + contrast_e / torch.hypot(contrast_e, torch.ones_like(contrast_e)))
+        context_m = strength_m[..., None] * organization.member_values_M.mean(1, keepdim=True)
+        context_e = strength_e[..., None] * organization.member_values_E.mean(1, keepdim=True)
+        scalar = score.sum(-1) + context_m.mean(-1) + context_e.mean(-1)
         for name in JOINT_BLOCKS + ("member_values_M", "member_values_E"):
             scalar = scalar + getattr(organization, name).mean() * 0.01
         fields = scalar[..., None].expand(-1, -1, 4)
@@ -95,6 +101,20 @@ class _ReadCore:
                 "address_block_mass_self_M": torch.full((1, query_count), 0.2),
                 "candidate_ids_M": torch.tensor([[0, 0, 0, 20]]),
                 "candidate_ids_E": torch.tensor([[0, 0, 0, 100]]),
+                "member_conditional_expectation_M": score[..., :3].mean(-1),
+                "member_conditional_expectation_E": score[..., 3:].mean(-1),
+                "member_conditional_entropy_M": torch.full((1, query_count), 0.4),
+                "member_conditional_entropy_E": torch.full((1, query_count), 0.6),
+                "member_read_contrast_M": contrast_m,
+                "member_read_contrast_E": contrast_e,
+                "member_read_strength_M": strength_m,
+                "member_read_strength_E": strength_e,
+                "member_gate_derivative_M": 0.5 / torch.hypot(contrast_m, torch.ones_like(contrast_m)).pow(3),
+                "member_gate_derivative_E": 0.5 / torch.hypot(contrast_e, torch.ones_like(contrast_e)).pow(3),
+                "context_M": context_m,
+                "context_E": context_e,
+                "member_context_norm_M": context_m.norm(dim=-1),
+                "member_context_norm_E": context_e.norm(dim=-1),
             }
         return SimpleNamespace(
             joint_fields=fields, work_counts={"query_rows": query_count}, trace=trace,
@@ -274,6 +294,8 @@ class _HealthModel(torch.nn.Module):
         self.core = _ReadCore()
         self.core.owner = self
         self.score = torch.nn.Parameter(torch.full((1, 1, 7), 0.2))
+        self.read_contrast_M = torch.nn.Parameter(torch.full((1, 1), 0.4))
+        self.read_contrast_E = torch.nn.Parameter(torch.full((1, 1), -0.3))
         self.calls = []
 
     def _extract_native_roles(self, prepared, temperature, flow):
@@ -470,6 +492,18 @@ def test_health_uses_complete_native_objective_and_bounded_actual_trace(monkeypa
             assert summary["native_objective_applied_route_parameter_gradient_norm_by_block"][block] > 0
         assert summary["native_objective_proposal_address_score_gradient_norm_by_role"]["M"] > 0
         assert summary["native_objective_proposal_address_score_gradient_norm_by_role"]["E"] > 0
+        assert summary["native_objective_member_read_strength_adjoint_l2_by_role"]["M"] > 0
+        assert summary["native_objective_member_read_strength_adjoint_l2_by_role"]["E"] > 0
+        assert summary["native_objective_member_context_adjoint_l2_by_role"]["M"] > 0
+        assert summary["native_objective_member_context_adjoint_l2_by_role"]["E"] > 0
+        trace_means = summary["member_read_trace_means"]
+        assert trace_means["member_conditional_expectation_M"] > 0
+        assert trace_means["member_conditional_entropy_normalized_M"] == pytest.approx(0.4)
+        assert trace_means["member_read_contrast_E"] == pytest.approx(-0.3)
+        assert trace_means["member_read_strength_M"] > 0
+        assert trace_means["member_gate_derivative_E"] > 0
+        assert trace_means["member_context_norm_M"] > 0
+        assert trace_means["nonempty_candidate_query_fraction_E"] == pytest.approx(1.0)
     assert provider.saved_state == {"training_elapsed_seconds": 0.0}
 
 

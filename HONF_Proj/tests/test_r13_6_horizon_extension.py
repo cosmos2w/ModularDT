@@ -41,6 +41,8 @@ CASES = (
      "interaction_reused_faithful_member_routing_training_v1"),
     ("thermal_r13_6h_typed_organization_train600_formal_v1.json",
      "interaction_reused_typed_organization_member_routing_training_v1"),
+    ("thermal_r13_7u_single_distribution_train600_formal_v1.json",
+     "interaction_reused_single_distribution_member_routing_training_v1"),
 )
 
 

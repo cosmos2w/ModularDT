@@ -17,7 +17,12 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from ..content_hypergraph.query_chunks_v1 import slice_query_v1
-from .core import InteractionJointOutput, InteractionReusedMemberRoutingCore, _tensor_version
+from .core import (
+    InteractionJointOutput,
+    InteractionReusedMemberRoutingCore,
+    _pack_work_counts,
+    _tensor_version,
+)
 from .guided import prior_weighted_scores
 from .joint import (
     JointMemberRoutingCore,
@@ -533,9 +538,24 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
         )
         return contribution, log_weight, common_offset, {}
 
+    def _joint_member_contribution_required(self, *, return_trace: bool) -> bool:
+        """Whether this read law needs Candidate A's global normalization."""
+        del return_trace
+        return True
+
+    def _role_statistics(
+        self,
+        contribution: Tensor,
+        scores: Tensor,
+        candidate: Tensor,
+        scene_eligible_count: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Preserve the historical normalization unless a private read law overrides it."""
+        return joint_role_statistics(contribution, scores, candidate, scene_eligible_count)
+
     def _role_read_contributions(
         self,
-        marginal_contribution: Tensor,
+        marginal_contribution: Tensor | None,
         member_prior: Tensor,
         ell: Tensor,
         candidate: Tensor,
@@ -553,6 +573,8 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
         while changing only how role contributions are assembled.
         """
         del member_prior, ell, candidate, full_candidate, proposal, retrieval_R, row_mass, module_count
+        if marginal_contribution is None:
+            raise RuntimeError("Candidate A requires its joint member contribution.")
         return marginal_contribution, marginal_contribution, {}
 
     @staticmethod
@@ -633,8 +655,8 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
             address_scores, address_scores_M, address_scores_E = self._address_logits(
                 prepared, query, qstates, address_allowed, normalized_query=normalized_query,
             )
-            address_score_rows_M = int(address_allowed[..., :modules].sum())
-            address_score_rows_E = int(address_allowed[..., modules:].sum())
+            address_score_rows_M = address_allowed[..., :modules].detach().sum(dtype=torch.long)
+            address_score_rows_E = address_allowed[..., modules:].detach().sum(dtype=torch.long)
             address_omega, role_allowed = self._address_base_measure(scene, address_allowed, self.address_mode)
             address_logits = address_scores / self.address_temperature
             log_measure = torch.where(role_allowed,
@@ -722,8 +744,8 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
                 "member_valid": member_valid, "member_prior": member_prior,
                 "member_prior_uncut": member_prior_uncut, "member_support": member_support,
                 "full_candidate": full_candidate,
-                "routing_normalization_shared_rows": int(
-                    role_allowed.sum() + batch * queries * total
+                "routing_normalization_shared_rows": (
+                    role_allowed.detach().sum(dtype=torch.long) + batch * queries * total
                 ),
             }
         else:
@@ -802,15 +824,23 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
         # The inherited diagnostic exactly reproduces R13-5's candidate-
         # dependent per-role calibration. The candidate-independent law is
         # applied to the same raw feature-normalized scores without centering.
-        # Both feed one common M+E likelihood normalizer below.
+        # Candidate A uses their common M+E normalizer; O/H request it only
+        # for the legacy diagnostic trace.
         ell = torch.cat((ell_by_role["M"], ell_by_role["E"]), dim=-1)
-        contribution, log_weight, common_offset, law_trace = self._joint_member_contribution(
-            member_prior, ell, joint_candidate,
-            proposal=active_pi,
-            retrieval_R=active_R,
-            row_mass=row_mass[:, :active_address_count],
-            retrieval_calibration=retrieval_calibration,
-        )
+        compute_joint_contribution = self._joint_member_contribution_required(return_trace=return_trace)
+        if compute_joint_contribution:
+            contribution, log_weight, common_offset, law_trace = self._joint_member_contribution(
+                member_prior, ell, joint_candidate,
+                proposal=active_pi,
+                retrieval_R=active_R,
+                row_mass=row_mass[:, :active_address_count],
+                retrieval_calibration=retrieval_calibration,
+            )
+        else:
+            contribution = None
+            log_weight = None
+            common_offset = None
+            law_trace = {}
         gate_contribution, value_contribution, read_law_trace = self._role_read_contributions(
             contribution,
             member_prior,
@@ -822,10 +852,10 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
             row_mass=row_mass[:, :active_address_count],
             module_count=modules,
         )
-        if (gate_contribution.shape != contribution.shape or value_contribution.shape != contribution.shape
-                or gate_contribution.device != contribution.device or value_contribution.device != contribution.device
-                or gate_contribution.dtype != contribution.dtype or value_contribution.dtype != contribution.dtype):
-            raise ValueError("Role read contributions must preserve the joint contribution tensor's shape, device and dtype.")
+        if (gate_contribution.shape != ell.shape or value_contribution.shape != ell.shape
+                or gate_contribution.device != ell.device or value_contribution.device != ell.device
+                or gate_contribution.dtype != ell.dtype or value_contribution.dtype != ell.dtype):
+            raise ValueError("Role read contributions must preserve member-score shape, device and dtype.")
         role_candidates = {"M": candidate_M, "E": candidate_E}
         role_offsets = {"M": (0, modules), "E": (modules, total)}
         contexts: dict[str, Tensor] = {}
@@ -839,7 +869,7 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
             b_role = value_contribution[..., start:stop]
             gate_role = gate_contribution[..., start:stop]
             ell_role = ell[..., start:stop]
-            p_role, expectation, entropy = joint_role_statistics(
+            p_role, expectation, entropy = self._role_statistics(
                 gate_role, ell_role, candidate,
                 eligible_scene.sum(-1),
             )
@@ -852,16 +882,13 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
             execute = candidate if execution == "dense_candidate_union" else (candidate & (beta > 0))
             context = self._reduce_selected(values, beta, execute)
             contexts[role] = context
-            prior_role = member_prior[..., start:stop]
-            conditional_prior = _normalize_nonnegative(prior_role, candidate)
-            role_states[role] = {
+            role_state = {
                 "candidate": candidate,
                 "raw_scores": member_logits[role],
                 "ell": ell_role,
                 "gate_contribution": gate_role,
                 "pre_strength": b_role,
                 "conditional": p_role,
-                "conditional_prior": conditional_prior,
                 "expectation": expectation,
                 "entropy": entropy,
                 "gate_logits": gate_logits,
@@ -871,6 +898,10 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
                 "context": context,
                 "role_mass": b_role.sum(-1),
             }
+            if return_trace:
+                prior_role = member_prior[..., start:stop]
+                role_state["conditional_prior"] = _normalize_nonnegative(prior_role, candidate)
+            role_states[role] = role_state
 
         fused = torch.cat((qstates, contexts["M"], contexts["E"]), dim=-1)
         fields = self.member_router.joint_head(self.member_router.joint_trunk(fused))
@@ -879,26 +910,49 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
         address_pairs = int(batch * queries * active_address_count * total)
         prefix_sort_rows = int(batch * queries * total) if mode == "restricted" else 0
         address_prefix_rows = int(batch * total) if address_coverage is not None else 0
-        counts: dict[str, int] = {
+        candidate_counts = {
+            "M": candidate_M.detach().sum(dtype=torch.long),
+            "E": candidate_E.detach().sum(dtype=torch.long),
+        }
+        eligible_counts = {
+            "M": full_candidate[..., :modules].detach().sum(dtype=torch.long),
+            "E": full_candidate[..., modules:].detach().sum(dtype=torch.long),
+        }
+        selected_counts = {
+            role: (role_states[role]["post_strength"].detach() > 0).sum(dtype=torch.long)
+            for role in ("M", "E")
+        }
+        value_execution_counts = {
+            role: (candidate_counts[role] if execution == "dense_candidate_union" else
+                   (role_candidates[role] & (role_states[role]["post_strength"].detach() > 0)).sum(dtype=torch.long))
+            for role in ("M", "E")
+        }
+        joint_candidate_count = candidate_counts["M"] + candidate_counts["E"]
+        full_candidate_count = eligible_counts["M"] + eligible_counts["E"]
+        role_allowed_count = role_allowed.detach().sum(dtype=torch.long)
+        address_relation_count = (
+            (active_pi.detach() > 0).to(torch.long) *
+            (active_R.detach() > 0).sum(-1).to(torch.long)[:, None, :]
+        ).sum(dtype=torch.long)
+        counts: dict[str, int | Tensor] = {
             "query_M_proposal_score_rows": address_score_rows_M,
             "query_E_proposal_score_rows": address_score_rows_E,
             "query_joint_address_score_rows": address_score_rows_M + address_score_rows_E,
-            "query_joint_address_base_measure_rows": int(role_allowed.sum()),
+            "query_joint_address_base_measure_rows": role_allowed_count,
             "query_joint_address_prefix_sort_rows": address_prefix_rows,
             "query_joint_address_prefix_id_sort_rows": int(batch * total) if address_coverage is not None else 0,
-            "query_address_softmax_rows": int(role_allowed.sum()),
+            "query_address_softmax_rows": role_allowed_count,
             "query_address_index_scan_rows": 0,
             "query_address_coefficient_pair_rows": address_pairs,
             "query_address_support_pair_rows": address_pairs,
-            "query_address_relation_rows": int(((active_pi > 0).to(active_R.dtype) *
-                                                  (active_R > 0).sum(-1).to(active_R.dtype)[:, None, :]).sum()),
+            "query_address_relation_rows": address_relation_count,
             "query_typed_read_gate_rows": 2 * batch * queries,
             "query_M_prior_composition_rows": batch * queries * active_address_count * modules,
             "query_E_prior_composition_rows": batch * queries * active_address_count * environments,
             "query_M_prior_normalization_rows": batch * queries * modules,
             "query_E_prior_normalization_rows": batch * queries * environments,
-            "query_M_continuous_value_rows": int(candidate_M.sum()),
-            "query_E_continuous_value_rows": int(candidate_E.sum()),
+            "query_M_continuous_value_rows": candidate_counts["M"],
+            "query_E_continuous_value_rows": candidate_counts["E"],
             # Candidate A uses one M+E normalization rather than two role
             # softmaxes. Keep the legacy per-role operation counters at zero.
             "query_M_member_softmax_rows": 0,
@@ -911,18 +965,20 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
             "query_E_prior_id_sort_rows": 0,
             "query_joint_prefix_sort_rows": prefix_sort_rows,
             "query_joint_prefix_id_sort_rows": int(batch * total) if mode == "restricted" else 0,
-            "query_joint_full_eligible_rows": int(full_candidate.sum()),
-            "query_joint_member_coverage_rows": int(joint_candidate.sum()),
+            "query_joint_full_eligible_rows": full_candidate_count,
+            "query_joint_member_coverage_rows": joint_candidate_count,
             "query_joint_raw_composition_pair_rows": address_pairs if retrieval_calibration == "row_strength" else 0,
             "query_joint_uncut_composition_pair_rows": address_pairs if address_coverage is not None else 0,
-            "query_joint_likelihood_rows": int(joint_candidate.sum()),
-            "query_joint_contribution_normalization_rows": batch * queries * total,
-            "query_joint_typed_gate_statistics_rows": int(joint_candidate.sum()),
+            "query_joint_likelihood_rows": joint_candidate_count if compute_joint_contribution else 0,
+            "query_joint_contribution_normalization_rows": batch * queries * total if compute_joint_contribution else 0,
+            "query_joint_typed_gate_statistics_rows": joint_candidate_count,
             "query_routing_feature_normalization_rows": batch * queries,
-            "query_joint_value_reduction_rows": int(candidate_M.sum() + candidate_E.sum()),
+            "query_joint_value_reduction_rows": joint_candidate_count,
             "query_joint_field_head_rows": batch * queries,
-            "query_routing_normalization_rows": int(role_allowed.sum() + batch * queries * total +
-                                                       joint_candidate.sum()),
+            "query_routing_normalization_rows": (
+                role_allowed_count + batch * queries * total +
+                (joint_candidate_count if compute_joint_contribution else 0)
+            ),
             "query_receiver_rows": batch * queries,
         }
         for role in ("M", "E"):
@@ -931,13 +987,13 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
             beta = state["post_strength"]
             counts.update({
                 f"query_{role}_cheap_score_rows": scored_rows_by_role[role],
-                f"query_{role}_candidate_rows": int(candidate.sum()),
-                f"query_{role}_eligible_candidate_rows": int(full_candidate[..., :modules].sum()) if role == "M" else int(full_candidate[..., modules:].sum()),
-                f"query_{role}_selected_value_rows": int((beta > 0).sum()),
-                f"query_{role}_value_execution_rows": int(candidate.sum()) if execution == "dense_candidate_union" else int((candidate & (beta > 0)).sum()),
-                f"query_{role}_dense_candidate_value_rows": int(candidate.sum()) if execution == "dense_candidate_union" else 0,
-                f"query_{role}_score_calibration_rows": int(candidate.sum()),
-                f"query_{role}_continuous_value_rows": int(candidate.sum()),
+                f"query_{role}_candidate_rows": candidate_counts[role],
+                f"query_{role}_eligible_candidate_rows": eligible_counts[role],
+                f"query_{role}_selected_value_rows": selected_counts[role],
+                f"query_{role}_value_execution_rows": value_execution_counts[role],
+                f"query_{role}_dense_candidate_value_rows": candidate_counts[role] if execution == "dense_candidate_union" else 0,
+                f"query_{role}_score_calibration_rows": candidate_counts[role],
+                f"query_{role}_continuous_value_rows": candidate_counts[role],
             })
 
         trace: dict[str, Tensor] = {}
@@ -1068,27 +1124,22 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
 
     @staticmethod
     def _split_paired_counts(
-        full_counts: Mapping[str, int],
-        restricted_counts: Mapping[str, int],
+        full_counts: Mapping[str, int | Tensor],
+        restricted_counts: Mapping[str, int | Tensor],
         shared_plan: Mapping[str, Any],
         count_names: tuple[str, ...],
-    ) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
-        shared = {name: int(full_counts.get(name, 0)) for name in _PAIRED_SHARED_COUNT_KEYS}
-        shared_normalization = int(shared_plan["routing_normalization_shared_rows"])
+    ) -> tuple[dict[str, int | Tensor], dict[str, int | Tensor], dict[str, int | Tensor]]:
+        shared = {name: full_counts.get(name, 0) for name in _PAIRED_SHARED_COUNT_KEYS}
+        shared_normalization = shared_plan["routing_normalization_shared_rows"]
         shared["query_routing_normalization_rows"] = shared_normalization
-        for name in _PAIRED_SHARED_COUNT_KEYS:
-            if int(full_counts.get(name, 0)) != int(restricted_counts.get(name, 0)):
-                raise RuntimeError(f"Paired Candidate A shared work disagrees for {name}.")
 
-        def branch_counts(counts: Mapping[str, int]) -> dict[str, int]:
-            branch = {name: int(counts.get(name, 0)) for name in count_names}
+        def branch_counts(counts: Mapping[str, int | Tensor]) -> dict[str, int | Tensor]:
+            branch = {name: counts.get(name, 0) for name in count_names}
             for name in _PAIRED_SHARED_COUNT_KEYS:
                 branch.pop(name, None)
             branch["query_routing_normalization_rows"] = (
-                int(counts.get("query_routing_normalization_rows", 0)) - shared_normalization
+                counts.get("query_routing_normalization_rows", 0) - shared_normalization
             )
-            if branch["query_routing_normalization_rows"] < 0:
-                raise RuntimeError("Paired Candidate A shared normalization exceeds branch total.")
             return branch
 
         return branch_counts(full_counts), branch_counts(restricted_counts), shared
@@ -1138,6 +1189,7 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
         full_counts: dict[str, int] = {}
         restricted_counts: dict[str, int] = {}
         shared_counts: dict[str, int] = {}
+        packed_count_total = None
         count_names = self._paired_count_names(getattr(self, "_additional_decode_count_keys", ()))
         shared_names = (*_PAIRED_SHARED_COUNT_KEYS, "query_routing_normalization_rows")
         for start in range(0, max(query.num_queries, 1), self.query_tile_size):
@@ -1169,45 +1221,55 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
                 local_full_counts, local_restricted_counts, local_shared_counts = self._split_paired_counts(
                     full_local_counts, restricted_local_counts, plan, count_names,
                 )
-                packed_counts = torch.as_tensor(
-                    [local_full_counts.get(name, 0) for name in count_names]
-                    + [local_restricted_counts.get(name, 0) for name in count_names]
-                    + [local_shared_counts.get(name, 0) for name in shared_names],
-                    device=full_local_fields.device, dtype=torch.long,
+                shared_differences = []
+                for name in _PAIRED_SHARED_COUNT_KEYS:
+                    full_value = full_local_counts.get(name, 0)
+                    restricted_value = restricted_local_counts.get(name, 0)
+                    if isinstance(full_value, Tensor) != isinstance(restricted_value, Tensor):
+                        raise RuntimeError(f"Paired Candidate A count type disagrees for {name}.")
+                    if isinstance(full_value, Tensor):
+                        shared_differences.append((full_value.detach() - restricted_value.detach()).abs())
+                    elif full_value != restricted_value:
+                        raise RuntimeError(f"Paired Candidate A shared work disagrees for {name}.")
+                shared_normalization = plan["routing_normalization_shared_rows"]
+                normalization_underflows = [
+                    (shared_normalization - local_counts["query_routing_normalization_rows"]).clamp_min(0)
+                    for local_counts in (full_local_counts, restricted_local_counts)
+                ]
+                paired_invariant_counts = torch.stack((*shared_differences, *normalization_underflows))
+                local_count_values = (
+                    tuple(local_full_counts.get(name, 0) for name in count_names),
+                    tuple(local_restricted_counts.get(name, 0) for name in count_names),
+                    tuple(local_shared_counts.get(name, 0) for name in shared_names),
                 )
-                return (full_local_fields, restricted_local_fields, packed_counts,
+                return (full_local_fields, restricted_local_fields, local_count_values, paired_invariant_counts,
                         full_local_trace, restricted_local_trace)
 
             if self.training and torch.is_grad_enabled() and not return_trace:
                 tile_runner = run_tile
-                full_tile_fields, restricted_tile_fields, packed_counts = checkpoint(
-                    lambda coordinates, tile_runner=tile_runner: tile_runner(coordinates)[:3],
+                (full_tile_fields, restricted_tile_fields, local_count_values,
+                 paired_invariant_counts) = checkpoint(
+                    lambda coordinates, tile_runner=tile_runner: tile_runner(coordinates)[:4],
                     tile.coordinates, use_reentrant=False,
                 )
-                values = packed_counts.detach().cpu().tolist()
-                full_local_counts = dict(zip(count_names, values[:len(count_names)]))
-                restricted_local_counts = dict(zip(
-                    count_names, values[len(count_names):2 * len(count_names)],
-                ))
-                shared_local_counts = dict(zip(shared_names, values[2 * len(count_names):]))
             else:
-                (full_tile_fields, restricted_tile_fields, packed_counts,
+                (full_tile_fields, restricted_tile_fields, local_count_values, paired_invariant_counts,
                  full_trace, restricted_trace) = run_tile(tile.coordinates)
-                values = packed_counts.detach().cpu().tolist()
-                full_local_counts = dict(zip(count_names, values[:len(count_names)]))
-                restricted_local_counts = dict(zip(
-                    count_names, values[len(count_names):2 * len(count_names)],
-                ))
-                shared_local_counts = dict(zip(shared_names, values[2 * len(count_names):]))
+
+            local_full_counts = dict(zip(count_names, local_count_values[0]))
+            local_restricted_counts = dict(zip(count_names, local_count_values[1]))
+            local_shared_counts = dict(zip(shared_names, local_count_values[2]))
+            packed_counts = torch.cat((
+                _pack_work_counts(local_full_counts, count_names, full_tile_fields),
+                _pack_work_counts(local_restricted_counts, count_names, full_tile_fields),
+                _pack_work_counts(local_shared_counts, shared_names, full_tile_fields),
+            ))
 
             full_fields_by_tile.append(full_tile_fields)
             restricted_fields_by_tile.append(restricted_tile_fields)
-            for name, value in full_local_counts.items():
-                full_counts[name] = full_counts.get(name, 0) + int(value)
-            for name, value in restricted_local_counts.items():
-                restricted_counts[name] = restricted_counts.get(name, 0) + int(value)
-            for name, value in shared_local_counts.items():
-                shared_counts[name] = shared_counts.get(name, 0) + int(value)
+            tile_report = torch.cat((packed_counts.detach(), paired_invariant_counts.detach()))
+            packed_count_total = (tile_report if packed_count_total is None else
+                                  packed_count_total + tile_report)
 
         parameter = next(self.parameters())
         full_fields = torch.cat(full_fields_by_tile, dim=1) if full_fields_by_tile else parameter.new_zeros(
@@ -1217,6 +1279,19 @@ class ConsistentJointMemberRoutingCore(JointMemberRoutingCore):
             torch.cat(restricted_fields_by_tile, dim=1) if restricted_fields_by_tile else
             parameter.new_zeros(query.batch_size, 0, self.output_dim)
         )
+        if packed_count_total is not None:
+            report_values = packed_count_total.detach().cpu().tolist()
+            branch_count_width = 2 * len(count_names)
+            shared_count_width = len(shared_names)
+            count_values = report_values[:branch_count_width + shared_count_width]
+            invariant_values = report_values[branch_count_width + shared_count_width:]
+            if any(invariant_values):
+                raise RuntimeError("Paired Candidate A shared work or normalization disagrees across branches.")
+            full_counts = dict(zip(count_names, count_values[:len(count_names)]))
+            restricted_counts = dict(zip(
+                count_names, count_values[len(count_names):2 * len(count_names)],
+            ))
+            shared_counts = dict(zip(shared_names, count_values[2 * len(count_names):]))
         if return_trace:
             if query.num_queries == 0:
                 full_trace = {"joint_fields": full_fields}

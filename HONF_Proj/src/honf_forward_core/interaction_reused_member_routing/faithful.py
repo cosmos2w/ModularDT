@@ -122,6 +122,10 @@ class FaithfulMECore(ConsistentJointMemberRoutingCore):
             "retained_prior_law": self.retained_prior_law,
         }
 
+    def _joint_member_contribution_required(self, *, return_trace: bool) -> bool:
+        """Keep Candidate A's diagnostic law only when a trace requests it."""
+        return return_trace
+
     @classmethod
     def validate_config(cls, config: Mapping[str, Any]) -> None:
         required = {
@@ -149,7 +153,7 @@ class FaithfulMECore(ConsistentJointMemberRoutingCore):
 
     def _role_read_contributions(
         self,
-        marginal_contribution: Tensor,
+        marginal_contribution: Tensor | None,
         member_prior: Tensor,
         ell: Tensor,
         candidate: Tensor,
@@ -204,10 +208,11 @@ class FaithfulMECore(ConsistentJointMemberRoutingCore):
             return_trace=return_trace,
             shared_plan=shared_plan,
         )
-        # O performs separate candidate-conditioned M/E likelihood softmaxes
-        # in addition to the inherited global contribution calculation.
-        counts["query_M_member_softmax_rows"] = int(counts["query_M_score_calibration_rows"])
-        counts["query_E_member_softmax_rows"] = int(counts["query_E_score_calibration_rows"])
+        # O performs separate candidate-conditioned M/E likelihood softmaxes.
+        # Its ordinary path skips Candidate A's global contribution; a requested
+        # legacy trace keeps that calculation for its original log-weight fields.
+        counts["query_M_member_softmax_rows"] = counts["query_M_score_calibration_rows"]
+        counts["query_E_member_softmax_rows"] = counts["query_E_score_calibration_rows"]
         if trace is not None and "member_conditional_likelihood_M" in trace:
             for role in ("M", "E"):
                 trace[f"member_relative_weights_{role}"] = trace[f"member_conditional_likelihood_{role}"]

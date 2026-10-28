@@ -304,6 +304,16 @@ class JointMemberRoutingHealth:
             if torch.is_tensor(address_scores) and address_scores.requires_grad:
                 address_gradient_index = len(gradient_targets)
                 gradient_targets.append(address_scores)
+            read_path_target_indices = {}
+            for role in ("M", "E"):
+                for kind, trace_key in (
+                    ("read_strength", f"member_read_strength_{role}"),
+                    ("context", f"context_{role}"),
+                ):
+                    value = trace.get(trace_key)
+                    if torch.is_tensor(value) and value.requires_grad:
+                        read_path_target_indices[(kind, role)] = len(gradient_targets)
+                        gradient_targets.append(value)
             route_parameter_indices = {}
             for block, parameters in route_parameter_refs.items():
                 indices = []
@@ -360,8 +370,49 @@ class JointMemberRoutingHealth:
                 }
             else:
                 address_score_gradient_norms = {"M": 0.0, "E": 0.0}
+            read_path_adjoint_norms = {
+                kind: {
+                    role: (self._gradient_norm(gradients[read_path_target_indices[(kind, role)]])
+                           if (kind, role) in read_path_target_indices else 0.0)
+                    for role in ("M", "E")
+                }
+                for kind in ("read_strength", "context")
+            }
             role_losses = {name: _finite_scalar(value.detach().mean()) for name, value in roles.items()}
             conditional_preferences = {}
+            read_trace_means = {}
+            for role in ("M", "E"):
+                expectation = trace.get(f"member_conditional_expectation_{role}")
+                entropy = trace.get(f"member_conditional_entropy_{role}")
+                # The maintained core trace already normalizes entropy by the full eligible scene count.
+                normalized_entropy = entropy if torch.is_tensor(entropy) else None
+                context_norm = trace.get(f"member_context_norm_{role}")
+                if not torch.is_tensor(context_norm):
+                    context = trace.get(f"context_{role}")
+                    context_norm = context.norm(dim=-1) if torch.is_tensor(context) else None
+                candidate = trace.get(f"candidate_mask_{role}")
+                read_trace_means[f"member_conditional_expectation_{role}"] = (
+                    _finite_scalar(expectation.detach().mean()) if torch.is_tensor(expectation) else None
+                )
+                read_trace_means[f"member_conditional_entropy_normalized_{role}"] = (
+                    _finite_scalar(normalized_entropy.detach().mean())
+                    if torch.is_tensor(normalized_entropy) else None
+                )
+                for suffix, trace_key in (
+                    ("read_contrast", f"member_read_contrast_{role}"),
+                    ("read_strength", f"member_read_strength_{role}"),
+                    ("gate_derivative", f"member_gate_derivative_{role}"),
+                ):
+                    value = trace.get(trace_key)
+                    read_trace_means[f"member_{suffix}_{role}"] = (
+                        _finite_scalar(value.detach().mean()) if torch.is_tensor(value) else None
+                    )
+                read_trace_means[f"member_context_norm_{role}"] = (
+                    _finite_scalar(context_norm.detach().mean()) if torch.is_tensor(context_norm) else None
+                )
+                read_trace_means[f"nonempty_candidate_query_fraction_{role}"] = (
+                    _finite_scalar(candidate.any(-1).float().mean()) if torch.is_tensor(candidate) else None
+                )
             for role in ("M", "E"):
                 value = trace.get(f"conditional_preference_{role}")
                 allowed = trace.get(f"full_eligible_mask_{role}")
@@ -383,6 +434,9 @@ class JointMemberRoutingHealth:
                 "native_objective_actual_positive_edge_adjoint_norm_by_applied_block": positive_norms,
                 "native_objective_applied_route_parameter_gradient_norm_by_block": route_parameter_norms,
                 "native_objective_member_value_gradient_norm_by_role": value_gradient_norms,
+                "native_objective_member_read_strength_adjoint_l2_by_role": read_path_adjoint_norms["read_strength"],
+                "native_objective_member_context_adjoint_l2_by_role": read_path_adjoint_norms["context"],
+                "member_read_trace_means": read_trace_means,
                 "applied_block_edge_activity": edge_activity,
                 "native_objective_proposal_address_score_gradient_norm_by_role": address_score_gradient_norms,
                 "applied_stage_provenance": block_values["provenance"],

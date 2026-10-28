@@ -43,7 +43,8 @@ def _parser() -> argparse.ArgumentParser:
     train_contextual.add_argument("--output", required=True)
 
     train_member_routing = commands.add_parser(
-        "train-member-routing", help="start one maintained Thermal member-routing run",
+        "train-member-routing", aliases=["train-single-distribution-member-routing"],
+        help="start one maintained Thermal member-routing run",
     )
     train_member_routing.add_argument("--config", required=True)
     train_member_routing.add_argument("--device", required=True)
@@ -101,7 +102,8 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     resume_member_routing = commands.add_parser(
-        "resume-member-routing", help="resume a maintained Thermal member-routing run",
+        "resume-member-routing", aliases=["resume-single-distribution-member-routing"],
+        help="resume a maintained Thermal member-routing run",
     )
     resume_member_routing.add_argument("--run", required=True)
     resume_member_routing.add_argument("--device", required=True)
@@ -128,8 +130,8 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_joint_member_routing.add_argument("--output", required=True)
 
     evaluate_r13_6_member_routing = commands.add_parser(
-        "evaluate-r13-6-member-routing",
-        help="evaluate a maintained R13-6 C/H checkpoint on all canonical VAL89 cases",
+        "evaluate-r13-6-member-routing", aliases=["evaluate-r13-7-single-distribution-member-routing"],
+        help="evaluate a maintained R13-6 C/H or R13-7 U checkpoint on all canonical VAL89 cases",
     )
     evaluate_r13_6_member_routing.add_argument("--checkpoint", required=True)
     evaluate_r13_6_member_routing.add_argument("--device", default="cpu")
@@ -210,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             epochs=args.epochs,
             output=args.output,
         )
-    elif args.command == "train-member-routing":
+    elif args.command in ("train-member-routing", "train-single-distribution-member-routing"):
         import torch
         from honf_runtime.contextual_frontier_training import (
             _arm, _build_task, load_contextual_frontier_config, train_contextual_frontier,
@@ -269,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             stop_after_epoch=args.stop_after_epoch,
             wall_clock_budget_seconds=args.wall_clock_budget_seconds,
         )
-    elif args.command == "resume-member-routing":
+    elif args.command in ("resume-member-routing", "resume-single-distribution-member-routing"):
         from honf_runtime.contextual_frontier_training import resume_contextual_frontier
         result = resume_contextual_frontier(
             args.run, device=args.device, devices=args.devices,
@@ -278,7 +280,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "evaluate-joint-member-routing":
         from honf_runtime.joint_member_routing_evaluation import evaluate
         result = evaluate(args.checkpoint, args.device, args.output)
-    elif args.command == "evaluate-r13-6-member-routing":
+    elif args.command in ("evaluate-r13-6-member-routing",
+                          "evaluate-r13-7-single-distribution-member-routing"):
         from honf_runtime.r13_6_member_routing_evaluation import evaluate
         result = evaluate(args.checkpoint, args.device, args.output)
     elif args.command == "evaluate-supplement-member-routing":

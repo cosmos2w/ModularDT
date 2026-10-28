@@ -34,6 +34,41 @@ def _tensor_version(value: Tensor) -> tuple[int, int, int]:
     return id(value), int(value.data_ptr()), version
 
 
+def _work_count_tensor(value: int | Tensor, reference: Tensor) -> Tensor:
+    """Return one detached device-side integer count without reading it on CPU."""
+    if isinstance(value, Tensor):
+        return value.detach().to(device=reference.device, dtype=torch.long).reshape(())
+    return torch.tensor(int(value), device=reference.device, dtype=torch.long)
+
+
+def _pack_work_counts(counts: Mapping[str, int | Tensor], keys: tuple[str, ...],
+                      reference: Tensor) -> Tensor:
+    """Pack logical work counts for device-side tile aggregation."""
+    if not keys:
+        return torch.empty((0,), device=reference.device, dtype=torch.long)
+    static_values: list[int] = []
+    dynamic_indices: list[int] = []
+    dynamic_values: list[Tensor] = []
+    for index, name in enumerate(keys):
+        value = counts.get(name, 0)
+        if isinstance(value, Tensor):
+            dynamic_indices.append(index)
+            dynamic_values.append(_work_count_tensor(value, reference))
+            static_values.append(0)
+        else:
+            static_values.append(int(value))
+    packed = torch.tensor(static_values, device=reference.device, dtype=torch.long)
+    if dynamic_values:
+        indices = torch.tensor(dynamic_indices, device=reference.device, dtype=torch.long)
+        packed.index_copy_(0, indices, torch.stack(dynamic_values))
+    return packed
+
+
+def _unpack_work_counts(packed: Tensor, keys: tuple[str, ...]) -> dict[str, int]:
+    """Convert aggregated counts to the public integer dictionary once."""
+    return {name: int(value) for name, value in zip(keys, packed.detach().cpu().tolist())}
+
+
 def _entmax_with_null(logits: Tensor, allowed: Tensor, temperature: float) -> Tensor:
     """Entmax over allowed records and one always-available zero-logit null."""
     if logits.shape != allowed.shape or allowed.dtype != torch.bool:
@@ -528,7 +563,7 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
     @staticmethod
     def _expand_live_coefficients(pi: Tensor, matrix: Tensor, Q: int, N: int,
                                   *, cached_index: Tensor | None = None,
-                                  cached_values: Tensor | None = None) -> tuple[Tensor, Tensor, Tensor, Tensor, int]:
+                                  cached_values: Tensor | None = None) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Coalesce live address paths without unordered CUDA atomic sums.
 
         Each output member has one fixed-order address reduction. Unordered
@@ -546,14 +581,14 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
         support = torch.bmm((pi > 0).to(pi.dtype), (matrix > 0).to(pi.dtype)) > 0
         if edge_index.numel():
             positive = ((pi[b, :, address] > 0) & (edge_values[:, None] > 0)).to(pi.dtype)
-            active_rows = int((positive > 0).sum())
+            active_rows = (positive.detach() > 0).sum(dtype=torch.long)
         else:
-            active_rows = 0
+            active_rows = torch.zeros((), device=pi.device, dtype=torch.long)
         return coefficients, support, edge_index, edge_values, active_rows
 
     def _typed_read_state(self, prepared: PreparedOrganizationV2, query: QueryBatch,
                           qstates: Tensor, intervention: Mapping[str, Any] | None,
-                          *, return_trace: bool) -> tuple[Tensor, dict[str, Tensor], dict[str, int], Tensor]:
+                          *, return_trace: bool) -> tuple[Tensor, dict[str, Tensor], dict[str, int | Tensor], Tensor]:
         scene = prepared.scene
         intervention = {} if intervention is None else dict(intervention)
         allowed_controls = {"member_score_mode", "value_execution", "fixed_B_M", "fixed_B_E", "fixed_pi",
@@ -568,7 +603,7 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
         dense_union = intervention.get("value_execution", "selected") == "dense_candidate_union"
         Q, M, E = query.num_queries, scene.num_modules, scene.num_environment_tokens
         qmask = self._query_mask(query)
-        counts: dict[str, int] = {}
+        counts: dict[str, int | Tensor] = {}
         trace: dict[str, Tensor] = {}
 
         B_M = self._validate_dense_control(intervention.get("fixed_B_M"),
@@ -692,18 +727,24 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
         joint = self.member_router.joint_trunk(torch.cat((qstates, c_M, c_E), dim=-1))
         joint_fields = self.member_router.joint_head(joint)
         joint_fields = joint_fields * qmask[..., None].to(joint_fields.dtype)
+        candidate_M_count = candidate_M.detach().sum(dtype=torch.long)
+        candidate_E_count = candidate_E.detach().sum(dtype=torch.long)
+        selected_M_count = (beta_M.detach() > 0).sum(dtype=torch.long)
+        selected_E_count = (beta_E.detach() > 0).sum(dtype=torch.long)
+        execution_M_count = execute_M.detach().sum(dtype=torch.long)
+        execution_E_count = execute_E.detach().sum(dtype=torch.long)
         counts.update(
             query_M_proposal_score_rows=proposal_rows,
             query_M_cheap_score_rows=rows_M,
             query_E_cheap_score_rows=rows_E,
-            query_M_selected_value_rows=int((beta_M > 0).sum()),
-            query_E_selected_value_rows=int((beta_E > 0).sum()),
-            query_M_value_execution_rows=int(execute_M.sum()),
-            query_E_value_execution_rows=int(execute_E.sum()),
-            query_M_dense_candidate_value_rows=int(candidate_M.sum()) if dense_union else 0,
-            query_E_dense_candidate_value_rows=int(candidate_E.sum()) if dense_union else 0,
-            query_M_candidate_rows=int(candidate_M.sum()),
-            query_E_candidate_rows=int(candidate_E.sum()),
+            query_M_selected_value_rows=selected_M_count,
+            query_E_selected_value_rows=selected_E_count,
+            query_M_value_execution_rows=execution_M_count,
+            query_E_value_execution_rows=execution_E_count,
+            query_M_dense_candidate_value_rows=candidate_M_count if dense_union else 0,
+            query_E_dense_candidate_value_rows=candidate_E_count if dense_union else 0,
+            query_M_candidate_rows=candidate_M_count,
+            query_E_candidate_rows=candidate_E_count,
             query_address_coefficient_pair_rows=int(scene.batch_size * Q * M * (M + E)),
             query_address_relation_rows=expansion_rows_M + expansion_rows_E,
             query_receiver_rows=int(scene.batch_size * Q),
@@ -763,6 +804,7 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
         # Preparation belongs to PreparedScene and is reported separately by
         # the native task. Cached decode must not charge those rows again.
         counts: dict[str, int] = {}
+        packed_count_total = None
         count_keys = ("query_M_proposal_score_rows", "query_M_cheap_score_rows", "query_E_cheap_score_rows",
                       "query_M_selected_value_rows", "query_E_selected_value_rows", "query_M_value_execution_rows",
                       "query_E_value_execution_rows", "query_M_dense_candidate_value_rows",
@@ -782,22 +824,24 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
                     local_qstates = self._query_states(organization, local_query)
                     _, _, local_counts, local_fields = self._typed_read_state(
                         organization, local_query, local_qstates, tile_intervention, return_trace=False)
-                    packed_counts = torch.as_tensor([local_counts.get(name, 0) for name in count_keys],
-                                                    device=local_fields.device, dtype=torch.long)
-                    return local_fields, packed_counts
-                local_fields, packed_counts = checkpoint(run_tile, tile.coordinates, use_reentrant=False)
-                local_counts = {name: int(value) for name, value in zip(count_keys, packed_counts.detach().cpu().tolist())}
+                    count_values = tuple(local_counts.get(name, 0) for name in count_keys)
+                    return local_fields, count_values
+                local_fields, count_values = checkpoint(run_tile, tile.coordinates, use_reentrant=False)
+                local_counts = dict(zip(count_keys, count_values))
             else:
                 local_qstates = self._query_states(organization, tile)
                 _, local_trace, local_counts, local_fields = self._typed_read_state(
                     organization, tile, local_qstates, tile_intervention, return_trace=return_trace)
                 if return_trace:
                     trace = local_trace
+            packed_counts = _pack_work_counts(local_counts, count_keys, local_fields)
             fields_by_tile.append(local_fields)
-            for name in count_keys:
-                counts[name] = counts.get(name, 0) + int(local_counts.get(name, 0))
+            packed_count_total = (packed_counts.detach() if packed_count_total is None else
+                                  packed_count_total + packed_counts.detach())
         fields = torch.cat(fields_by_tile, dim=1) if fields_by_tile else next(self.parameters()).new_zeros(
             query.batch_size, 0, self.output_dim)
+        if packed_count_total is not None:
+            counts = _unpack_work_counts(packed_count_total, count_keys)
         if return_trace:
             trace["joint_fields"] = fields
         return InteractionJointOutput(fields, trace if return_trace else None, counts)

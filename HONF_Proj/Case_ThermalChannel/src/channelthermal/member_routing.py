@@ -35,6 +35,11 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
                     TypedOrganizationMemberRoutingCore,
                 )
                 core_type = TypedOrganizationMemberRoutingCore
+            elif core_config.get("schema") == "interaction_reused_single_distribution_member_routing_v1":
+                from honf_forward_core.interaction_reused_member_routing.single_distribution_core import (
+                    SingleDistributionMemberRoutingCore,
+                )
+                core_type = SingleDistributionMemberRoutingCore
             else:
                 from honf_forward_core.interaction_reused_member_routing import (
                     InteractionReusedMemberRoutingCore,
@@ -136,9 +141,18 @@ class ThermalTypedOrganizationMemberRoutingAdapter(ThermalInteractionReusedMembe
     ARCHITECTURES = ("R13-6-H-ME-TypedOrganizationJoint95",)
 
 
+class ThermalSingleDistributionMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
+    """Thermal-native adapter for the R13-7 U single-distribution reader."""
+
+    SCHEMA = "thermal_interaction_reused_single_distribution_member_routing_adapter_v1"
+    CORE_SCHEMA = "interaction_reused_single_distribution_member_routing_v1"
+    ARCHITECTURES = ("R13-7-U-ME-SingleDistributionJoint95",)
+
+
 __all__ = [
     "ThermalFaithfulMemberRoutingAdapter",
     "ThermalInteractionReusedMemberRoutingAdapter",
     "ThermalRelativeMemberRoutingAdapter",
+    "ThermalSingleDistributionMemberRoutingAdapter",
     "ThermalTypedOrganizationMemberRoutingAdapter",
 ]

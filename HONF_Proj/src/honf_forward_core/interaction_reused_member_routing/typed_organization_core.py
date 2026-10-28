@@ -38,9 +38,43 @@ class TypedOrganizationMemberRoutingCore(FaithfulMECore):
         if config.get("retained_prior_law") != "none":
             raise ValueError("R13-6 H config cannot combine typed organization with retained-prior law K.")
 
+    @staticmethod
+    def _typed_organization_distribution(
+        ell: Tensor,
+        candidate: Tensor,
+        proposal: Tensor,
+        retrieval_R: Tensor,
+        module_count: int,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Build H's unchanged M/E distributions directly from the shared scores and plan."""
+        if not 0 <= module_count <= ell.shape[-1]:
+            raise ValueError("module_count must split the joint M/E member axis.")
+        if proposal.shape[-1] != retrieval_R.shape[1]:
+            raise ValueError("Typed organization proposals and retrieval rows must share their address axis.")
+        m_slice = slice(0, module_count)
+        e_slice = slice(module_count, ell.shape[-1])
+        value_m = organization_conditioned_role_contribution(
+            retrieval_R[..., m_slice],
+            proposal,
+            ell[..., m_slice],
+            candidate[..., m_slice],
+        )
+        value_e = organization_conditioned_role_contribution(
+            retrieval_R[..., e_slice],
+            proposal,
+            ell[..., e_slice],
+            candidate[..., e_slice],
+        )
+        distribution = torch.cat((value_m, value_e), dim=-1)
+        trace = {
+            "typed_organization_member_contribution_M": value_m,
+            "typed_organization_member_contribution_E": value_e,
+        }
+        return distribution, trace
+
     def _role_read_contributions(
         self,
-        marginal_contribution: Tensor,
+        marginal_contribution: Tensor | None,
         member_prior: Tensor,
         ell: Tensor,
         candidate: Tensor,
@@ -63,30 +97,11 @@ class TypedOrganizationMemberRoutingCore(FaithfulMECore):
             module_count=module_count,
         )
         del _original_value_contribution, member_prior, full_candidate, row_mass
-        if not 0 <= module_count <= gate_contribution.shape[-1]:
-            raise ValueError("module_count must split the joint M/E member axis.")
-        if proposal.shape[-1] != retrieval_R.shape[1]:
-            raise ValueError("Typed organization proposals and retrieval rows must share their address axis.")
-
-        m_slice = slice(0, module_count)
-        e_slice = slice(module_count, gate_contribution.shape[-1])
-        value_m = organization_conditioned_role_contribution(
-            retrieval_R[..., m_slice],
-            proposal,
-            ell[..., m_slice],
-            candidate[..., m_slice],
+        value_contribution, organization_trace = self._typed_organization_distribution(
+            ell, candidate, proposal, retrieval_R, module_count,
         )
-        value_e = organization_conditioned_role_contribution(
-            retrieval_R[..., e_slice],
-            proposal,
-            ell[..., e_slice],
-            candidate[..., e_slice],
-        )
-        trace.update({
-            "typed_organization_member_contribution_M": value_m,
-            "typed_organization_member_contribution_E": value_e,
-        })
-        return gate_contribution, torch.cat((value_m, value_e), dim=-1), trace
+        trace.update(organization_trace)
+        return gate_contribution, value_contribution, trace
 
     def _typed_read_state_with_plan(self, prepared, query, qstates, intervention, *,
                                     return_trace, shared_plan=None):
