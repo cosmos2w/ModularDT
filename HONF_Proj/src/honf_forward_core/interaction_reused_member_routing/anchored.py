@@ -609,6 +609,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         """Capture applied final-cycle E←M/E←E and compile the live directory."""
         organization = InteractionReusedMemberRoutingCore._finalize_native_preparation(
             self, organization, cycle_trace,
+            build_legacy_directory=getattr(self, "_prepare_legacy_directory", False),
         )
         scene = organization.scene
         cycle_trace = {} if cycle_trace is None else cycle_trace
@@ -868,13 +869,14 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         scores, prior = raw[union_index], packed["prior"]
         tiny = torch.finfo(scores.dtype).tiny
         mass = self._segment_sum(prior, group, groups)
-        conditional = prior / mass[group].clamp_min(tiny)
-        means = self._segment_sum(conditional * scores, group, groups)
-        centered = scores - means[group]
-        variance = self._segment_sum(conditional * centered.square(), group, groups)
-        ell = 4. * torch.tanh(centered / (4. * torch.sqrt(variance[group] + 1.)))
         if self.score_calibration == "bounded_tanh":
             ell = 4. * torch.tanh(scores / 4.)
+        else:
+            conditional = prior / mass[group].clamp_min(tiny)
+            means = self._segment_sum(conditional * scores, group, groups)
+            centered = scores - means[group]
+            variance = self._segment_sum(conditional * centered.square(), group, groups)
+            ell = 4. * torch.tanh(centered / (4. * torch.sqrt(variance[group] + 1.)))
         log_weight = prior.clamp_min(tiny).log() + ell
         maximum = scores.new_full((groups,), -torch.inf).scatter_reduce(
             0, group, log_weight, reduce="amax", include_self=True)
@@ -1037,6 +1039,11 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                                                 intervention=intervention,
                                                 return_trace=return_trace or trace_request is not None)
         return outputs["full"], outputs["restricted"], shared
+
+    def member_routing_intervention(self, probe_name, prepared, query, query_indices=None):
+        if probe_name != "remove_contextual_message_recompute":
+            raise ValueError("Legacy M-directory probes do not apply to anchored reads; use E-directory interventions.")
+        return super().member_routing_intervention(probe_name, prepared, query, query_indices)
 
 
 __all__ = [

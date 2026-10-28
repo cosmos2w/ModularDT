@@ -401,34 +401,33 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
             raise ValueError(f"Applied {route.upper()} incidence has an invalid shape.")
         return gate
 
-    def _finalize_native_preparation(self, organization: PreparedOrganizationV2, cycle_trace):
+    def _finalize_native_preparation(self, organization: PreparedOrganizationV2, cycle_trace,
+                                     *, build_legacy_directory=True):
         cycle_trace = {} if cycle_trace is None else cycle_trace
         scene = organization.scene
-        gate_mm = self._safe_snapshot_gate(cycle_trace, "mm", scene)
-        gate_me = self._safe_snapshot_gate(cycle_trace, "me", scene)
-        present_M = scene.module_mask.to(gate_mm.dtype)
-        identity = torch.diag_embed(present_M)
-        off_diagonal = ~torch.eye(scene.num_modules, device=gate_mm.device, dtype=torch.bool)[None]
-        organization.B_M = gate_mm * off_diagonal.to(gate_mm.dtype) + identity
-        organization.B_E = gate_me * scene.environment_mask[:, None, :].to(gate_me.dtype)
-        organization.B_M_edge_index = (organization.B_M > 0).nonzero(as_tuple=False)
-        organization.B_E_edge_index = (organization.B_E > 0).nonzero(as_tuple=False)
-        organization.B_M_edge_values = organization.B_M[
-            organization.B_M_edge_index.unbind(-1)] if organization.B_M_edge_index.numel() else organization.B_M.reshape(-1)[:0]
-        organization.B_E_edge_values = organization.B_E[
-            organization.B_E_edge_index.unbind(-1)] if organization.B_E_edge_index.numel() else organization.B_E.reshape(-1)[:0]
+        organization.has_legacy_member_directory = build_legacy_directory
+        if build_legacy_directory:
+            gate_mm = self._safe_snapshot_gate(cycle_trace, "mm", scene)
+            gate_me = self._safe_snapshot_gate(cycle_trace, "me", scene)
+            present_M = scene.module_mask.to(gate_mm.dtype)
+            identity = torch.diag_embed(present_M)
+            off_diagonal = ~torch.eye(scene.num_modules, device=gate_mm.device, dtype=torch.bool)[None]
+            organization.B_M = gate_mm * off_diagonal.to(gate_mm.dtype) + identity
+            organization.B_E = gate_me * scene.environment_mask[:, None, :].to(gate_me.dtype)
+            organization.B_M_edge_index = (organization.B_M > 0).nonzero(as_tuple=False)
+            organization.B_E_edge_index = (organization.B_E > 0).nonzero(as_tuple=False)
+            organization.B_M_edge_values = organization.B_M[
+                organization.B_M_edge_index.unbind(-1)] if organization.B_M_edge_index.numel() else organization.B_M.reshape(-1)[:0]
+            organization.B_E_edge_values = organization.B_E[
+                organization.B_E_edge_index.unbind(-1)] if organization.B_E_edge_index.numel() else organization.B_E.reshape(-1)[:0]
 
-        # Final-read E information measure is dimensionless: positive physical
-        # measures divided once by their scene positive mean. M is a discrete
-        # present-record count measure, so each present M has nu=1, including
-        # a zero donor-measure M whose prescribed identity remains addressable.
-        physical_E = scene.environment_measure.to(organization.environment_states.dtype)
-        valid_E = scene.environment_mask & (physical_E > 0)
-        positive_count = valid_E.sum(-1, keepdim=True).clamp_min(1).to(physical_E.dtype)
-        mean_E = (physical_E * valid_E.to(physical_E.dtype)).sum(-1, keepdim=True) / positive_count
-        organization.nu_M = scene.module_mask.to(organization.module_states.dtype)
-        organization.nu_E = torch.where(valid_E, physical_E / mean_E.clamp_min(torch.finfo(physical_E.dtype).tiny),
-                                        torch.zeros_like(physical_E))
+            physical_E = scene.environment_measure.to(organization.environment_states.dtype)
+            valid_E = scene.environment_mask & (physical_E > 0)
+            positive_count = valid_E.sum(-1, keepdim=True).clamp_min(1).to(physical_E.dtype)
+            mean_E = (physical_E * valid_E.to(physical_E.dtype)).sum(-1, keepdim=True) / positive_count
+            organization.nu_M = scene.module_mask.to(organization.module_states.dtype)
+            organization.nu_E = torch.where(valid_E, physical_E / mean_E.clamp_min(torch.finfo(physical_E.dtype).tiny),
+                                            torch.zeros_like(physical_E))
         organization.member_keys_M = organization.direct_source_keys
         organization.member_values_M = organization.direct_source_values
         organization.member_keys_E = self.member_router.key_E(organization.environment_states)
@@ -436,10 +435,11 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
         organization.member_projection_versions = tuple(_tensor_version(value) for value in (
             organization.member_keys_M, organization.member_values_M,
             organization.member_keys_E, organization.member_values_E))
-        organization.member_route_state_versions = tuple(_tensor_version(value) for value in (
-            organization.B_M, organization.B_E, organization.nu_M, organization.nu_E,
-            organization.B_M_edge_index, organization.B_M_edge_values,
-            organization.B_E_edge_index, organization.B_E_edge_values))
+        if build_legacy_directory:
+            organization.member_route_state_versions = tuple(_tensor_version(value) for value in (
+                organization.B_M, organization.B_E, organization.nu_M, organization.nu_E,
+                organization.B_M_edge_index, organization.B_M_edge_values,
+                organization.B_E_edge_index, organization.B_E_edge_values))
         organization.work_counts.update({
             "cached_scene_projection_rows_M": int(scene.batch_size * scene.num_modules),
             "cached_scene_projection_rows_E": int(scene.batch_size * scene.num_environment_tokens),
@@ -473,12 +473,13 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
             organization.member_keys_E, organization.member_values_E))
         if current != organization.member_projection_versions:
             raise ValueError("Prepared interaction member projections changed; rebuild the scene.")
-        route_state = tuple(_tensor_version(value) for value in (
-            organization.B_M, organization.B_E, organization.nu_M, organization.nu_E,
-            organization.B_M_edge_index, organization.B_M_edge_values,
-            organization.B_E_edge_index, organization.B_E_edge_values))
-        if route_state != organization.member_route_state_versions:
-            raise ValueError("Prepared interaction routing state changed; rebuild the scene.")
+        if organization.has_legacy_member_directory:
+            route_state = tuple(_tensor_version(value) for value in (
+                organization.B_M, organization.B_E, organization.nu_M, organization.nu_E,
+                organization.B_M_edge_index, organization.B_M_edge_values,
+                organization.B_E_edge_index, organization.B_E_edge_values))
+            if route_state != organization.member_route_state_versions:
+                raise ValueError("Prepared interaction routing state changed; rebuild the scene.")
 
     def validate_prepared_state(self, organization: PreparedOrganizationV2, query: QueryBatch) -> None:
         self._validate_prepared_state(organization)

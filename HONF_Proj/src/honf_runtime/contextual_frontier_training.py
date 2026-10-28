@@ -411,14 +411,18 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                                initialization.get("normalization_mode"))
             if membership == "fixed25_train150_dev22":
                 valid_schedule = (
-                    actual_schedule == (500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
-                                        "fixed25_train150_stats")
+                    actual_schedule in ((500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
+                                         "fixed25_train150_stats"),
+                                        (1000, 100, 1000, list(range(100, 1001, 100)),
+                                         "fixed25_train150_stats"))
                     and training.get("curve_every") == 10
                 )
             elif (membership == "full_train600"
                   and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND):
                 valid_schedule = (
-                    actual_schedule == (100, 100, 500, [100], "scratch_train600_stats")
+                    actual_schedule in ((100, 100, 500, [100], "scratch_train600_stats"),
+                                        (1000, 100, 1000, list(range(100, 1001, 100)),
+                                         "scratch_train600_stats"))
                     and training.get("curve_every") == 10
                 )
             else:
@@ -428,7 +432,9 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                 model.get("architecture") == arm
                 and model.get("locator_mode") == expected_locator
                 and model.get("retained_mass") == 0.95
-                and model.get("score_calibration") == "inherited"
+                and (model.get("score_calibration") == "inherited"
+                     or (training.get("local_horizon") == 1000
+                         and model.get("score_calibration") == "bounded_tanh"))
             )
         else:
             valid_schedule = False
@@ -1520,12 +1526,16 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
         elif (core_schema == R13_8_E_ANCHORED_CORE_SCHEMA
               and frontier.get("schema") == R13_8_E_ANCHORED_CONFIG_SCHEMA):
             if membership == "fixed25_train150_dev22":
-                valid_schedule = (actual == (500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
-                                             "fixed25_train150_stats")
+                valid_schedule = (actual in ((500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
+                                              "fixed25_train150_stats"),
+                                             (1000, 100, 1000, list(range(100, 1001, 100)),
+                                              "fixed25_train150_stats"))
                                   and training.get("curve_every") == 10)
             elif (membership == "full_train600"
                   and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND):
-                valid_schedule = (actual == (100, 100, 500, [100], "scratch_train600_stats")
+                valid_schedule = (actual in ((100, 100, 500, [100], "scratch_train600_stats"),
+                                             (1000, 100, 1000, list(range(100, 1001, 100)),
+                                              "scratch_train600_stats"))
                                   and training.get("curve_every") == 10)
             else:
                 valid_schedule = False
@@ -1534,7 +1544,9 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                 model.get("architecture") == arm
                 and model.get("locator_mode") == expected_locator
                 and model.get("retained_mass") == 0.95
-                and model.get("score_calibration") == "inherited"
+                and (model.get("score_calibration") == "inherited"
+                     or (training.get("local_horizon") == 1000
+                         and model.get("score_calibration") == "bounded_tanh"))
             )
         else:
             valid_schedule = valid_model = False

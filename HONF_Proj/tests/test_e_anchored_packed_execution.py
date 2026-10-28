@@ -53,7 +53,8 @@ def dense_oracle(model, prepared, query, mode):
                                 (prepared.scene.environment_mask[b] & (prepared.scene.environment_measure[b]>0)).sum())
                     result = anchored_row_read(raw[None], row.access_weight[choose],
                         torch.ones_like(slots,dtype=torch.bool), values[b,slots], qnorm[b,q][None],
-                        model.typed_read_gates[role], eligible, torch.ones(1,dtype=torch.bool))
+                        model.typed_read_gates[role], eligible, torch.ones(1,dtype=torch.bool),
+                        score_calibration=model.score_calibration)
                     local[role] = local[role] + query.anchor_weights[b,q,k]*result.context[0]
             for role in contexts:
                 outputs[role].append(local[role])
@@ -112,6 +113,109 @@ def test_paired_checkpoint_replay_matches_separate_reads_and_shares_raw_scores()
         if p.grad is not None:
             torch.testing.assert_close(p.grad,other.grad,rtol=2e-8,atol=2e-9,msg=name)
     assert shared["query_unique_union_raw_score_pairs_E"]==outputs[0].work_counts["query_unique_union_raw_score_pairs_E"]
+
+
+@pytest.mark.parametrize("locator", ["e_anchor", "local_e_cover"])
+@pytest.mark.parametrize("calibration", ["inherited", "bounded_tanh"])
+@pytest.mark.parametrize("reference_change", ["raw", "directory"])
+def test_live_raw_projection_reuse_fp32_paired_replay_and_gradients(locator, calibration, reference_change):
+    model, scene, query = fixture(locator)
+    model = model.float().train()
+    model.score_calibration = calibration
+    reference = copy.deepcopy(model)
+    if reference_change == "raw":
+        reference._reuse_raw_projections = False
+    elif reference_change == "directory":
+        reference._prepare_legacy_directory = True
+    def live_scene():
+        changes = {f.name: v.float().detach().clone().requires_grad_(True)
+                   for f in fields(scene) if torch.is_tensor(v := getattr(scene, f.name))
+                   and v.is_floating_point()}
+        return replace(scene, **changes), changes
+    scenes = [live_scene(), live_scene()]
+    queries = []
+    for _ in range(2):
+        coords = query.coordinates.float().detach().clone().requires_grad_(True)
+        weights = (torch.stack((coords[..., 0].sigmoid(), 1 - coords[..., 0].sigmoid()), -1)
+                   if locator == "local_e_cover" else query.anchor_weights.float())
+        queries.append(replace(query, coordinates=coords, anchor_weights=weights))
+    outputs, grads = [], []
+    for current, (s, inputs), q in zip((model, reference), scenes, queries):
+        full, restricted, _ = current.decode_paired(current.prepare(s), q)
+        outputs.append(torch.stack((full.joint_fields, restricted.joint_fields)))
+        targets = list(inputs.values()) + [q.coordinates] + list(current.parameters())
+        grads.append(torch.autograd.grad(outputs[-1].square().sum(), targets, allow_unused=True))
+    output_diff = (outputs[0] - outputs[1]).abs().max().item()
+    grad_diffs = []
+    for actual, expected in zip(*grads):
+        assert (actual is None) == (expected is None)
+        if actual is not None:
+            grad_diffs.append((actual - expected).abs().max().item() if actual.numel() else 0.)
+            torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-7)
+    torch.testing.assert_close(outputs[0], outputs[1], rtol=2e-5, atol=2e-7)
+    print(f"FP32 {reference_change} {locator} {calibration}: output max {output_diff:.9g}, gradient max {max(grad_diffs):.9g}")
+
+
+def test_anchored_preparation_omits_legacy_directory_and_keeps_actual_stages():
+    model, scene, query = fixture("e_anchor")
+    prepared = model.prepare(scene, trace_request={"include": []})
+    assert not prepared.has_legacy_member_directory
+    assert not hasattr(prepared, "B_M") and not hasattr(prepared, "B_E")
+    assert all(prepared.final_applied_context_stages[route]["snapshot"] is not None
+               for route in ("mm", "em", "ee", "me"))
+    output = model.decode(prepared, query, return_trace=True)
+    assert output.trace["anchored_applied_EM"] is prepared.anchored_applied_EM
+    assert output.trace["anchored_applied_EE"] is prepared.anchored_applied_EE
+    with pytest.raises(ValueError, match="E-directory"):
+        model.member_routing_intervention("b_fixed_candidates_scores", prepared, query)
+    _, options = model.member_routing_intervention("remove_contextual_message_recompute", prepared, query)
+    removed = model.prepare(scene, **options)
+    assert removed.e_access_directory is not None
+
+
+@pytest.mark.parametrize("locator", ["e_anchor", "local_e_cover"])
+@pytest.mark.parametrize("mode", ["full", "restricted"])
+def test_bounded_tanh_packed_matches_independent_row_execution(locator, mode):
+    model, scene, query = fixture(locator)
+    model.score_calibration = "bounded_tanh"
+    model.eval()
+    prepared = model.prepare(scene)
+    actual = model.decode(prepared, query, intervention={"read_mode": mode}, return_trace=True)
+    expected, contexts = dense_oracle(model, prepared, query, mode)
+    torch.testing.assert_close(actual.joint_fields, expected, rtol=1e-10, atol=1e-11)
+    for role in contexts:
+        torch.testing.assert_close(actual.trace[f"context_{role}"], contexts[role], rtol=1e-10, atol=1e-11)
+
+
+def test_singleton_calibration_and_raw_score_trace_contract():
+    model, scene, query = fixture("e_anchor")
+    gate = model.typed_read_gates["E"]
+    raw = torch.tensor([[2.]], dtype=torch.double)
+    normal = torch.tensor([torch.finfo(torch.double).tiny], dtype=torch.double)
+    subnormal = normal * .5
+    arguments = (torch.ones(1, dtype=torch.bool), torch.ones(1, model.context_dim, dtype=torch.double),
+                 torch.zeros(1, model.context_dim, dtype=torch.double), gate, 2,
+                 torch.ones(1, dtype=torch.bool))
+    regular = anchored_row_read(raw, normal, *arguments)
+    underflow = anchored_row_read(raw, subnormal, *arguments)
+    bounded = anchored_row_read(raw, normal, *arguments, score_calibration="bounded_tanh")
+    assert regular.calibrated_scores.item() == regular.expectation.item() == regular.normalized_entropy.item() == 0.
+    assert regular.probabilities.item() == 1.
+    assert underflow.calibrated_scores.item() != 0.
+    assert bounded.calibrated_scores.item() != 0.
+    traced = model.decode(model.prepare(scene), query, return_trace=True).trace
+    assert traced["member_score_union_values_E"].numel() > 0
+
+
+@pytest.mark.parametrize("locator", ["e_anchor", "local_e_cover"])
+def test_packed_singleton_and_empty_role_with_traces(locator):
+    model, scene, query = fixture(locator)
+    model.eval()
+    output = model.decode(model.prepare(scene), query,
+        intervention={"read_mode": "restricted", "access_intervention": "self_only"}, return_trace=True)
+    assert torch.count_nonzero(output.trace["context_M"]) == 0
+    assert torch.count_nonzero(output.trace["anchor_read_calibrated_scores"]) == 0
+    assert output.trace["member_score_union_values_E"].numel() > 0
 
 
 def test_one_anchor_local_cover_equals_a_and_row_only_m_fades_with_lambda():

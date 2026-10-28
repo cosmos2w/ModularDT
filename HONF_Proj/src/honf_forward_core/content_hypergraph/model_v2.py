@@ -801,15 +801,19 @@ class ContentHypergraphCoreV2(nn.Module):
         applied_context_stages = []
         context_work_summaries = []
         context_stage_metadata = []
+        # Raw records and these parameters are unchanged across the context
+        # cycles. Reuse the live tensors so gradients still reach both inputs
+        # and projection weights through every application.
+        reuse_raw = getattr(self, "_reuse_raw_projections", True)
+        projected_module_raw = self.module_raw_projection(raw_module_states) if reuse_raw and self.context_depth else None
+        projected_environment_raw = self.environment_raw_projection(raw_environment_states) if reuse_raw and self.context_depth else None
         for cycle_index, block in enumerate(self.context_blocks):
             module_boundary = module_states
             environment_boundary = environment_states
-            module_states = module_states + self.module_raw_gate * self.module_raw_projection(raw_module_states)
+            module_states = module_states + self.module_raw_gate * (projected_module_raw if reuse_raw else self.module_raw_projection(raw_module_states))
             if use_summary:
                 module_states = module_states + self.module_scene_gate * self.module_scene_projection(scene_summary)[:, None, :]
-            environment_states = environment_states + self.environment_raw_gate * self.environment_raw_projection(
-                raw_environment_states
-            )
+            environment_states = environment_states + self.environment_raw_gate * (projected_environment_raw if reuse_raw else self.environment_raw_projection(raw_environment_states))
             if use_summary:
                 environment_states = environment_states + self.environment_scene_gate * self.environment_scene_projection(
                     scene_summary
