@@ -148,6 +148,25 @@ def _pack_masked_rows(
     )
 
 
+def build_e_access_measure(
+    module_mask: Tensor, environment_mask: Tensor, environment_measure: Tensor,
+    *, dtype: torch.dtype, access_measure: str = "inventory_unit_total",
+) -> Tensor:
+    """Prepare directory measures independently of contextual exchange.
+
+    Mean-one counts only active positive-measure E records; M is discrete.
+    """
+    measure = build_joint_member_measure(module_mask, environment_mask, environment_measure, dtype=dtype)
+    if access_measure == "inventory_unit_total":
+        return measure
+    if access_measure != "mean_one":
+        raise ValueError("access_measure must be 'inventory_unit_total' or 'mean_one'.")
+    m_count = module_mask.sum(-1, keepdim=True).to(dtype)
+    e_count = (environment_mask & (environment_measure > 0)).sum(-1, keepdim=True).to(dtype)
+    return torch.cat((measure[:, :module_mask.shape[1]] * m_count,
+                      measure[:, module_mask.shape[1]:] * e_count), dim=-1)
+
+
 def compile_e_access_directory(
     applied_em: Tensor,
     applied_ee: Tensor,
@@ -466,7 +485,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
 
     def __init__(self, base_model_config: Mapping[str, Any], *, locator_mode: str = "e_anchor",
                  input_dataset: str = "native_records", query_tile_size: int = 256,
-                 retained_mass: float = 0.95, score_calibration: str = "inherited"):
+                 retained_mass: float = 0.95, score_calibration: str = "inherited",
+                 access_measure: str = "inventory_unit_total",
+                 ee_incidence_aggregation: str = "pre_gate"):
         if locator_mode not in ("e_anchor", "local_e_cover"):
             raise ValueError("locator_mode must be 'e_anchor' or 'local_e_cover'.")
         if (isinstance(retained_mass, bool) or not isinstance(retained_mass, (float, int))
@@ -474,11 +495,18 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             raise ValueError("retained_mass must be in (0,1].")
         if score_calibration not in ("inherited", "bounded_tanh"):
             raise ValueError("score_calibration must be 'inherited' or 'bounded_tanh'.")
+        if access_measure not in ("inventory_unit_total", "mean_one"):
+            raise ValueError("Unsupported anchored access_measure.")
+        if ee_incidence_aggregation not in ("pre_gate", "post_gate"):
+            raise ValueError("Unsupported EE incidence aggregation.")
+        self.access_measure = access_measure
+        self.ee_incidence_aggregation = ee_incidence_aggregation
         self.locator_mode = locator_mode
         self.retained_mass = float(retained_mass)
         self.score_calibration = score_calibration
         super().__init__(base_model_config, address_mode="ME", input_dataset=input_dataset,
                          query_tile_size=query_tile_size, retained_prior_law="none")
+        self.applied_incidence.ee_incidence_aggregation = ee_incidence_aggregation
         self.score_calibration = score_calibration
         self.joint_member_coverage = self.retained_mass
         # Initialization used the exact U parameter inventory and name seeds;
@@ -501,7 +529,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
 
     def get_config(self) -> dict[str, Any]:
         base = InteractionReusedMemberRoutingCore.get_config(self)
-        return {
+        config = {
             "schema": self.schema,
             "architecture": self.architecture_name,
             "locator_mode": self.locator_mode,
@@ -512,12 +540,19 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             "retained_mass": self.retained_mass,
             "score_calibration": self.score_calibration,
         }
+        if self.access_measure != "inventory_unit_total":
+            config["access_measure"] = self.access_measure
+        if self.ee_incidence_aggregation != "pre_gate":
+            config["ee_incidence_aggregation"] = self.ee_incidence_aggregation
+        return config
 
     @classmethod
     def validate_config(cls, config: Mapping[str, Any]) -> None:
         required = {"schema", "architecture", "locator_mode", "base_model_config", "input_dataset",
                     "input_capability", "query_tile_size", "retained_mass", "score_calibration"}
-        if set(config) != required or config.get("schema") != cls.schema:
+        if (set(config) - {"access_measure", "ee_incidence_aggregation"} != required or config.get("schema") != cls.schema
+                or config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one")
+                or config.get("ee_incidence_aggregation", "pre_gate") not in ("pre_gate", "post_gate")):
             raise ValueError("R13-8 anchored routing configuration inventory/schema differs.")
         locator_mode = config["locator_mode"]
         if (locator_mode not in ("e_anchor", "local_e_cover")
@@ -551,7 +586,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         cls.validate_config(config)
         return cls(config["base_model_config"], locator_mode=config["locator_mode"],
                    input_dataset=config["input_dataset"], query_tile_size=config["query_tile_size"],
-                   retained_mass=config["retained_mass"], score_calibration=config["score_calibration"])
+                   retained_mass=config["retained_mass"], score_calibration=config["score_calibration"],
+                   access_measure=config.get("access_measure", "inventory_unit_total"),
+                   ee_incidence_aggregation=config.get("ee_incidence_aggregation", "pre_gate"))
 
     @staticmethod
     def _directory_versions(directory: EAccessDirectory) -> tuple[int, ...]:
@@ -640,9 +677,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                     "donor_ids": snapshots[route].donor_ids}
             for route in ("em", "ee")
         }
-        member_measure = build_joint_member_measure(
+        member_measure = build_e_access_measure(
             scene.module_mask, scene.environment_mask, scene.environment_measure,
-            dtype=applied_em.dtype,
+            dtype=applied_em.dtype, access_measure=self.access_measure,
         )
         directory = compile_e_access_directory(
             applied_em, applied_ee, member_measure[:, :scene.num_modules],

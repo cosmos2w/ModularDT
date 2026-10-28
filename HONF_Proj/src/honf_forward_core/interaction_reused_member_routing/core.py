@@ -101,6 +101,7 @@ class AppliedInteractionIncidence(nn.Module):
 
     def __init__(self, heads: int):
         super().__init__()
+        self.ee_incidence_aggregation = "pre_gate"
         self.routes = nn.ModuleDict({name: ScoreCalibration(heads) for name in _ROUTE_TOPOLOGY})
         # A moderate active offset avoids the +7 saturated gate calibration.
         with torch.no_grad():
@@ -108,6 +109,12 @@ class AppliedInteractionIncidence(nn.Module):
                 calibration.bias.fill_(1.5)
 
     def forward(self, raw_logits: Tensor, allowed: Tensor, route_name: str, **metadata) -> Tensor:
+        if route_name == "ee" and self.ee_incidence_aggregation == "post_gate":
+            calibration = self.routes[route_name]
+            per_head = positive_quadratic_gate(calibration.head_inputs(raw_logits, allowed))
+            return (per_head * calibration.head_weights.to(raw_logits)[None, :, None, None]).sum(1) * allowed
+        if self.ee_incidence_aggregation not in ("pre_gate", "post_gate"):
+            raise ValueError("Unknown EE incidence aggregation.")
         return positive_quadratic_gate(self.routes[route_name](raw_logits, allowed)) * allowed
 
 

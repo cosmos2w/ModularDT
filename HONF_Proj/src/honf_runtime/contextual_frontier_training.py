@@ -92,6 +92,31 @@ R13_8_E_ANCHORED_WORKFLOW = "interaction_reused_e_anchored_member_routing_traini
 R13_8_E_ANCHORED_PROVIDER_SCHEMA = "thermal_r13_8_e_anchored_member_routing_provider_v1"
 R13_8_E_ANCHORED_MANIFEST_SCHEMA = "honf_r13_8_e_anchored_member_routing_run_manifest_v1"
 R13_8_E_ANCHORED_SOURCE_KIND = "scratch_r13_8_e_anchored_member_routing"
+
+
+def _anchored_schedule_and_model(training, initialization, model, arm):
+    actual = (training.get("local_horizon"), training.get("first_segment_epochs"),
+              training.get("optimizer_schedule_horizon"), training.get("checkpoint_epochs"),
+              initialization.get("normalization_mode"))
+    membership = training.get("membership")
+    if membership == "fixed25_train150_dev22":
+        schedules = ((100, 100, 100, [100], "fixed25_train150_stats"),
+                     (500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS, "fixed25_train150_stats"),
+                     (1000, 100, 1000, list(range(100, 1001, 100)), "fixed25_train150_stats"))
+    elif membership == "full_train600" and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND:
+        schedules = ((100, 100, 500, [100], "scratch_train600_stats"),
+                     (500, 100, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS, "scratch_train600_stats"),
+                     (1000, 100, 1000, list(range(100, 1001, 100)), "scratch_train600_stats"))
+    else:
+        schedules = ()
+    locator = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}.get(arm)
+    valid_model = (model.get("architecture") == arm and locator is not None
+        and model.get("locator_mode") == locator and model.get("retained_mass") == 0.95
+        and (model.get("score_calibration") == "inherited"
+             or (training.get("local_horizon") == 1000 and model.get("score_calibration") == "bounded_tanh"))
+        and model.get("access_measure", "inventory_unit_total") in ("inventory_unit_total", "mean_one")
+        and model.get("ee_incidence_aggregation", "pre_gate") in ("pre_gate", "post_gate"))
+    return actual in schedules and training.get("curve_every") == 10, valid_model
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
 INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1")
 SPATIAL_INTERACTION_GROUP_CORE_SCHEMA = "spatial_interaction_group_fields_v1"
@@ -405,37 +430,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
             )
         elif (core_schema == R13_8_E_ANCHORED_CORE_SCHEMA
               and config_schema == R13_8_E_ANCHORED_CONFIG_SCHEMA):
-            actual_schedule = (training.get("local_horizon"), training.get("first_segment_epochs"),
-                               training.get("optimizer_schedule_horizon"),
-                               training.get("checkpoint_epochs"),
-                               initialization.get("normalization_mode"))
-            if membership == "fixed25_train150_dev22":
-                valid_schedule = (
-                    actual_schedule in ((500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
-                                         "fixed25_train150_stats"),
-                                        (1000, 100, 1000, list(range(100, 1001, 100)),
-                                         "fixed25_train150_stats"))
-                    and training.get("curve_every") == 10
-                )
-            elif (membership == "full_train600"
-                  and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND):
-                valid_schedule = (
-                    actual_schedule in ((100, 100, 500, [100], "scratch_train600_stats"),
-                                        (1000, 100, 1000, list(range(100, 1001, 100)),
-                                         "scratch_train600_stats"))
-                    and training.get("curve_every") == 10
-                )
-            else:
-                valid_schedule = False
-            expected_locator = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}.get(arm)
-            valid_model = (
-                model.get("architecture") == arm
-                and model.get("locator_mode") == expected_locator
-                and model.get("retained_mass") == 0.95
-                and (model.get("score_calibration") == "inherited"
-                     or (training.get("local_horizon") == 1000
-                         and model.get("score_calibration") == "bounded_tanh"))
-            )
+            valid_schedule, valid_model = _anchored_schedule_and_model(training, initialization, model, arm)
         else:
             valid_schedule = False
             valid_model = False
@@ -1525,29 +1520,7 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
             )
         elif (core_schema == R13_8_E_ANCHORED_CORE_SCHEMA
               and frontier.get("schema") == R13_8_E_ANCHORED_CONFIG_SCHEMA):
-            if membership == "fixed25_train150_dev22":
-                valid_schedule = (actual in ((500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS,
-                                              "fixed25_train150_stats"),
-                                             (1000, 100, 1000, list(range(100, 1001, 100)),
-                                              "fixed25_train150_stats"))
-                                  and training.get("curve_every") == 10)
-            elif (membership == "full_train600"
-                  and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND):
-                valid_schedule = (actual in ((100, 100, 500, [100], "scratch_train600_stats"),
-                                             (1000, 100, 1000, list(range(100, 1001, 100)),
-                                              "scratch_train600_stats"))
-                                  and training.get("curve_every") == 10)
-            else:
-                valid_schedule = False
-            expected_locator = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}.get(arm)
-            valid_model = (
-                model.get("architecture") == arm
-                and model.get("locator_mode") == expected_locator
-                and model.get("retained_mass") == 0.95
-                and (model.get("score_calibration") == "inherited"
-                     or (training.get("local_horizon") == 1000
-                         and model.get("score_calibration") == "bounded_tanh"))
-            )
+            valid_schedule, valid_model = _anchored_schedule_and_model(training, initialization, model, arm)
         else:
             valid_schedule = valid_model = False
         joint_member_routing = core_schema == JOINT_MEMBER_ROUTING_CORE_SCHEMA

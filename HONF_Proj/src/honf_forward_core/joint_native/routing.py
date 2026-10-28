@@ -34,6 +34,23 @@ class ScoreCalibration(nn.Module):
     def head_weights(self) -> Tensor:
         return self.head_logits.softmax(0)
 
+    def head_inputs(self, scores: Tensor, allowed: Tensor) -> Tensor:
+        """Calibrated per-head inputs using the same eligible row maxima."""
+        if scores.ndim != 4 or allowed.shape != (scores.shape[0], scores.shape[2], scores.shape[3]):
+            raise ValueError("Scores/eligibility must have [B,H,Q,N]/[B,Q,N] shapes.")
+        if scores.shape[1] != self.head_logits.numel():
+            raise ValueError("Independent route head counts must match calibration.")
+        _require(~allowed[:, None] | torch.isfinite(scores), "Eligible scores must be finite.")
+        if not scores.shape[-1]:
+            return scores
+        maximum = scores.masked_fill(~allowed[:, None], -torch.inf).amax(-1, keepdim=True)
+        maximum = torch.where(allowed[:, None].any(-1, keepdim=True), maximum, torch.zeros_like(maximum))
+        relative = torch.where(allowed[:, None], scores - maximum, torch.zeros_like(scores))
+        result = relative * self.scale.to(scores)
+        if self.bias is not None:
+            result = result + self.bias.to(scores)
+        return result
+
     def forward(self, scores: Tensor, allowed: Tensor) -> Tensor:
         if scores.ndim != 4 or allowed.shape != (scores.shape[0], scores.shape[2], scores.shape[3]):
             raise ValueError("Scores/eligibility must have [B,H,Q,N]/[B,Q,N] shapes.")

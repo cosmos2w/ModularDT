@@ -936,6 +936,8 @@ def evaluate(
             "core_schema": getattr(getattr(model, "core", None), "schema", None),
             "locator_mode": getattr(getattr(model, "core", None), "locator_mode", None),
             "retained_mass": getattr(getattr(model, "core", None), "retained_mass", None),
+            "access_measure": getattr(getattr(model, "core", None), "access_measure", None),
+            "ee_incidence_aggregation": getattr(getattr(model, "core", None), "ee_incidence_aggregation", None),
             "validation_population": identity["validation_population"],
             "case_ids": {"validation": list(validation_ids), "train_detail": list(train_detail_ids)},
             "fixed_detail_panel": {
