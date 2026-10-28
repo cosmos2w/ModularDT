@@ -36,10 +36,34 @@ def coverage_support(access, own_indices, member_roles, member_ids, retained_mas
     return out, np.sum(np.where(out, access, 0), axis=1)
 
 
+def learned_access_weights(access, applied_relations, structural_self):
+    """Remove only S's contribution from saved access R proportional to (G+S)mu.
+
+    The original row normalization and compiled support stay fixed. In an own-E
+    slot shared by learned G and structural S, R*G/(G+S) retains the learned
+    part; deleting that entire slot would also delete learned self. This is an
+    incidence accounting operation, not recompilation or a prediction ablation.
+    It applies to joint access weights, not nonlinear query-used beta.
+    """
+    access = np.asarray(access, dtype=np.float64)
+    applied_relations = np.asarray(applied_relations, dtype=np.float64)
+    structural_self = np.asarray(structural_self, dtype=np.float64)
+    if access.ndim != 2 or not (access.shape == applied_relations.shape == structural_self.shape):
+        raise ValueError('Access, applied relations and structural ledger must share [receiver, member] shape.')
+    if any(not np.isfinite(x).all() or np.any(x < 0) for x in (access, applied_relations, structural_self)):
+        raise ValueError('Access, applied relations and structural ledger must be finite and nonnegative.')
+    total = applied_relations + structural_self
+    fraction = np.divide(applied_relations, total, out=np.zeros_like(total), where=total > 0)
+    return access * fraction
+
+
 def incidence_summary(weights, structural_self, *, service=None):
     """Describe receiver/member incidence without equating self with learned links.
 
     Weights are nonnegative joint access or actual accumulated query weights.
+    The mask marks own-E slots: ``without_self`` removes the whole coalesced
+    incidence, including any learned self. To exclude only the structural
+    contribution, first use ``learned_access_weights`` on saved joint access.
     Pairwise overlap is calculated over distinct nonempty receiver rows. The
     active bipartite graph includes every receiver and member as a vertex.
     Service-weighted graph statistics retain only actually served receiver rows.
