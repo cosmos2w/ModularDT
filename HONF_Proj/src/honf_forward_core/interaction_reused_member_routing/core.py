@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+import math
 from typing import Any, Mapping
 
 import torch
@@ -96,19 +97,72 @@ def _positive_softmax(logits: Tensor, allowed: Tensor) -> Tensor:
                        torch.zeros_like(positive))
 
 
+class RelativeEECalibration(nn.Module):
+    """Measure-weighted relative score gaps with one shared learned width."""
+
+    def __init__(self, heads: int, initial_tau: float):
+        super().__init__()
+        if not math.isfinite(initial_tau) or initial_tau <= 0:
+            raise ValueError("EE initial tau must be finite and positive.")
+        self.head_logits = nn.Parameter(torch.zeros(heads))
+        self.raw_tau = nn.Parameter(torch.tensor(initial_tau + math.log(-math.expm1(-initial_tau))))
+
+    @property
+    def tau(self):
+        return torch.nn.functional.softplus(self.raw_tau)
+
+    def forward(self, scores: Tensor, allowed: Tensor, donor_measure: Tensor, mode: str) -> Tensor:
+        if (scores.ndim != 4 or allowed.shape != (scores.shape[0], scores.shape[2], scores.shape[3])
+                or donor_measure.shape != (scores.shape[0], scores.shape[3])
+                or scores.shape[1] != self.head_logits.numel()):
+            raise ValueError("EE scores, masks and physical donor measures have incompatible shapes.")
+        if not scores.shape[-1]:
+            return scores.sum(1)
+        eligible = allowed & (donor_measure[:, None, :] > 0)
+        weights = torch.where(eligible, donor_measure[:, None, :].to(scores), 0.)
+        weights = weights / weights.sum(-1, keepdim=True).clamp_min(torch.finfo(scores.dtype).tiny)
+        safe_scores = torch.where(eligible[:, None], scores, torch.zeros_like(scores))
+        mean = (safe_scores * weights[:, None]).sum(-1, keepdim=True)
+        variance = ((safe_scores - mean).square() * weights[:, None]).sum(-1, keepdim=True)
+        maximum = scores.masked_fill(~eligible[:, None], -torch.inf).amax(-1, keepdim=True)
+        maximum = torch.where(eligible[:, None].any(-1, keepdim=True), maximum, torch.zeros_like(maximum))
+        gap = torch.where(eligible[:, None], maximum - safe_scores, 0.) / (1. + variance).sqrt()
+        x = 1. - gap / self.tau.to(scores)
+        if mode == "relative_quadratic":
+            per_head = 2. * positive_quadratic_gate(x)
+        elif mode == "relative_sigmoid":
+            per_head = x.sigmoid() / scores.new_tensor(1.).sigmoid()
+        else:
+            raise ValueError("Unsupported relative EE gate mode.")
+        return (per_head * self.head_logits.softmax(0).to(scores)[None, :, None, None]).sum(1) * eligible
+
+
 class AppliedInteractionIncidence(nn.Module):
     """Live positive gates used by the contextual value reductions."""
 
     def __init__(self, heads: int):
         super().__init__()
         self.ee_incidence_aggregation = "pre_gate"
+        self.ee_gate_mode = "legacy"
         self.routes = nn.ModuleDict({name: ScoreCalibration(heads) for name in _ROUTE_TOPOLOGY})
         # A moderate active offset avoids the +7 saturated gate calibration.
         with torch.no_grad():
             for calibration in self.routes.values():
                 calibration.bias.fill_(1.5)
 
+    def set_relative_ee_gate(self, mode: str, initial_tau: float) -> None:
+        if mode not in ("relative_quadratic", "relative_sigmoid"):
+            raise ValueError("Unsupported relative EE gate mode.")
+        heads = self.routes["ee"].head_logits.numel()
+        self.routes["ee"] = RelativeEECalibration(heads, initial_tau)
+        self.ee_gate_mode = mode
+
     def forward(self, raw_logits: Tensor, allowed: Tensor, route_name: str, **metadata) -> Tensor:
+        if route_name == "ee" and self.ee_gate_mode != "legacy":
+            measure = metadata.get("donor_measure")
+            if measure is None:
+                raise ValueError("Relative EE gates require physical donor measures.")
+            return self.routes["ee"](raw_logits, allowed, measure, self.ee_gate_mode)
         if route_name == "ee" and self.ee_incidence_aggregation == "post_gate":
             calibration = self.routes[route_name]
             per_head = positive_quadratic_gate(calibration.head_inputs(raw_logits, allowed))
@@ -344,10 +398,10 @@ class InteractionReusedMemberRoutingCore(ContentHypergraphCoreV2):
         return self._AppliedMessagePolicy(self)
 
     class _AppliedMessagePolicy:
-        execution_backend = "segment"
-
         def __init__(self, core: "InteractionReusedMemberRoutingCore"):
             self.core = core
+            self.execution_backend = getattr(core, "context_execution_backend", None) or (
+                "dense_weighted" if core.applied_incidence.ee_gate_mode == "relative_sigmoid" else "segment")
 
         def __call__(self, raw_logits, allowed, route_name, **metadata):
             gates = self.core.applied_incidence(raw_logits, allowed, route_name, **metadata)

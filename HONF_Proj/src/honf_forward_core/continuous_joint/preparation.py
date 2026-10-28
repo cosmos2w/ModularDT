@@ -55,7 +55,8 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
 
     scores = torch.matmul(query, key.transpose(-2, -1)) + geometry_bias
     selected = policy(scores, allowed, route_name, stage_identity=stage_identity,
-                      destination_ids=destination_ids, donor_ids=donor_ids)
+                      destination_ids=destination_ids, donor_ids=donor_ids,
+                      donor_measure=donor_measure)
     if isinstance(selected,FrozenSDPAContextPlan):
         if selected.incidence.shape!=allowed.shape or selected.query.shape!=query.shape or selected.key.shape!=key.shape:
             raise ValueError('Frozen SDPA controls must match the native contextual axes.')

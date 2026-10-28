@@ -16,7 +16,7 @@ class ContinuousIncidencePolicy(nn.Module):
                 calibration.bias.fill_(7.)
 
     def forward(self, raw_logits, allowed, route_name, stage_identity=None,
-                destination_ids=None, donor_ids=None):
+                destination_ids=None, donor_ids=None, donor_measure=None):
         return positive_quadratic_gate(self.routes[route_name](raw_logits,allowed)) * allowed
 
     def retrieval(self, capture, records):

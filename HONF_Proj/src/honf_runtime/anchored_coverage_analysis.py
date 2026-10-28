@@ -4,6 +4,73 @@ from __future__ import annotations
 import numpy as np
 
 
+def regional_mass_geometry(weights, receiver_xy, donor_xy, donor_measure, own_indices,
+                           fractions=(0.90, 0.95, 0.99)):
+    """Describe nonself environmental mass, area and reach in physical coordinates.
+
+    ``weights`` are actual nonnegative row weights (e.g. c, R or admitted C),
+    not a positivity mask. The own donor is excluded before each row is
+    normalized. Each prefix contains the smallest number of donors reaching
+    the requested fraction, with index as a deterministic tie breaker. Area
+    is the sum of the original physical donor measures; area_fraction uses all
+    valid environment measure, including own. Empty nonself rows have null
+    area/reach and are counted explicitly. No geometric cutoff is imposed.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    r = np.asarray(receiver_xy, dtype=np.float64)
+    d = np.asarray(donor_xy, dtype=np.float64)
+    area = np.asarray(donor_measure, dtype=np.float64)
+    own = np.asarray(own_indices)
+    if w.ndim != 2 or r.ndim != 2 or d.ndim != 2 or r.shape[1] != d.shape[1]:
+        raise ValueError('Expected weights [receiver,donor] and aligned coordinate matrices.')
+    if r.shape[0] != w.shape[0] or d.shape[0] != w.shape[1] or area.shape != (w.shape[1],) or own.shape != (w.shape[0],):
+        raise ValueError('Coordinates, measures and own indices must match the weight axes.')
+    if any(not np.isfinite(x).all() for x in (w, r, d, area)) or (w < 0).any() or (area < 0).any():
+        raise ValueError('Weights, coordinates and measures must be finite and nonnegative where applicable.')
+    if not np.issubdtype(own.dtype, np.integer) or np.any((own < 0) | (own >= w.shape[1])):
+        raise ValueError('Each receiver needs a valid own donor index.')
+    fractions = tuple(float(f) for f in fractions)
+    if any(not 0 < f <= 1 for f in fractions):
+        raise ValueError('Mass fractions must be in (0,1].')
+    x = w.copy()
+    x[np.arange(len(own)), own] = 0
+    x[:, area <= 0] = 0
+    total = x.sum(axis=1)
+    normalized = np.divide(x, total[:, None], out=np.zeros_like(x), where=total[:, None] > 0)
+    result = {'nonself_mass': total.tolist(), 'zero_nonself_rows': int((total == 0).sum()),
+              'positive_nonself_count': (x > 0).sum(axis=1).tolist(), 'prefixes': {}}
+    for fraction in fractions:
+        counts, areas, shares, reaches = [], [], [], []
+        for i, row in enumerate(normalized):
+            positive = np.flatnonzero(row > 0)
+            if not len(positive):
+                counts.append(0); areas.append(None); shares.append(None); reaches.append(None)
+                continue
+            order = positive[np.lexsort((positive, -row[positive]))]
+            n = min(len(order), int(np.searchsorted(np.cumsum(row[order]), fraction, side='left')) + 1)
+            selected = order[:n]
+            covered = float(area[selected].sum())
+            counts.append(n); areas.append(covered)
+            shares.append(covered / float(area.sum()) if area.sum() > 0 else None)
+            reaches.append(float(np.linalg.norm(d[selected] - r[i], axis=1).max()))
+        result['prefixes'][str(fraction)] = {'count': counts, 'area': areas,
+                                               'area_fraction': shares, 'max_reach': reaches}
+    # Compare each receiver to its nearest distinct receiver. Weighted Jaccard
+    # is on normalized nonself distributions, not raw positive support.
+    nearest, overlap = [], []
+    for i in range(len(r)):
+        distances = np.linalg.norm(r - r[i], axis=1)
+        distances[i] = np.inf
+        if len(r) < 2:
+            nearest.append(None); overlap.append(None); continue
+        j = int(np.argmin(distances)); nearest.append(j)
+        union = np.maximum(normalized[i], normalized[j]).sum()
+        overlap.append(float(np.minimum(normalized[i], normalized[j]).sum() / union) if union > 0 else None)
+    result['nearest_receiver_index'] = nearest
+    result['nearest_weighted_jaccard'] = overlap
+    return result
+
+
 def coverage_support(access, own_indices, member_roles, member_ids, retained_mass):
     """Reconstruct the whole-row prefix and mandatory self from saved R.
 

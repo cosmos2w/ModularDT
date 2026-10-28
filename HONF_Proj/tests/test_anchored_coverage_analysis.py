@@ -2,6 +2,20 @@ import numpy as np
 from honf_runtime.anchored_coverage_analysis import coverage_support
 
 
+def test_regional_mass_geometry_separates_tails_and_empty_rows():
+    from honf_runtime.anchored_coverage_analysis import regional_mass_geometry
+    coords = np.array([[0., 0.], [1., 0.], [3., 0.]])
+    weights = np.array([[2., .99, .01], [0., 1., 0.], [.99, .01, 3.]])
+    result = regional_mass_geometry(weights, coords, coords, [1., 2., 3.], [0, 1, 2])
+    assert result['positive_nonself_count'] == [2, 0, 2]
+    assert result['zero_nonself_rows'] == 1
+    assert result['prefixes']['0.9']['count'] == [1, 0, 1]
+    assert result['prefixes']['0.9']['area'] == [2., None, 1.]
+    assert result['prefixes']['0.9']['max_reach'] == [1., None, 3.]
+    assert result['prefixes']['0.99']['count'] == [1, 0, 1]
+    assert result['nearest_weighted_jaccard'][1] == 0.
+
+
 def test_joint_prefix_ties_self_and_nesting():
     access = np.array([[0.4, 0.3, 0.2, 0.1], [0.25, 0.25, 0.25, 0.25]])
     args = (access, np.array([3, 3]), np.array([0, 0, 1, 1]), np.array([7, 2, 8, 3]))

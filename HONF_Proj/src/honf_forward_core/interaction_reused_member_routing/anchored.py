@@ -7,6 +7,7 @@ those indices remain connected to the applied final-cycle EM/EE tensors.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import math
 from typing import Any, Mapping
 
 import torch
@@ -487,7 +488,8 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                  input_dataset: str = "native_records", query_tile_size: int = 256,
                  retained_mass: float = 0.95, score_calibration: str = "inherited",
                  access_measure: str = "inventory_unit_total",
-                 ee_incidence_aggregation: str = "pre_gate"):
+                 ee_incidence_aggregation: str = "pre_gate",
+                 ee_gate_mode: str = "legacy", ee_initial_tau: float | None = None):
         if locator_mode not in ("e_anchor", "local_e_cover"):
             raise ValueError("locator_mode must be 'e_anchor' or 'local_e_cover'.")
         if (isinstance(retained_mass, bool) or not isinstance(retained_mass, (float, int))
@@ -499,14 +501,26 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             raise ValueError("Unsupported anchored access_measure.")
         if ee_incidence_aggregation not in ("pre_gate", "post_gate"):
             raise ValueError("Unsupported EE incidence aggregation.")
+        if ee_gate_mode not in ("legacy", "relative_quadratic", "relative_sigmoid"):
+            raise ValueError("Unsupported EE gate mode.")
+        if ee_gate_mode == "legacy" and ee_initial_tau is not None:
+            raise ValueError("Legacy EE does not have a relative width.")
+        if ee_gate_mode != "legacy" and (ee_incidence_aggregation != "post_gate"
+                or isinstance(ee_initial_tau, bool) or not isinstance(ee_initial_tau, (int, float))
+                or not math.isfinite(ee_initial_tau) or ee_initial_tau <= 0):
+            raise ValueError("Relative EE requires post-gate aggregation and a positive finite initial tau.")
         self.access_measure = access_measure
         self.ee_incidence_aggregation = ee_incidence_aggregation
+        self.ee_gate_mode = ee_gate_mode
+        self.ee_initial_tau = ee_initial_tau
         self.locator_mode = locator_mode
         self.retained_mass = float(retained_mass)
         self.score_calibration = score_calibration
         super().__init__(base_model_config, address_mode="ME", input_dataset=input_dataset,
                          query_tile_size=query_tile_size, retained_prior_law="none")
         self.applied_incidence.ee_incidence_aggregation = ee_incidence_aggregation
+        if ee_gate_mode != "legacy":
+            self.applied_incidence.set_relative_ee_gate(ee_gate_mode, float(ee_initial_tau))
         self.score_calibration = score_calibration
         self.joint_member_coverage = self.retained_mass
         # Initialization used the exact U parameter inventory and name seeds;
@@ -544,16 +558,27 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             config["access_measure"] = self.access_measure
         if self.ee_incidence_aggregation != "pre_gate":
             config["ee_incidence_aggregation"] = self.ee_incidence_aggregation
+        if self.ee_gate_mode != "legacy":
+            config["ee_gate_mode"] = self.ee_gate_mode
+            config["ee_initial_tau"] = self.ee_initial_tau
         return config
 
     @classmethod
     def validate_config(cls, config: Mapping[str, Any]) -> None:
         required = {"schema", "architecture", "locator_mode", "base_model_config", "input_dataset",
                     "input_capability", "query_tile_size", "retained_mass", "score_calibration"}
-        if (set(config) - {"access_measure", "ee_incidence_aggregation"} != required or config.get("schema") != cls.schema
+        if (set(config) - {"access_measure", "ee_incidence_aggregation", "ee_gate_mode", "ee_initial_tau"} != required or config.get("schema") != cls.schema
                 or config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one")
                 or config.get("ee_incidence_aggregation", "pre_gate") not in ("pre_gate", "post_gate")):
             raise ValueError("R13-8 anchored routing configuration inventory/schema differs.")
+        gate_mode = config.get("ee_gate_mode", "legacy")
+        tau = config.get("ee_initial_tau")
+        if (gate_mode not in ("legacy", "relative_quadratic", "relative_sigmoid")
+                or (gate_mode == "legacy" and tau is not None)
+                or (gate_mode != "legacy" and (config.get("ee_incidence_aggregation", "pre_gate") != "post_gate"
+                    or isinstance(tau, bool) or not isinstance(tau, (int, float))
+                    or not math.isfinite(tau) or tau <= 0))):
+            raise ValueError("Invalid relative EE gate configuration.")
         locator_mode = config["locator_mode"]
         if (locator_mode not in ("e_anchor", "local_e_cover")
                 or config["architecture"] != cls._anchored_arm_name(locator_mode)):
@@ -588,7 +613,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                    input_dataset=config["input_dataset"], query_tile_size=config["query_tile_size"],
                    retained_mass=config["retained_mass"], score_calibration=config["score_calibration"],
                    access_measure=config.get("access_measure", "inventory_unit_total"),
-                   ee_incidence_aggregation=config.get("ee_incidence_aggregation", "pre_gate"))
+                   ee_incidence_aggregation=config.get("ee_incidence_aggregation", "pre_gate"),
+                   ee_gate_mode=config.get("ee_gate_mode", "legacy"),
+                   ee_initial_tau=config.get("ee_initial_tau"))
 
     @staticmethod
     def _directory_versions(directory: EAccessDirectory) -> tuple[int, ...]:

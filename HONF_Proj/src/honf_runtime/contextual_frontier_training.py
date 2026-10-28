@@ -102,13 +102,15 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
     if membership == "fixed25_train150_dev22":
         schedules = ((100, 100, 100, [100], "fixed25_train150_stats"),
                      (500, 500, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS, "fixed25_train150_stats"),
-                     (1000, 100, 1000, list(range(100, 1001, 100)), "fixed25_train150_stats"))
+                     (1000, 100, 1000, list(range(100, 1001, 100)), "fixed25_train150_stats"),
+                     (1000, 200, 1000, list(range(100, 1001, 100)), "fixed25_train150_stats"))
         if arm == R13_8_L_ARM:
             schedules += ((20, 20, 20, [20], "fixed25_train150_stats"),)
     elif membership == "full_train600" and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND:
         schedules = ((100, 100, 500, [100], "scratch_train600_stats"),
                      (500, 100, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS, "scratch_train600_stats"),
-                     (1000, 100, 1000, list(range(100, 1001, 100)), "scratch_train600_stats"))
+                     (1000, 100, 1000, list(range(100, 1001, 100)), "scratch_train600_stats"),
+                     (1000, 200, 1000, list(range(100, 1001, 100)), "scratch_train600_stats"))
     else:
         schedules = ()
     locator = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}.get(arm)
