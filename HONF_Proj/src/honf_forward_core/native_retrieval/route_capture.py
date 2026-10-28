@@ -97,8 +97,12 @@ class NativeRouteSnapshot:
         if self.applied_incidence is not None:
             if self.applied_incidence.shape != self.allowed.shape:
                 raise ValueError("Applied contextual incidence must match the native route axes.")
+            # Convex head mixtures can round just above their unit peak. Keep
+            # the live tensor and its gradients; tolerate only numeric ulps.
+            upper_roundoff = 4 * torch.finfo(self.query_scaled.dtype).eps
             condition = (torch.isfinite(self.applied_incidence).all()
-                         & (self.applied_incidence >= 0).all() & (self.applied_incidence <= 1).all()
+                         & (self.applied_incidence >= 0).all()
+                         & (self.applied_incidence <= 1 + upper_roundoff).all()
                          & (self.applied_incidence.masked_select(~self.allowed) == 0).all())
             if self.applied_incidence.device.type == "cuda":
                 torch._assert_async(condition, "Invalid applied contextual incidence.")
