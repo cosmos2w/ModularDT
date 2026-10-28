@@ -162,13 +162,18 @@ def _contextual_checkpoint_parts(
             "R13-8-A-EAnchor": "e_anchor",
             "R13-8-L-LocalECover": "local_e_cover",
         }.get(arm)
+        recipe_section = recipe.get("member_routing")
+        recipe_model = recipe_section.get("model") if isinstance(recipe_section, Mapping) else None
         if (adapter_state.get("schema") != "thermal_interaction_reused_e_anchored_member_routing_adapter_v1"
                 or not isinstance(core_config, Mapping)
                 or core_config.get("schema") != "interaction_reused_e_anchored_member_routing_v1"
                 or core_config.get("architecture") != arm
                 or core_config.get("locator_mode") != expected_locator
                 or core_config.get("retained_mass") != 0.95
-                or core_config.get("score_calibration") != "inherited"
+                or core_config.get("score_calibration") not in ("inherited", "bounded_tanh")
+                or not isinstance(recipe_model, Mapping)
+                or recipe_model.get("score_calibration") != core_config.get("score_calibration")
+                or recipe_section.get("arm") != arm
                 or provider_identity.get("member_routing_schema") != "interaction_reused_e_anchored_member_routing_v1"):
             raise ValueError("R13-8 adapter, core locator, access law and provider identities must agree.")
     return identity, provider_identity, {"adapter_state": adapter_state, "recipe": recipe, "arm": arm}
