@@ -1,0 +1,164 @@
+# Round13-11: stable EE relationships and useful geometric organization
+
+## Purpose and authorized scope
+
+Preserve useful environmental relationships through mature training, from actual EE exchange to reusable directories and executed original-member reads. The desired result is an overlapping organization with interpretable spatial service regions, retained environmental detail and demonstrable predictive use, while maintaining the lean anchored executor and a general joint physical-field head. A larger positive adjacency matrix alone is not the objective.
+
+This is an implementation and experiment plan. Preparing it launches no training. Execute from the current `agent/honf-core-next` checkout, using the R13-10 implementation and the completed review at `f5d4614` as references while preserving later user changes, historical artifacts and unrelated jobs. Do not reset the checkout, modify old run configurations or resume historical runs to create new candidates.
+
+This plan applies the user's newly authorized **1000-epoch horizon to each declared TRAIN150 comparison and each selected full-TRAIN600 model**, using physical GPUs 0/1, within the bounded experiment matrix below and with substantive reviews every 200 epochs. This is a round-specific exception to the usual short segmented qualification and initial formal100 limits. The1000-epoch subset trajectories here investigate learning dynamics; they are not promoted into full-population evidence. The final formal runs remain under sparse Luna monitoring through their completed 1000 reviews: the earlier startup-only/no-monitor continuation exception does not apply to this request. Do not stop at 100, report a launch as completion, or ask again for an already authorized continuation within this plan.
+
+Deliver one primary model and, when useful, one complementary model. Preserve A/L as valid reader choices; use A for the main organizer comparison so the EE mechanism is isolated. L receives actual preparation/read/gradient/reload and boundary compatibility checks, without automatically adding another training arm. Do not replace original members with compulsory pooled group values, restore global query-to-all-entrance search, split predictions by physics, or force local neighbors into the hypergraph.
+
+## Evidence and the precise failure to address
+
+Read the complete [R13-10 report](../docs/reports/HONF_Round13-10_Useful_Environment_Coverage_Report.md), including its final seven-lineage/U1000 closure, the [R13-10 plan](HONF_Round13-10_Useful_Environment_Coverage_Work_Plan.md), and the [Thermal development protocol](../docs/guides/Thermal_Model_Development_Protocol.md). Preserve their historical evidence and use the protocol's existing input-only TRAIN150/VAL22 membership. This plan's explicit horizons and review cadence take precedence for R13-11 only.
+
+The same formal U lineage has the following population trajectory. Values are per E receiver, across all canonical VAL89 cases; source checkpoints, normalizers and partitions must remain literal.
+
+| U checkpoint | Positive nonself EE in G | Nonself E admitted at joint95 | Learned EE positive-score window, b/gamma |
+|---|---:|---:|---:|
+| 100 | 111.83 | 52.98 | 1.400 |
+| 500 | 11.94 | 0.301 | 0.871 |
+| 1000 | 6.86 | 0 | 0.524 |
+
+Reproduce the last column directly from the saved calibration parameters: EE bias falls 1.44917→1.05157→0.64623 while scale rises 1.03528→1.20707→1.23310. Head weights remain close to uniform. The maximum attainable EE gate also falls 0.67743→0.52512→0.29459. In contrast, the EM positive-score window grows 1.51875→1.64792→1.82773. These observations identify learned EE contraction, not merely a plotting threshold or recurrence of the old null/entmax reader failure.
+
+At U1000, all 17088 E receiver rows exclude nonself E at joint95, although raw EE exchange remains active. Mean nonself-E R mass is only 0.7258%. The formal access law still multiplies gates by inventory-unit-total measures, approximately 1/N_M per M and 1/192 per equal-area E, and adds a separate structural ownE. The directory can satisfy95% before admitting remote E. The later read then normalizes M/E separately and applies independent typed strengths, so joint R share is not final contribution share. Correcting EE alone must therefore be followed through G, actual contextual coefficients c, R, admitted C and query-used beta.
+
+U1000 nevertheless improves all nine mean errors over its own 500 endpoint. Complete reads have similar error to restricted reads, and the anchored executor retains a large cost advantage over ME. Preserve these gains. A zero/nonzero gradient check detects a broken path, but cannot establish retained regional organization. Thermal's current E inputs are positions/boundary distances rather than independently varying material fields; contextual ownE and M can fit this case while direct nonself-E use declines. Treat that as an explanation of optimization, not a generic architectural assumption.
+
+Carry forward the [R13-5 supplement](../docs/reports/HONF_Round13-5_Supplement_Consistency_Latency_and_Organization_Conditioned_Read_Report.md) and [R13-6 review](../docs/reports/HONF_Round13-6_Faithful_Integration_and_Useful_Organization_Report.md): changing probability interpretation or making organization enter a new read can degrade native fidelity even when the equations appear more unified. Do not respond by simultaneously replacing normalization, typed amplitude, value projection and the physical head. The primary S/C comparisons deliberately retain the successful reader and isolate the EE gate.
+
+## Model boundary and hypotheses
+
+The controlled seams are [applied incidence](../src/honf_forward_core/interaction_reused_member_routing/core.py), [score calibration](../src/honf_forward_core/joint_native/routing.py), [actual contextual reduction](../src/honf_forward_core/continuous_joint/preparation.py), [ordered exchange](../src/honf_forward_core/content_hypergraph/staged_attention_v2.py), and [anchored compilation/read](../src/honf_forward_core/interaction_reused_member_routing/anchored.py). Keep the existing token ownership, prescribed controls, MM/EM/ME laws, exchange order/depth, original-member projections, inherited decoder calibration and joint head unchanged in the primary arms. Q/K already receive normalization; do not diagnose this as a missing Q/K normalization fix.
+
+Route names are receiver-first: EM is E←M and ME is M←E. Continue compiling from the actual final-cycle EM/EE stages while diagnosing both cycles. Do not silently union earlier-cycle relations, transpose a reverse index into an alleged executed exchange, or fold structural ownE into learned EE to inflate coverage.
+
+Test three explanations separately: the gate couples narrowing support to shrinking every surviving weight; hard-zero tails make direct relationship recovery harder; and the access compiler can discard useful relationships because its cross-role units differ from those of the completed read. A geometric prior is a separate hypothesis, not an automatic addition to all three. Instrument actual route temperature, geometry-score scale and head-relative gaps before attributing every support change to b/gamma.
+
+## Primary candidates: a faithful control and two small gate changes
+
+### U: faithful R13-10 control
+
+Retain the serialized post-gate head mixture, inventory-unit-total directory, structural self ledger and inherited read. Reuse the completed formal U1000 and its milestone evidence as the full-population control. Run a new matched TRAIN150 U control only where an exact1000-epoch control with the same initialization, normalization, objective and sampler does not already exist. An old TRAIN150 A, an early U100 or a full-TRAIN600 U is not that control.
+
+### S: separate relative gate shape from its peak amplitude
+
+The first primary experiment removes the free EE bias that simultaneously controls width and peak amplitude. Define a measure-weighted score mean and a variance-regularized scale over eligible donors, before adding donor log measure:
+
+$$
+\bar m_i=\frac{m_i}{\sum_{j\in\mathcal E_a}m_j},\qquad
+\bar s_{ha}=\sum_i\bar m_i s_{hai},\qquad
+v_{ha}=\sqrt{1+\sum_i\bar m_i(s_{hai}-\bar s_{ha})^2},\qquad
+\delta_{hai}=\frac{\max_{j\in\mathcal E_a}s_{haj}-s_{hai}}{v_{ha}}.
+$$
+
+The unit variance regularizer follows the existing score-calibration convention; it is not a neighbor count, gate floor or claim of exact scale invariance. Use original positive physical donor measures, original eligibility and the same stage-local scores that drive the actual EE exchange. Empty rows stay empty; padded/zero-measure donors do not enter statistics.
+
+With one positive learned EE width tau, shared across heads/cycles as the current route calibration is, use
+
+$$
+\tau=\operatorname{softplus}(\theta),\qquad x_{hai}=1-\delta_{hai}/\tau,\qquad
+g^S_{hai}=\frac{\psi(x_{hai})}{\psi(1)}=2\psi(x_{hai}),\qquad
+G^S_{ai}=\sum_h\omega_h g^S_{hai}.
+$$
+
+Here psi is the existing positive-quadratic gate. Since x<=1 on eligible donors, the gate lies in[0,1]; its peak is a relative-unit convention and does not decay when width changes. Exact-zero relations remain possible, and the learned maximum can be ownE, so this imposes no minimum nonself degree, geometric neighbor or final M/E winner. Tau remains trainable from the first epoch, with no forced-open period, freeze, target width or reopening schedule. It may still contract: S tests whether removing the width/amplitude coupling and stabilizing score units helps, rather than assuming that a new parameterization guarantees a useful graph.
+
+Apply G^S in the actual EE value reduction in both contextual cycles and reuse exactly that applied G in the existing directory. Do not compute a prettier S matrix only for retrieval. Remove unused EE-bias parameters from this new mode rather than leaving inactive learned controls. Historical U configurations, parameter meaning and loading must remain unchanged.
+
+### C: the same shape convention with a continuous tail
+
+Use the same delta, positive tau, head mixture, masks and peak convention as S, changing only the gate family:
+
+$$
+g^C_{hai}=\frac{\operatorname{sigmoid}(x_{hai})}{\operatorname{sigmoid}(1)},\qquad
+G^C_{ai}=\sum_h\omega_h g^C_{hai}.
+$$
+
+This keeps relative peak1 and removes the hard-zero cutoff at x=0. It tests recoverable weak EE relationships without a positive epsilon floor or a separate selector. Tiny weights or floating-point underflow must be recorded honestly. Nearly all gates being positive is a property of C, not evidence that a broad useful hypergraph has formed. Evaluate effective message/access mass, physical-area coverage, executed members and intervention utility instead of celebrating192 positive entries.
+
+Keep the actual measure-aware guarded contextual coefficient law and decoder unchanged in the isolated C arm. This is a gate-only experiment, not an unannounced replacement of attention by uniform averaging. A fully continuous EE law may need dense weighted reduction for practical execution; use the existing exact `dense_weighted` backend when actual output/input/parameter-gradient and replay parity to the same equation passes. Do not materialize an E×E×feature-width value bank merely because all gates are positive. Do not replace a weighted relation by an all-open SDPA operator: those equations differ.
+
+### Initialization and fair implementation
+
+Build all scratch arms from one common seed0 initialization of shared parameters, matching by name and meaning. Gate-specific initialization must not shift unrelated RNG draws. Choose one documented initial tau from input-only TRAIN calibration score-gap statistics, for example the median inherited initial positive window expressed in v units; use the same tau convention for S/C. Do not tune it against validation errors or desired edge counts, or sweep several initial widths. Reuse existing manifests and ordinary configuration/version fields, not new hashes, freezes or initialization snapshot services.
+
+Keep new choices small and serialized at the existing incidence/compiler seam, with actual saved/reloaded native execution. A last-stage fixed-input gate calculation is not a whole-scene intervention: changing the first cycle changes later source states. Parameter count changes and exact equation differences must be reported, not hidden behind an architecture label inherited from A.
+
+## One evidence-driven reserve strategy, not a portfolio
+
+Reserve one additional TRAIN150 lineage X, up to 1000 epochs. Choose at most one of the following responses after the 200-epoch evidence and zero-fit probes identify the dominant remaining problem. Do not stack both into X and then attribute its effects to either one. If S/C already provide useful retained organization, leave this reserve unused.
+
+If G and contextual message coverage remain useful but R→C erases nonself E, test **active-domain physical measure** on the better gate candidate. Let D_at contain role-t members with G_ai+S_ai>0 and define mu_active_ai=mu_i/sum_(j in D_at)mu_j, with zero for an empty domain. Form w_ai=(G_ai+S_ai)*mu_active_ai, then retain one joint M/E prefix as before. This interprets access relative to the actually related physical domain, rather than diluting it over inactive inventory. It does not force each role's final mass to one because gate values still multiply the measure. It is not the old per-record mean-one P: identical donor-cell splits that conserve physical area and gate values conserve the active-domain total in the corresponding algebra fixture. Check that property, support-boundary changes, structural ownE and real adapter refinement separately; do not claim whole-model mesh invariance. C's continuously positive domain may make this option identical to the inherited measure, in which case do not train a duplicate arm.
+
+At fixed contextual states and representably positive support, this active-domain change scales each role's priors uniformly. The inherited full typed read should therefore be invariant, including its calibrated statistics and parameter gradients, while restricted admission can change. Verify this with actual native execution before fitting X; inspect any numerical-underflow support difference explicitly before diagnosing a full-read mismatch. Preserve the existing typed amplitudes instead of multiplying contexts by the newly adjusted joint R shares.
+
+If effective EE mass and actual access survive but the regional organization remains spatially scattered and functionally weak, test **one simple geometric hypothesis**: replace, rather than stack onto, the EE geometry-score MLP with a learned finite distance bias s'=s_content-lambda*d(a,i)^2. Use one shared nonnegative learned lambda, dimensionless geometry supplied by the adapter and the same biased score in actual EE exchange/capture. Content can override the finite bias, retaining remote cooperation. This is an explicit generic prior, not proof that learned physics is local. Do not hardcode Thermal dimensions, introduce a cutoff radius, enforce k-nearest neighbors, retain a redundant unused EE geometry MLP, or reward a block-diagonal picture. Initialize its scale from input geometry/score units and document the prior; do not search several kernels.
+
+A transparent fixed cross-role multiplier can be used as a zero-fit diagnosis, but is not another training arm or an automatically learnable fix. In the current separately normalized typed reader it cancels within a fixed role/support, while the shortlist permutation is detached; native loss generally cannot learn that multiplier through those operations. Likewise, directly concatenating separately unit-normalized EM/EE coefficient blocks silently introduces type balancing. Any coefficient-reuse alternative must account for the native measure already inside the coefficients and the route amplitudes. Do not substitute either construction without its own clear equation and bounded comparison.
+
+## Budget and two-GPU execution
+
+The following is the explicit maximum allocation, not a target to exhaust. Actual retries, short real fits and repaired restarts debit these slots. No unlisted fifth TRAIN150 arm, extra seed study or hidden full-data control is authorized by this plan.
+
+| Population | Lineages | Maximum per lineage | Maximum new fitting |
+|---|---|---:|---:|
+| TRAIN150/VAL22 | U control, S, C | 1000 epochs | 3000 epochs |
+| TRAIN150/VAL22 reserve | One X or a justified repair of an existing strategy | 1000 epochs | 1000 epochs |
+| Full TRAIN600/VAL89 | One required selected candidate; second only if complementary | 1000 epochs | 2000 epochs |
+| Combined ceiling | At most4 subset and 2 formal lineages | — | 6000 epochs |
+
+Run real execution/backward/reload/resume qualification before long fitting. Use only the necessary early epochs, charged to the same lineage; continue it rather than repeating scratch smoke fits. Start with U/S on GPUs 0/1 and use the released slot for C; alternatively prepare C first if dense-executor correctness needs earlier diagnosis. Run independent arms concurrently, not two memory-competing jobs on one device. Verify physical devices/process ownership at launch, preserve unrelated work and do not create GPU locks or reservation daemons.
+
+Keep the common scientific horizon 1000 and constant inherited learning-rate recipe from initial launch. Execute/review at completed epochs 200/400/600/800/1000, resuming the same lineage exactly when segments are used. Preserve sampler/RNG/state/history and do not reset the learning schedule every 200 epochs. Retain the existing100-epoch checkpoint cadence, latest and one best-field alias, with loss curves refreshed every 10 epochs. The200-epoch review is substantive; ordinary in-process validation and lightweight existing health checks continue without forcing external polling. Do not create extra per-review checkpoint copies or per-epoch raw graph dumps.
+
+Healthy primary S/C candidates should receive their full 1000-epoch subset trajectories. Poor 200-epoch accuracy or an emerging narrowing trend calls for diagnosis, not an immediate architecture verdict. If an actual implementation defect, nonfinite computation, broken reuse or dead required path is found, clean-stop and repair it before further costly fitting; record the consumed epochs. A functioning U-like contraction is the phenomenon being studied and is not automatically a software crash. Preserve its evidence, investigate it promptly and use the reserve deliberately instead of repeatedly restarting. Once a mathematical candidate demonstrably duplicates another equation, stop the redundant experiment without waiting for 1000.
+
+Select full candidates after mature subset trajectories by retained organization utility, physical fidelity/tails and measured cost, not just larger E support or the lowest scalar loss. Scratch full runs use the entire TRAIN600 population, its common train-only normalization and matched shared initialization; subset weights are not promoted. Prefer two complementary organizer candidates when the subset evidence warrants them, otherwise complete one. Both selected lineages are authorized through 1000 with 200-epoch reviews; no fresh100-epoch permission question is needed. Reuse completed U1000 as the full control and add any missing U200/400/600/800 evaluations from its literal checkpoints rather than retraining it. If the strongest subset candidate has a specific remediable issue at full 200, diagnose and repair within the remaining declared allocation; do not spend the entire second slot on an unrelated redesign.
+
+## What each200-epoch review must resolve
+
+Read the full declared validation membership once per review: VAL22 for TRAIN150, VAL89 for full TRAIN600. Keep the same input-selected case order and detailed panels. Use the closure panel0274/0293/0678 for reconstruction and VAL0678 plus TRAIN0003/M1 for same-scene organization; derive module counts from original inputs. Utility probes may reuse the existing formal panel0277/0294/0684 where its saved references match, without expanding every graph export to the full population. Do not choose scenes from current errors or redraw a prettier cohort.
+
+**Relationship formation.** Record both contextual cycles, not only the last row. Summarize gate width/bias or its new equivalent, head weights, attention temperature, geometry-score scale, head score-gap distributions, and the fraction of mass near a hard threshold. Report positive support separately from effective support/cumulative mass. Capture the actual applied c, its service mass and G provenance on a small panel; do not rename G as the normalized message coefficient. For C, a dense positive G requires mass-based evidence that informative relations remain distributed rather than concentrating into an effectively singleton row.
+
+**From relationship to execution.** Separate M, nonself E, learned EE self and structural ownE through G/c/R/C/beta. Report the fraction of receiver rows admitting zero nonself E, retained nonself mass conditional on its available mass, physically covered area and query-used nonself-E contribution. Keep denominator-zero rows explicit. Increasing G support while C or beta stays negligible is an unfinished access mechanism, not organizer success. A nonzero gradient alone is insufficient evidence of useful service.
+
+**Geometry and regional service.** Show original coordinates and IDs, E receiver/query coverage, high-mass related E regions and module participation together. Measure physical-area coverage and spatial reach at cumulative90/95/99 mass, and overlap/smooth variation between nearby receiver rows, excluding the structural self contribution. Use effective weights as well as admitted sets so continuous weak tails do not inflate the result. Neighboring rows need not be identical, edges need not all be near, and disconnected components need not be forbidden. Check whether persistent long links have actual read/use evidence and whether adjacent receiver rows offer a coherent regional service. A coordinate-shuffled weighted-graph reference may contextualize coherence, but is a geometric null comparison, not a changed-physics experiment. No prescribed degree, radius, block count or block-diagonal target is used.
+
+**Physical usefulness.** Save all nine native mean/p90 errors, with readable emphasis on velocity, fluid/material temperature and original-module peak errors. Include module-count strata and local tails; keep proxy observables labelled. At200/600/1000 on a small fixed panel, remove direct nonself-E reads with contexts fixed and recompute legal calibration/strengths; separately remove actual contextual EE in both cycles and fully re-prepare. Compare reference errors and prediction changes for the two interventions. For finalists at 1000, add one fixed region-level/set-versus-single-member probe to expose cooperative information use. Do not call a sensitivity map physical causality, and do not require every edge deletion to increase error. Useful regional organization must survive a collective-use test on relevant cases, rather than only producing attractive links.
+
+**Cost and coverage.** At200 and 1000, measure complete paired TRAIN24 forward/backward/replay and low/high-M complete native inference with synchronized wall time and allocated baseline/peak/increment, retaining reserved memory separately. Reuse the R13-10 closure workloads, native shapes, query recipes and CPU-output endpoint contract. Include preparation, compilation, locator, decoding and native extraction; show prepared-read costs separately. Review component spans only where a complete measurement identifies a bottleneck; nested spans are not additive. Native cost checks run in an idle owned GPU slot or at a planned review pause, not against a concurrently fitting job on the same device. A continuous broader graph may cost more than a narrow U; report fidelity/useful coverage per measured work, and do not compare its raw positive count with sparse U as equal work.
+
+At200 and 1000, compare90/95/99/own-full on fixed weights, recomputing support-dependent read statistics. At intermediate reviews use the saved95/full pair, avoiding repeated large sweeps. A95 default may be retained, changed or exposed as a documented hyperparameter based on actual fidelity/coverage/runtime. Do not use a threshold sweep to conceal an upstream relation that has already vanished.
+
+## Active diagnosis, generality and successful delivery
+
+The target is a stable, useful regional organization at late checkpoints: nonself-E message and executed access remain meaningful on relevant scenes; neighboring receiver services have coherent weighted regional structure with interpretable exceptions; collective environmental use supports field fidelity; and complete cost remains practical. Judge the200→1000 trajectory, not just one favorable early picture. Numerical counts/geometry statistics are scientific evidence and selection aids, not new blocking admission thresholds. Preserve a healthy sparse solution when its service is useful, and distinguish it from an effective singleton/tail-only solution.
+
+When contraction appears, inspect which stage changes first, which native task terms supply the gradient, whether ownE/M substitutes for nonself E, and whether full/restricted branches co-adapt. Termwise gradient attribution belongs on at most two fixed TRAIN scenes when a contraction actually needs explanation, not on the whole validation population at every review. Explain and test one change before adding another. Do not lock tau, freeze bias, force a minimum EE degree, add entropy/coverage rewards or a mandatory leaf/open period to make the graph look healthy. A temporary fixed-parameter or frozen-context counterfactual is a diagnosis, not a new training default. Preserve the strongest existing predictor/organizer state while exploring; do not silently replace it with a visually broader but worse model.
+
+Keep the core dataset-neutral: object-owned geometry/materials/boundaries/controls, generic joint fields, physical measures and adapter-owned coordinate/coverage rules. Reuse the existing HET-MF adapter and numerical input/measure fixtures to check heterogeneous-feature and irregular-area compatibility without claiming Thermal-only success establishes generality. No new HET-MF/Wind fitting campaign or simulator regeneration is added to this budget. If Thermal's redundant E inputs leave ambiguity about useful regional service, state the concrete ambiguity and prepare the next heterogeneous-input experiment; do not invent target labels, force neighborhood use or encode Thermal generation shortcuts into the core.
+
+Do not deliver only 'training completed' or a failure table after an early endpoint. Complete the authorized mature comparisons and diagnostic work, pursue justified repairs within the reserve, and recommend 1–2 clearly specified models using evidence across organizer, predictor and executor. If no candidate achieves the intended regional service after the bounded work, preserve the best model and report the demonstrated mechanism and tested remedy, without claiming geometry from tiny continuous weights or silently launching more models. The requested success is the research target; it is not authorization to manufacture it.
+
+## Sparse Luna monitoring and milestone handling
+
+After each training launch/resume, explicitly use an inexpensive `gpt-6-luna` agent with `fork_turns="none"` and a short run-specific handoff: owned run/path, physical GPU, scientific 1000 horizon, next 200-epoch stop/review, history/curve/checkpoint locations, and actionable notification conditions. Never inherit the main agent's full conversation. Luna performs one startup check to establish progress and actual epoch timing, estimates the next milestone time, and normally sleeps until 80–90% of the estimated remaining segment duration. If the first meaningful inspection is early, update the estimate and wait near completion rather than repeatedly checking.
+
+Luna stays quiet unless the milestone completes, an actual failure/collapse signal appears, timing changes materially or user action is needed. The parent does code/review/plot work that is independently useful or rests; it does not duplicate log/GPU polling. Existing in-process health/exception reporting can trigger an earlier actionable check. At a completed200-epoch segment, evaluate its saved endpoint, record the interpretation and continue the same healthy lineage toward the next milestone. Use ordinary sessions/waits and the existing engine; no daemon, observer framework, admission layer or monitoring service is introduced. Reviews through 1000 are required here, so do not invoke the old final100→500 no-monitor handoff to finish the task early.
+
+## Implementation checks, storage and final artifacts
+
+Exercise actual native prepare/decode/paired backward, saved/reloaded configuration, activation replay and same-lineage resume. Focused tests should check the new gate equations/ranges/derivatives, masks/empty rows/ties, weighted score statistics, S exact zeros versus C tails, correct original IDs and applied-stage reuse, ownE ledger separation, and A/L compatibility. Equivalent executor changes need output and input/parameter-gradient parity; a new equation does not have to match U's different equation. Use actual measured execution; heuristic pre-flight assertions do not replace it. Preserve existing security, TEST/data, job-ownership, checkpoint and upload safeguards. Default-deny new hashes, freezes, device-identity locks, baseline snapshot services, speculative compatibility layers and blocking gates.
+
+Before generating payloads, verify DATA2 mount and required workspace symlinks, record free space and estimates, and declare **32 GiB retained + 4 GiB temporary** for this round, with 100 GiB DATA2 and 20 GiB home headroom. Include all milestone checkpoints, full histories/curves, fixed native arrays, graph samples and runtime exports. Reuse exact existing datasets/catalogues/caches; no per-arm cache copies or dataset materialization. Estimate total GPU time from measured startup epoch timing and update it at 200-epoch milestones; do not invent a second arbitrary horizon that truncates otherwise authorized1000-epoch runs.
+
+Keep TRAIN150 payloads under `/data2/wanglz/ModularDT/round13_11_<date>/train150/`, discoverable only through the round's ignored diagnostics alias. Formal payloads live under that round's `formal/` with aliases strictly at `HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/<run_name>`. Preserve the workspace `Trained_Results` and `diagnostics` bindings and all old aliases. Planning itself needs no generated payloads. During execution remove only verified round-owned disposable caches, failed temporaries and superseded visual exports, following the existing exact-allowlist/consumer/dependency rules; preserve scientific checkpoints, raw histories, references and numerical evidence. Report removed bytes, retained artifacts and actual free capacity.
+
+Deliver durable implementation/tests/configs and an English `HONF_Round13-11_Stable_EE_Relations_and_Geometric_Organization_Report.md`, with exact run/checkpoint/partition identities and tested launch/resume/evaluate commands. Lead with retained useful organization and field/cost outcomes. Use a small figure index and approximately six principal figure groups: learning/gate-to-access trajectories; same-scene spatial organization and three-query access in the R13 closure style; abstract hyperedges plus physically ordered incidence matrices; native fields/residuals and module peaks; collective-use effects; and coverage/fidelity/complete cost. A reordered matrix may reveal overlap, but no reordered view replaces the original spatial ordering or becomes a training target. Keep every selected panel legible, retain PDF masters and relative inline PNG previews, inspect both figures and rendered Markdown/math, and keep prose/captions on single source lines. Reuse unchanged R13-10/ME/U-H historical evidence with explicit ages and legacy-head qualifications rather than rerunning the seven-model study.
+
+Finish only after the selected full 1000 reviews, cleanup and evidence validation. Commit/push durable changes on the current non-default branch through `.githooks`, audit the entire outgoing range and verify remote/local tips. Generated data, numerical exports, figures and one-time helpers remain ignored on DATA2; preserve preexisting user edits and unrelated jobs throughout.
