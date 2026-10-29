@@ -16,10 +16,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+visualization = ["matplotlib>=3.6", "scipy>=1.9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["honf_forward_core*", "honf_inverse_core*", "honf_runtime*"]
+include = ["honf_forward_core*", "honf_inverse_core*", "honf_runtime*", "honf_viz*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "Case_ThermalChannel/tests", "Case_WindFarm/tests"]

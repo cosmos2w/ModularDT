@@ -402,6 +402,7 @@ The reusable compatibility references are:
 
 ## 11. Documentation and extension boundary
 
+- [Global hypergraph organization visualization](docs/guides/Global_Hypergraph_Organization_Visualization.md): the three standard scene-wide views, matched S/X examples, evidence meanings and reusable CPU plotting command.
 - [Model_Explain.md](Model_Explain.md): current model mathematics and code map.
 - [docs/architecture](docs/architecture): maintained ownership and
   compatibility contracts.
