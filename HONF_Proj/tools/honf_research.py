@@ -117,6 +117,10 @@ def _parser() -> argparse.ArgumentParser:
         "--extend-horizon", action="store_true",
         help="explicitly continue a completed configured endpoint with the same optimizer schedule",
     )
+    resume_member_routing.add_argument(
+        "--wall-clock-budget-seconds", type=int,
+        help="absolute cumulative provider elapsed-time cap for Relative full-TRAIN600 continuation",
+    )
 
     for resumer in (resume_contextual, resume_member_routing):
         resumer.add_argument("--compact-history", action=argparse.BooleanOptionalAction, default=None,
@@ -285,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         result = resume_contextual_frontier(
             args.run, device=args.device, devices=args.devices,
             stop_after_epoch=args.stop_after_epoch, extend_horizon=args.extend_horizon,
+            wall_clock_budget_seconds=args.wall_clock_budget_seconds,
             compact_history=args.compact_history,
         )
     elif args.command == "evaluate-joint-member-routing":

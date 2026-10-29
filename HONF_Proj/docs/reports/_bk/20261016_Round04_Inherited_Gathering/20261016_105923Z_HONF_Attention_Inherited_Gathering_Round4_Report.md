@@ -60,7 +60,7 @@ Each sparse child inherits its own soft e500 parameters, named Adam moments, RNG
 
 Board A compares independently trained soft/sparse trajectories at literal e2500 and their common e500 state. Board B compares each with unchanged Round3 D0 on the same selected membership, objective, deterministic streams and native endpoints. Board C retains full-TRAIN Thermal1804/1404 at their actual selected ages 4738/4890 and Wind2103/2102 at 2475/2440 on the same DEV22/24 native panels. Those classic columns have unequal training exposure, transforms, objectives and ages; they are practical reference distance. They are not the Round2 full-population formal summaries.
 
-The primary decision is literal e2500. The prospectively declared secondary selector uses the lowest monitoring field_score for Thermal or val_volume_mse for Wind, earliest tie, over common saved ages 600:100:2500. It does not search native endpoint errors. Existing engine aliases retain their original domains. The matched fixed TRAIN4 D0 board is newly evaluated from unchanged weights; older R3 two-case TRAIN checks are excluded from the four-case learning curves.
+The primary decision is literal e2500. The prospectively declared secondary selector uses the lowest monitoring field_score for Thermal or val_volume_mse for Wind, earliest tie, over common saved ages 600\:100\:2500. It does not search native endpoint errors. Existing engine aliases retain their original domains. The matched fixed TRAIN4 D0 board is newly evaluated from unchanged weights; older R3 two-case TRAIN checks are excluded from the four-case learning curves.
 
 ### Qualification and correctness
 

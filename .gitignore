@@ -104,3 +104,14 @@ Evaluation*/
 Saved_Model_LocalModule/
 cache/
 cache_index.json
+
+# Historical comparison archives: keep narrative Markdown; generated assets and one-time scripts stay local.
+/HONF_Proj/docs/reports/_bk/run1501_1502_comparison/**
+!/HONF_Proj/docs/reports/_bk/run1501_1502_comparison/**/
+!/HONF_Proj/docs/reports/_bk/run1501_1502_comparison/**/*.md
+/HONF_Proj/docs/reports/_bk/run1503_v3_organizer_diagnostics/**
+!/HONF_Proj/docs/reports/_bk/run1503_v3_organizer_diagnostics/**/
+!/HONF_Proj/docs/reports/_bk/run1503_v3_organizer_diagnostics/**/*.md
+/HONF_Proj/docs/reports/_bk/windfarm_forward_2500_comparison/**
+!/HONF_Proj/docs/reports/_bk/windfarm_forward_2500_comparison/**/
+!/HONF_Proj/docs/reports/_bk/windfarm_forward_2500_comparison/**/*.md

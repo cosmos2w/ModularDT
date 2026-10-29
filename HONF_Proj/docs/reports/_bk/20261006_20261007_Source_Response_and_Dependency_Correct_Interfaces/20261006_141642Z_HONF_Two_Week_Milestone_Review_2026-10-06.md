@@ -169,11 +169,11 @@ The mature comparison provides a clean field-and-cost check within one applicati
 | 1501 | 0.03321 | 231.33 | Better some physical quantities, slower broad application. |
 | 1502 | 0.03153 | 231.09 | Useful fidelity/incidence change, no application speed gain. |
 
-These are all 90 Q8192 cases on one RTX6000Ada GPU, maps off, one warmup and three synchronized repetitions, checkpoint-native inner chunks. Incremental allocation and recorded historical training totals have separate meanings. See [the mature comparison](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md), its [accuracy table](../../run1501_1502_comparison/accuracy/accuracy_summary.csv), and [cost measurements](../../run1501_1502_comparison/cost/inference_cost_cuda2.csv).
+These are all 90 Q8192 cases on one RTX6000Ada GPU, maps off, one warmup and three synchronized repetitions, checkpoint-native inner chunks. Incremental allocation and recorded historical training totals have separate meanings. See [the mature comparison](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md), its [accuracy table](../run1501_1502_comparison/accuracy/accuracy_summary.csv), and [cost measurements](../run1501_1502_comparison/cost/inference_cost_cuda2.csv).
 
-![Mature checkpoint reconstruction and physical-output comparisons for 1404,1804,1501,1502](../../run1501_1502_comparison/accuracy/accuracy_comparison.png)
+![Mature checkpoint reconstruction and physical-output comparisons for 1404,1804,1501,1502](../run1501_1502_comparison/accuracy/accuracy_comparison.png)
 
-**Figure 1 — retain the field tradeoffs, not just a sparsity headline.** Saved-best full-grid90-case evidence gives 1502 pooled L2 **0.03153**, an improvement over1501 **0.03321** but worse than Dense **0.02896**.1502 beats1501 on 49/90 cases and Dense on 21/90. Pooled improvement is not universal per-case or per-field improvement. [PDF master](../../run1501_1502_comparison/accuracy/accuracy_comparison.pdf).
+**Figure 1 — retain the field tradeoffs, not just a sparsity headline.** Saved-best full-grid90-case evidence gives 1502 pooled L2 **0.03153**, an improvement over1501 **0.03321** but worse than Dense **0.02896**.1502 beats1501 on 49/90 cases and Dense on 21/90. Pooled improvement is not universal per-case or per-field improvement. [PDF master](../run1501_1502_comparison/accuracy/accuracy_comparison.pdf).
 
 **Milestone lesson:** exact support needs an executor that avoids work, and saved work needs a complete-call timing benefit. Neither follows from a smaller K, an attractive graph, or a lower memory peak.
 

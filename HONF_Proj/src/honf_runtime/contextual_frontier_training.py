@@ -1034,6 +1034,17 @@ def _supports_cumulative_budget_override(config: Mapping[str, Any]) -> bool:
         initialization = config["initialization"]
         training = config["training"]
         arm = section["arm"]
+        if section_name == "member_routing":
+            return (
+                section.get("schema") == RELATIVE_MEMBER_ROUTING_CONFIG_SCHEMA
+                and _member_routing_core_schema(section) == RELATIVE_MEMBER_ROUTING_CORE_SCHEMA
+                and arm == "R13-3-Relative"
+                and initialization.get("source_kind") == "scratch_interaction_reused_member_routing"
+                and initialization.get("normalization_mode") == "scratch_train600_stats"
+                and training.get("membership") == "full_train600"
+                and training.get("local_horizon", 0) >= 100
+                and config["optimizer"].get("schedule") == "constant_config_lr"
+            )
         return (
             section_name == "interaction_groups"
             and _is_spatial_interaction_group_section(section)
@@ -1062,16 +1073,23 @@ def _resume_execution_budget(
         return int(config["training"]["wall_clock_budget_seconds"]), None
     if not _supports_cumulative_budget_override(config):
         raise ValueError(
-            "Cumulative wall-clock overrides are limited to F13 full-TRAIN600 runs sourced from matching development epoch500."
+            "Cumulative wall-clock overrides are limited to F13 full-TRAIN600 runs sourced from matching "
+            "development epoch500, or Relative full-TRAIN600 continuation from epoch100."
         )
     arm = _arm(config)
     epoch = int(latest_payload.get("epoch", -1))
     identity = latest_payload.get("experiment_identity")
-    if (epoch < 500 or latest_payload.get("arm") != arm
+    relative = "member_routing" in config
+    source_epoch = 100 if relative else 500
+    expected_workflow = RELATIVE_MEMBER_ROUTING_WORKFLOW if relative else "spatial_interaction_groups_joint_training_v1"
+    if (epoch < source_epoch or latest_payload.get("arm") != arm
             or not isinstance(identity, Mapping)
-            or identity.get("workflow") != "spatial_interaction_groups_joint_training_v1"
+            or identity.get("workflow") != expected_workflow
             or identity.get("training_membership") != "full_train600"):
-        raise ValueError("Cumulative wall-clock overrides require the matching F13 full-TRAIN checkpoint at epoch500 or later.")
+        raise ValueError(
+            f"Cumulative wall-clock overrides require the matching {arm} full-TRAIN checkpoint "
+            f"at epoch{source_epoch} or later."
+        )
     training = config["training"]
     recipe_seconds = int(training["wall_clock_budget_seconds"])
     reserve_seconds = int(training["clean_save_reserve_seconds"])

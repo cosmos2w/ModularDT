@@ -44,9 +44,9 @@ The held-out-layout bootstrap averages the three directions within each layout b
 
 At the selected checkpoints, Dense reduces validation standardized MSE by 26.6%, physical RMSE by 44.5%, and pooled vector relative L2 by 45.2%. On the reserved test set, the corresponding reductions are 10.5%, 43.8%, and 43.1%. The paired mean Dense-minus-Classic physical RMSE is -0.00865 m/s on validation (10,000-bootstrap interval -0.01045 to -0.00718) and -0.00829 m/s on test (-0.00928 to -0.00741).
 
-![Accuracy across checkpoint policies](../../windfarm_forward_2500_comparison/figures/accuracy_overview.png)
+![Accuracy across checkpoint policies](../windfarm_forward_2500_comparison/figures/accuracy_overview.png)
 
-![Paired case physical RMSE](../../windfarm_forward_2500_comparison/figures/paired_physical_rmse.png)
+![Paired case physical RMSE](../windfarm_forward_2500_comparison/figures/paired_physical_rmse.png)
 
 ### Channel and region tradeoffs
 
@@ -56,13 +56,13 @@ The standardized regional metric is more mixed. At selected validation, Dense is
 
 Dense also has lower physical RMSE in every reported validation and test geometry stratum, including turbine-count, aspect-ratio, spacing, dispersion, domain-volume, and wind-direction groups. Several individual strata contain only one layout, so this is consistency evidence rather than a precise estimate of stratum-level generalization.
 
-![Geometry-stratified physical RMSE](../../windfarm_forward_2500_comparison/figures/geometry_strata_comparison.png)
+![Geometry-stratified physical RMSE](../windfarm_forward_2500_comparison/figures/geometry_strata_comparison.png)
 
 ## Learning behavior
 
 Both selected epochs occur near the end of the 2,500-epoch runs. Exact epoch 2,500 slightly improves physical RMSE but slightly worsens the validation selection metric for each model. This shows continued local movement in the objective and does not demonstrate universal convergence. Extending these same single-seed runs would have weak evidential value without a predeclared objective and additional seeds; no continuation was launched.
 
-![Training and validation loss history](../../windfarm_forward_2500_comparison/figures/learning_curves.png)
+![Training and validation loss history](../windfarm_forward_2500_comparison/figures/learning_curves.png)
 
 The figure reads the complete saved `metrics.csv` histories and marks both the validation-selected and terminal epochs. The per-run legacy figures remain in each run's `plots/loss_history.png`; the current code writes future per-run loss figures under `plots/training/`.
 
@@ -82,7 +82,7 @@ The figure reads the complete saved `metrics.csv` histories and marks both the v
 
 The matched GPU 0 probe used the same 16 rows, query count, query chunk, environmental tokens, warm-up policy, and repetition count for both models. Full inference includes preparation and decode. The disposable updates produced finite nonzero losses, gradients, and parameter changes. Dense's lower update-memory peak comes from recomputation through activation checkpointing; it should not be interpreted as lower overall computational cost.
 
-![Matched model cost](../../windfarm_forward_2500_comparison/figures/model_cost.png)
+![Matched model cost](../windfarm_forward_2500_comparison/figures/model_cost.png)
 
 ## Streaming native-volume checks
 
@@ -105,19 +105,19 @@ The representative layouts were selected using geometry only with deterministic 
 
 Layout 15 has 10 turbines and a broad native domain:
 
-![Layout 15 native hub-height comparison](../../windfarm_forward_2500_comparison/figures/native_fields/layout_0015_gen_0015_wd270_native_z_comparison.png)
+![Layout 15 native hub-height comparison](../windfarm_forward_2500_comparison/figures/native_fields/layout_0015_gen_0015_wd270_native_z_comparison.png)
 
 Layout 142 has 30 turbines and the largest selected native support:
 
-![Layout 142 native hub-height comparison](../../windfarm_forward_2500_comparison/figures/native_fields/layout_0142_gen_0142_wd270_native_z_comparison.png)
+![Layout 142 native hub-height comparison](../windfarm_forward_2500_comparison/figures/native_fields/layout_0142_gen_0142_wd270_native_z_comparison.png)
 
 Layout 168 has 9 tightly spaced turbines and the smallest selected support:
 
-![Layout 168 native vertical comparison](../../windfarm_forward_2500_comparison/figures/native_fields/layout_0168_gen_0168_wd270_native_x_comparison.png)
+![Layout 168 native vertical comparison](../windfarm_forward_2500_comparison/figures/native_fields/layout_0168_gen_0168_wd270_native_x_comparison.png)
 
-All nine x/y/z comparison figures and their case-level JSON evidence are in [`figures/native_fields`](../../windfarm_forward_2500_comparison/figures/native_fields). The Classic latent visualization below shows normalized module assignment mass and dominant assignment for the six learned edge modules. It is a diagnostic of model routing, not a physical wake graph or interpretable turbine connection network.
+All nine x/y/z comparison figures and their case-level JSON evidence are in [`figures/native_fields`](../windfarm_forward_2500_comparison/figures/native_fields). The Classic latent visualization below shows normalized module assignment mass and dominant assignment for the six learned edge modules. It is a diagnostic of model routing, not a physical wake graph or interpretable turbine connection network.
 
-![Classic latent organization on layout 142](../../windfarm_forward_2500_comparison/figures/native_fields/layout_0142_gen_0142_wd270_latent_organization.png)
+![Classic latent organization on layout 142](../windfarm_forward_2500_comparison/figures/native_fields/layout_0142_gen_0142_wd270_latent_organization.png)
 
 ## Scope and limitations
 
@@ -136,7 +136,7 @@ Run roots:
 
 The reusable report builder is `Case_WindFarm/src/windfarm/forward_analysis_figures.py`; the native-plane and latent visualizer is `Case_WindFarm/src/windfarm/comparative_visualization.py`. Both require explicit run/evaluation paths and fail on mismatched case identities, sampling contracts, or checkpoint roles.
 
-Report evidence is stored in [`evidence`](../../windfarm_forward_2500_comparison/evidence), including the six-endpoint accuracy table, paired case table, 10,000-replicate layout bootstrap, geometry-stratum table, cost table, manifest, and validation audit. The larger raw evaluation and cost artifacts remain in the existing ignored structured stores:
+Report evidence is stored in [`evidence`](../windfarm_forward_2500_comparison/evidence), including the six-endpoint accuracy table, paired case table, 10,000-replicate layout bootstrap, geometry-stratum table, cost table, manifest, and validation audit. The larger raw evaluation and cost artifacts remain in the existing ignored structured stores:
 
 - `Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/`
 - `Case_WindFarm/diagnostics/generated/forward_velocity_cost_2102_2103/`

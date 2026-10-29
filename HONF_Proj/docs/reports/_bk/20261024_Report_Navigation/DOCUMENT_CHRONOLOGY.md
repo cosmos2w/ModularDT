@@ -80,7 +80,7 @@ Only durable Markdown in UpgradePlan is newly eligible for Git; numerical data, 
 
 | Document | Prior location | Status | Proposal / declared report date | Completion date / publication bound | Filename timestamp basis |
 | --- | --- | --- | --- | --- | --- |
-| [README.md](../../run1503_v3_organizer_diagnostics/effective_k/README.md) | `HONF_Proj/docs/reports/run1503_v3_organizer_diagnostics/effective_k/README.md` | ignored_local_diagnostics_index | Unknown; see dated evidence below | Unknown | Unknown; No Git timestamp; stable support filename |
+| [README.md](../run1503_v3_organizer_diagnostics/effective_k/README.md) | `HONF_Proj/docs/reports/run1503_v3_organizer_diagnostics/effective_k/README.md` | ignored_local_diagnostics_index | Unknown; see dated evidence below | Unknown | Unknown; No Git timestamp; stable support filename |
 | [README.md](../stage1_interface_fields/README.md) | `HONF_Proj/docs/reports/_bk/stage1_interface_fields/README.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-05T20:50:03Z; Git first recorded commit, UTC; not experiment completion |
 | [README.md](../stage2_sparse_interface_honf/README.md) | `HONF_Proj/docs/reports/_bk/stage2_sparse_interface_honf/README.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-05T23:56:00Z; Git first recorded commit, UTC; not experiment completion |
 | [20260906_052330Z_HONF_Interface_Study_Report.md](../20260905_20260914_Interface_Fields_and_Response_Compression/20260906_052330Z_HONF_Interface_Study_Report.md) | `HONF_Proj/docs/reports/_bk/HONF_Interface_Study_Report.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-17T20:14:32Z (published record) | 2026-09-06T05:23:30Z; Git first recorded commit, UTC; not experiment completion |
@@ -116,12 +116,12 @@ Only durable Markdown in UpgradePlan is newly eligible for Git; numerical data, 
 | [20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_030336Z_HONF_Run1501_SparseIncidence_Evaluation.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1501_SparseIncidence_Evaluation.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T03:03:36Z; Git first recorded commit, UTC; not experiment completion |
 | [20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260923_050754Z_HONF_Run1501_Executor_and_Run1502_Development.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1501_Executor_and_Run1502_Development.md` | completed_bounded_work_with_later_continuation_unverified | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-23T05:07:54Z; Git first recorded commit, UTC; not experiment completion |
 | [20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_035324Z_HONF_1404_1804_1501_1502_Mature_Comparison.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/HONF_1404_1804_1501_1502_Mature_Comparison.md` | completed_comparative_report | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [accuracy_findings.md](../../run1501_1502_comparison/accuracy/accuracy_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/accuracy_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [commands.md](../../run1501_1502_comparison/accuracy/commands.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/commands.md` | reproduction_commands | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [commands.md](../../run1501_1502_comparison/cost/commands.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/commands.md` | reproduction_commands | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [cost_findings.md](../../run1501_1502_comparison/cost/cost_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/cost_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [README.md](../../run1501_1502_comparison/cost/superseded/README.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/superseded/README.md` | superseded_support_index | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
-| [routing_findings.md](../../run1501_1502_comparison/routing_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/routing_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [accuracy_findings.md](../run1501_1502_comparison/accuracy/accuracy_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/accuracy_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [commands.md](../run1501_1502_comparison/accuracy/commands.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/commands.md` | reproduction_commands | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [commands.md](../run1501_1502_comparison/cost/commands.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/commands.md` | reproduction_commands | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [cost_findings.md](../run1501_1502_comparison/cost/cost_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/cost_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [README.md](../run1501_1502_comparison/cost/superseded/README.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/cost/superseded/README.md` | superseded_support_index | Unknown; see dated evidence below | Unknown | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
+| [routing_findings.md](../run1501_1502_comparison/routing_findings.md) | `HONF_Proj/docs/reports/run1501_1502_comparison/routing_findings.md` | completed_supporting_findings | Unknown; see dated evidence below | Exact time unknown; closed by 2026-09-24T03:53:24Z (published record) | 2026-09-24T03:53:24Z; Git first recorded commit, UTC; not experiment completion |
 | [20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v2_Reversible_Edge_Coalescence.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1503_v2_Reversible_Edge_Coalescence.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
 | [20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1503_v3_Converged_Identity_Preserving_Coalescence.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
 | [20260924_220635Z_HONF_Run1505_E500_Organizer_Diagnostics.md](../20260922_20260925_Adaptive_Capacity_Incidence_and_Coalescence/20260924_220635Z_HONF_Run1505_E500_Organizer_Diagnostics.md) | `HONF_Proj/docs/reports/_bk/HONF_Run1505_E500_Organizer_Diagnostics.md` | completed_bounded_assessment | Unknown; see dated evidence below | Exact time unknown; closed by 2026-10-02T18:45:19Z (published record) | 2026-09-24T22:06:35Z; Git first recorded commit, UTC; not experiment completion |
@@ -1461,7 +1461,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### accuracy_findings.md
 
-[Current document](../../run1501_1502_comparison/accuracy/accuracy_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../run1501_1502_comparison/accuracy/accuracy_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1471,7 +1471,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### commands.md
 
-[Current document](../../run1501_1502_comparison/accuracy/commands.md). Status: `reproduction_commands`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../run1501_1502_comparison/accuracy/commands.md). Status: `reproduction_commands`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1481,7 +1481,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### commands.md
 
-[Current document](../../run1501_1502_comparison/cost/commands.md). Status: `reproduction_commands`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../run1501_1502_comparison/cost/commands.md). Status: `reproduction_commands`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1491,7 +1491,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### cost_findings.md
 
-[Current document](../../run1501_1502_comparison/cost/cost_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../run1501_1502_comparison/cost/cost_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1501,7 +1501,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### README.md
 
-[Current document](../../run1501_1502_comparison/cost/superseded/README.md). Status: `superseded_support_index`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../run1501_1502_comparison/cost/superseded/README.md). Status: `superseded_support_index`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1511,7 +1511,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### routing_findings.md
 
-[Current document](../../run1501_1502_comparison/routing_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
+[Current document](../run1501_1502_comparison/routing_findings.md). Status: `completed_supporting_findings`. Filename basis: Git first recorded commit, UTC; not experiment completion.
 
 Earliest recorded addition: `aaee3fa9bcc2baf4760d34aebdd57c4344e14bc7`, 2026-09-24T03:53:24Z.
 
@@ -1521,7 +1521,7 @@ Uncertainty: No exact full-round/report-completion clock established from prose;
 
 ### README.md
 
-[Current document](../../run1503_v3_organizer_diagnostics/effective_k/README.md). Status: `ignored_local_diagnostics_index`. Filename basis: No Git timestamp; stable support filename.
+[Current document](../run1503_v3_organizer_diagnostics/effective_k/README.md). Status: `ignored_local_diagnostics_index`. Filename basis: No Git timestamp; stable support filename.
 
 Evidence: This folder contains a frozen-checkpoint diagnosis for the 90 cases in the.
 

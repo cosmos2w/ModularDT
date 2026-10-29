@@ -17,6 +17,92 @@ from honf_runtime.contextual_frontier_training import load_contextual_frontier_c
 CONFIGS = PROJECT / "configs/research"
 
 
+def test_relative_resume_cli_forwards_explicit_execution_budget(monkeypatch):
+    import importlib.util
+    import honf_runtime.contextual_frontier_training as training
+
+    spec = importlib.util.spec_from_file_location("honf_research_cli", PROJECT / "tools/honf_research.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    captured = {}
+
+    def resume(run, **options):
+        captured.update(run=run, **options)
+        return {"status": "dispatched"}
+
+    monkeypatch.setattr(training, "resume_contextual_frontier", resume)
+    assert cli.main([
+        "resume-member-routing", "--run", "relative", "--device", "cuda:1",
+        "--stop-after-epoch", "1000", "--extend-horizon",
+        "--wall-clock-budget-seconds", "30000",
+    ]) == 0
+    assert captured["wall_clock_budget_seconds"] == 30000
+    assert captured["stop_after_epoch"] == 1000
+    assert captured["extend_horizon"] is True
+
+
+def test_relative_cumulative_budget_preserves_recipe_and_survives_resume(tmp_path):
+    import copy
+    from honf_runtime.contextual_frontier_training import _resume_execution_budget
+
+    config, _ = load_contextual_frontier_config(
+        CONFIGS / "thermal_member_routing_r13_3_relative_train600_100_v2.json"
+    )
+    original = copy.deepcopy(config)
+    source = tmp_path / "epoch_0100_model.pt"
+    source.touch()
+    payload = {
+        "epoch": 100, "arm": "R13-3-Relative",
+        "experiment_identity": {
+            "workflow": "interaction_reused_member_routing_joint_training_v2",
+            "training_membership": "full_train600",
+        },
+        "provider_training_state": {"training_elapsed_seconds": 2670.0},
+    }
+    budget, record = _resume_execution_budget(config, {}, source, payload, 30000)
+    assert budget == 30000
+    assert record["recipe_budget_seconds"] == 18000
+    assert record["initial_source"]["epoch"] == 100
+    payload["epoch"] = 200
+    payload["provider_training_state"]["training_elapsed_seconds"] = 5300.0
+    reused, next_record = _resume_execution_budget(
+        config, {"execution_budget": record}, source, payload, None,
+    )
+    assert reused == 30000
+    assert next_record["initial_source"] == record["initial_source"]
+    assert next_record["last_resume_source"]["epoch"] == 200
+    assert config == original
+
+
+@pytest.mark.parametrize("mismatch", ("epoch", "arm", "workflow", "membership"))
+def test_relative_cumulative_budget_rejects_wrong_source(tmp_path, mismatch):
+    from honf_runtime.contextual_frontier_training import _resume_execution_budget
+
+    config, _ = load_contextual_frontier_config(
+        CONFIGS / "thermal_member_routing_r13_3_relative_train600_100_v2.json"
+    )
+    source = tmp_path / "source.pt"
+    source.touch()
+    payload = {
+        "epoch": 100, "arm": "R13-3-Relative",
+        "experiment_identity": {
+            "workflow": "interaction_reused_member_routing_joint_training_v2",
+            "training_membership": "full_train600",
+        },
+        "provider_training_state": {"training_elapsed_seconds": 2670.0},
+    }
+    if mismatch == "epoch":
+        payload["epoch"] = 99
+    elif mismatch == "arm":
+        payload["arm"] = "R13-3-Route"
+    elif mismatch == "workflow":
+        payload["experiment_identity"]["workflow"] = "interaction_reused_member_routing_joint_training_v1"
+    else:
+        payload["experiment_identity"]["training_membership"] = "fixed25_train150_dev22"
+    with pytest.raises(ValueError, match="matching R13-3-Relative"):
+        _resume_execution_budget(config, {}, source, payload, 30000)
+
+
 def test_relative_adapter_payload_roundtrip_preserves_v2_and_rejects_v1_relabelling():
     import torch
     from channelthermal.member_routing import (
