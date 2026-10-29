@@ -41,32 +41,6 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     assert by_name["stage5_fixed_residual_concat_uniform_lr3e4"]["status"] == "frozen_experiment"
     assert by_name["case_adaptive_residual_context"]["status"] == "candidate"
     assert by_name["case_adaptive_tensor_residual_context"]["status"] == "candidate"
-    assert by_name["fixed_group_pairwise_honf_context"]["status"] == "candidate"
-    assert by_name["group_control_pairwise_honf_context"]["status"] == "candidate"
-    assert by_name["hypergraph_quadrature_honf_context"]["status"] == "candidate"
-    assert by_name["hypergraph_quadrature_honf_context"]["base"] is None
-    assert by_name["budgeted_group_control_honf_context"]["status"] == "candidate"
-    assert by_name["budgeted_group_control_honf_context"]["base"] is None
-    assert by_name["occupancy_adaptive_group_control_honf_context"]["status"] == "candidate"
-    assert by_name["occupancy_adaptive_group_control_honf_context"]["base"] is None
-    assert by_name["mass_competitive_group_control_honf_context"]["status"] == "candidate"
-    assert by_name["mass_competitive_group_control_honf_context"]["base"] is None
-    assert by_name["sparse_incidence_group_control_honf_context"]["status"] == "candidate"
-    assert by_name["sparse_incidence_group_control_honf_context"]["base"] is None
-    assert by_name["run1502_environment_refinement_sparsemax"]["status"] == "candidate"
-    assert by_name["run1502_environment_refinement_sparsemax"]["base"] == (
-        "sparse_incidence_group_control_honf_context"
-    )
-    assert by_name["converged_identity_preserving_coalescence_honf_context"]["status"] == "candidate"
-    assert by_name["converged_identity_preserving_coalescence_honf_context"]["base"] is None
-    assert by_name["continuous_functional_coalescence_honf_context"]["status"] == "candidate"
-    assert by_name["continuous_functional_coalescence_honf_context"]["base"] is None
-    assert by_name["adaptive_hyperedge_opening_honf_context"]["status"] == "candidate"
-    assert by_name["adaptive_hyperedge_opening_honf_context"]["base"] is None
-    assert by_name["source_conditioned_pairwise_honf_context"]["status"] == "candidate"
-    assert by_name["source_conditioned_pairwise_honf_context"]["base"] is None
-    assert registry["recommended_forward_profile"] != "case_adaptive_residual_context"
-    assert registry["recommended_forward_profile"] != "case_adaptive_tensor_residual_context"
 
     for profile in profiles:
         path = project_root / profile["path"].removeprefix("project://")
@@ -104,76 +78,8 @@ def test_windfarm_joint_forward_profile_passes_strict_config_loader(tmp_path: Pa
         load_config_bundle(malformed_path, project_root=project_root)
 
 
-def test_run1503_v3_profile_round_trips_converged_architecture_settings() -> None:
-    from honf_forward_core.config import UnifiedForwardConfig
-
-    parent_bundle = load_config_bundle(
-        "project://src/config_core/forward/sparse_incidence_group_control_honf_context.json",
-        experiment_overlay=(
-            "project://src/config_core/forward/experiments/"
-            "run1502_environment_refinement_sparsemax.json"
-        ),
-    )
-    bundle = load_config_bundle(
-        "project://src/config_core/forward/converged_identity_preserving_coalescence_honf_context.json"
-    )
-    config = UnifiedForwardConfig.from_dict(bundle.effective["model"]["core_honf"])
-    interface = config.interface_model
-    assert config.forward_architecture == "converged_identity_preserving_coalescence_honf"
-    assert interface.group_count == 12
-    assert interface.group_control_dim == 16
-    assert interface.source_normalizer == "entmax15"
-    assert interface.query_normalizer == "sparsemax"
-    assert interface.environment_refinement_normalizer == "sparsemax"
-    assert interface.fusion_max_iterations == 512
-    assert interface.fusion_eps_abs == pytest.approx(1.0e-9)
-    assert interface.fusion_eps_rel == pytest.approx(1.0e-8)
-    assert interface.fusion_eta_final == 0.5
-    assert interface.fusion_ramp_epochs == 150
-    assert bundle.case == parent_bundle.case
-    for section in ("dataset", "loss"):
-        assert bundle.effective[section] == parent_bundle.effective[section]
-    for key in ("seed", "learning_rate", "weight_decay", "amp", "gradient_clip_norm"):
-        assert bundle.effective["training"][key] == parent_bundle.effective["training"][key]
-    assert bundle.effective["training"]["port_curriculum"] == parent_bundle.effective["training"]["port_curriculum"]
-    assert bundle.effective["training"]["seed"] == 0
-    assert bundle.effective["training"]["epochs"] == 500
-
-    invalid = dict(bundle.effective["model"]["core_honf"])
-    invalid["interface_model"] = dict(invalid["interface_model"])
-    invalid["interface_model"]["fusion_max_iterations"] = 64
-    with pytest.raises(ValueError, match="requires fusion settings"):
-        UnifiedForwardConfig.from_dict(invalid)
 
 
-def test_run1503_v4_profile_has_fixed_train_only_tree_and_no_solver_settings() -> None:
-    from honf_forward_core.config import UnifiedForwardConfig
-
-    base = load_config_bundle(
-        "project://src/config_core/forward/converged_identity_preserving_coalescence_honf_context.json"
-    )
-    bundle = load_config_bundle(
-        "project://src/config_core/forward/continuous_functional_coalescence_honf_context.json"
-    )
-    config = UnifiedForwardConfig.from_dict(bundle.effective["model"]["core_honf"])
-    interface = config.interface_model
-    assert config.forward_architecture == "continuous_functional_coalescence_honf"
-    assert len(interface.functional_tree_subsets) == 11
-    assert set(interface.functional_tree_subsets[-1]) == set(range(12))
-    assert interface.read_input_close_rms == pytest.approx(0.02)
-    assert interface.read_input_keep_rms == pytest.approx(0.06)
-    assert not any(key.startswith("fusion_") for key in config.to_dict()["interface_model"])
-    assert bundle.case == base.case
-    for section in ("dataset", "loss"):
-        assert bundle.effective[section] == base.effective[section]
-    for key in ("seed", "learning_rate", "weight_decay", "amp", "gradient_clip_norm"):
-        assert bundle.effective["training"][key] == base.effective["training"][key]
-    assert bundle.effective["training"]["port_curriculum"] == base.effective["training"]["port_curriculum"]
-
-    invalid = copy.deepcopy(bundle.effective["model"]["core_honf"])
-    invalid["interface_model"]["functional_tree_subsets"][-1] = [0, 1]
-    with pytest.raises(ValueError, match="final functional tree node"):
-        UnifiedForwardConfig.from_dict(invalid)
 
 
 def test_split_config_composes_deterministically() -> None:
@@ -704,22 +610,4 @@ def test_organizer_learning_rate_must_be_null_or_positive(tmp_path) -> None:
     path = tmp_path / "invalid_optimizer.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="organizer_learning_rate"):
-        load_config_bundle(path)
-
-
-@pytest.mark.parametrize("learning_rate", [0.0, float("nan"), float("inf")])
-def test_functional_detail_controller_learning_rate_must_be_finite_positive(
-    tmp_path,
-    learning_rate: float,
-) -> None:
-    source = load_config_bundle(
-        "project://src/config_core/forward/task_trained_functional_coalescence_honf_context.json"
-    )
-    payload = copy.deepcopy(source.core)
-    payload["case"]["config"] = str(source.case_source)
-    payload["training"]["functional_detail_controller_learning_rate"] = learning_rate
-    path = tmp_path / "invalid_functional_detail_learning_rate.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="functional_detail_controller_learning_rate"):
         load_config_bundle(path)

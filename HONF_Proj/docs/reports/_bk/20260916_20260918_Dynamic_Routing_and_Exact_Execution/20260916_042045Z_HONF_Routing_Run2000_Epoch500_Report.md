@@ -4,7 +4,7 @@
 
 ## Scope and implementation
 
-Goal 1 adds `routed_pairwise_honf` with `routing.strategy="module_hubs"`. The profile is [routing_module_hubs_context.json](../../../../src/config_core/forward/routing_module_hubs_context.json). Goals 2 and 3 are not implemented or launched by this task. The historical models, 1402/1403 decoder-context ablations, and WindFarm implementation are retained.
+Goal 1 adds `routed_pairwise_honf` with `routing.strategy="module_hubs"`. The profile is [routing_module_hubs_context.json](https://github.com/cosmos2w/ModularDT/blob/7981c173e8b1d29ee2b3addb7b972d0f15003542/HONF_Proj/src/config_core/forward/routing_module_hubs_context.json). Goals 2 and 3 are not implemented or launched by this task. The historical models, 1402/1403 decoder-context ablations, and WindFarm implementation are retained.
 
 The backend inherits Dense's simultaneous fine MM/ME/EM preparation, environmental update, QM response network, and QE content/geometry attention. The shared coarse/local paths and ThermalChannel predicted-port P0/P1/P2 loop remain in use. Every phase prepares its current contextual states. Hubs contain routing descriptors and indices; they never replace fine field values.
 

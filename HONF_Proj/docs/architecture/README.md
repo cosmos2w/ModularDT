@@ -1,10 +1,5 @@
 # Forward architecture index
 
-The maintained forward platform is the fixed/context-fusion model:
+The maintained catalogue contains six checkpoint-compatible families: Hypergraph-routed, Dense pairwise, Content-attention, Unified hypergraph, Relation-anchored and Active-domain relation-anchored neural fields. The [project README](../../README.md) describes their information access, saved examples and case integration; the [public factory](../../src/honf_forward_core/models.py) resolves names without rewriting existing checkpoint identifiers.
 
-- primary profile: `src/config_core/forward/stage7_structured_context.json`;
-- profile status index: `src/config_core/forward/profile_registry.json`;
-- reusable schema and compatibility fixtures: `tests/fixtures/forward_cleanup/`.
-
-See [forward_core.md](forward_core.md), [thermalchannel.md](thermalchannel.md), and
-[compatibility.md](compatibility.md) for ownership and compatibility boundaries.
+[Forward core](forward_core.md), [Thermal adaptation](thermalchannel.md), and [compatibility](compatibility.md) describe the established managed-workflow boundary. Their fixed/context-fusion profiles are historical compatibility references rather than the only maintained architecture. [`profile_registry.json`](../../src/config_core/forward/profile_registry.json) indexes the remaining managed profiles; the research S/X and U-H workflows retain their own saved configuration contracts. Shared legacy six-hyperedge and dense interfaces remain callable for existing collaborators.

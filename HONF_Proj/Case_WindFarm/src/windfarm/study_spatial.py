@@ -185,6 +185,13 @@ def render_native_plane(plane: dict[str, Any], prediction: np.ndarray, hubs_D: n
                    title=f"{name}: {label} [m/s]",
                    xlim=(plane["horizontal_D"][0], plane["horizontal_D"][-1]),
                    ylim=(plane["vertical_D"][0], plane["vertical_D"][-1]))
+            if column == 2:
+                error = np.asarray(difference[..., channel], dtype=np.float64)
+                finite = np.isfinite(error)
+                rmse = float(np.sqrt(np.mean(error[finite] ** 2))) if finite.any() else float("nan")
+                ax.text(.02, .98, f"RMSE = {rmse:.4g} m/s", transform=ax.transAxes,
+                        ha="left", va="top", fontsize=8,
+                        bbox={"facecolor": "white", "edgecolor": "none", "alpha": .85})
             ax.set_aspect("equal", adjustable="box")
             fig.colorbar(artist, ax=ax, shrink=0.65)
     fig.suptitle(f"{title}\nNative {plane['fixed_axis']} = {plane['actual_m']:.3f} m; turbine markers projected onto plane")

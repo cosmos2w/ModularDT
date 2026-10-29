@@ -116,7 +116,7 @@ def render_overview(scenes, output):
         fig.legend(handles=handles, loc="lower center", ncol=min(8, len(handles)), frameon=False,
                    bbox_to_anchor=(.47, .015))
     legend_height = .07 + .035 * max(0, (len(handles) - 1) // 8)
-    fig.subplots_adjust(left=.05, right=.90, top=.90, bottom=legend_height + .08)
+    fig.subplots_adjust(left=.05, right=.90, top=.84, bottom=legend_height + .08)
     if table_image is not None:
         cax = fig.add_axes([.93, .25, .014, .40])
         fig.colorbar(table_image, cax=cax, label="Share of each M's directory service")

@@ -20,7 +20,7 @@ Few directly read E records do not mean that q has only local information: ownE 
 
 ## Source-level diagnosis: three separate operations
 
-The relevant source is [applied incidence](../../../src/honf_forward_core/interaction_reused_member_routing/core.py), [head calibration](../../../src/honf_forward_core/joint_native/routing.py), [positive gate](../../../src/honf_forward_core/continuous_joint/primitives.py), [actual contextual reduction](../../../src/honf_forward_core/continuous_joint/preparation.py), [ordered exchange and capture](../../../src/honf_forward_core/content_hypergraph/staged_attention_v2.py), [member measure](../../../src/honf_forward_core/interaction_reused_member_routing/joint.py) and [anchored directory/read](../../../src/honf_forward_core/interaction_reused_member_routing/anchored.py).
+The relevant source is [applied incidence](../../../src/honf_forward_core/interaction_reused_member_routing/core.py), [head calibration](../../../src/honf_forward_core/joint_native/routing.py), [positive gate](../../../src/honf_forward_core/continuous_joint/primitives.py), [actual contextual reduction](../../../src/honf_forward_core/continuous_joint/preparation.py), [ordered exchange and capture](../../../src/honf_forward_core/content_hypergraph/staged_attention_v2.py), [member measure](https://github.com/cosmos2w/ModularDT/blob/7981c173e8b1d29ee2b3addb7b972d0f15003542/HONF_Proj/src/honf_forward_core/interaction_reused_member_routing/joint.py) and [anchored directory/read](../../../src/honf_forward_core/interaction_reused_member_routing/anchored.py).
 
 For an eligible receiver a, donor i and head h, let s be the actual normalized-QK score including geometry, before donor log measure. The current route calibration and incidence are
 

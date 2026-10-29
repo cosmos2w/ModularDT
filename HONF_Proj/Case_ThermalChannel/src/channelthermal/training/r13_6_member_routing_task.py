@@ -9,14 +9,9 @@ import torch
 
 from ..data.datasets import fit_global_normalizer
 from ..data.development_split import read_case_catalog
-from ..member_routing import (
-    ThermalFaithfulMemberRoutingAdapter,
-    ThermalTypedOrganizationMemberRoutingAdapter,
-)
 from .content_hypergraph_task import ThermalContentPredictions
 from .joint_member_routing_task import (
-    JointMemberRoutingHealth,
-    ThermalJointMemberRoutingTask,
+    _PairedMemberRoutingTask,
     ThermalJointPairPredictions,
 )
 from .member_routing_task import ThermalInteractionReusedMemberRoutingTask, _training_membership
@@ -26,63 +21,9 @@ from .joint_task import _load_data_binding, _read_selected_cases
 CONFIG_SECTION_SCHEMA = "thermal_r13_6_member_routing_v1"
 SOURCE_KIND = "scratch_r13_6_member_routing"
 JOINT_BLOCKS = ("H_MM_applied", "H_EM_applied", "H_EE_applied", "H_ME_applied")
-_VARIANTS = {
-    ThermalFaithfulMemberRoutingAdapter.CORE_SCHEMA: {
-        "adapter": ThermalFaithfulMemberRoutingAdapter,
-        "arm": "R13-6-O-ME-FaithfulJoint95",
-        "workflow": "interaction_reused_faithful_member_routing_training_v1",
-        "provider_schema": "thermal_r13_6_faithful_member_routing_provider_v1",
-        "training_state_schema": "thermal_r13_6_faithful_member_routing_training_state_v1",
-        "candidate": "C",
-    },
-    ThermalTypedOrganizationMemberRoutingAdapter.CORE_SCHEMA: {
-        "adapter": ThermalTypedOrganizationMemberRoutingAdapter,
-        "arm": "R13-6-H-ME-TypedOrganizationJoint95",
-        "workflow": "interaction_reused_typed_organization_member_routing_training_v1",
-        "provider_schema": "thermal_r13_6_typed_organization_member_routing_provider_v1",
-        "training_state_schema": "thermal_r13_6_typed_organization_member_routing_training_state_v1",
-        "candidate": "H",
-    },
-}
 
-
-class ThermalR136MemberRoutingTask(ThermalJointMemberRoutingTask):
+class _AnchoredPairedMemberRoutingTask(_PairedMemberRoutingTask):
     """Reuse R13-5's objective and typed health with the actual paired core call."""
-
-    VARIANTS = _VARIANTS
-    EXPECTED_SOURCE_KIND = SOURCE_KIND
-    LINEAGE = "R13-6"
-
-    def __init__(self, **kwargs):
-        # The R13-5 task methods are the maintained native objective, schedule,
-        # validation and typed ME health implementation. Initialize their base
-        # provider directly so R13-6 retains its own versioned identity.
-        ThermalInteractionReusedMemberRoutingTask.__init__(self, **kwargs)
-        variant = self.VARIANTS.get(self.model.CORE_SCHEMA)
-        if variant is None or self.model.architecture != variant["arm"]:
-            raise ValueError(f"{self.LINEAGE} task requires a matching maintained member-routing adapter.")
-        self._member_routing_variant = variant
-        self.candidate = str(variant["candidate"])
-        self.arm = str(variant["arm"])
-        self.workflow = str(variant["workflow"])
-        self.provider_schema = str(variant["provider_schema"])
-        self.training_state_schema = str(variant["training_state_schema"])
-        initialization = self.recipe["initialization"]
-        self.source_kind = str(initialization["source_kind"])
-        self.source_parent_age = int(initialization.get("source_parent_age", 0))
-        if (self.source_kind != self.EXPECTED_SOURCE_KIND
-                or self.source_parent_age != 0
-                or initialization.get("source_checkpoint") is not None
-                or initialization.get("pretrained_weights") is not False
-                or initialization.get("source_arm") != "scratch_common_seed0"):
-            raise ValueError(f"{self.LINEAGE} requires a fresh seed-0 scratch lineage with no source checkpoint.")
-        self.training_sampling_arm = str(
-            self.recipe["training"].get("sampling_arm", "R13-3-Relative")
-        )
-        health_config = self.recipe.get("member_routing", {}).get("health")
-        self._member_routing_health = None
-        if isinstance(health_config, Mapping) and health_config.get("enabled") is True:
-            self._member_routing_health = JointMemberRoutingHealth(self, health_config)
 
     def _paired_predictions(self, prepared, physical_heat):
         self.model.validate_prepared(prepared)
@@ -126,17 +67,15 @@ class ThermalR136MemberRoutingTask(ThermalJointMemberRoutingTask):
         )
 
 
-def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_type=None,
-                                       variants=None, section_schema=CONFIG_SECTION_SCHEMA,
-                                       source_kind=SOURCE_KIND, lineage="R13-6",
+def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_type,
+                                       variants, section_schema,
+                                       source_kind, lineage,
                                        required_address_mode="ME"):
     """Build a versioned adapter and the shared native TRAIN/VAL provider."""
     recipe = copy.deepcopy(dict(config))
     section = recipe.get("member_routing", {})
     model_config = section.get("model")
     selected_arm = str(arm or section.get("arm", ""))
-    variants = _VARIANTS if variants is None else variants
-    task_type = ThermalR136MemberRoutingTask if task_type is None else task_type
     if section.get("schema") != section_schema:
         raise ValueError(f"{lineage} requires {section_schema}.")
     core_schema = model_config.get("schema") if isinstance(model_config, Mapping) else None
@@ -189,14 +128,3 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
         },
     )
     return model, provider
-
-
-def build_thermal_r13_6_member_routing_task(config, *, arm=None, device="cpu"):
-    """Build a strict R13-6 adapter and the shared native TRAIN/VAL provider."""
-    return _build_thermal_member_routing_task(config, arm=arm, device=device)
-
-
-__all__ = [
-    "CONFIG_SECTION_SCHEMA", "ThermalR136MemberRoutingTask",
-    "build_thermal_r13_6_member_routing_task",
-]

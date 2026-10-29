@@ -16,7 +16,7 @@ from ..member_routing import ThermalAnchoredMemberRoutingAdapter
 from .content_hypergraph_task import ThermalContentPredictions
 from .joint_member_routing_task import _finite_scalar
 from .member_routing_task import ThermalInteractionReusedMemberRoutingTask
-from .r13_6_member_routing_task import ThermalR136MemberRoutingTask
+from .r13_6_member_routing_task import _AnchoredPairedMemberRoutingTask
 from .r13_6_member_routing_task import _build_thermal_member_routing_task
 
 
@@ -486,7 +486,7 @@ class AnchoredMemberRoutingHealth:
         }
 
 
-class ThermalR138AnchoredMemberRoutingTask(ThermalR136MemberRoutingTask):
+class ThermalR138AnchoredMemberRoutingTask(_AnchoredPairedMemberRoutingTask):
     """R13-8 paired native objective with versioned A/L identity and live traces."""
 
     VARIANTS = _VARIANTS

@@ -227,7 +227,8 @@ def plot_internal(output_path: Path, sample: Dict[str, Any], pred_internal: np.n
         gt_img[mask] = gt_points[module_idx].reshape(-1)
         pred_img[mask] = pred_internal[module_idx, :, 0].reshape(-1)
         err_img = np.abs(pred_img - gt_img)
-        for col, (image, title, cmap) in enumerate([(gt_img, f"M{module_idx} GT", "inferno"), (pred_img, f"M{module_idx} Pred", "inferno"), (err_img, f"M{module_idx} Error", "magma")]):
+        rmse = masked_error_metrics(pred_img, gt_img, mask)["rmse"]
+        for col, (image, title, cmap) in enumerate([(gt_img, f"M{module_idx} GT", "inferno"), (pred_img, f"M{module_idx} Pred", "inferno"), (err_img, f"M{module_idx} Error\nRMSE={rmse:.4e} (native temperature units)", "magma")]):
             im = axes[row, col].imshow(image, origin="lower", extent=(-1, 1, -1, 1), cmap=cmap)
             axes[row, col].set_title(title)
             fig.colorbar(im, ax=axes[row, col], fraction=0.046, pad=0.04)

@@ -44,17 +44,8 @@ _CONFIG_NAME = "research_run.json"
 _EVAL_DIR = "evaluations/research"
 
 
-def _is_round12_scratch(config: Mapping[str, Any]) -> bool:
-    return config["initialization"].get("source_kind") == "scratch_compact_config"
-
-
-def _is_softonly(config: Mapping[str, Any]) -> bool:
-    return config.get("round12", {}).get("schema") == "thermal_compact_softonly_v2"
-
-
 def _initialization_path(config: Mapping[str, Any]) -> Path:
-    value = (config["dataset"]["base_recipe_path"] if _is_round12_scratch(config)
-             else config["initialization"]["source_checkpoint"])
+    value = config["initialization"]["source_checkpoint"]
     return Path(value).expanduser().resolve(strict=True)
 
 
@@ -190,6 +181,13 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
     training = config["training"]
     optimizer = config["optimizer"]
     execution = config["execution"]
+    init = config["initialization"]
+    if (init.get("source_kind") != "classic_identity_metadata_only"
+            or init.get("normalization_mode") != "classic_train600_stats"
+            or init.get("fresh_routing_mode") != "hypergraph"
+            or training.get("membership") != "classic_train600_exposed_val89"
+            or "round12" in config):
+        raise ValueError("Only the retained U-H classic TRAIN600 research profile is supported.")
     if training.get("membership") not in (
         "fixed25_train150_dev22", "original_train600_fixed25_dev22", "classic_train600_exposed_val89",
         "parent_train600_exposed_val89", "scratch_train600_exposed_val89",
@@ -250,42 +248,6 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
         "inherit_parent_train_stats",
     ):
         raise ValueError("Select source TRAIN150 normalization, fresh full-TRAIN600 stats, saved classic TRAIN600 stats, or inherited parent TRAIN600 stats.")
-    if _is_round12_scratch(config):
-        init, compact = config["initialization"], config.get("round12", {})
-        if (normalization_mode != "scratch_train600_stats"
-                or training.get("membership") != "scratch_train600_exposed_val89"
-                or init.get("source_parent_age") != 0
-                or any(init.get(key) is not None for key in
-                       ("source_checkpoint", "source_run_dir", "source_identity_path", "source_sha256"))
-                or init.get("fresh_routing_mode") != "hypergraph"
-                or init.get("fresh_model_schedule") != {"coordinate_start_epoch": 3000,
-                    "coordinate_span_epochs": 1000, "ramp_epochs": 1000}
-                or (optimizer.get("kind"), optimizer.get("schedule")) !=
-                    ("fresh_adamw_from_config", "constant_config_lr")):
-            raise ValueError("Scratch compact runs forbid checkpoint/parent bindings and require fresh TRAIN600/VAL89 initialization.")
-        if _is_softonly(config):
-            from .thermal_soft_organization import validate_softonly_config
-            validate_softonly_config(config)
-        elif (compact.get("schema") != "thermal_compact_round12_v1"
-                or (compact.get("role"), compact.get("compact_arm")) != ("R1", "merge")
-                or compact.get("tie_loss_gradient") != "stop_outer_probability_v1"
-                or compact.get("shared_prefix_epochs") != 20
-                or compact.get("cut_after_local_epoch") != 40
-                or compact.get("structural_loss_scale") != 0.02
-                or compact.get("calibration_max_microbatches") != 2
-                or init.get("clock_mapping") != {"sampler_parent_epoch": 0,
-                    "controller_parent_coordinate": 3000, "parent_update_index": 0, "parent_macro_clock": 0}):
-            raise ValueError("Scratch compact runs require the amended Round12 20/40 phases and fresh clocks.")
-        checkpoints = training.get("checkpoint_epochs")
-        horizon = training["local_horizon"]
-        if (horizon != 1000 or training["first_segment_epochs"] != horizon
-                or checkpoints != (list(range(100, horizon + 1, 100)) if _is_softonly(config)
-                                   else [20, 40, *range(100, horizon + 1, 100)])
-                or training.get("checkpoint_every") != 100
-                or training["seed"] != 0 or training["microbatch_cases"] != 24):
-            raise ValueError("Scratch compact1000 requires the frozen full1000 schedule and 20/40/100-step milestones.")
-    elif normalization_mode == "scratch_train600_stats":
-        raise ValueError("Scratch normalization requires scratch_compact_config initialization.")
     if normalization_mode == "classic_train600_stats":
         init = config["initialization"]
         if (training.get("membership") != "classic_train600_exposed_val89"
@@ -301,42 +263,6 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
                        for epoch in milestone_epochs)
                 or milestone_epochs != sorted(set(milestone_epochs))):
             raise ValueError("Classic profiles require sorted unique in-horizon checkpoint_epochs.")
-    if normalization_mode == "inherit_parent_train_stats":
-        init = config["initialization"]
-        round12 = config.get("round12")
-        clock = init.get("clock_mapping")
-        if (init.get("source_kind") != "research_run_checkpoint_adaptation"
-                or init.get("source_arm") != "U-H"
-                or init.get("source_parent_age") != 1000
-                or training.get("membership") != "parent_train600_exposed_val89"
-                or not isinstance(round12, Mapping)
-                or round12.get("schema") != "thermal_compact_round12_v1"
-                or round12.get("role") not in ("common", "R0", "R1")
-                or round12.get("compact_arm") not in ("common", "singleton", "merge")
-                or not isinstance(clock, Mapping)
-                or (clock.get("sampler_parent_epoch"), clock.get("controller_parent_coordinate"),
-                    clock.get("parent_update_index"), clock.get("parent_macro_clock")) != (1000, 4000, 12, 13000)):
-            raise ValueError("Round12 adaptation must bind the literal U-H e1000 parent, full TRAIN600/VAL89, and separate saved sampler/controller/update clocks.")
-        if (round12.get("role"), round12.get("compact_arm")) not in (
-                ("common", "common"), ("R0", "singleton"), ("R1", "merge")):
-            raise ValueError("Round12 role and compact arm must be common/common, R0/singleton, or R1/merge.")
-        checkpoints = training.get("checkpoint_epochs")
-        if (training.get("local_horizon", 0) < 100 or training.get("first_segment_epochs") != 20
-                or not isinstance(checkpoints, list) or checkpoints[:3] != [20, 40, 100]
-                or checkpoints != sorted(set(checkpoints))
-                or any(type(epoch) is not int or epoch < 1 or epoch > training["local_horizon"]
-                       for epoch in checkpoints)
-                or training.get("checkpoint_every") != 10):
-            raise ValueError("Round12 defaults to a 100-epoch endpoint, common prefix 20, and checkpoints at 20/40/100 with latest every 10; longer explicit horizons remain valid.")
-        if (training.get("effective_batch_size") != 48 or training.get("microbatch_cases") != 24
-                or training.get("primary_queries") != 1024 or training.get("seed") != 0):
-            raise ValueError("Round12 must retain the parent seed, effective batch 48, microbatch 24, and Q=1024.")
-        if config["optimizer"].get("kind") != "fresh_adamw_from_source_groups":
-            raise ValueError("Round12 source adaptation must construct fresh AdamW moments over the compact parameter names.")
-        if round12.get("cut_after_local_epoch") != 40 or round12.get("structural_loss_scale") != 0.02:
-            raise ValueError("Round12 hard cut and structural-loss calibration boundary differ from the declared protocol.")
-        if round12.get("calibration_max_microbatches") != 2:
-            raise ValueError("Round12 structural-loss calibration is bounded to two TRAIN microbatches.")
 
 
 def verify_storage(config: Mapping[str, Any], *, output: str | Path | None = None,
@@ -524,175 +450,13 @@ def _cpu_state_snapshot(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
-def _round12_model_parameter_names(model) -> set[str]:
-    """Map the compact core's frozen policy names onto adapter parameter names."""
-    core = getattr(model, "core", model)
-    declared = getattr(core, "compact_frozen_parameter_names", ())
-    if callable(declared):
-        declared = declared()
-    if not declared:
-        return set()
-    names = dict(model.named_parameters())
-    result = set()
-    for core_name in map(str, declared):
-        if core_name in names:
-            result.add(core_name)
-            continue
-        matches = {name for name in names if name.endswith("." + core_name)}
-        if len(matches) != 1:
-            raise ValueError(f"Compact frozen parameter {core_name!r} does not map uniquely into the Thermal model.")
-        result.update(matches)
-    return result
-
-
-def _round12_adaptation_source_components(config: Mapping[str, Any], device: torch.device):
-    """Load the literal U-H parent through its owned run and migrate its core."""
-    init = config["initialization"]
-    source_path = Path(init["source_checkpoint"]).expanduser().resolve(strict=True)
-    source_run = Path(init["source_run_dir"]).expanduser().resolve(strict=True)
-    payload, selected_path = _read_run_checkpoint(source_run, source_path)
-    if selected_path != source_path:
-        raise ValueError("Round12 source resolution changed the literal e1000 checkpoint path.")
-    actual_sha = sha256_file(source_path)
-    if init.get("source_sha256") and init["source_sha256"] != actual_sha:
-        raise ValueError("Round12 U-H parent checkpoint bytes differ from its configured SHA256.")
-    identity = payload.get("experiment_identity", {})
-    provider_identity = identity.get("provider_identity", {})
-    recipe = identity.get("recipe", {})
-    if (identity.get("family") != TASK_SCHEMA
-            or identity.get("model_family") != "unified_continuous_joint_native_v1"
-            or identity.get("dataset") != "thermal"
-            or int(payload.get("epoch", -1)) != 1000
-            or int(init.get("source_parent_age", -1)) != 1000
-            or recipe.get("config_name") != "thermal_u_h_full5000_v1"):
-        raise ValueError("Round12 requires the self-contained Thermal U-H e1000 research checkpoint.")
-    if (len(provider_identity.get("training_case_ids", ())) != 600
-            or len(provider_identity.get("validation_case_ids", ())) != 89
-            or provider_identity.get("validation_scope") != (
-                "canonical89_exposed_original_test_excluding_0273; unexposed remainder excluded"
-            )):
-        raise ValueError("Round12 parent must bind its exact full TRAIN600 and exposed canonical VAL89 memberships.")
-    expected_sampling = identity.get("sampling_dataset_id")
-    if (not isinstance(expected_sampling, str)
-            or _sampling_dataset_id(provider_identity) != expected_sampling):
-        raise ValueError("Round12 parent sampling namespace does not match its sealed TRAIN membership.")
-    adapter_state = provider_identity.get("adapter_state")
-    if not isinstance(adapter_state, Mapping):
-        raise ValueError("Round12 parent checkpoint lacks self-contained Thermal adapter state.")
-    expected_normalizer = config["round12"].get("expected_parent_normalizer_key")
-    if adapter_state.get("normalizer_key") != expected_normalizer:
-        raise ValueError("Round12 parent normalizer differs from the configured inherited TRAIN600 statistics.")
-    if expected_sampling != config["round12"].get("expected_parent_sampling_dataset_id"):
-        raise ValueError("Round12 parent sampling namespace differs from the configured U-H lineage.")
-    # This safe adapter reconstruction owns the parent's learned core state and
-    # keeps the normalizer, grid, and physical extraction boundary intact.
-    parent_model = _model_from_run_payload(payload, device)
-    parent_core = getattr(parent_model, "core", None)
-    if parent_core is None or getattr(parent_core, "routing_mode", None) != "hypergraph":
-        raise ValueError("Round12 source is not the learned U-H hypergraph model.")
-    for name, expected in (("joint_epoch", 4000), ("joint_update_index", 12), ("joint_macro_clock", 13000)):
-        actual = getattr(parent_core, name, None)
-        if isinstance(actual, torch.Tensor):
-            actual = int(actual.detach().cpu())
-        if actual is None or int(actual) != expected:
-            raise ValueError(f"Round12 U-H parent {name} clock is {actual!r}, expected {expected}.")
-
-    from honf_forward_core.continuous_joint.unified import CompactUnifiedJointCore
-
-    compact_core = CompactUnifiedJointCore.from_unified_parent(parent_core)
-    parent_model.core = compact_core
-    compact_core.set_execution_options(**config["execution"]["options"])
-    coefficient_setter = getattr(compact_core, "set_compact_loss_coefficients", None)
-    if not callable(coefficient_setter):
-        raise TypeError("Round12 compact core is missing its persistent loss-coefficient setter.")
-    coefficient_setter(tie=0.0, capacity=0.0)
-    parent_model.train(True)
-
-    source_contract = identity.get("optimizer_schedule_contract", payload.get("optimizer_schedule_contract"))
-    if not isinstance(source_contract, Sequence) or len(source_contract) != 1:
-        raise ValueError("Round12 U-H parent must expose its one-group formal_joint AdamW schedule.")
-    source_group = copy.deepcopy(dict(source_contract[0]))
-    schedule = source_group.get("schedule", {})
-    if (source_group.get("name") != "formal_joint"
-            or abs(float(schedule.get("final_lr", -1.0)) - 3.0e-4) > 1.0e-12
-            or abs(float(source_group.get("weight_decay", -1.0)) - 1.0e-5) > 1.0e-12):
-        raise ValueError("Round12 U-H source optimizer differs from formal_joint AdamW at 3e-4/1e-5.")
-    active_names = [name for name, parameter in parent_model.named_parameters() if parameter.requires_grad]
-    if not active_names:
-        raise ValueError("Round12 compact migration produced no trainable parameters.")
-    source_group["parameter_names"] = active_names
-    optimizer_contract = [source_group]
-    source_payload = copy.deepcopy(payload)
-    source_payload["round12_parent_sampling_dataset_id"] = expected_sampling
-    source_payload["round12_parent_normalizer_key"] = expected_normalizer
-    source_payload["compact_parameter_migration"] = copy.deepcopy(
-        getattr(compact_core, "compact_parameter_migration", None)
-    )
-    source_payload["round12_optimizer_schedule_contract"] = optimizer_contract
-    return parent_model, source_payload, source_path, actual_sha
-
-
-def _scratch_compact_components(config: Mapping[str, Any], device: torch.device):
-    """Construct every weight from config; fit normalization on TRAIN600 only."""
-    from channelthermal.training.content_hypergraph_task_v2 import build_thermal_content_hypergraph_task_v2
-    from channelthermal.content_hypergraph import ThermalContentHypergraphAdapterV2
-    from honf_forward_core.continuous_joint.unified import UnifiedJointCore, CompactUnifiedJointCore
-
-    recipe = read_json(config["dataset"]["base_recipe_path"])
-    recipe.update(data_path=config["dataset"]["data_path"], manifest=config["dataset"]["manifest_path"])
-    if config["dataset"].get("atlas_directory"):
-        recipe["atlas_directory"] = config["dataset"]["atlas_directory"]
-    _, base, _ = build_thermal_content_hypergraph_task_v2(recipe, device="cpu")
-    if len(base.training_case_ids) != 600 or len(base.validation_case_ids) != 89:
-        raise ValueError("Scratch formal factory must provide TRAIN600 and canonical VAL89.")
-    provider_identity = copy.deepcopy(dict(base.identity_payload()))
-    state = base.model.state_payload()
-    base_config = base.model.core.get_config()
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(int(config["training"]["seed"]))
-        fresh = UnifiedJointCore(base_config, input_dataset="thermal", routing_mode="hypergraph")
-        # Copy only newly generated random tensors inside this initialization;
-        # no saved model or checkpoint enters this path.
-        core = (CompactUnifiedJointCore.from_unified_parent(fresh, compact_mode="soft_only")
-                if _is_softonly(config) else CompactUnifiedJointCore.from_unified_parent(fresh))
-    core.set_execution_options(**config["execution"]["options"])
-    for name, value in config["initialization"]["fresh_controller_lambda0"].items():
-        core.joint_budget.duals[name].set_calibrated_lambda0(float(value))
-    if int(core.joint_epoch) != 3000 or int(core.joint_macro_clock) != 0:
-        raise RuntimeError("Scratch core must start with fresh work-controller clocks.")
-    core.set_compact_phase(0, arm="soft_only" if _is_softonly(config) else "merge")
-    adapter = ThermalContentHypergraphAdapterV2(
-        state["normalization_stats"], core=core,
-        nx=state["native_grid_nx_ny"][0], ny=state["native_grid_nx_ny"][1],
-        environment_nx=state["environment_grid_nx_ny"][0],
-        environment_ny=state["environment_grid_nx_ny"][1],
-    ).to(device)
-    recipe_optimizer = recipe["optimizer"]
-    lr = float(recipe_optimizer["lr"])
-    schedule = asdict(ScheduleSpec(peak_lr=lr, warmup_start_lr=lr, warmup_epochs=0,
-        hold_through_epoch=1000, total_epochs=1001, final_lr=lr))
-    contract = [{"name": "formal_joint", "parameter_names": [
-        n for n, p in adapter.named_parameters() if p.requires_grad], "schedule": schedule,
-        "weight_decay": float(recipe_optimizer["weight_decay"]),
-        "betas": list(recipe_optimizer["betas"]), "eps": float(recipe_optimizer["eps"])}]
-    payload = {"epoch": 0, "experiment_identity": {"provider_identity": provider_identity,
-        "optimizer_schedule_contract": contract}, "compact_parameter_migration":
-        copy.deepcopy(core.compact_parameter_migration), "pretrained_weights_loaded": False}
-    path = _initialization_path(config)
-    return adapter, payload, path, sha256_file(path)
-
-
 def _source_components(config: Mapping[str, Any], device: torch.device):
     init = config["initialization"]
-    if _is_round12_scratch(config):
-        return _scratch_compact_components(config, device)
     source_path = Path(init["source_checkpoint"]).expanduser().resolve(strict=True)
     expected_sha = init.get("source_sha256")
     actual_sha = sha256_file(source_path)
     if expected_sha and actual_sha != expected_sha:
         raise ValueError("Source initialization checkpoint bytes differ from the optional preset SHA256.")
-    if init.get("source_kind") == "research_run_checkpoint_adaptation":
-        return _round12_adaptation_source_components(config, device)
     from .compat import load_trusted_checkpoint
     if init.get("source_kind") == "classic_identity_metadata_only":
         # The classic weight file is bound as provenance, but it is never
@@ -789,29 +553,6 @@ def _source_components(config: Mapping[str, Any], device: torch.device):
         adapter.train(True)
         return adapter, source_payload, source_path, actual_sha
 
-    source_payload = load_trusted_checkpoint(source_path, map_location="cpu")
-    identity = source_payload.get("experiment_identity", {})
-    recipe = identity.get("recipe", {})
-    if (identity.get("family") != "unified_continuous_joint_native_v1"
-            or identity.get("workflow") != "continuous_joint_train_v1"
-            or recipe.get("dataset") != "thermal"
-            or recipe.get("arm") != init.get("source_arm")
-            or int(source_payload.get("epoch", -1)) != int(init.get("source_parent_age", -2))):
-        raise ValueError("Source is not the declared completed Thermal U-triplet model export.")
-    if source_payload["experiment_identity"]["provider_identity"].get("source_binding", {}).get(
-            "dataset_path") != config["dataset"].get("data_path"):
-        raise ValueError("Preset dataset path differs from the source checkpoint's packed dataset binding.")
-    from .continuous_joint_runtime import load_continuous_joint_checkpoint
-    source_model, _, validated = load_continuous_joint_checkpoint(source_path, device=str(device))
-    if int(validated.get("epoch", -1)) != int(init["source_parent_age"]):
-        raise ValueError("Validated source loader returned a different parent age.")
-    core = getattr(source_model, "core", source_model)
-    set_options = getattr(core, "set_execution_options", None)
-    if not callable(set_options):
-        raise TypeError("Loaded continuous core lacks the maintained execution-options API.")
-    set_options(**config["execution"]["options"])
-    source_model.train(True)
-    return source_model, source_payload, source_path, actual_sha
 
 
 def _read_run_checkpoint(run_dir: Path, selector: str = "latest") -> tuple[dict[str, Any], Path]:
@@ -843,31 +584,6 @@ def _model_from_run_payload(payload: Mapping[str, Any], device: torch.device):
     model = ThermalContentHypergraphAdapterV2.from_state_payload(
         adapter_state, device=str(device), state_dict=payload["model_state_dict"],
     )
-    core = getattr(model, "core", model)
-    compact_adaptation = provider_identity.get("recipe", {}).get("compact_adaptation")
-    saved_migration = (compact_adaptation.get("parameter_migration")
-                       if isinstance(compact_adaptation, Mapping) else None)
-    if saved_migration is not None:
-        if not isinstance(saved_migration, Mapping):
-            raise ValueError("Compact checkpoint migration metadata must be a named mapping.")
-        actual_core_names = dict(core.named_parameters())
-        actual_new_names = {name for name in actual_core_names if name.startswith("compact_retrieval.")}
-        declared_new_names = tuple(map(str, saved_migration.get("new_names", ())))
-        if (not declared_new_names or len(set(declared_new_names)) != len(declared_new_names)
-                or set(declared_new_names) != actual_new_names):
-            raise ValueError("Saved compact new-parameter names differ from the reconstructed retrieval module.")
-        declared_dropped = tuple(map(str, saved_migration.get("dropped_names", ())))
-        if (len(set(declared_dropped)) != len(declared_dropped)
-                or not set(declared_dropped) <= set(actual_core_names)):
-            raise ValueError("Saved compact optimizer-exclusion names differ from the reconstructed core.")
-        for key in ("copied_names", "optimizer_excluded_names", "state_dropped_names",
-                    "cloned_route_and_reader_names"):
-            values = tuple(map(str, saved_migration.get(key, ())))
-            if len(values) != len(set(values)):
-                raise ValueError(f"Saved compact migration field {key!r} contains duplicate names.")
-        if not set(map(str, saved_migration.get("optimizer_excluded_names", ()))) <= set(declared_dropped):
-            raise ValueError("Saved compact optimizer exclusions are not covered by the dropped-name contract.")
-        core.compact_parameter_migration = copy.deepcopy(dict(saved_migration))
     return model
 
 
@@ -914,98 +630,19 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
         self._research_normalization_mode = str(config["initialization"]["normalization_mode"])
         self._classic_provider_identity = (None if classic_provider_identity is None else
                                            copy.deepcopy(dict(classic_provider_identity)))
-        self._round12 = copy.deepcopy(dict(config.get("round12", {}))) if (
-            config["initialization"]["normalization_mode"] in ("inherit_parent_train_stats", "scratch_train600_stats")
-        ) else None
-        self._round12_parent_macro_clock = int(
-            config["initialization"].get("clock_mapping", {}).get("parent_macro_clock", 0)
-        )
-        self._round12_local_epoch = 0
         self.sampling_dataset_id = _sampling_dataset_id(self.identity_payload())
-        if _is_softonly(config):
-            from .thermal_soft_organization import SoftOrganizationRuntime
-            self.soft_organization = SoftOrganizationRuntime(self)
-
-    def before_optimizer_step(self, model, optimizer, losses, work, *, epoch, update_index):
-        runtime = getattr(self, "soft_organization", None)
-        if runtime is not None:
-            runtime.before_step(model, optimizer, losses, work, epoch=epoch, update_index=update_index)
-
-    def completed_training_epoch(self, model, engine, epoch, output, row):
-        runtime = getattr(self, "soft_organization", None)
-        if runtime is not None:
-            runtime.completed_epoch(model, engine, epoch, Path(output), row)
 
     def training_state_dict(self):
-        base_reader = getattr(super(ResearchThermalProvider, self), "training_state_dict", None)
-        base_state = base_reader() if callable(base_reader) else {}
-        if self._round12 is None:
-            return copy.deepcopy(base_state) if isinstance(base_state, Mapping) else {}
-        core = getattr(self.model, "core", self.model)
-        compact_export = getattr(core, "export_compact_state", None)
-        if not callable(compact_export):
-            raise TypeError("Round12 checkpointing requires the compact core's explicit state export.")
-        current_macro = getattr(core, "joint_macro_clock", None)
-        if isinstance(current_macro, torch.Tensor):
-            current_macro = int(current_macro.detach().cpu())
-        if current_macro is None:
-            raise ValueError("Round12 compact core omitted its native joint macro clock.")
-        current_update = getattr(core, "joint_update_index", None)
-        if isinstance(current_update, torch.Tensor):
-            current_update = int(current_update.detach().cpu())
-        current_epoch = getattr(core, "joint_epoch", None)
-        if isinstance(current_epoch, torch.Tensor):
-            current_epoch = int(current_epoch.detach().cpu())
-        result = {
-            "schema": "thermal_compact_round12_provider_state_v1",
-            "base": copy.deepcopy(dict(base_state)) if isinstance(base_state, Mapping) else {},
-            "compact_state": copy.deepcopy(compact_export()),
-            "clocks": {
-                **copy.deepcopy(dict(self._research_config["initialization"]["clock_mapping"])),
-                "local_epoch": int(compact_export().get("local_epoch", 0)),
-                "controller_epoch": int(current_epoch),
-                "macro_update_index": int(current_update),
-                "joint_macro_clock": int(current_macro),
-                "optimizer_updates_since_parent": int(current_macro) - self._round12_parent_macro_clock,
-            },
-        }
-        runtime = getattr(self, "soft_organization", None)
-        if runtime is not None:
-            result["soft_organization"] = runtime.state_dict()
-        return result
+        reader = getattr(super(ResearchThermalProvider, self), "training_state_dict", None)
+        state = reader() if callable(reader) else {}
+        return copy.deepcopy(state) if isinstance(state, Mapping) else {}
 
     def load_training_state_dict(self, state):
-        if not isinstance(state, Mapping) or state.get("schema") != "thermal_compact_round12_provider_state_v1":
-            loader = getattr(super(ResearchThermalProvider, self), "load_training_state_dict", None)
-            if callable(loader):
-                loader(state)
-            elif state not in ({}, None):
-                raise ValueError("Round12 provider received an unsupported checkpoint state wrapper.")
-            return
-        base_loader = getattr(super(ResearchThermalProvider, self), "load_training_state_dict", None)
-        if callable(base_loader):
-            base_loader(state.get("base", {}))
-        core = getattr(self.model, "core", self.model)
-        compact_loader = getattr(core, "load_compact_state", None)
-        if not callable(compact_loader):
-            raise TypeError("Round12 resume requires the compact core's explicit state loader.")
-        compact_loader(state["compact_state"])
-        runtime = getattr(self, "soft_organization", None)
-        if runtime is not None:
-            runtime.load_state_dict(state["soft_organization"])
-        clocks = state.get("clocks")
-        expected = self._research_config["initialization"]["clock_mapping"]
-        if not isinstance(clocks, Mapping) or any(clocks.get(key) != expected[key] for key in (
-                "sampler_parent_epoch", "controller_parent_coordinate", "parent_update_index",
-                "parent_macro_clock")):
-            raise ValueError("Round12 provider checkpoint clocks differ from this run's sealed parent mapping.")
-        actual_macro = getattr(core, "joint_macro_clock", None)
-        if isinstance(actual_macro, torch.Tensor):
-            actual_macro = int(actual_macro.detach().cpu())
-        if actual_macro != clocks.get("joint_macro_clock"):
-            raise ValueError("Round12 compact state and saved macro-update clock disagree.")
-        if int(clocks.get("optimizer_updates_since_parent", -1)) != int(actual_macro) - self._round12_parent_macro_clock:
-            raise ValueError("Round12 cumulative optimizer-update count differs from the inherited core clock.")
+        loader = getattr(super(ResearchThermalProvider, self), "load_training_state_dict", None)
+        if callable(loader):
+            loader(state)
+        elif state not in ({}, None):
+            raise ValueError("Unsupported provider checkpoint state.")
 
     def identity_payload(self) -> Mapping[str, Any]:
         from channelthermal.training.content_hypergraph_task import _ids_sha256
@@ -1053,8 +690,6 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "protocol": TASK_SCHEMA,
                 "dataset_profile": self._research_membership,
                 "normalization_fit_scope": (
-                    "freshly fitted original TRAIN600 only; no pretrained model" if _is_round12_scratch(self._research_config) else
-                    "inherited U-H full TRAIN600 statistics; no refit" if self._round12 is not None else
                     "original TRAIN600 only; saved classic statistics reused" if classic_identity is not None else
                     "original TRAIN600 only" if self._research_normalization_mode == "fresh_full_train600_stats" else
                     "inherited source TRAIN150; unchanged"
@@ -1085,11 +720,7 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "microbatch_size": self._identity_microbatch_size,
                 "primary_queries_per_case": self.primary_queries,
                 "total_epochs": self.total_epochs,
-                "optimizer": ("fresh AdamW over random compact weights"
-                              if _is_round12_scratch(self._research_config) else
-                              "fresh AdamW source-terminal groups over the compact U-H parameter migration"
-                              if self._round12 is not None else
-                              "fresh AdamW formal_joint group over all active U-core parameters"
+                "optimizer": ("fresh AdamW formal_joint group over all active U-core parameters"
                               if classic_identity is not None else
                               "AdamW with fresh moments and source-compatible named groups"),
                 "optimizer_schedule": {
@@ -1132,21 +763,8 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 "diagnostic_case_limit": self._research_case_limit,
                 "execution_options": copy.deepcopy(self._research_config["execution"]["options"]),
                 "optimizer_moments": "reset on source initialization; retained only on exact in-run resume",
-                "compact_adaptation": (None if self._round12 is None else {
-                    "schema": self._round12["schema"],
-                    "role": self._round12["role"],
-                    "compact_arm": self._round12["compact_arm"],
-                    "parameter_migration": copy.deepcopy(getattr(
-                        getattr(self.model, "core", self.model), "compact_parameter_migration", None,
-                    )),
-                    "clock_mapping": copy.deepcopy(self._research_config["initialization"]["clock_mapping"]),
-                    "hard_cut_after_local_epoch": self._round12["cut_after_local_epoch"],
-                }),
             },
         })
-        # Pre-Round12 identities omitted inactive compact metadata entirely.
-        if self._round12 is None:
-            payload["recipe"].pop("compact_adaptation", None)
         _restore_checkpoint_identity_metadata(self, payload)
         self.sampling_dataset_id = _sampling_dataset_id(payload)
         return payload
@@ -1156,15 +774,7 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
         if model is not self.model or arm != model.architecture:
             raise ValueError("Research optimizer requested for the wrong bound model.")
         named_parameters = dict(model.named_parameters())
-        if self._round12 is None:
-            named = {name for name, parameter in named_parameters.items() if parameter.requires_grad}
-            allowed_frozen: set[str] = set()
-        else:
-            # The Round12 hard cut stops policy gradients but keeps the same
-            # named AdamW groups and moments, so an exact resume has one stable
-            # optimizer contract on both sides of the transition.
-            named = set(named_parameters)
-            allowed_frozen = _round12_model_parameter_names(model)
+        named = {name for name, parameter in named_parameters.items() if parameter.requires_grad}
         groups = []
         covered: set[str] = set()
         for source in self._research_optimizer_contract:
@@ -1191,16 +801,8 @@ class ResearchThermalProvider(ThermalContentHypergraphTaskV2):
                 eps=float(source.get("eps", 1.0e-8)),
             ))
         trainable = {name for name, parameter in named_parameters.items() if parameter.requires_grad}
-        if self._round12 is None:
-            if covered != trainable:
-                raise ValueError(f"Source optimizer groups omit current trainable parameters: {sorted(trainable-covered)}")
-        elif covered != trainable | (covered & allowed_frozen):
-            raise ValueError(
-                "Round12 optimizer contract must include every trainable parameter and may retain only "
-                "the declared frozen compatibility policy parameters."
-            )
-        elif not allowed_frozen <= covered:
-            raise ValueError("Round12 optimizer contract lost a frozen compatibility policy parameter.")
+        if covered != trainable:
+            raise ValueError(f"Source optimizer groups omit current trainable parameters: {sorted(trainable-covered)}")
         return tuple(groups)
 
     def _schedule_payload(self):
@@ -1241,10 +843,7 @@ class ResearchTrainingEngine(TrainingEngine):
                  fresh_model_schedule: Mapping[str, Any] | None = None,
                  execution_options: Mapping[str, Any] | None = None,
                  sampler_parent_epoch: int | None = None,
-                 controller_parent_coordinate: int | None = None,
-                 compact_arm: str | None = None,
-                 compact_cut_epoch: int = 40,
-                 round12_clock_mapping: Mapping[str, Any] | None = None):
+                 controller_parent_coordinate: int | None = None):
         super().__init__(config, device=device, selection=selection)
         self.parent_age = int(parent_age)
         self.fresh_model_schedule = None if fresh_model_schedule is None else dict(fresh_model_schedule)
@@ -1255,13 +854,6 @@ class ResearchTrainingEngine(TrainingEngine):
         self.controller_parent_coordinate = int(
             self.parent_age if controller_parent_coordinate is None else controller_parent_coordinate
         )
-        self.compact_arm = compact_arm
-        self.compact_cut_epoch = int(compact_cut_epoch)
-        self.round12_clock_mapping = copy.deepcopy(dict(round12_clock_mapping or {}))
-        if compact_arm is not None and compact_arm not in ("common", "singleton", "merge", "soft_only"):
-            raise ValueError("Compact arm must be common, singleton, or merge.")
-        if self.compact_cut_epoch < 1:
-            raise ValueError("Compact hard-cut epoch must be positive.")
         self.nominal_microbatch_cases = int(config.microbatch_cases)
         self.runtime_microbatch_cases = self.nominal_microbatch_cases
         self.nominal_execution_options = _validated_execution_options(
@@ -1278,30 +870,6 @@ class ResearchTrainingEngine(TrainingEngine):
         metadata = self._last_update_execution_metadata
         self._last_update_execution_metadata = None
         return metadata
-
-    def _make_optimizer(self, model, provider, arm, initial_epoch, optimizer_seed, *, group_specs=None):
-        if self.compact_arm is None:
-            return super()._make_optimizer(
-                model, provider, arm, initial_epoch, optimizer_seed, group_specs=group_specs,
-            )
-        frozen_names = _round12_model_parameter_names(model)
-        if not frozen_names:
-            return super()._make_optimizer(
-                model, provider, arm, initial_epoch, optimizer_seed, group_specs=group_specs,
-            )
-        named = dict(model.named_parameters())
-        prior_flags = {name: named[name].requires_grad for name in frozen_names}
-        try:
-            for name in frozen_names:
-                named[name].requires_grad_(True)
-            return super()._make_optimizer(
-                model, provider, arm, initial_epoch, optimizer_seed, group_specs=group_specs,
-            )
-        finally:
-            for name, flag in prior_flags.items():
-                named[name].requires_grad_(flag)
-                if not flag:
-                    named[name].grad = None
 
     def bind_execution_runtime(self, path: str | Path, *, nominal_microbatch_cases: int,
                                default_execution_options: Mapping[str, Any] | None = None) -> None:
@@ -1406,20 +974,6 @@ class ResearchTrainingEngine(TrainingEngine):
         return fit_epoch if self.fresh_model_schedule is not None else self.sampler_parent_epoch + fit_epoch
 
     def sampler_epoch_contract(self):
-        if self.compact_arm is not None:
-            return {
-                "schema": "research_round12_clock_mapping_v1",
-                "source_parent_age": self.parent_age,
-                "sampler_parent_epoch": self.sampler_parent_epoch,
-                "controller_parent_coordinate": self.controller_parent_coordinate,
-                "fit_epoch_to_sampler_epoch": "sampler_parent_epoch + local_experiment_epoch",
-                "fit_epoch_to_model_clock": "controller_parent_coordinate + local_experiment_epoch",
-                "fit_epoch_to_optimizer_schedule": "local_experiment_epoch; constant source terminal learning rate",
-                "parent_joint_update_index": int(self._round12_clock("parent_update_index")),
-                "parent_joint_macro_clock": int(self._round12_clock("parent_macro_clock")),
-                "macro_update_index_mapping": "zero_based_within_local_epoch; native_macro_clock_continues_from_parent",
-                "local_checkpoint_epoch_remains_local": True,
-            }
         return {
             "schema": "research_parent_age_mapping_v1",
             "parent_age": self.parent_age,
@@ -1432,12 +986,6 @@ class ResearchTrainingEngine(TrainingEngine):
             "fresh_model_schedule": copy.deepcopy(self.fresh_model_schedule),
             "local_checkpoint_epoch_remains_local": True,
         }
-
-    def _round12_clock(self, field: str) -> int:
-        value = getattr(self, "round12_clock_mapping", {}).get(field)
-        if type(value) is not int:
-            return 0
-        return value
 
     def _run_update(self, *args, epoch: int, **kwargs):
         self._last_update_execution_metadata = None
@@ -1459,35 +1007,6 @@ class ResearchTrainingEngine(TrainingEngine):
         update_index = kwargs.get("update_index")
         if phase is None or arm is None or type(update_index) is not int:
             raise TypeError("Research optimizer updates require phase, arm, and macro update index.")
-        native_core = getattr(model, "core", model)
-        soft_runtime = getattr(provider, "soft_organization", None)
-        if soft_runtime is not None:
-            soft_runtime.before_update(self, model, provider, optimizer, int(epoch), update_index)
-        elif _is_round12_scratch(getattr(provider, "_research_config", {"initialization": {}})):
-            if self._execution_runtime_path is None:
-                raise RuntimeError("Scratch phase transitions require the owned run directory.")
-            _scratch_round12_boundary(self._execution_runtime_path.parent, model, provider,
-                                      local_epoch=int(epoch), update_index=update_index, device=self.device)
-        if self.compact_arm is not None:
-            phase_setter = getattr(native_core, "set_compact_phase", None)
-            if not callable(phase_setter):
-                raise TypeError("Round12 training requires the compact core's local phase API.")
-            if (self.compact_arm == "merge" and int(epoch) == self.compact_cut_epoch + 1
-                    and not bool(getattr(native_core, "compact_cut_active").detach().cpu())):
-                # Normal operation uses `honf_research activate-cut` between
-                # the ordinary e40 before-state and the after-state. This
-                # fallback makes an explicit continuation from an uncut e40
-                # checkpoint apply the declared transition before update 41.
-                activate_cut = getattr(native_core, "activate_hard_cut", None)
-                if not callable(activate_cut):
-                    raise TypeError("Round12 R1 requires the compact core's persistent hard-cut transition.")
-                activate_cut()
-            # The core requires the hard cut to be activated while its saved
-            # local phase is still 40. In particular, an uncut e40 resume must
-            # not first advance the persistent phase to 41.
-            phase_setter(int(epoch), arm=self.compact_arm)
-            if hasattr(provider, "_round12_local_epoch"):
-                provider._round12_local_epoch = int(epoch)
         if self._execution_runtime_dirty:
             self._write_execution_runtime(last_oom={
                 "status": "execution_only_resume_override",
@@ -1512,17 +1031,6 @@ class ResearchTrainingEngine(TrainingEngine):
                 update_result = super()._run_update(
                     model, provider, optimizer, microbatches, *args[4:], epoch=model_epoch, **kwargs,
                 )
-                if (self.compact_arm == "merge"
-                        and 21 <= int(epoch) <= self.compact_cut_epoch):
-                    if (not isinstance(update_result, tuple) or not update_result
-                            or not isinstance(update_result[0], Mapping)):
-                        raise TypeError("Round12 soft-merge updates must return the maintained loss mapping.")
-                    missing_structural = {"compact_tie", "compact_capacity"} - set(update_result[0])
-                    if missing_structural:
-                        raise RuntimeError(
-                            "Round12 soft-merge additive losses were not returned for training history: "
-                            f"{sorted(missing_structural)}"
-                        )
                 self._last_update_execution_metadata = {
                     "successful_microbatch_count": len(microbatches),
                     "oom_retry_attempts": attempt,
@@ -1602,7 +1110,7 @@ class ResearchTrainingEngine(TrainingEngine):
         import gc
         native_core = getattr(model, "core", model)
         for name in ("_joint_entries", "_context_entries", "_budgeted_entries",
-                     "_budgeted_observations", "_compact_loss_entries"):
+                     "_budgeted_observations"):
             if isinstance(getattr(native_core, name, None), list):
                 setattr(native_core, name, [])
         optimizer.zero_grad(set_to_none=True)
@@ -1665,20 +1173,7 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
         recipe["atlas_directory"] = dataset["atlas_directory"]
     else:
         recipe.pop("atlas_directory", None)
-    supplied_stats = None
-    if config["initialization"]["normalization_mode"] in ("inherit_parent_train_stats", "scratch_train600_stats"):
-        adapter_state = checkpoint_payload["experiment_identity"]["provider_identity"]["adapter_state"]
-        supplied_stats = adapter_state.get("normalization_stats")
-        if not isinstance(supplied_stats, Mapping):
-            raise ValueError("Round12 source checkpoint is missing inherited TRAIN600 normalization statistics.")
-    if supplied_stats is None:
-        _, base, _ = build_thermal_content_hypergraph_task_v2(recipe, device="cpu")
-    else:
-        # The factory accepts saved parent statistics directly and must not fit
-        # a replacement normalizer from the full source dataset.
-        _, base, _ = build_thermal_content_hypergraph_task_v2(
-            recipe, device="cpu", normalization_stats=supplied_stats,
-        )
+    _, base, _ = build_thermal_content_hypergraph_task_v2(recipe, device="cpu")
     source_train600 = tuple(case_id for case_id in base.catalog_case_ids
                             if base.case_split_by_id[case_id] == "train")
     fixed_train150 = tuple(base.training_case_ids)
@@ -1707,7 +1202,6 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
         train_ids = (fixed_train150 if config["training"]["membership"] == "fixed25_train150_dev22"
                      else source_train600)
     expected_full_membership = (
-        "scratch_train600_exposed_val89" if _is_round12_scratch(config) else
         "classic_train600_exposed_val89"
         if config["initialization"]["normalization_mode"] == "classic_train600_stats"
         else "parent_train600_exposed_val89"
@@ -1724,64 +1218,21 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
             raise ValueError("Diagnostic case IDs must be a unique subset of the configured training membership.")
         train_ids = selected
     if fit_fresh_normalizer:
-        if config["training"]["membership"] != "original_train600_fixed25_dev22" or diagnostic:
-            raise ValueError("Fresh normalization is available only for a complete original TRAIN600 fit.")
-        normalizer = fit_global_normalizer(dataset["data_path"], source_train600)
-        from channelthermal.content_hypergraph import ThermalContentHypergraphAdapterV2
-        old = model
-        fresh_core = _fresh_core_from_template(
-            old.core,
-            seed=int(config["training"].get("seed", 0)),
-            execution_options=config["execution"]["options"],
-            controller_lambda0=config["initialization"]["fresh_controller_lambda0"],
-        )
-        model = ThermalContentHypergraphAdapterV2(
-            normalizer.stats,
-            core=fresh_core,
-            nx=old.nx,
-            ny=old.ny,
-            environment_nx=old.environment_nx,
-            environment_ny=old.environment_ny,
-        ).to(next(old.parameters()).device)
-    else:
-        adapter_state = checkpoint_payload["experiment_identity"]["provider_identity"]["adapter_state"]
-        normalizer = H5Normalizer({key: np.asarray(value, dtype=np.float32)
-                                   for key, value in adapter_state["normalization_stats"].items()})
+        raise ValueError("The retained U-H profile reuses its saved TRAIN600 normalizer.")
+    adapter_state = checkpoint_payload["experiment_identity"]["provider_identity"]["adapter_state"]
+    normalizer = H5Normalizer({key: np.asarray(value, dtype=np.float32)
+                               for key, value in adapter_state["normalization_stats"].items()})
 
-    # The v2 factory has already loaded the full formal TRAIN600/VAL89 panels.
-    # Reuse those arrays for Round12 when their identities and inherited stats
-    # match exactly, avoiding a second full in-memory dataset materialization.
-    reused_factory_cases = False
-    if supplied_stats is not None:
-        factory_normalizer_key = base.model.state_payload().get("normalizer_key")
-        factory_train_ids = tuple(map(str, getattr(base, "training_case_ids", ())))
-        factory_validation_ids = tuple(map(str, getattr(base, "validation_case_ids", ())))
-        if (factory_normalizer_key == config["round12"].get("expected_parent_normalizer_key", model.normalizer_key)
-                and set(factory_train_ids) == set(train_ids)
-                and set(factory_validation_ids) == set(dev_ids)
-                and len(base.training_cases) == len(factory_train_ids)
-                and len(base.validation_cases) == len(factory_validation_ids)):
-            train_by_id = dict(zip(factory_train_ids, base.training_cases))
-            validation_by_id = dict(zip(factory_validation_ids, base.validation_cases))
-            training_cases = tuple(train_by_id[key] for key in train_ids)
-            validation_cases = tuple(validation_by_id[key] for key in dev_ids)
-            reused_factory_cases = True
-    if not reused_factory_cases:
-        # The base v2 task may hold a different profile's examples. Drop them
-        # before loading exactly the selected IDs through its established reader.
-        base.training_cases = ()
-        base.validation_cases = ()
-        import gc
-        gc.collect()
-        training_cases = _read_selected_cases(
-            dataset["data_path"], train_ids, split="train", normalizer=normalizer, include_grid=False,
-        )
-        validation_cases = _read_selected_cases(
-            dataset["data_path"], dev_ids, split="test", normalizer=normalizer, include_grid=False,
-        )
-    else:
-        base.training_cases = ()
-        base.validation_cases = ()
+    base.training_cases = ()
+    base.validation_cases = ()
+    import gc
+    gc.collect()
+    training_cases = _read_selected_cases(
+        dataset["data_path"], train_ids, split="train", normalizer=normalizer, include_grid=False,
+    )
+    validation_cases = _read_selected_cases(
+        dataset["data_path"], dev_ids, split="test", normalizer=normalizer, include_grid=False,
+    )
     base.model = base.adapter = model
     base.device = next(model.parameters()).device
     provider = ResearchThermalProvider(
@@ -1803,50 +1254,10 @@ def _build_research_provider(config: Mapping[str, Any], model, checkpoint_payloa
     if full_train_parent_mode:
         expected_sampling_id = checkpoint_payload.get("classic_sampling_dataset_id")
         if expected_sampling_id is None:
-            expected_sampling_id = checkpoint_payload.get("round12_parent_sampling_dataset_id")
-        if expected_sampling_id is None:
             expected_sampling_id = checkpoint_payload.get("experiment_identity", {}).get("sampling_dataset_id")
         if expected_sampling_id and provider.sampling_dataset_id != expected_sampling_id:
             raise ValueError("Inherited full-data provider changed the source TRAIN sampling namespace.")
     return model, provider
-
-
-def _fresh_core_from_template(source_core, *, seed: int, execution_options: Mapping[str, Any],
-                              controller_lambda0: Mapping[str, float]):
-    """Create architecture-matched weights and fresh controller state from config alone."""
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(int(seed))
-        core = type(source_core).from_config(source_core.get_config())
-    core.set_execution_options(**dict(execution_options))
-    joint_budget = getattr(core, "joint_budget", None)
-    duals = getattr(joint_budget, "duals", None)
-    if duals is None or set(duals) != set(controller_lambda0):
-        raise ValueError("Fresh model must expose exactly the calibrated M/E/context budget duals.")
-    for name, value in controller_lambda0.items():
-        dual = duals[name]
-        setter = getattr(dual, "set_calibrated_lambda0", None)
-        if not callable(setter):
-            raise TypeError(f"Fresh {name} controller lacks set_calibrated_lambda0().")
-        setter(float(value))
-        # A from-config core is newly initialized, so these fields should be
-        # empty. Explicitly clear them to make the fresh-state contract robust
-        # to architecture config defaults that may seed controller buffers.
-        for field in ("macro_step", "window_step_count", "dual_update_count"):
-            counter = getattr(dual, field, None)
-            if isinstance(counter, torch.Tensor):
-                counter.zero_()
-        residual_sum = getattr(dual, "window_residual_sum", None)
-        if isinstance(residual_sum, torch.Tensor):
-            residual_sum.zero_()
-    set_clock = getattr(core, "set_training_clock", None)
-    if callable(set_clock):
-        # e3000 is the native continuous schedule's open boundary, not parent fit age.
-        set_clock(3000, 0)
-    if hasattr(core, "joint_budget"):
-        schedule = core.joint_budget.schedule()
-        if schedule.get("absolute_epoch") != 3000 or schedule.get("sparse_age") != 0:
-            raise RuntimeError("Fresh native work controller did not initialize at its open boundary.")
-    return core
 
 
 def _execution_options_for_run(run_dir: Path, config: Mapping[str, Any],
@@ -1970,10 +1381,6 @@ def _engine_for(config, *, device: torch.device, parent_age: int, microbatch: in
         controller_parent_coordinate=config["initialization"].get("clock_mapping", {}).get(
             "controller_parent_coordinate", parent_age,
         ),
-        compact_arm=config.get("round12", {}).get("compact_arm"),
-        compact_cut_epoch=(40 if _is_softonly(config) else
-                           int(config.get("round12", {}).get("cut_after_local_epoch", 40))),
-        round12_clock_mapping=config["initialization"].get("clock_mapping"),
     )
 
 
@@ -1986,10 +1393,10 @@ def _write_run_manifest(output: Path, *, config: Mapping[str, Any], config_path:
         "schema": RESEARCH_SCHEMA,
         "config": copy.deepcopy(dict(config)),
         "config_path": str(config_path),
-        "source_checkpoint": None if _is_round12_scratch(config) else str(source_path),
-        "initialization_recipe": str(source_path) if _is_round12_scratch(config) else None,
-        "source_checkpoint_sha256": None if _is_round12_scratch(config) else source_sha,
-        "initialization_recipe_sha256": source_sha if _is_round12_scratch(config) else None,
+        "source_checkpoint": str(source_path),
+        "initialization_recipe": None,
+        "source_checkpoint_sha256": source_sha,
+        "initialization_recipe_sha256": None,
         "source_alias": config["initialization"].get("source_alias", ""),
         "source_epoch": int(config["initialization"]["source_parent_age"]),
         "optimizer_moments": "fresh on source initialization; exact-run checkpoint on resume",
@@ -2077,15 +1484,6 @@ def _fit_with_retries(engine: ResearchTrainingEngine, model, provider, output: P
                 allow_microbatch_change=allow_microbatch_change,
                 allow_horizon_extension=allow_horizon_extension,
             )
-            if _is_softonly(provider._research_config):
-                payload, _ = _read_run_checkpoint(output, "latest")
-                if (int(payload["epoch"]) == int(provider._research_config["training"]["local_horizon"])
-                        == active_engine.config.total_epochs):
-                    from .thermal_soft_reviews import run_final_validation
-                    runtime = provider.soft_organization
-                    remaining = max(0.0, 14400.0 - runtime.state["review_elapsed_seconds"])
-                    result["softonly_terminal_validation"] = run_final_validation(
-                        output, str(active_engine.device), budget_seconds=remaining)
             return result
         except (torch.cuda.OutOfMemoryError, RuntimeError) as error:
             if isinstance(error, ResearchLocalOOMExhausted):
@@ -2265,19 +1663,13 @@ def _experiment_identity(config: Mapping[str, Any], provider: ResearchThermalPro
         "config_sha256": _canonical_sha256(config),
         "training_membership": config["training"]["membership"],
         "normalization_mode": config["initialization"]["normalization_mode"],
-        "source_checkpoint": None if _is_round12_scratch(config) else str(source_path),
-        "initialization_recipe": str(source_path) if _is_round12_scratch(config) else None,
-        "source_checkpoint_sha256": None if _is_round12_scratch(config) else source_sha,
-        "initialization_recipe_sha256": source_sha if _is_round12_scratch(config) else None,
+        "source_checkpoint": str(source_path),
+        "initialization_recipe": None,
+        "source_checkpoint_sha256": source_sha,
+        "initialization_recipe_sha256": None,
         "source_parent_age": int(config["initialization"]["source_parent_age"]),
         "training_parent_age": _parent_age(config),
-        "source_model_initialization": (
-            "fresh_random_compact_core; no checkpoint read; no pretrained weights or optimizer state"
-            if _is_round12_scratch(config) else
-            "fresh_random_core_from_declared_architecture; source weights not loaded"
-            if _parent_age(config) == 0 and int(config["initialization"]["source_parent_age"]) > 0
-            else "model_weights_only; optimizer moments reset"
-        ),
+        "source_model_initialization": "fresh_random_core_from_declared_architecture; source weights not loaded",
         "classic_reference_identity_path": config["initialization"].get("source_identity_path"),
         "classic_checkpoint_weights_deserialized": (
             False if config["initialization"].get("source_kind") == "classic_identity_metadata_only" else None
@@ -2332,10 +1724,10 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
         raise ValueError("Fresh full-TRAIN profiles are available only for a full-membership fit.")
 
     output_path = Path(output).expanduser().resolve(strict=False)
-    if output_path.exists() and (_is_round12_scratch(config) or not output_path.is_dir() or any(output_path.iterdir())):
+    if output_path.exists() and (not output_path.is_dir() or any(output_path.iterdir())):
         raise FileExistsError(f"New research fits require an empty output directory: {output_path}")
     source_path = _initialization_path(config)
-    source_size = (64 * 1024**2 if _is_round12_scratch(config) else source_path.stat().st_size)
+    source_size = source_path.stat().st_size
     estimate = _estimate_run_bytes(config, epochs=stop_after, source_size=source_size,
                                    diagnostic=diagnostic_only)
     peak_estimate = 2 * source_size + 256 * 1024**2
@@ -2345,16 +1737,12 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
     permitted = _permitted_order(device, devices)
     selected_device, device_info = resolve_device(permitted[0], permitted_devices=permitted)
     model, source_payload, source_path, source_sha = _source_components(config, selected_device)
-    optimizer_contract = (
-        source_payload.get("round12_optimizer_schedule_contract")
-        if config["initialization"]["normalization_mode"] == "inherit_parent_train_stats"
-        else source_payload["experiment_identity"].get(
-            "optimizer_schedule_contract", source_payload.get("optimizer_schedule_contract"),
-        )
+    optimizer_contract = source_payload["experiment_identity"].get(
+        "optimizer_schedule_contract", source_payload.get("optimizer_schedule_contract"),
     )
     if not isinstance(optimizer_contract, Sequence) or not optimizer_contract:
         raise ValueError("Source checkpoint lacks its named optimizer group schedule contract.")
-    if config["initialization"]["normalization_mode"] in ("classic_train600_stats", "scratch_train600_stats"):
+    if config["initialization"]["normalization_mode"] == "classic_train600_stats":
         classic_group = copy.deepcopy(optimizer_contract[0])
         classic_group["parameter_names"] = [name for name, parameter in model.named_parameters()
                                              if parameter.requires_grad]
@@ -2412,8 +1800,8 @@ def train(config_path: str | Path, *, device: str, output: str | Path,
     print(json.dumps({
         "event": "research_run_prepared",
         "output": str(output_path),
-        "source_checkpoint": None if _is_round12_scratch(config) else str(source_path),
-        "initialization_recipe": str(source_path) if _is_round12_scratch(config) else None,
+        "source_checkpoint": str(source_path),
+        "initialization_recipe": None,
         "source_sha256": source_sha,
         "source_epoch": config["initialization"]["source_parent_age"],
         "selected_device": device_info,
@@ -2470,10 +1858,7 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
     execution_horizon = int(payload["experiment_identity"]["engine_config"]["total_epochs"])
     requested_stop = (current_epoch + additional_epochs if type(additional_epochs) is int else stop_after_epoch)
     if extend_horizon:
-        if (not _is_softonly(config) or type(requested_stop) is not int
-                or requested_stop % 100 or requested_stop <= execution_horizon or current_epoch != execution_horizon):
-            raise ValueError("Explicit horizon extension requires a terminal soft-only checkpoint and a larger stop.")
-        execution_horizon = requested_stop
+        raise ValueError("The retained U-H run does not support terminal horizon extensions.")
     stop_after = _resolve_resume_stop(
         current_epoch=current_epoch,
         local_horizon=execution_horizon,
@@ -2533,29 +1918,6 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
         run_manifest.get("initialization_recipe_sha256") or run_manifest["source_checkpoint_sha256"],
         diagnostic=diagnostic,
     )
-    if extend_horizon:
-        from .unified_training import _resume_identity_amendment
-        sealed, _ = _round12_sealed_identity(config, model, provider, engine,
-            run_manifest["initialization_recipe"], run_manifest["initialization_recipe_sha256"])
-        amendment = _resume_identity_amendment(payload["experiment_identity"], sealed,
-                                              allow_horizon_extension=True)
-        # Preserve the original terminal state and manifest; fit records the amendment
-        # and restores all training state through its ordinary strict resume path.
-        import fcntl
-        with (run / ".training.lock").open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            milestone, milestone_path = _read_run_checkpoint(run, f"epoch_{current_epoch:04d}_model.pt")
-            if int(milestone["epoch"]) != current_epoch:
-                raise ValueError("The original terminal milestone must be retained before extension.")
-            _atomic_json(RunLayout(run).write_path("horizon_extension.json", category="configs"), {
-                **amendment, "source_checkpoint": str(latest_path), "source_epoch": current_epoch,
-                "source_checkpoint_sha256": sha256_file(latest_path),
-                "retained_terminal_milestone": str(milestone_path),
-                "retained_terminal_milestone_sha256": sha256_file(milestone_path),
-                "original_config": config, "storage": verify_storage(config, output=run,
-                    estimated_bytes=2 * 1024**3, peak_temporary_bytes=512 * 1024**2),
-                "created_unix": time.time(),
-            })
     print(json.dumps({
         "event": "research_resume_prepared",
         "run": str(run),
@@ -2586,828 +1948,6 @@ def resume(run_dir: str | Path, *, device: str, additional_epochs: int | None = 
         permitted_devices=permitted,
         allow_horizon_extension=extend_horizon,
     )
-
-
-def activate_round12_cut(run_dir: str | Path) -> dict[str, Any]:
-    """Persist the R1 hard cut between its saved before/after local-40 states."""
-    import fcntl
-
-    run = Path(run_dir).expanduser().resolve(strict=True)
-    run_manifest, _ = _load_run_manifest(run)
-    config = run_manifest["config"]
-    round12 = config.get("round12", {})
-    if (config["initialization"].get("normalization_mode") != "inherit_parent_train_stats"
-            or round12.get("role") != "R1" or round12.get("compact_arm") != "merge"):
-        raise ValueError("Hard-cut activation applies only to a Round12 R1 merge run.")
-    if round12.get("cut_after_local_epoch") != 40:
-        raise ValueError("Run does not declare the Round12 local-40 cut boundary.")
-    latest_path = resolve_checkpoint(run, "latest").resolve()
-    if not latest_path.is_relative_to(run):
-        raise ValueError("Latest checkpoint is outside the declared research run.")
-    before_path = RunLayout(run).write_path("epoch_0040_model.pt")
-    after_path = RunLayout(run).write_path("epoch_0040_after_cut_model.pt")
-    if after_path.exists():
-        raise FileExistsError(f"Round12 after-cut checkpoint already exists: {after_path}")
-
-    from .unified_training import _atomic_torch_save
-
-    size = latest_path.stat().st_size
-    storage = verify_storage(config, output=run, estimated_bytes=size,
-                             peak_temporary_bytes=2 * size)
-    lock_path = run / ".training.lock"
-    with lock_path.open("a+b") as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RuntimeError("Cannot activate the cut while another writer owns the R1 run.") from error
-        try:
-            payload, selected_path = _read_run_checkpoint(run, "latest")
-            if selected_path != latest_path:
-                raise RuntimeError("R1 latest checkpoint changed while the cut command waited for its lock.")
-            if int(payload.get("epoch", -1)) != 40:
-                raise ValueError("Round12 R1 cut activation requires the ordinary local-40 checkpoint.")
-            before_path = before_path.resolve(strict=True)
-            if not before_path.is_relative_to(run) or not before_path.is_file():
-                raise FileNotFoundError("The ordinary pre-cut epoch-40 milestone is missing.")
-            before_payload, _ = _read_run_checkpoint(run, "epoch_0040_model.pt")
-            if int(before_payload.get("epoch", -1)) != 40:
-                raise ValueError("Saved pre-cut milestone is not local epoch 40.")
-            provider_state = payload.get("provider_training_state")
-            if (not isinstance(provider_state, Mapping)
-                    or provider_state.get("schema") != "thermal_compact_round12_provider_state_v1"):
-                raise ValueError("R1 e40 checkpoint lacks its explicit compact provider state.")
-            compact_state = provider_state.get("compact_state")
-            if (not isinstance(compact_state, Mapping)
-                    or compact_state.get("schema") != "compact_unified_groups_state_v1"
-                    or int(compact_state.get("local_epoch", -1)) != 40
-                    or compact_state.get("arm") != "merge"
-                    or bool(compact_state.get("cut_active"))):
-                raise ValueError("R1 e40 latest state is not the expected pre-cut merge state.")
-            model = _model_from_run_payload(payload, torch.device("cpu"))
-            core = getattr(model, "core", model)
-            setter = getattr(core, "set_compact_phase", None)
-            activate = getattr(core, "activate_hard_cut", None)
-            exporter = getattr(core, "export_compact_state", None)
-            if not callable(setter) or not callable(activate) or not callable(exporter):
-                raise TypeError("R1 compact core is missing its persisted hard-cut API.")
-            setter(40, arm="merge")
-            activate()
-            changed = copy.deepcopy(dict(payload))
-            changed["model_state_dict"] = _cpu_state_snapshot(model.state_dict())
-            changed["provider_training_state"] = copy.deepcopy(dict(provider_state))
-            changed["provider_training_state"]["compact_state"] = copy.deepcopy(exporter())
-            active_state = changed["provider_training_state"]["compact_state"]
-            if not active_state.get("cut_active") or active_state.get("last_topology") is not None:
-                raise RuntimeError("Hard-cut export must mark the cut active and clear pre-cut topology.")
-            _atomic_torch_save(after_path, changed)
-            _atomic_torch_save(RunLayout(run).write_path("latest_model.pt"), changed)
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-    return {
-        "status": "round12_hard_cut_activated",
-        "run": str(run),
-        "before_checkpoint": str(before_path),
-        "after_checkpoint": str(after_path),
-        "latest_checkpoint": str(resolve_checkpoint(run, "latest")),
-        "epoch": 40,
-        "optimizer_group_contract_preserved": True,
-        "storage": storage,
-    }
-
-
-def _scratch_round12_boundary(run: Path, model, provider, *, local_epoch: int,
-                              update_index: int, device: torch.device) -> None:
-    """Automatic algorithm boundaries within one new scratch fit, never a fork."""
-    if update_index != 0 or local_epoch not in (21, 41):
-        return
-    config = provider._research_config
-    core = model.core
-    if local_epoch == 21:
-        calibration_path = run / "round12_calibration.json"
-        if calibration_path.exists():
-            record = read_json(calibration_path)
-            if record.get("source_common_local_epoch") != 20:
-                raise ValueError("Scratch calibration must belong to this run's warmup20.")
-            coefficients = {name: record["terms"][name]["coefficient"] for name in ("tie", "capacity")}
-        else:
-            payload, _ = _read_run_checkpoint(run, "latest")
-            if int(payload.get("epoch", -1)) != 20:
-                raise ValueError("Scratch calibration needs this new run's local20 checkpoint.")
-            calibrated = _round12_calibrate_structural_losses(run, payload, config, device)
-            record, coefficients = calibrated["record"], calibrated["coefficients"]
-            _atomic_json(calibration_path, record)
-        core.set_compact_loss_coefficients(**coefficients)
-    elif not bool(core.compact_cut_active):
-        # TrainingEngine already owns the writer lock. Preserve the ordinary
-        # e40 checkpoint and its RNG/Adam/history/clocks; change cut state only.
-        from .unified_training import _atomic_torch_save
-        payload, _ = _read_run_checkpoint(run, "latest")
-        if int(payload.get("epoch", -1)) != 40 or int(core.compact_local_epoch) != 40:
-            raise ValueError("Scratch hard cut needs the completed pre-cut local40 state.")
-        before = RunLayout(run).read_path("epoch_0040_model.pt")
-        if not before.is_file():
-            raise FileNotFoundError("Scratch hard cut requires the retained pre-cut milestone.")
-        after = RunLayout(run).write_path("epoch_0040_after_cut_model.pt")
-        if after.exists():
-            raise FileExistsError("Scratch after-cut checkpoint already exists; refusing to overwrite it.")
-        core.activate_hard_cut()
-        changed = copy.deepcopy(dict(payload))
-        changed["model_state_dict"] = _cpu_state_snapshot(model.state_dict())
-        changed["provider_training_state"]["compact_state"] = copy.deepcopy(core.export_compact_state())
-        _atomic_torch_save(after, changed)
-        _atomic_torch_save(RunLayout(run).write_path("latest_model.pt"), changed)
-
-
-def _round12_new_parameter_names(model) -> tuple[str, ...]:
-    core = getattr(model, "core", model)
-    migration = getattr(core, "compact_parameter_migration", None)
-    if not isinstance(migration, Mapping):
-        raise TypeError("Round12 compact core omitted its named parameter migration contract.")
-    declared = migration.get("new_names")
-    if not isinstance(declared, Sequence) or not declared:
-        raise ValueError("Round12 compact migration must list its newly introduced parameter names.")
-    model_names = tuple(dict(model.named_parameters()))
-    resolved = []
-    for core_name in map(str, declared):
-        if core_name in model_names:
-            resolved.append(core_name)
-            continue
-        matches = [name for name in model_names if name.endswith("." + core_name)]
-        if len(matches) != 1:
-            raise ValueError(f"New compact parameter {core_name!r} does not map uniquely into the Thermal model.")
-        resolved.append(matches[0])
-    if len(set(resolved)) != len(resolved):
-        raise ValueError("Compact migration maps multiple new core names onto one adapter parameter.")
-    return tuple(sorted(resolved))
-
-
-def _gradient_norm_by_name(gradients: Mapping[str, torch.Tensor]) -> float:
-    values = [value.detach().double().norm() for value in gradients.values() if value.numel()]
-    if not values:
-        return 0.0
-    norm = float(torch.stack(values).norm().cpu())
-    return norm if math.isfinite(norm) else float("nan")
-
-
-def _round12_term_gradient_calibration(native_gradients, term_gradients, scale):
-    participating = set(term_gradients)
-    native_norm = _gradient_norm_by_name({
-        name: gradient for name, gradient in native_gradients.items() if name in participating
-    })
-    term_norm = _gradient_norm_by_name(term_gradients)
-    coefficient = (float(scale) * native_norm / term_norm
-                   if math.isfinite(native_norm) and native_norm > 0
-                   and math.isfinite(term_norm) and term_norm > 0 else 0.0)
-    if not math.isfinite(coefficient) or coefficient < 0:
-        coefficient = 0.0
-    return native_norm, term_norm, coefficient
-
-
-def _round12_merge_native_work_gradients(task_gradients, parameter_names, parameters):
-    """Combine task and ordinary joint-work VJPs before per-term calibration."""
-    combined = {name: gradient.detach().clone() for name, gradient in task_gradients.items()}
-    for name, parameter in zip(parameter_names, parameters):
-        gradient = parameter.grad
-        if gradient is None:
-            continue
-        if name in combined:
-            combined[name].add_(gradient.detach())
-        else:
-            combined[name] = gradient.detach().clone()
-    return combined
-
-
-def _round12_calibrate_structural_losses(common_run: Path, common_payload: Mapping[str, Any],
-                                         config: Mapping[str, Any], device: torch.device) -> dict[str, Any]:
-    """Calibrate raw structural terms on the next TRAIN macro, without stepping."""
-    caller_rng = _cpu_state_snapshot(capture_rng_state())
-    model = provider = engine = None
-    try:
-        horizon = int(config["training"]["local_horizon"])
-        optimizer_contract = _load_run_manifest(common_run)[0]["optimizer_schedule_contract"]
-        model, provider = _build_provider_for_resume(
-            config,
-            common_payload,
-            optimizer_contract,
-            None,
-            horizon,
-            False,
-            device,
-        )
-        provider_state = common_payload.get("provider_training_state", {})
-        provider.load_training_state_dict(provider_state)
-        core = getattr(model, "core", model)
-        core.set_compact_phase(40, arm="merge")
-        core.set_compact_loss_coefficients(tie=0.0, capacity=0.0)
-        if int(common_payload.get("epoch", -1)) != 20:
-            raise ValueError("Round12 structural calibration must branch from the completed common local-20 checkpoint.")
-        local_epoch = 21
-        arm = model.architecture
-        sampler_epoch = int(config["initialization"]["clock_mapping"]["sampler_parent_epoch"]) + local_epoch
-        ordered_cases = tuple(provider.epoch_cases(sampler_epoch, int(config["training"]["seed"])))
-        if len(ordered_cases) != 600:
-            raise ValueError("Round12 calibration requires the complete inherited TRAIN600 cohort.")
-        update_cases = ordered_cases[:int(config["training"]["effective_batch_size"])]
-        engine = _engine_for(
-            config,
-            device=device,
-            parent_age=_parent_age(config),
-            microbatch=int(config["training"]["microbatch_cases"]),
-        )
-        batches = engine.prepare_update_microbatches(
-            provider,
-            arm=arm,
-            phase="joint",
-            epoch=local_epoch,
-            update_index=0,
-            update_cases=update_cases,
-            sampling_dataset_id=provider.sampling_dataset_id,
-        )
-        maximum = int(config["round12"]["calibration_max_microbatches"])
-        if not 1 <= len(batches) <= maximum:
-            raise ValueError("Round12 calibration microbatch count is outside the configured small bound.")
-        # The first calibration microbatches exactly match the next common-prefix
-        # continuation's TRAIN case order and maintained case_epoch_v1 keys.
-        restore_rng_state(common_payload["rng_state"])
-        model.train(True)
-        native_clock = int(config["initialization"]["clock_mapping"]["controller_parent_coordinate"]) + local_epoch
-        named_parameters = dict(model.named_parameters())
-        new_names = _round12_new_parameter_names(model)
-        parameters = [named_parameters[name] for name in new_names]
-        if any(not parameter.requires_grad for parameter in parameters):
-            raise ValueError("A compact new parameter is unexpectedly frozen during soft calibration.")
-        # A disposable optimizer supplies the exact native macro hooks; it is
-        # never stepped and its empty moments are discarded with this model.
-        optimizer, _ = engine._make_optimizer(model, provider, arm, local_epoch, None)
-        optimizer.zero_grad(set_to_none=True)
-        from .joint_native_objective import JointMacroObjective
-        objective_api = JointMacroObjective(getattr(model, "core", model), optimizer, native_clock, 0)
-        planned = {
-            name: float(value)
-            for name, value in provider.loss_denominators(batches, "joint", arm).items()
-        }
-        if not planned or any(not math.isfinite(value) or value <= 0 for value in planned.values()):
-            raise ValueError("Round12 calibration requires the exact positive native TRAIN macro denominators.")
-        scene_count = sum(len(set(map(str, batch.case_keys))) for batch in batches)
-        if scene_count != len(update_cases):
-            raise ValueError("Round12 calibration batches changed or duplicated the next TRAIN macro's primary cases.")
-        native_gradients: dict[str, torch.Tensor] = {}
-        term_gradients: dict[str, dict[str, torch.Tensor]] = {"tie": {}, "capacity": {}}
-        observed: dict[str, float] = {name: 0.0 for name in planned}
-        case_keys = []
-        alpha = float(getattr(core, "compact_alpha", -1.0))
-        if alpha != 1.0:
-            raise ValueError(f"Round12 calibration must use tying alpha=1; core reported {alpha}.")
-        for batch in batches:
-            batch_auxiliary = batch.auxiliary if isinstance(batch.auxiliary, Mapping) else {}
-            case_keys.extend(map(str, batch.case_keys))
-            scene = provider.make_scene(batch.scene_inputs)
-            objective_api.begin_microbatch()
-            predictions, auxiliary_state = provider.predict_native(
-                model, scene, batch.receivers, arm, "joint", epoch=native_clock,
-                temperature=engine.config.temperature_for_epoch(native_clock),
-            )
-            expected_cases = len(batch.case_keys) + int(bool(batch_auxiliary.get("response_family_id")))
-            objective_api.observe(expected_cases)
-            loss_terms = provider.loss_terms(predictions, batch.targets, "joint", auxiliary_state)
-            native_loss = None
-            for name, term in loss_terms.items():
-                if name not in planned:
-                    raise ValueError(f"Round12 calibration native loss {name!r} is missing from the denominator prepass.")
-                denominator = float(term.denominator)
-                if denominator < 0 or not math.isfinite(denominator):
-                    raise ValueError(f"Round12 calibration native denominator for {name!r} is invalid.")
-                observed[name] += denominator
-                if denominator == 0:
-                    if float(term.numerator.detach()) != 0.0:
-                        raise ValueError(f"Round12 calibration term {name!r} is nonzero with no valid targets.")
-                    continue
-                weighted = term.numerator * (float(term.weight) / planned[name])
-                native_loss = weighted if native_loss is None else native_loss + weighted
-            if native_loss is None:
-                raise ValueError("Round12 calibration microbatch produced no ordinary native objective.")
-            native_current = torch.autograd.grad(
-                native_loss, parameters, retain_graph=True, allow_unused=True,
-            )
-            for name, gradient in zip(new_names, native_current):
-                if gradient is not None:
-                    native_gradients[name] = (gradient.detach().clone() if name not in native_gradients
-                                              else native_gradients[name] + gradient.detach())
-            prepared = getattr(predictions, "native_prepared", None)
-            organization = getattr(prepared, "organization", None)
-            if organization is None:
-                raise ValueError("Round12 calibration requires the native prepared organization from predictions.")
-            components = core.compact_structural_loss_components(organization)
-            if not isinstance(components, Mapping) or set(components) != {"tie", "capacity"}:
-                raise ValueError("Compact structural API must return exactly tie and capacity tensors.")
-            structural_losses = {}
-            for name in ("tie", "capacity"):
-                value = components[name]
-                if (not torch.is_tensor(value) or value.ndim != 1
-                        or value.shape[0] != len(batch.case_keys) or not torch.isfinite(value.detach()).all()):
-                    raise ValueError(f"Round12 raw {name} structural loss must be one finite value per primary scene.")
-                structural_losses[name] = value.sum() * (alpha / scene_count)
-            for index, name in enumerate(("tie", "capacity")):
-                current = torch.autograd.grad(
-                    structural_losses[name], parameters,
-                    retain_graph=index == 0,
-                    allow_unused=True,
-                )
-                for parameter_name, gradient in zip(new_names, current):
-                    if gradient is not None:
-                        term_gradients[name][parameter_name] = (
-                            gradient.detach().clone() if parameter_name not in term_gradients[name]
-                            else term_gradients[name][parameter_name] + gradient.detach()
-                        )
-        for name, expected in planned.items():
-            if not math.isclose(observed[name], expected, rel_tol=1e-6, abs_tol=1e-7):
-                raise ValueError(f"Round12 calibration observed {observed[name]} targets for {name}, expected {expected}.")
-        # Match the maintained update's ordinary native gradient: weighted
-        # task/auxiliary/response loss plus the existing completed-macro
-        # M/E/context work-controller VJPs, before gradient clipping. The
-        # structural channels are zero-weighted for this native reference.
-        objective_api.apply()
-        native_gradients = _round12_merge_native_work_gradients(
-            native_gradients, new_names, parameters,
-        )
-        coefficient_values = {}
-        details = {}
-        for name in ("tie", "capacity"):
-            native_norm, term_norm, coefficient = _round12_term_gradient_calibration(
-                native_gradients, term_gradients[name], config["round12"]["structural_loss_scale"],
-            )
-            coefficient_values[name] = coefficient
-            details[name] = {"native_gradient_l2_norm_on_participating_new_parameters": native_norm,
-                             "raw_gradient_l2_norm": term_norm, "coefficient": coefficient,
-                             "scaled_gradient_l2_norm": coefficient * term_norm}
-        result = {
-            "schema": "thermal_compact_structural_loss_calibration_v1",
-            "source_common_run": str(common_run),
-            "source_checkpoint": str(_read_run_checkpoint(common_run, "latest")[1]),
-            "source_common_local_epoch": 20,
-            "sampling_partition": "TRAIN only; exposed validation and locked test were not read",
-            "calibration_local_epoch": local_epoch,
-            "calibration_sampler_epoch": sampler_epoch,
-            "calibration_controller_epoch": native_clock,
-            "optimizer_update_index": 0,
-            "case_keys": case_keys,
-            "microbatch_count": len(batches),
-            "unique_primary_scene_count": scene_count,
-            "alpha": alpha,
-            "new_parameter_names": list(new_names),
-            "terms": details,
-            "formula": "0.02 * native_gradient_l2_norm / raw_structural_gradient_l2_norm; zero when either norm is zero or nonfinite",
-            "native_gradient_convention": (
-                "ordinary weighted TRAIN task/auxiliary/response gradient plus active existing M/E/context "
-                "macro work-controller gradient, before clipping; each norm restricted to that structural "
-                "term's participating compact parameters; new structural terms excluded"
-            ),
-        }
-        return {"record": result, "coefficients": coefficient_values}
-    finally:
-        # The reconstructed model/provider are disposable. Restore only
-        # process RNG streams and leave the common checkpoint untouched.
-        restore_rng_state(caller_rng)
-        if model is not None:
-            del model
-        if provider is not None:
-            del provider
-        if engine is not None:
-            del engine
-        import gc
-        gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-
-def _round12_sealed_identity(config, model, provider, engine, source_path, source_sha):
-    from .unified_training import _engine_config_payload, _optimizer_spec_payload
-
-    identity = _experiment_identity(config, provider, source_path, source_sha, diagnostic=False)
-    specs = tuple(provider.optimizer_groups(model, model.architecture, "joint"))
-    provider_identity = dict(provider.identity_payload())
-    identity.update({
-        "provider_identity": provider_identity,
-        "engine_config": _engine_config_payload(engine.config),
-        "selection_policy": asdict(engine.selection),
-        "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in specs],
-    })
-    sampler_contract = engine.sampler_epoch_contract()
-    if sampler_contract is not None:
-        identity["sampler_epoch_mapping"] = dict(sampler_contract)
-    if engine.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
-        identity["sampling_dataset_id"] = _sampling_dataset_id(provider_identity)
-    return identity, specs
-
-
-def _round12_write_child_start(run_output: Path, *, config, config_path: Path,
-                               child_identity: Mapping[str, Any], source_path: Path,
-                               source_sha: str, source_best_payload: Mapping[str, Any],
-                               child_payload: Mapping[str, Any], optimizer_contract,
-                               storage_snapshot: Mapping[str, Any], calibration_record: Mapping[str, Any],
-                               parent_lineage: Mapping[str, Any], diagnostic: bool = False) -> None:
-    import fcntl
-
-    run_output = Path(run_output).expanduser().resolve(strict=False)
-    run_output.mkdir(parents=True, exist_ok=True)
-    lock_path = run_output / ".training.lock"
-    with lock_path.open("a+b") as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RuntimeError("Cannot initialize a Round12 child while another writer owns its run directory.") from error
-        try:
-            if any(path.name != ".training.lock" for path in run_output.iterdir()):
-                raise FileExistsError(f"Round12 child run directory is no longer empty: {run_output}")
-            _round12_write_child_start_locked(
-                run_output,
-                config=config,
-                config_path=config_path,
-                child_identity=child_identity,
-                source_path=source_path,
-                source_sha=source_sha,
-                source_best_payload=source_best_payload,
-                child_payload=child_payload,
-                optimizer_contract=optimizer_contract,
-                storage_snapshot=storage_snapshot,
-                calibration_record=calibration_record,
-                parent_lineage=parent_lineage,
-                diagnostic=diagnostic,
-            )
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-
-
-def _round12_write_child_start_locked(run_output: Path, *, config, config_path: Path,
-                                      child_identity: Mapping[str, Any], source_path: Path,
-                                      source_sha: str, source_best_payload: Mapping[str, Any],
-                                      child_payload: Mapping[str, Any], optimizer_contract,
-                                      storage_snapshot: Mapping[str, Any], calibration_record: Mapping[str, Any],
-                                      parent_lineage: Mapping[str, Any], diagnostic: bool = False) -> None:
-    from .unified_training import _atomic_torch_save
-
-    run_output.mkdir(parents=True, exist_ok=True)
-    layout = RunLayout(run_output)
-    _atomic_json(layout.path("artifact_layout.json"), {
-        "artifact_layout_version": 1,
-        "run_dir": str(run_output),
-    })
-    _atomic_json(layout.write_path("experiment_identity.json"), child_identity)
-    resolved_config_path = Path(config_path)
-    if not resolved_config_path.is_file():
-        resolved_config_path = layout.write_path(
-            f"continuation_config_{int(config['training']['local_horizon'])}.json", category="configs",
-        )
-        _atomic_json(resolved_config_path, config)
-    _write_run_manifest(
-        run_output,
-        config=config,
-        config_path=resolved_config_path,
-        source_path=source_path,
-        source_sha=source_sha,
-        optimizer_contract=optimizer_contract,
-        case_ids=None,
-        storage_snapshot=storage_snapshot,
-        diagnostic=diagnostic,
-        batch=int(config["training"]["effective_batch_size"]),
-        microbatch=int(config["training"]["microbatch_cases"]),
-        identity_microbatch=int(config["training"]["microbatch_cases"]),
-    )
-    best_payload = copy.deepcopy(dict(source_best_payload))
-    best_payload["experiment_identity"] = copy.deepcopy(dict(child_identity))
-    best_payload["branch_parent"] = copy.deepcopy(dict(parent_lineage))
-    payload = copy.deepcopy(dict(child_payload))
-    payload["branch_parent"] = copy.deepcopy(dict(parent_lineage))
-    _atomic_json(layout.write_path("history.json"), list(payload.get("history", ())))
-    _atomic_json(run_output / "round12_calibration.json", calibration_record)
-    _atomic_torch_save(layout.write_path(f"epoch_{int(payload['epoch']):04d}_model.pt"), payload)
-    _atomic_torch_save(layout.write_path("latest_model.pt"), payload)
-    _atomic_torch_save(layout.write_path("best_by_field_mse_model.pt"), best_payload)
-    from .unified_training import environment_snapshot, source_state_snapshot
-    _atomic_json(layout.write_path("software.json"), environment_snapshot())
-    _atomic_json(layout.write_path("source_state.json"), source_state_snapshot(Path(__file__).resolve().parents[2]))
-    source_runtime = Path(str(parent_lineage["run_dir"])) / "execution_runtime.json"
-    if source_runtime.is_file():
-        import shutil
-        shutil.copy2(source_runtime, run_output / "execution_runtime.json")
-    else:
-        _atomic_json(run_output / "execution_runtime.json", {
-            "schema": "honf_research_execution_runtime_v1",
-            "nominal_microbatch_cases": int(config["training"]["microbatch_cases"]),
-            "runtime_microbatch_cases": int(config["training"]["microbatch_cases"]),
-            "runtime_execution_options": copy.deepcopy(config["execution"]["options"]),
-            "local_oom_retry_count": 0,
-            "last_oom": {"status": "none"},
-            "updated_unix": time.time(),
-        })
-
-
-def _validate_round12_common_fork(common_manifest, r0_config, r1_config):
-    common = common_manifest["config"]
-    if (common.get("round12", {}).get("role") != "common"
-            or common.get("round12", {}).get("compact_arm") != "common"):
-        raise ValueError("Round12 child initialization requires the ordinary common role run.")
-    for config, role, arm in ((r0_config, "R0", "singleton"), (r1_config, "R1", "merge")):
-        if (config.get("round12", {}).get("role") != role
-                or config.get("round12", {}).get("compact_arm") != arm
-                or config["initialization"] != common["initialization"]
-                or config["dataset"] != common["dataset"]
-                or config["optimizer"] != common["optimizer"]
-                or config["training"] != common["training"]
-                or config["execution"] != common["execution"]
-                or config["storage"] != common["storage"]):
-            raise ValueError(f"Round12 {role} child configuration diverges from the sealed common-prefix protocol.")
-        for key in ("schema", "expected_parent_normalizer_key", "expected_parent_sampling_dataset_id",
-                    "shared_prefix_epochs", "cut_after_local_epoch", "structural_loss_scale",
-                    "calibration_max_microbatches", "hard_cut_rule"):
-            if config["round12"].get(key) != common["round12"].get(key):
-                raise ValueError(f"Round12 {role} child changes common {key}.")
-
-
-def _validate_round12_common_checkpoint(common_payload: Mapping[str, Any]) -> None:
-    """Require the adapted compact U-H common20 state before creating branches."""
-    if common_payload.get("arm") != "A2-D":
-        raise ValueError("Round12 common20 checkpoint is not the expected adapted U-H compact model.")
-    compact_state = common_payload.get("provider_training_state", {}).get("compact_state", {})
-    if (compact_state.get("schema") != "compact_unified_groups_state_v1"
-            or int(compact_state.get("local_epoch", -1)) != 20
-            or compact_state.get("arm") != "common"
-            or bool(compact_state.get("cut_active"))):
-        raise ValueError("Round12 common checkpoint is not the uncut shared K=N local-20 state.")
-
-
-def fork_round12_common(common_run: str | Path, *, r0_config_path: str | Path,
-                        r0_output: str | Path, r1_config_path: str | Path,
-                        r1_output: str | Path, device: str) -> dict[str, Any]:
-    """Fork calibrated R0/R1 runs from common20 with named optimizer/RNG state intact."""
-    common_path = Path(common_run).expanduser().resolve(strict=True)
-    common_manifest, _ = _load_run_manifest(common_path)
-    common_config = common_manifest["config"]
-    r0_config, r0_path = load_research_config(r0_config_path)
-    r1_config, r1_path = load_research_config(r1_config_path)
-    _validate_round12_common_fork(common_manifest, r0_config, r1_config)
-    common_payload, common_checkpoint = _read_run_checkpoint(common_path, "latest")
-    common_best_payload, common_best_checkpoint = _read_run_checkpoint(common_path, "best_by_field_mse")
-    if int(common_payload.get("epoch", -1)) != 20:
-        raise ValueError("Round12 branch fork requires the common run stopped at local epoch 20.")
-    if not 1 <= int(common_best_payload.get("epoch", -1)) <= 20:
-        raise ValueError("Round12 common best-field selector must refer to the completed shared prefix.")
-    history = common_payload.get("history")
-    if (not isinstance(history, Sequence) or len(history) != 20
-            or any(int(row.get("epoch", -1)) != index or int(row.get("case_visits", -1)) != 600
-                   or int(row.get("optimizer_updates", -1)) != 13 for index, row in enumerate(history, 1))):
-        raise ValueError("Round12 common20 must retain all 20 complete TRAIN600 epochs and 260 optimizer updates.")
-    _validate_round12_common_checkpoint(common_payload)
-    r0_output_path = Path(r0_output).expanduser().resolve(strict=False)
-    r1_output_path = Path(r1_output).expanduser().resolve(strict=False)
-    if r0_output_path == r1_output_path:
-        raise ValueError("Round12 R0 and R1 require distinct output run identities.")
-    for output in (r0_output_path, r1_output_path):
-        if output.exists() and (not output.is_dir() or any(output.iterdir())):
-            raise FileExistsError(f"Round12 fork outputs must be empty new directories: {output}")
-    if Path(common_manifest["source_checkpoint"]).resolve() != Path(common_config["initialization"]["source_checkpoint"]).resolve():
-        raise ValueError("Round12 common run manifest changed its literal U-H e1000 source binding.")
-    source_path = Path(common_manifest["source_checkpoint"]).resolve(strict=True)
-    source_sha = str(common_manifest["source_checkpoint_sha256"])
-    if sha256_file(source_path) != source_sha:
-        raise ValueError("Round12 source e1000 checkpoint changed after the common run was sealed.")
-    device_value, device_info = resolve_device(device)
-    checkpoint_size = int(common_checkpoint.stat().st_size)
-    estimated = sum(_estimate_run_bytes(cfg, epochs=int(cfg["training"]["local_horizon"]),
-                                        source_size=checkpoint_size, diagnostic=False)
-                    for cfg in (r0_config, r1_config))
-    common_storage = verify_storage(
-        common_config, output=r0_output_path, estimated_bytes=estimated,
-        peak_temporary_bytes=2 * checkpoint_size + 256 * 1024**2,
-    )
-    verify_storage(common_config, output=r1_output_path, estimated_bytes=0)
-    calibrated = _round12_calibrate_structural_losses(common_path, common_payload, common_config, device_value)
-    calibration_record = calibrated["record"]
-    calibration_record["fork_device"] = device_info
-    child_results = []
-    for config, config_path, output, role, arm in (
-        (r0_config, r0_path, r0_output_path, "R0", "singleton"),
-        (r1_config, r1_path, r1_output_path, "R1", "merge"),
-    ):
-        model, provider = _build_provider_for_resume(
-            config,
-            common_payload,
-            common_manifest["optimizer_schedule_contract"],
-            None,
-            int(config["training"]["local_horizon"]),
-            False,
-            device_value,
-        )
-        provider.load_training_state_dict(common_payload.get("provider_training_state", {}))
-        core = getattr(model, "core", model)
-        core.set_compact_phase(20, arm=arm)
-        core.set_compact_loss_coefficients(
-            tie=calibrated["coefficients"]["tie"],
-            capacity=calibrated["coefficients"]["capacity"],
-        )
-        provider._round12_local_epoch = 20
-        engine = _engine_for(
-            config,
-            device=device_value,
-            parent_age=_parent_age(config),
-            microbatch=int(config["training"]["microbatch_cases"]),
-        )
-        identity, specs = _round12_sealed_identity(
-            config, model, provider, engine, source_path, source_sha,
-        )
-        from .unified_training import _optimizer_spec_payload
-        optimizer_contract = [_optimizer_spec_payload(spec) for spec in specs]
-        if (optimizer_contract != common_payload.get("optimizer_schedule_contract")
-                or common_payload.get("optimizer_group_names") != [spec.name for spec in specs]):
-            raise ValueError("Round12 branch fork would change the common named optimizer groups or schedule.")
-        if identity.get("sampling_dataset_id") != common_payload.get("experiment_identity", {}).get("sampling_dataset_id"):
-            raise ValueError("Round12 branch fork changed the exact parent TRAIN sampling namespace.")
-        child_payload = copy.deepcopy(dict(common_payload))
-        child_payload["experiment_identity"] = copy.deepcopy(identity)
-        child_payload["model_state_dict"] = _cpu_state_snapshot(model.state_dict())
-        child_payload["provider_training_state"] = _cpu_state_snapshot(provider.training_state_dict())
-        if child_payload["provider_training_state"]["compact_state"].get("arm") != arm:
-            raise RuntimeError("Round12 child fork failed to persist its compact arm before the first update.")
-        parent_lineage = {
-            "kind": "round12_common_prefix_fork",
-            "run_dir": str(common_path),
-            "checkpoint": str(common_checkpoint),
-            "epoch": 20,
-            "role": role,
-            "shared_prefix_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
-        }
-        _round12_write_child_start(
-            output,
-            config=config,
-            config_path=config_path,
-            child_identity=identity,
-            source_path=source_path,
-            source_sha=source_sha,
-            source_best_payload=common_best_payload,
-            child_payload=child_payload,
-            optimizer_contract=optimizer_contract,
-            storage_snapshot=common_storage,
-            calibration_record=calibration_record,
-            parent_lineage=parent_lineage,
-        )
-        child_results.append({"role": role, "arm": arm, "output": str(output),
-                             "epoch": 20, "optimizer_updates_preserved": 260})
-        del model, provider, engine
-        import gc
-        gc.collect()
-        if device_value.type == "cuda":
-            torch.cuda.empty_cache()
-    return {
-        "status": "round12_children_forked_from_common20",
-        "common_run": str(common_path),
-        "common_checkpoint": str(common_checkpoint),
-        "calibration": calibration_record,
-        "children": child_results,
-        "storage": common_storage,
-    }
-
-
-def fork_round12_terminal(run_dir: str | Path, *, output: str | Path,
-                          local_horizon: int, device: str) -> dict[str, Any]:
-    """Create a new exact-state continuation identity at a user-chosen horizon."""
-    source_run = Path(run_dir).expanduser().resolve(strict=True)
-    source_manifest, _ = _load_run_manifest(source_run)
-    parent_config = source_manifest["config"]
-    role = parent_config.get("round12", {}).get("role")
-    arm = parent_config.get("round12", {}).get("compact_arm")
-    if (parent_config["initialization"].get("normalization_mode") != "inherit_parent_train_stats"
-            or (role, arm) not in (("R0", "singleton"), ("R1", "merge"))):
-        raise ValueError("Round12 horizon continuation is available only from terminal R0 or R1 runs.")
-    if type(local_horizon) is not int or local_horizon <= int(parent_config["training"]["local_horizon"]):
-        raise ValueError("An explicit Round12 continuation horizon must exceed its terminal run horizon.")
-    latest_payload, latest_path = _read_run_checkpoint(source_run, "latest")
-    current_epoch = int(latest_payload.get("epoch", -1))
-    if current_epoch != int(parent_config["training"]["local_horizon"]):
-        raise ValueError("Round12 continuation requires a latest checkpoint at the sealed terminal epoch.")
-    compact_state = latest_payload.get("provider_training_state", {}).get("compact_state", {})
-    if (compact_state.get("schema") != "compact_unified_groups_state_v1"
-            or int(compact_state.get("local_epoch", -1)) != current_epoch
-            or compact_state.get("arm") != arm):
-        raise ValueError("Round12 terminal checkpoint's compact phase differs from its run identity.")
-    if role == "R1" and not bool(compact_state.get("cut_active")):
-        raise ValueError("Terminal R1 continuation must preserve its active post-e40 hard cut.")
-    if role == "R0" and bool(compact_state.get("cut_active")):
-        raise ValueError("Terminal R0 singleton control cannot carry the R1 hard-cut state.")
-    history = latest_payload.get("history")
-    if (not isinstance(history, Sequence) or len(history) != current_epoch
-            or int(history[-1].get("epoch", -1)) != current_epoch):
-        raise ValueError("Round12 continuation checkpoint lacks its full local training history.")
-    source_best_payload, source_best_path = _read_run_checkpoint(source_run, "best_by_field_mse")
-    if int(source_best_payload.get("epoch", -1)) > current_epoch:
-        raise ValueError("Round12 best-field selector points beyond the terminal checkpoint.")
-    calibration_path = source_run / "round12_calibration.json"
-    calibration_record = read_json(calibration_path)
-    if calibration_record.get("schema") != "thermal_compact_structural_loss_calibration_v1":
-        raise ValueError("Round12 terminal run lacks its original common-prefix calibration record.")
-
-    child_config = copy.deepcopy(parent_config)
-    old_name = str(child_config["name"])
-    child_config["name"] = f"{old_name}_continue_{local_horizon}"
-    child_config["training"]["local_horizon"] = local_horizon
-    child_config["training"]["checkpoint_epochs"] = sorted(set(
-        list(map(int, child_config["training"]["checkpoint_epochs"])) + [local_horizon]
-    ))
-    _validate_research_config(child_config)
-    output_path = Path(output).expanduser().resolve(strict=False)
-    if output_path == source_run or output_path.is_relative_to(source_run):
-        raise ValueError("Round12 continuation requires a distinct output run identity.")
-    if output_path.exists() and (not output_path.is_dir() or any(output_path.iterdir())):
-        raise FileExistsError(f"Round12 continuation output must be a new or empty directory: {output_path}")
-    device_value, device_info = resolve_device(device)
-    checkpoint_size = int(latest_path.stat().st_size)
-    estimate = _estimate_run_bytes(
-        child_config, epochs=local_horizon, source_size=checkpoint_size, diagnostic=False,
-    )
-    storage_snapshot = verify_storage(
-        child_config, output=output_path, estimated_bytes=estimate,
-        peak_temporary_bytes=2 * checkpoint_size + 256 * 1024**2,
-    )
-    source_path = Path(source_manifest["source_checkpoint"]).resolve(strict=True)
-    source_sha = str(source_manifest["source_checkpoint_sha256"])
-    if sha256_file(source_path) != source_sha:
-        raise ValueError("Round12 source U-H e1000 checkpoint changed since terminal training.")
-    model, provider = _build_provider_for_resume(
-        child_config,
-        latest_payload,
-        source_manifest["optimizer_schedule_contract"],
-        source_manifest.get("run_case_ids"),
-        local_horizon,
-        bool(source_manifest.get("diagnostic_only")),
-        device_value,
-    )
-    provider.load_training_state_dict(latest_payload.get("provider_training_state", {}))
-    core = getattr(model, "core", model)
-    core.set_compact_phase(current_epoch, arm=arm)
-    provider._round12_local_epoch = current_epoch
-    engine = _engine_for(
-        child_config,
-        device=device_value,
-        parent_age=_parent_age(child_config),
-        microbatch=int(child_config["training"]["microbatch_cases"]),
-    )
-    identity, specs = _round12_sealed_identity(
-        child_config, model, provider, engine, source_path, source_sha,
-    )
-    from .unified_training import _optimizer_spec_payload
-    optimizer_contract = [_optimizer_spec_payload(spec) for spec in specs]
-    if latest_payload.get("optimizer_group_names") != [spec.name for spec in specs]:
-        raise ValueError("Round12 continuation changed named optimizer group order.")
-    old_optimizer_groups = latest_payload.get("optimizer_state_by_name", {}).get("groups", ())
-    current_groups = [
-        {"name": spec.name, "parameter_names": list(spec.parameter_names)} for spec in specs
-    ]
-    if old_optimizer_groups != current_groups:
-        raise ValueError("Round12 continuation changed named optimizer membership or order.")
-    child_payload = copy.deepcopy(dict(latest_payload))
-    child_payload["experiment_identity"] = copy.deepcopy(identity)
-    child_payload["model_state_dict"] = _cpu_state_snapshot(model.state_dict())
-    child_payload["provider_training_state"] = _cpu_state_snapshot(provider.training_state_dict())
-    child_payload["optimizer_schedule_contract"] = copy.deepcopy(optimizer_contract)
-    best_payload = copy.deepcopy(dict(source_best_payload))
-    best_payload["experiment_identity"] = copy.deepcopy(identity)
-    best_payload["optimizer_schedule_contract"] = copy.deepcopy(optimizer_contract)
-    parent_lineage = {
-        "kind": "round12_explicit_horizon_continuation",
-        "run_dir": str(source_run),
-        "checkpoint": str(latest_path),
-        "epoch": current_epoch,
-        "role": role,
-        "new_local_horizon": local_horizon,
-        "native_clocks": copy.deepcopy(latest_payload["provider_training_state"].get("clocks", {})),
-    }
-    _round12_write_child_start(
-        output_path,
-        config=child_config,
-        config_path=output_path / f"continuation_{local_horizon}.json",
-        child_identity=identity,
-        source_path=source_path,
-        source_sha=source_sha,
-        source_best_payload=best_payload,
-        child_payload=child_payload,
-        optimizer_contract=optimizer_contract,
-        storage_snapshot=storage_snapshot,
-        calibration_record=calibration_record,
-        parent_lineage=parent_lineage,
-    )
-    return {
-        "status": "round12_terminal_fork_created",
-        "parent_run": str(source_run),
-        "parent_epoch": current_epoch,
-        "role": role,
-        "output": str(output_path),
-        "new_local_horizon": local_horizon,
-        "resume_from_local_epoch": current_epoch,
-        "next_sampler_epoch": int(child_config["initialization"]["clock_mapping"]["sampler_parent_epoch"])
-            + current_epoch + 1,
-        "next_controller_epoch": int(child_config["initialization"]["clock_mapping"]["controller_parent_coordinate"])
-            + current_epoch + 1,
-        "storage": storage_snapshot,
-    }
 
 
 def evaluate(run_dir: str | Path, *, device: str = "cpu", checkpoint: str = "latest") -> dict[str, Any]:

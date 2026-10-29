@@ -13,14 +13,9 @@ from honf_forward_core.interaction_reused_member_routing.anchored import (
     blend_anchored_contexts,
     compile_e_access_directory,
 )
-from honf_forward_core.interaction_reused_member_routing.joint import build_joint_member_measure
-from honf_forward_core.interaction_reused_member_routing.guided import prior_weighted_scores
-from honf_forward_core.interaction_reused_member_routing.single_distribution_core import (
-    SingleDistributionMemberRoutingCore,
-)
-from honf_forward_core.interaction_reused_member_routing.faithful import (
-    original_role_conditional_likelihood,
-)
+from honf_forward_core.interaction_reused_member_routing.primitives import build_joint_member_measure
+from honf_forward_core.interaction_reused_member_routing.primitives import prior_weighted_scores
+from tests.anchored_fixtures import original_role_conditional_likelihood
 
 
 def _base_config() -> dict:
@@ -287,23 +282,6 @@ def test_prepared_directory_uses_role_total_one_measure_with_unequal_counts() ->
         model._validate_anchor_carrier(invalid_scene, query)
 
 
-def test_anchored_parameter_inventory_matches_u_except_removed_entrance() -> None:
-    base = _base_config()
-    u = SingleDistributionMemberRoutingCore(
-        base, address_mode="ME", input_dataset="synthetic-r13-8", query_tile_size=8,
-        retained_prior_law="none",
-    )
-    a = AnchoredMemberRoutingCore(
-        base, locator_mode="e_anchor", input_dataset="synthetic-r13-8", query_tile_size=8,
-    )
-    u_state = u.state_dict()
-    a_state = a.state_dict()
-    assert "member_router.proposal_M.0.weight" in u_state
-    assert not any(name.startswith("member_router.proposal_M.") for name in a_state)
-    for name, value in a_state.items():
-        torch.testing.assert_close(value, u_state[name], rtol=0.0, atol=0.0)
-    config = a.get_config()
-    assert AnchoredMemberRoutingCore.from_config(config).get_config() == config
 
 
 def test_row_read_matches_historical_one_row_distribution_and_reuses_p_for_strength_and_values() -> None:

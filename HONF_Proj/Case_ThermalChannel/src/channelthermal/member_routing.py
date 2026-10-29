@@ -22,34 +22,8 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
         if core is None:
             if not isinstance(core_config, Mapping):
                 raise TypeError("InteractionReusedMemberRoutingCore requires a saved model configuration.")
-            if core_config.get("schema") == "interaction_reused_member_routing_v2":
-                from honf_forward_core.interaction_reused_member_routing.relative import (
-                    RelativeMemberRoutingCore,
-                )
-                core_type = RelativeMemberRoutingCore
-            elif core_config.get("schema") == "interaction_reused_faithful_joint_member_routing_v1":
-                from honf_forward_core.interaction_reused_member_routing.faithful import FaithfulMECore
-                core_type = FaithfulMECore
-            elif core_config.get("schema") == "interaction_reused_typed_organization_member_routing_v1":
-                from honf_forward_core.interaction_reused_member_routing.typed_organization_core import (
-                    TypedOrganizationMemberRoutingCore,
-                )
-                core_type = TypedOrganizationMemberRoutingCore
-            elif core_config.get("schema") == "interaction_reused_single_distribution_member_routing_v1":
-                from honf_forward_core.interaction_reused_member_routing.single_distribution_core import (
-                    SingleDistributionMemberRoutingCore,
-                )
-                core_type = SingleDistributionMemberRoutingCore
-            elif core_config.get("schema") == "interaction_reused_e_anchored_member_routing_v1":
-                from honf_forward_core.interaction_reused_member_routing.anchored import (
-                    AnchoredMemberRoutingCore,
-                )
-                core_type = AnchoredMemberRoutingCore
-            else:
-                from honf_forward_core.interaction_reused_member_routing import (
-                    InteractionReusedMemberRoutingCore,
-                )
-                core_type = InteractionReusedMemberRoutingCore
+            from honf_forward_core.interaction_reused_member_routing.anchored import AnchoredMemberRoutingCore
+            core_type = AnchoredMemberRoutingCore
             core = core_type.from_config(dict(core_config))
         if getattr(core, "schema", None) != self.CORE_SCHEMA:
             raise ValueError(f"Thermal member-routing adapter requires {self.CORE_SCHEMA}.")
@@ -122,54 +96,12 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
         return self.apply_native_with_work_counts(prepared, physical_heat, **kwargs)[0]
 
 
-class ThermalRelativeMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
-    """Thermal-native adapter for the separately versioned relative reader."""
-
-    SCHEMA = "thermal_interaction_reused_member_routing_adapter_v2"
-    CORE_SCHEMA = "interaction_reused_member_routing_v2"
-    ARCHITECTURES = ("R13-3-Relative",)
-
-
-class ThermalFaithfulMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
-    """Thermal-native adapter for the versioned R13-6 faithful O reader."""
-
-    SCHEMA = "thermal_interaction_reused_faithful_member_routing_adapter_v1"
-    CORE_SCHEMA = "interaction_reused_faithful_joint_member_routing_v1"
-    ARCHITECTURES = ("R13-6-O-ME-FaithfulJoint95",)
-
-
-class ThermalTypedOrganizationMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
-    """Thermal-native adapter for the versioned R13-6 typed-organization H reader."""
-
-    SCHEMA = "thermal_interaction_reused_typed_organization_member_routing_adapter_v1"
-    CORE_SCHEMA = "interaction_reused_typed_organization_member_routing_v1"
-    ARCHITECTURES = ("R13-6-H-ME-TypedOrganizationJoint95",)
-
-
-class ThermalSingleDistributionMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
-    """Thermal-native adapter for the R13-7 U single-distribution reader."""
-
-    SCHEMA = "thermal_interaction_reused_single_distribution_member_routing_adapter_v1"
-    CORE_SCHEMA = "interaction_reused_single_distribution_member_routing_v1"
-    ARCHITECTURES = ("R13-7-U-ME-SingleDistributionJoint95",)
-
-
 class ThermalAnchoredMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingAdapter):
     """Thermal-native R13-8 E-directory adapter for the A and L locators."""
 
     SCHEMA = "thermal_interaction_reused_e_anchored_member_routing_adapter_v1"
     CORE_SCHEMA = "interaction_reused_e_anchored_member_routing_v1"
-    ARCHITECTURES = ("R13-8-A-EAnchor", "R13-8-L-LocalECover",
-                     "R13-12-P-EAnchor", "R13-12-G-EAnchor",
-                     "R13-12-P-LocalECover", "R13-12-G-LocalECover",
-                     "R13-12-G-Radial-EAnchor", "R13-12-G-Radial-LocalECover")
+    ARCHITECTURES = ("R13-8-A-EAnchor", "R13-8-L-LocalECover")
 
 
-__all__ = [
-    "ThermalFaithfulMemberRoutingAdapter",
-    "ThermalAnchoredMemberRoutingAdapter",
-    "ThermalInteractionReusedMemberRoutingAdapter",
-    "ThermalRelativeMemberRoutingAdapter",
-    "ThermalSingleDistributionMemberRoutingAdapter",
-    "ThermalTypedOrganizationMemberRoutingAdapter",
-]
+__all__ = ["ThermalAnchoredMemberRoutingAdapter", "ThermalInteractionReusedMemberRoutingAdapter"]

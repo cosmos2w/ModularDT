@@ -20,52 +20,17 @@ class ModelFamilySpec:
 
 
 MODEL_FAMILIES = {
-    "joint_native_hypergraph_v1": ModelFamilySpec(
-        family_id="joint_native_hypergraph_v1", available=True,
-        workflows=("joint_native_train", "joint_native_evaluate"),
-        description="Round9 jointly trained native module/environment reader and typed sparse controls",
-    ),
-    "inherited_attention_v1": ModelFamilySpec(
-        family_id="inherited_attention_v1",
-        available=True,
-        workflows=("inherited_attention_train", "inherited_attention_evaluate"),
-        description="Dataset-native IAG-C inherited-gathering operator with geometry-derived receiver covers",
-    ),
-    "moment_hyperedges_round5": ModelFamilySpec(
-        family_id="moment_hyperedges_round5",
-        available=True,
-        workflows=("moment_hyperedges_train", "moment_hyperedges_evaluate"),
-        description="Round5 scene-prepared signed-moment hyperedge continuation on native IAG-C providers",
-    ),
-    "hyperedge_readout_round6": ModelFamilySpec(
-        family_id="hyperedge_readout_round6",
-        available=True,
-        workflows=("hyperedge_readout_train", "hyperedge_readout_evaluate"),
-        description="Round6 matched receiver-conditioned readouts over completed H hyperedge states",
-    ),
-    "native_retrieval_v1": ModelFamilySpec(
-        family_id="native_retrieval_v1",
-        available=True,
-        workflows=("native_retrieval_train", "native_retrieval_evaluate"),
-        description="Round7 matched A2-D continuations with typed native-token retrieval and strict no-E primary access",
-    ),
-    "native_budgeted_dispatch_v2": ModelFamilySpec(
-        family_id="native_budgeted_dispatch_v2",
-        available=True,
-        workflows=("native_budgeted_dispatch_train", "native_budgeted_dispatch_evaluate"),
-        description="Round8 matched D0 continuations with learned budgeted native hyperedge dispatch and strict no-E primary access",
-    ),
     "honf_content_hypergraph": ModelFamilySpec(
         family_id="honf_content_hypergraph",
         available=True,
         workflows=("forward", "compare"),
-        description="Typed attention with content-bearing hypergraph decoding and native adapters",
+        description="Retained content-attention workflows and native adapters",
     ),
     "honf_forward": ModelFamilySpec(
         family_id="honf_forward",
         available=True,
         workflows=("forward", "local_module", "compare"),
-        description="Hypergraph Operator Neural Field forward model",
+        description="Historical six-hyperedge and dense pairwise forward workflows",
     ),
     "honf_inverse": ModelFamilySpec(
         family_id="honf_inverse",

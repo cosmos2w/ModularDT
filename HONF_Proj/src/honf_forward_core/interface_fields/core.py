@@ -2,152 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
+import torch.nn as nn
 
-from honf_forward_core.config import (
-    ROUTING_TYPED_TEMPERATURE_NAMES,
-    BatchData,
-    UnifiedForwardConfig,
-)
+from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.nn import FourierFeatures, LazyMLP
-
-from .adaptive_interaction_cover import (
-    AdaptiveCoverPlan,
-    InteractionContext,
-    MechanismPlan,
-    compile_mechanism_execution_view,
-)
-from .capabilities import CAMPAIGN_ARCHITECTURES
 from .common import SharedInterfaceContext
 from .dense_pairwise import DensePairwiseField
-from .group_operator import SparseInterfaceHONF, SparseLayoutCache, packed_coarse_group_sources
-from .hierarchical_regional import HierarchicalRegionalField
-from .latent_attention import GeometryLatentField
-from .regional_response import RegionalResponseField
-from .response_hierarchy import prepare_hierarchy_geometry
+from .group_operator import packed_coarse_group_sources
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
-
-if TYPE_CHECKING:
-    from honf_forward_core.organization.functional_fusion_tree import FunctionalProbeCatalogue
-
-
-def _merge_compiled_routing_maps(chunks):
-    """Merge opt-in CSR diagnostics in global batch/receiver order."""
-    merged = {}
-    total_width = sum(width for _, width in chunks)
-    for prefix in ("routing_module", "routing_environment"):
-        if not all(prefix + "_partial_row_ptr" in entry for entry, _ in chunks):
-            continue
-        complete_indices, complete_priors = [], []
-        partial_rows, partial_sources, partial_priors, count_chunks = [], [], [], []
-        offset = 0
-        for entry, width in chunks:
-            local_complete = entry[prefix + "_complete_row_index"]
-            complete_indices.append(torch.div(local_complete, width, rounding_mode="floor") * total_width
-                                    + local_complete.remainder(width) + offset)
-            complete_priors.append(entry[prefix + "_complete_prior"])
-            ptr = entry[prefix + "_partial_row_ptr"]
-            counts = ptr[1:] - ptr[:-1]
-            count_chunks.append(counts.reshape(-1, width))
-            local_rows = torch.repeat_interleave(torch.arange(counts.numel(), device=ptr.device), counts)
-            partial_rows.append(torch.div(local_rows, width, rounding_mode="floor") * total_width
-                                + local_rows.remainder(width) + offset)
-            partial_sources.append(entry[prefix + "_partial_source"])
-            partial_priors.append(entry[prefix + "_partial_prior"])
-            offset += width
-        complete = torch.cat(complete_indices)
-        order = torch.argsort(complete, stable=True)
-        merged[prefix + "_complete_row_index"] = complete[order]
-        merged[prefix + "_complete_prior"] = torch.cat(complete_priors)[order]
-        # This optional diagnostic ordering sorts unique rows, never hub paths.
-        order = torch.argsort(torch.cat(partial_rows), stable=True)
-        merged[prefix + "_partial_source"] = torch.cat(partial_sources)[order]
-        merged[prefix + "_partial_prior"] = torch.cat(partial_priors)[order]
-        counts = torch.cat(count_chunks, dim=1).reshape(-1)
-        merged[prefix + "_partial_row_ptr"] = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
-    return merged
-
-
-def _merge_fixed_group_maps(chunks):
-    """Merge Run-1405 query maps and ragged semantic triples by receiver order.
-
-    Fixed-group diagnostics are deliberately explicit here because they do not
-    all follow the historical dense-routing tensor layout.  In particular,
-    dense environment attention is ``[B,K,H,Q,E]`` (the receiver axis is 3),
-    while semantic triples are packed one-dimensional arrays whose query
-    indices are local to each receiver chunk.
-    """
-
-    merged = {}
-    keys = {
-        key
-        for entry, _ in chunks
-        for key in entry
-        if key.startswith("fixed_group_")
-    }
-    for key in keys:
-        values_and_widths = [
-            (entry[key], width)
-            for entry, width in chunks
-            if key in entry
-        ]
-        if not values_and_widths:
-            continue
-        values = [value for value, _ in values_and_widths]
-        first = values[0]
-        if key.endswith("_triple_query"):
-            offset = 0
-            shifted = []
-            for entry, width in chunks:
-                if key in entry:
-                    shifted.append(entry[key] + offset)
-                offset += width
-            merged[key] = torch.cat(shifted, dim=0)
-        elif key.endswith(("_triple_batch", "_triple_group", "_triple_source")):
-            merged[key] = torch.cat(values, dim=0)
-        elif key.startswith("fixed_group_environment_attention_"):
-            # Packed attention can optionally carry explicit provenance
-            # columns alongside [triples, heads].  Query indices are local to
-            # each receiver chunk; batch/group/source indices are not.
-            suffix = key.removeprefix("fixed_group_environment_attention_")
-            if suffix in {"query", "query_index"}:
-                offset = 0
-                shifted = []
-                for entry, width in chunks:
-                    if key in entry:
-                        shifted.append(entry[key] + offset)
-                    offset += width
-                merged[key] = torch.cat(shifted, dim=0)
-            elif suffix in {"batch", "batch_index", "group", "group_index", "source", "source_index"}:
-                merged[key] = torch.cat(values, dim=0)
-            else:
-                merged[key] = first
-        elif key == "fixed_group_environment_attention":
-            if first.ndim >= 5 and all(
-                value.ndim >= 5 and value.shape[3] == width
-                for value, width in values_and_widths
-            ):
-                merged[key] = torch.cat(values, dim=3)
-            elif first.ndim >= 2:
-                # The backend may use a packed [triples, heads] diagnostic;
-                # preserve every packed row across receiver chunks too.
-                merged[key] = torch.cat(values, dim=0)
-            else:  # pragma: no cover - diagnostics are tensor-valued.
-                merged[key] = first
-        elif first.ndim >= 2 and all(
-            value.ndim >= 2 and value.shape[1] == width
-            for value, width in values_and_widths
-        ):
-            # Query-local fixed-group maps: [B,Q,...].
-            merged[key] = torch.cat(values, dim=1)
-        else:
-            # Incidence, centres, and batch-level summaries are repeated for
-            # every receiver chunk; retain one copy.
-            merged[key] = first
-    return merged
 
 
 def _merge_group_control_maps(chunks):
@@ -339,9 +204,6 @@ class InterfaceFieldCore(nn.Module):
         if config.interface_model is None:
             raise ValueError("InterfaceFieldCore requires interface_model settings.")
         self.config = config
-        # An organizer is attached only after loading the trusted native
-        # checkpoint, so historical checkpoint keys stay unchanged.
-        self.native_interaction_policy: nn.Module | None = None
         options = config.interface_model
         hidden = int(config.hidden_dim)
         heads = int(options.attention_heads)
@@ -352,564 +214,28 @@ class InterfaceFieldCore(nn.Module):
         self.env_encoder = LazyMLP(hidden, num_layers=2, include_zero_dropout=True)
         self.position_fourier = FourierFeatures(None, int(config.position_fourier_frequencies))
         self.receiver_fourier = FourierFeatures(None, int(config.query_fourier_frequencies))
-        native_context_architectures = {"native_context_tree_honf", "native_context_global_control_honf"}
-        if config.forward_architecture not in native_context_architectures and config.forward_architecture in {
-            "three_term_full_access_honf",
-            "direct_pairwise_control_honf",
-            *CAMPAIGN_ARCHITECTURES,
-            "adaptive_interaction_cover_honf",
-            "fixed_group_pairwise_honf",
-            "group_control_pairwise_honf",
-            "phase_shared_group_control_honf",
-            "hypergraph_quadrature_honf",
-            "budgeted_group_control_honf",
-            "occupancy_adaptive_group_control_honf",
-            "mass_competitive_group_control_honf",
-            "sparse_incidence_group_control_honf",
-            "coalesced_sparse_incidence_honf",
-            "converged_identity_preserving_coalescence_honf",
-            "continuous_functional_coalescence_honf",
-            "task_trained_functional_coalescence_honf",
-            "source_conditioned_pairwise_honf",
-            "adaptive_hyperedge_opening_honf",
-        }:
-            # Run 1405/1406 deliberately replace the historical coarse/local
-            # context object with the three-term reader. Keep construction
-            # conditional so every historical architecture retains the same
-            # module tree and serialized parameter names.
-            from .three_term_context import ThreeTermInterfaceContext
-
-            self.common = ThreeTermInterfaceContext(
-                hidden_dim=hidden,
-                field_dim=int(config.field_dim),
-                query_fourier_frequencies=int(config.query_fourier_frequencies),
-            )
-        else:
-            self.common = SharedInterfaceContext(
-                hidden_dim=hidden,
-                field_dim=int(config.field_dim),
-                num_heads=heads,
-                coarse_latent_count=int(options.coarse_latent_count),
-                coarse_blocks=int(options.coarse_blocks),
-                local_radius_factor=float(options.local_radius_factor),
-                fourier_frequencies=frequencies,
-                coarse_module_source=str(options.coarse_module_source),
-            )
-        # The science profile owns exactly four scalar route temperatures at
-        # the reusable core boundary.  Historical profiles keep this
-        # ParameterDict empty, so their state-dict structure and optimizer
-        # inventory remain unchanged.  The routed backend receives the same
-        # ParameterDict by reference and applies the values to source/query
-        # projections without creating a second set of parameters.
-        self.routing_log_temperatures = nn.ParameterDict()
-        if (
-            config.forward_architecture == "routed_pairwise_honf"
-            and options.routing is not None
-            and bool(options.routing.sparsification.learn_typed_temperatures)
-        ):
-            # ParameterDict.update sorts ordinary mappings in some supported
-            # PyTorch versions.  Assign one key at a time so checkpoint and
-            # optimizer inventories retain the plan's source-M, source-E,
-            # query-M, query-E order as well as the exact four-key schema.
-            for name in ROUTING_TYPED_TEMPERATURE_NAMES:
-                self.routing_log_temperatures[name] = nn.Parameter(
-                    torch.zeros((), dtype=torch.get_default_dtype())
-                )
-        if config.forward_architecture == "dense_pairwise_field":
-            # This backend has the original Dense parameter tree and calls
-            # Dense directly until a native policy is explicitly attached.
-            from .adaptive_cover_field import AdaptiveCoverPairwiseField
-
-            self.backend = AdaptiveCoverPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                activation_checkpointing=bool(options.activation_checkpointing),
-                optional_native_policy=True,
-            )
-        elif config.forward_architecture in CAMPAIGN_ARCHITECTURES:
-            from .typed_hypergraph_field import TypedHypergraphField
-
-            backend_type = TypedHypergraphField
-            backend_options = dict(options.hypergraph_options)
-            source_residual = backend_options.pop("tensor_source_residual", False)
-            query_interaction = backend_options.pop("tensor_query_interaction", False)
-            if source_residual and query_interaction:
-                raise ValueError("Select only one tensor interface backend")
-            if query_interaction:
-                from .tensor_query_interaction import TensorQueryInteractionField
-                backend_type = TensorQueryInteractionField
-            elif source_residual:
-                from .tensor_source_group_residual import TensorSourceGroupResidualField
-                backend_type = TensorSourceGroupResidualField
-            self.backend = backend_type(
-                hidden, int(options.message_hidden_dim), heads, frequencies,
-                architecture=config.forward_architecture,
-                spatial_dim=int(config.spatial_dim),
-                module_characteristic_length=float(config.module_radius),
-                control_dim=int(options.group_control_dim),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                options=backend_options,
-            )
-        elif config.forward_architecture == "direct_pairwise_control_honf":
-            from .direct_pairwise_control import DirectPairwiseControlField
-
-            settings = dict(options.hypergraph_options)
-            self.backend = DirectPairwiseControlField(
-                hidden, int(options.message_hidden_dim), heads, frequencies,
-                control_hidden_dim=settings.pop("pair_control_width", 80),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-            if settings:
-                raise ValueError(f"Unknown direct pair-control options: {sorted(settings)}")
-        elif config.forward_architecture == "three_term_full_access_honf":
-            self.backend = DensePairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "adaptive_interaction_cover_honf":
-            from .adaptive_cover_field import AdaptiveCoverPairwiseField
-
-            self.backend = AdaptiveCoverPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "routed_pairwise_honf":
-            from .routed_pairwise import RoutedPairwiseField
-
-            routed_kwargs = {
-                "routing_config": options.routing,
-                "activation_checkpointing": bool(options.activation_checkpointing),
-            }
-            # Keep the historical backend constructor path untouched until a
-            # science profile actually asks for the new parameters.  The
-            # exact executor accepts this optional object for the opt-in
-            # profile; old checkpoints therefore remain loadable during the
-            # transition and under older backend implementations.
-            if len(self.routing_log_temperatures) > 0:
-                # Pass a plain mapping of the already-registered Parameter
-                # objects.  Registering the ParameterDict a second time under
-                # the backend would duplicate state-dict paths and defeat the
-                # strict four-key warm-start contract.
-                routed_kwargs["typed_log_temperatures"] = dict(self.routing_log_temperatures)
-            self.backend = RoutedPairwiseField(
-                hidden, int(options.message_hidden_dim), heads, frequencies,
-                **routed_kwargs,
-            )
-        elif config.forward_architecture == "geometry_latent_field":
-            self.backend = GeometryLatentField(
-                hidden,
-                int(options.main_latent_count),
-                int(options.main_latent_blocks),
-                heads,
-                frequencies,
-            )
-        elif config.forward_architecture == "sparse_interface_honf":
-            if options.support_spacing_factor is None:
-                raise ValueError("sparse_interface_honf requires support_spacing_factor.")
-            self.backend = SparseInterfaceHONF(
-                hidden,
-                int(options.message_hidden_dim),
-                frequencies,
-                float(options.support_spacing_factor),
-                group_read_mode=str(options.group_read_mode),
-            )
-        elif config.forward_architecture == "regional_response_honf":
-            self.backend = RegionalResponseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                response_region_block_shape=tuple(options.response_region_block_shape),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "hierarchical_regional_honf":
-            self.backend = HierarchicalRegionalField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                response_region_block_shape=tuple(options.response_region_block_shape),
-                response_tree_opening_interval=tuple(options.response_tree_opening_interval),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "fixed_group_pairwise_honf":
-            from .fixed_group_pairwise import FixedGroupPairwiseField
-
-            self.backend = FixedGroupPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_code_dim=int(options.group_code_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "group_control_pairwise_honf":
-            from .group_control_pairwise import GroupControlPairwiseField
-
-            self.backend = GroupControlPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "phase_shared_group_control_honf":
-            from .phase_shared_group_control import PhaseSharedGroupControlPairwiseField
-
-            self.backend = PhaseSharedGroupControlPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "hypergraph_quadrature_honf":
-            # Keep the opt-in import narrow so historical models do not
-            # materialize or depend on the sampled-reader implementation.
-            from .hypergraph_quadrature import HypergraphQuadratureField
-
-            self.backend = HypergraphQuadratureField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                samples_per_group=int(options.samples_per_group),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "budgeted_group_control_honf":
-            from .budgeted_group_control import BudgetedGroupControlPairwiseField
-
-            budget = options.case_group_budget
-            if budget is None or not budget.enabled:
-                raise ValueError(
-                    "budgeted_group_control_honf requires an enabled case_group_budget block."
-                )
-            self.backend = BudgetedGroupControlPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                gate_hidden_dim=int(budget.gate_hidden_dim),
-                hard_concrete_temperature=float(budget.hard_concrete_temperature),
-                stretch_lower=float(budget.stretch_lower),
-                stretch_upper=float(budget.stretch_upper),
-                initial_optional_open_probability=float(budget.initial_optional_open_probability),
-                always_available_group=int(budget.always_available_group),
-                execution_mode=str(budget.execution_mode),
-                rescue_mode=bool(budget.rescue_mode),
-                schedule=str(budget.schedule),
-                routing_initial_scale=float(budget.routing_initial_scale),
-                routing_full_epoch=int(budget.routing_full_epoch),
-                compression_start_epoch=int(budget.compression_start_epoch),
-                hardening_epoch=int(budget.hardening_epoch),
-            )
-        elif config.forward_architecture == "occupancy_adaptive_group_control_honf":
-            from .occupancy_group_control import OccupancyAdaptiveGroupControlPairwiseField
-
-            self.backend = OccupancyAdaptiveGroupControlPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "mass_competitive_group_control_honf":
-            from .mass_competitive_group_control import (
-                MassCompetitiveGroupControlPairwiseField,
-            )
-
-            self.backend = MassCompetitiveGroupControlPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-            )
-        elif config.forward_architecture == "sparse_incidence_group_control_honf":
-            from .sparse_incidence_group_control import (
-                SparseIncidenceGroupControlPairwiseField,
-            )
-
-            self.backend = SparseIncidenceGroupControlPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                environment_refinement_normalizer=str(
-                    options.environment_refinement_normalizer
-                ),
-            )
-        elif config.forward_architecture == "source_conditioned_pairwise_honf":
-            from .source_conditioned_pairwise import SourceConditionedPairwiseField
-
-            self.backend = SourceConditionedPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                environment_refinement_normalizer=str(
-                    options.environment_refinement_normalizer
-                ),
-            )
-        elif config.forward_architecture == "coalesced_sparse_incidence_honf":
-            from .coalesced_sparse_incidence import CoalescedSparseIncidencePairwiseField
-
-            self.backend = CoalescedSparseIncidencePairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                environment_refinement_normalizer=str(
-                    options.environment_refinement_normalizer
-                ),
-                fusion_max_iterations=int(options.fusion_max_iterations),
-                fusion_eta_final=float(options.fusion_eta_final),
-                fusion_ramp_epochs=int(options.fusion_ramp_epochs),
-            )
-        elif config.forward_architecture == "converged_identity_preserving_coalescence_honf":
-            from .coalesced_sparse_incidence import (
-                ConvergedIdentityPreservingCoalescencePairwiseField,
-            )
-
-            self.backend = ConvergedIdentityPreservingCoalescencePairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                environment_refinement_normalizer=str(
-                    options.environment_refinement_normalizer
-                ),
-                fusion_max_iterations=int(options.fusion_max_iterations),
-                fusion_eta_final=float(options.fusion_eta_final),
-                fusion_ramp_epochs=int(options.fusion_ramp_epochs),
-                fusion_eps_abs=float(options.fusion_eps_abs),
-                fusion_eps_rel=float(options.fusion_eps_rel),
-            )
-        elif config.forward_architecture == "continuous_functional_coalescence_honf":
-            from .continuous_functional_coalescence import (
-                ContinuousFunctionalCoalescencePairwiseField,
-            )
-
-            self.backend = ContinuousFunctionalCoalescencePairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                environment_refinement_normalizer=str(
-                    options.environment_refinement_normalizer
-                ),
-                functional_tree_subsets=options.functional_tree_subsets,
-                read_input_close_rms=float(options.read_input_close_rms),
-                read_input_keep_rms=float(options.read_input_keep_rms),
-            )
-        elif config.forward_architecture == "task_trained_functional_coalescence_honf":
-            from .task_trained_functional_coalescence import (
-                TaskTrainedFunctionalCoalescencePairwiseField,
-            )
-
-            self.backend = TaskTrainedFunctionalCoalescencePairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                environment_refinement_normalizer=str(
-                    options.environment_refinement_normalizer
-                ),
-                functional_tree_subsets=options.functional_tree_subsets,
-                functional_detail_hidden_dim=int(options.functional_detail_hidden_dim),
-                functional_detail_initial_logit=float(
-                    options.functional_detail_initial_logit
-                ),
-                functional_detail_inference_mode=str(
-                    options.functional_detail_inference_mode
-                ),
-            )
-        elif config.forward_architecture == "adaptive_hyperedge_opening_honf":
-            from .adaptive_hyperedge_opening import AdaptiveHyperedgeOpeningPairwiseField
-
-            self.backend = AdaptiveHyperedgeOpeningPairwiseField(
-                hidden,
-                int(options.message_hidden_dim),
-                heads,
-                frequencies,
-                group_count=int(options.group_count),
-                group_control_dim=int(options.group_control_dim),
-                spatial_dim=int(config.spatial_dim),
-                module_temperature=float(options.module_temperature),
-                environment_temperature=float(options.environment_temperature),
-                query_temperature=float(options.query_temperature),
-                activation_checkpointing=bool(options.activation_checkpointing),
-                environment_refinement_normalizer=str(
-                    options.environment_refinement_normalizer
-                ),
-            )
-        else:
+        self.common = SharedInterfaceContext(
+            hidden_dim=hidden,
+            field_dim=int(config.field_dim),
+            num_heads=heads,
+            coarse_latent_count=int(options.coarse_latent_count),
+            coarse_blocks=int(options.coarse_blocks),
+            local_radius_factor=float(options.local_radius_factor),
+            fourier_frequencies=frequencies,
+            coarse_module_source=str(options.coarse_module_source),
+        )
+        if config.forward_architecture != "dense_pairwise_field":
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
+        self.backend = DensePairwiseField(
+            hidden, int(options.message_hidden_dim), heads, frequencies,
+            activation_checkpointing=bool(options.activation_checkpointing),
+        )
         self.receiver_chunk_size = int(options.receiver_chunk_size)
 
-    def set_native_interaction_policy(self, policy: nn.Module | None) -> None:
-        """Attach an input-only organizer to an intact Dense native model.
+    def set_training_progress(self, *, epoch: int, total_epochs: Optional[int] = None) -> None:
+        del epoch, total_epochs
 
-        The policy implements ``plan_cases(encoded, prepared_state, trees)``
-        and returns one deterministic cover plan per case. ``None`` preserves
-        the direct Dense prepare/read calls and constructs no receiver trees.
-        """
-
-        if policy is None:
-            self.native_interaction_policy = None
-            return
-        if self.config.forward_architecture != "dense_pairwise_field":
-            raise ValueError("native interaction policies are supported only by dense_pairwise_field")
-        if not bool(getattr(self.backend, "optional_native_policy", False)):
-            raise TypeError("the configured backend does not support native interaction policies")
-        if not callable(getattr(policy, "plan_cases", None)):
-            raise TypeError("native interaction policy must implement plan_cases(encoded, prepared_state, trees)")
-        if not isinstance(policy, nn.Module):
-            raise TypeError("native interaction policy must be an nn.Module so its parameters are trainable")
-        reference_parameter = next(self.parameters(), None)
-        if reference_parameter is not None:
-            policy = policy.to(device=reference_parameter.device)
-        self.native_interaction_policy = policy
-
-    def clear_native_interaction_tree_cache(self) -> None:
-        """Clear session geometry indexes without changing policy state."""
-
-        clear = getattr(self.backend, "clear_case_tree_cache", None)
-        if not callable(clear):
-            raise TypeError("the configured backend does not own a native interaction tree cache")
-        clear()
-
-    def native_interaction_tree_cache_info(self) -> dict[str, int]:
-        """Return bounded geometry-tree cache counters for execution audits."""
-
-        info = getattr(self.backend, "case_tree_cache_info", None)
-        if not callable(info):
-            raise TypeError("the configured backend does not own a native interaction tree cache")
-        return dict(info())
-
-    @property
-    def typed_routing_temperatures_enabled(self) -> bool:
-        """Whether this core carries the four learnable route temperatures."""
-
-        return len(self.routing_log_temperatures) == len(ROUTING_TYPED_TEMPERATURE_NAMES)
-
-    def set_training_progress(self, *, epoch: int, total_epochs: int | None = None) -> None:
-        if self.config.forward_architecture in {
-            *CAMPAIGN_ARCHITECTURES,
-            "budgeted_group_control_honf",
-            "coalesced_sparse_incidence_honf",
-            "converged_identity_preserving_coalescence_honf",
-            "continuous_functional_coalescence_honf",
-            "task_trained_functional_coalescence_honf",
-        }:
-            setter = getattr(self.backend, "set_training_progress", None)
-            if callable(setter):
-                setter(epoch=epoch, total_epochs=total_epochs)
-
-    def selection_state(self) -> dict[str, int | None]:
-        if self.config.forward_architecture in {
-            *CAMPAIGN_ARCHITECTURES,
-            "budgeted_group_control_honf",
-            "coalesced_sparse_incidence_honf",
-            "converged_identity_preserving_coalescence_honf",
-            "continuous_functional_coalescence_honf",
-            "task_trained_functional_coalescence_honf",
-        }:
-            getter = getattr(self.backend, "selection_state", None)
-            if callable(getter):
-                return dict(getter())
+    def selection_state(self) -> Dict[str, Optional[int]]:
         return {"epoch": None, "total_epochs": None}
 
     def _coordinate_scale(self, coordinates: torch.Tensor) -> torch.Tensor:
@@ -1015,36 +341,6 @@ class InterfaceFieldCore(nn.Module):
             if batch.env_hierarchy is not None else None
         )
         hierarchy_geometry = None
-        if self.config.forward_architecture == "hierarchical_regional_honf":
-            if env_hierarchy is None:
-                raise ValueError("hierarchical_regional_honf requires adapter-supplied env_hierarchy.")
-            hierarchy_geometry = prepare_hierarchy_geometry(env_hierarchy, env_weights, env_coords)
-        anchors = (batch.receiver_anchor_coords, batch.receiver_anchor_weights, batch.receiver_anchor_roles)
-        if any(value is not None for value in anchors) and not all(value is not None for value in anchors):
-            raise ValueError("receiver anchor coordinates, weights, and roles must be supplied together")
-        anchor_coords = anchor_weights = anchor_roles = None
-        if all(value is not None for value in anchors):
-            anchor_coords = anchors[0].to(device=module_centers.device, dtype=module_centers.dtype)
-            anchor_weights = anchors[1].to(device=module_centers.device, dtype=module_centers.dtype)
-            anchor_roles = anchors[2].to(device=module_centers.device, dtype=torch.long)
-            if anchor_coords.ndim == 2:
-                anchor_coords = anchor_coords[None].expand(int(module_centers.shape[0]), -1, -1)
-            if anchor_weights.ndim == 1:
-                anchor_weights = anchor_weights[None].expand(int(module_centers.shape[0]), -1)
-            if anchor_roles.ndim == 1:
-                anchor_roles = anchor_roles[None].expand(int(module_centers.shape[0]), -1)
-            if (
-                anchor_coords.ndim != 3
-                or anchor_coords.shape[0] != module_centers.shape[0]
-                or anchor_coords.shape[-1] != module_centers.shape[-1]
-                or anchor_weights.shape != anchor_coords.shape[:2]
-                or anchor_roles.shape != anchor_coords.shape[:2]
-            ):
-                raise ValueError("receiver anchors must align as [B,A,d], [B,A], [B,A]")
-            if not bool(torch.isfinite(anchor_coords).all()) or not bool(torch.isfinite(anchor_weights).all()):
-                raise ValueError("receiver anchor coordinates and weights must be finite")
-            if bool((anchor_weights < 0).any()) or bool((anchor_weights > 0).sum(dim=1).eq(0).any()):
-                raise ValueError("receiver anchor weights must be nonnegative with positive case mass")
         return EncodedInterfaceCase(
             module_tokens=module_tokens,
             env_tokens=env_tokens,
@@ -1060,18 +356,6 @@ class InterfaceFieldCore(nn.Module):
             env_hierarchy=env_hierarchy,
             env_hierarchy_geometry=hierarchy_geometry,
             routing_geometry=batch.routing_geometry,
-            sampler_layout=batch.sampler_layout,
-            receiver_anchor_coords=anchor_coords,
-            receiver_anchor_weights=anchor_weights,
-            receiver_anchor_roles=anchor_roles,
-            module_source_ids=batch.module_source_ids,
-            env_source_ids=batch.env_source_ids,
-            module_characteristic_lengths=(
-                batch.module_characteristic_lengths
-                if batch.module_characteristic_lengths is not None
-                else module_present.new_full(module_present.shape, float(self.config.module_radius))
-            ),
-            env_characteristic_lengths=batch.env_characteristic_lengths,
         )
 
     def prepare(
@@ -1081,120 +365,14 @@ class InterfaceFieldCore(nn.Module):
         layout_cache: Any = None,
         *,
         return_routing_maps: bool = False,
-        phase_shared_state: Any = None,
-        functional_probes: FunctionalProbeCatalogue | None = None,
-        functional_detail_stochastic_mask: torch.Tensor | None = None,
-        fixed_cover_plans: tuple[AdaptiveCoverPlan | MechanismPlan, ...] | None = None,
-        interaction_context: InteractionContext | None = None,
+        fixed_cover_plans: Any = None,
+        interaction_context: Any = None,
     ) -> PreparedInterfaceField:
-        functional_architecture = (
-            self.config.forward_architecture == "continuous_functional_coalescence_honf"
-        )
-        task_trained_functional_architecture = (
-            self.config.forward_architecture == "task_trained_functional_coalescence_honf"
-        )
-        if functional_probes is not None and not functional_architecture:
-            raise ValueError(
-                "functional_probes are only supported by continuous_functional_coalescence_honf."
-            )
-        if functional_detail_stochastic_mask is not None and not task_trained_functional_architecture:
-            raise ValueError(
-                "functional_detail_stochastic_mask is only supported by "
-                "task_trained_functional_coalescence_honf."
-            )
-        native_policy = self.native_interaction_policy
         if fixed_cover_plans is not None:
-            if not bool(getattr(self.backend, "optional_native_policy", False)):
-                raise TypeError("fixed cover plans require the checkpoint-native Dense cover backend")
-            plans = self.backend.rebind_fixed_plans(encoded, tuple(fixed_cover_plans))
-            trees = tuple(plan.tree for plan in plans)
-            backend_state = self.backend.prepare(
-                encoded,
-                module_states,
-                cover_trees=trees,
-                cover_plans=plans,
-                interaction_context=interaction_context,
-                return_routing_maps=bool(return_routing_maps),
-            )
-            # Keep fixed-plan provenance in the prepared state.  A later
-            # explicit read context may select a receiver role within the
-            # same phase, but it must not reinterpret phase-keyed permissions.
-            backend_state["cover_fixed_plans_explicit"] = True
-        elif native_policy is not None:
-            if not bool(getattr(self.backend, "optional_native_policy", False)):
-                raise TypeError("native interaction policy is attached to an incompatible backend")
-            trees = self.backend.build_case_trees(encoded)
-            tree_cache_hits = self.backend.last_case_tree_cache_hits
-            # Only current model-side input states and the encoded input
-            # record reach the organizer. BatchData and all targets remain
-            # outside this execution boundary.
-            prepared_policy_inputs = {
-                "module_states": module_states,
-                "environment_states": encoded.env_tokens,
-                "global_state": encoded.global_token,
-            }
-            plans = tuple(native_policy.plan_cases(encoded, prepared_policy_inputs, trees))
-            backend_state = self.backend.prepare(
-                encoded,
-                module_states,
-                cover_trees=trees,
-                cover_plans=plans,
-                interaction_context=interaction_context,
-                cover_tree_cache_hits=tree_cache_hits,
-                return_routing_maps=bool(return_routing_maps),
-            )
-        elif self.config.forward_architecture in {*CAMPAIGN_ARCHITECTURES, "direct_pairwise_control_honf"}:
-            tensor_kwargs = ({"phase_shared_state": phase_shared_state}
-                             if getattr(self.backend, "shares_tensor_plan", False) else {})
-            backend_state = self.backend.prepare(
-                encoded, module_states,
-                interaction_context=interaction_context,
-                return_routing_maps=bool(return_routing_maps), **tensor_kwargs,
-            )
-        elif self.config.forward_architecture == "sparse_interface_honf":
-            if not isinstance(layout_cache, SparseLayoutCache):
-                raise ValueError("sparse_interface_honf requires a SparseLayoutCache built from module ports.")
-            backend_state = self.backend.prepare(encoded, module_states, layout_cache)
-        elif self.config.forward_architecture == "regional_response_honf":
-            backend_state = self.backend.prepare(
-                encoded,
-                module_states,
-                region_ids=encoded.env_region_ids,
-                return_routing_maps=bool(return_routing_maps),
-            )
-        elif functional_architecture:
-            backend_state = self.backend.prepare(
-                encoded,
-                module_states,
-                functional_probes=functional_probes,
-                return_routing_maps=bool(return_routing_maps),
-            )
-        elif task_trained_functional_architecture:
-            backend_state = self.backend.prepare(
-                encoded,
-                module_states,
-                return_routing_maps=bool(return_routing_maps),
-                functional_detail_stochastic_mask=functional_detail_stochastic_mask,
-            )
-        elif self.config.forward_architecture in {
-            "phase_shared_group_control_honf",
-            "hypergraph_quadrature_honf",
-            "budgeted_group_control_honf",
-            "occupancy_adaptive_group_control_honf",
-            "mass_competitive_group_control_honf",
-        }:
-            backend_state = self.backend.prepare(
-                encoded,
-                module_states,
-                phase_shared_state=phase_shared_state,
-                return_routing_maps=bool(return_routing_maps),
-            )
-        else:
-            backend_state = self.backend.prepare(
-                encoded,
-                module_states,
-                return_routing_maps=bool(return_routing_maps),
-            )
+            raise ValueError("Dense field does not support cover plans.")
+        backend_state = self.backend.prepare(
+            encoded, module_states, return_routing_maps=bool(return_routing_maps),
+        )
         coarse_kwargs = {}
         if self.config.interface_model.coarse_module_source == "group_states":
             groups = packed_coarse_group_sources(backend_state)
@@ -1207,155 +385,12 @@ class InterfaceFieldCore(nn.Module):
             module_states, encoded.env_tokens, encoded.module_present, encoded.env_weights,
             **coarse_kwargs,
         )
-        aux: dict[str, Any] = {
+        aux: Dict[str, Any] = {
             "forward_architecture": self.config.forward_architecture,
-            "coarse_latent_count": (
-                0
-                if not isinstance(self.common, SharedInterfaceContext) and self.config.forward_architecture in {
-                    "three_term_full_access_honf",
-                    "direct_pairwise_control_honf",
-                    *CAMPAIGN_ARCHITECTURES,
-                    "adaptive_interaction_cover_honf",
-                    "fixed_group_pairwise_honf",
-                    "group_control_pairwise_honf",
-                    "phase_shared_group_control_honf",
-                    "hypergraph_quadrature_honf",
-                    "budgeted_group_control_honf",
-                    "occupancy_adaptive_group_control_honf",
-                    "mass_competitive_group_control_honf",
-                    "sparse_incidence_group_control_honf",
-                    "coalesced_sparse_incidence_honf",
-                    "converged_identity_preserving_coalescence_honf",
-                    "continuous_functional_coalescence_honf",
-                    "task_trained_functional_coalescence_honf",
-                    "source_conditioned_pairwise_honf",
-                    "adaptive_hyperedge_opening_honf",
-                }
-                else int(self.config.interface_model.coarse_latent_count)
-            ),
-            "main_latent_count": (
-                int(self.config.interface_model.main_latent_count)
-                if self.config.forward_architecture == "geometry_latent_field"
-                else 0
-            ),
+            "coarse_latent_count": int(self.config.interface_model.coarse_latent_count),
+            "main_latent_count": 0,
         }
-        if native_policy is not None or fixed_cover_plans is not None:
-            aux.update(
-                self.backend.preparation_aux(
-                    backend_state,
-                    include_diagnostics=bool(return_routing_maps),
-                )
-            )
-            batch_count, padded_modules = encoded.module_present.shape
-            environment_count = int(encoded.env_coords.shape[1])
-            coarse_latents = int(coarse_state.shape[1])
-            aux.update({
-                "cover_coarse_path_bypass_active": torch.ones(
-                    (), device=module_states.device, dtype=torch.long
-                ),
-                "cover_local_path_bypass_active": torch.ones(
-                    (), device=module_states.device, dtype=torch.long
-                ),
-                "cover_coarse_module_source_rows": torch.tensor(
-                    int(batch_count) * coarse_latents * int(padded_modules),
-                    device=module_states.device,
-                    dtype=torch.long,
-                ),
-                "cover_coarse_environment_source_rows": torch.tensor(
-                    int(batch_count) * coarse_latents * environment_count,
-                    device=module_states.device,
-                    dtype=torch.long,
-                ),
-            })
-        elif self.config.forward_architecture in {
-            "adaptive_interaction_cover_honf",
-            "direct_pairwise_control_honf",
-            *CAMPAIGN_ARCHITECTURES,
-            "fixed_group_pairwise_honf",
-            "group_control_pairwise_honf",
-            "phase_shared_group_control_honf",
-            "hypergraph_quadrature_honf",
-            "budgeted_group_control_honf",
-            "occupancy_adaptive_group_control_honf",
-            "mass_competitive_group_control_honf",
-            "sparse_incidence_group_control_honf",
-            "coalesced_sparse_incidence_honf",
-            "converged_identity_preserving_coalescence_honf",
-            "continuous_functional_coalescence_honf",
-            "task_trained_functional_coalescence_honf",
-            "source_conditioned_pairwise_honf",
-            "adaptive_hyperedge_opening_honf",
-        }:
-            aux.update(
-                self.backend.preparation_aux(
-                    backend_state,
-                    include_diagnostics=bool(return_routing_maps),
-                )
-            )
-        elif self.config.forward_architecture in {
-            "sparse_interface_honf",
-            "hierarchical_regional_honf",
-            "routed_pairwise_honf",
-        }:
-            aux.update(self.backend.preparation_aux(backend_state))
-        if isinstance(backend_state, dict):
-            cover_plans = backend_state.get("cover_plans")
-            if cover_plans is not None:
-                prepared_context = backend_state.get("cover_interaction_context")
-                prepared_phase = (
-                    prepared_context.phase
-                    if isinstance(prepared_context, InteractionContext)
-                    else None
-                )
-                environment_count = int(encoded.env_coords.shape[1])
-                # A plan subclass may define direct per-receiver access that
-                # cannot be represented by static tree membership matrices.
-                # Keep its native reference executor instead of compiling the
-                # base-class view and silently changing the physical mask.
-                compiled_views = (
-                    tuple(
-                        compile_mechanism_execution_view(
-                            plan,
-                            module_present=encoded.module_present[case],
-                            environment_count=environment_count,
-                            phase=prepared_phase,
-                    )
-                    for case, plan in enumerate(cover_plans)
-                    )
-                    if all(
-                        type(plan) in {AdaptiveCoverPlan, MechanismPlan}
-                        and not (
-                            isinstance(plan, MechanismPlan)
-                            and (plan.direct_access or plan.direct_policies)
-                        )
-                        for plan in cover_plans
-                    )
-                    else None
-                )
-                backend_state = {
-                    **backend_state,
-                    "cover_execution_views": compiled_views,
-                }
-        return PreparedInterfaceField(
-            encoded,
-            module_states,
-            backend_state,
-            coarse_state,
-            aux,
-            (
-                backend_state.get("phase_shared_group_control")
-                if isinstance(backend_state, dict)
-                else None
-            )
-            if self.config.forward_architecture != "budgeted_group_control_honf"
-            else backend_state.get("case_group_budget"),
-        )
-
-    def export_typed_hypergraph(self, prepared: PreparedInterfaceField) -> dict[str, Any]:
-        """Common input-only inverse export, separate from the legacy organizer."""
-        if self.config.forward_architecture not in CAMPAIGN_ARCHITECTURES:
-            raise ValueError("typed hypergraph export requires a registered campaign architecture")
-        return self.backend.export_typed_state(prepared.backend_state)
+        return PreparedInterfaceField(encoded, module_states, backend_state, coarse_state, aux)
 
     def build_layout(
         self,
@@ -1363,40 +398,21 @@ class InterfaceFieldCore(nn.Module):
         module_port_coordinates: torch.Tensor,
         *,
         port_quadrature_weights: torch.Tensor | None = None,
-    ) -> SparseLayoutCache | None:
-        """Build sparse case geometry once; dense/latent families need no cache."""
-
-        if self.config.forward_architecture != "sparse_interface_honf":
-            return None
-        return self.backend.build_layout(
-            encoded,
-            module_port_coordinates,
-            module_radius=float(self.config.module_radius),
-            port_quadrature_weights=port_quadrature_weights,
-        )
+    ) -> None:
+        """Dense reads do not require a precomputed sparse layout."""
+        return None
 
     def _receiver_features(self, prepared: PreparedInterfaceField, receivers: torch.Tensor) -> torch.Tensor:
-        scale = prepared.encoded.coordinate_scale
-        if scale.ndim == 1:
-            scale = scale[None, None, :]
-        elif scale.ndim == 2:
-            scale = scale[:, None, :]
-        elif scale.ndim == 3:
-            if int(scale.shape[1]) != 1:
-                raise ValueError("coordinate_scale must have shape [d], [B,d], or [B,1,d].")
-        else:
-            raise ValueError("coordinate_scale must have shape [d], [B,d], or [B,1,d].")
-        return self.receiver_fourier(receivers / scale)
+        return self.receiver_fourier(receivers / prepared.encoded.coordinate_scale)
 
     def read(
         self,
         prepared: PreparedInterfaceField,
         receiver_coordinates: torch.Tensor,
         *,
-        receiver_chunk_size: int | None = None,
+        receiver_chunk_size: Optional[int] = None,
         return_routing_maps: bool = False,
-        interaction_context: InteractionContext | None = None,
-        include_cover_diagnostics: bool = True,
+        interaction_context: Any = None,
     ) -> InterfaceRead:
         """Read receivers with an optional evaluation-only chunk override.
 
@@ -1405,23 +421,6 @@ class InterfaceFieldCore(nn.Module):
         enter the model configuration or checkpoint state.
         """
         receivers = receiver_coordinates.float()
-        backend_state = prepared.backend_state
-        if (
-            isinstance(backend_state, dict)
-            and bool(backend_state.get("cover_fixed_plans_explicit", False))
-            and interaction_context is not None
-        ):
-            prepared_context = backend_state.get("cover_interaction_context")
-            prepared_phase = (
-                prepared_context.phase
-                if isinstance(prepared_context, InteractionContext)
-                else None
-            )
-            if interaction_context.phase != prepared_phase:
-                raise ValueError(
-                    "explicit fixed cover plans cannot be read in a different interaction phase "
-                    f"(prepared={prepared_phase!r}, requested={interaction_context.phase!r})"
-                )
         chunk_size = self.receiver_chunk_size if receiver_chunk_size is None else int(receiver_chunk_size)
         if chunk_size <= 0:
             raise ValueError("receiver_chunk_size must be positive.")
@@ -1430,23 +429,16 @@ class InterfaceFieldCore(nn.Module):
         main_norms = []
         coarse_norms = []
         local_norms = []
-        backend_aux_chunks: list[tuple[dict[str, torch.Tensor], int]] = []
-        effective_context = interaction_context
-        if effective_context is None and isinstance(prepared.backend_state, dict):
-            effective_context = prepared.backend_state.get("cover_interaction_context")
+        backend_aux_chunks: list[tuple[Dict[str, torch.Tensor], int]] = []
         for start in range(0, int(receivers.shape[1]), chunk_size):
             chunk = receivers[:, start : start + chunk_size]
             receiver_features = self._receiver_features(prepared, chunk)
-            backend_kwargs = {"return_routing_maps": bool(return_routing_maps)}
-            if bool(getattr(self.backend, "optional_native_policy", False)) or self.config.forward_architecture == "adaptive_interaction_cover_honf":
-                backend_kwargs["interaction_context"] = effective_context
-                backend_kwargs["include_cover_diagnostics"] = bool(include_cover_diagnostics)
             main, backend_aux = self.backend.read(
                 prepared.backend_state,
                 prepared.encoded,
                 chunk,
                 receiver_features,
-                **backend_kwargs,
+                return_routing_maps=bool(return_routing_maps),
             )
             coarse = self.common.read_coarse(
                 receiver_features, prepared.encoded.global_token, prepared.coarse_state
@@ -1470,7 +462,7 @@ class InterfaceFieldCore(nn.Module):
         coarse_values = torch.cat(coarse_norms, dim=1)
         local_values = torch.cat(local_norms, dim=1)
         branch_total = (main_values + coarse_values + local_values).clamp_min(1.0e-12)
-        aux: dict[str, torch.Tensor] = {
+        aux: Dict[str, torch.Tensor] = {
             "local_neighbor_count": torch.cat(neighbour_counts, dim=1),
             "main_context_norm": main_values,
             "coarse_context_norm": coarse_values,
@@ -1480,18 +472,7 @@ class InterfaceFieldCore(nn.Module):
             "local_context_fraction": local_values / branch_total,
         }
         if backend_aux_chunks:
-            compiled_maps = _merge_compiled_routing_maps(backend_aux_chunks)
-            aux.update(compiled_maps)
-            fixed_group_maps = _merge_fixed_group_maps(backend_aux_chunks)
-            aux.update(fixed_group_maps)
-            group_control_maps = _merge_group_control_maps(backend_aux_chunks)
-            aux.update(group_control_maps)
-            keys = (
-                {key for chunk_aux, _ in backend_aux_chunks for key in chunk_aux}
-                - set(compiled_maps)
-                - set(fixed_group_maps)
-                - set(group_control_maps)
-            )
+            keys = {key for chunk_aux, _ in backend_aux_chunks for key in chunk_aux}
             for key in keys:
                 values_and_widths = [
                     (chunk_aux[key], width)
@@ -1502,98 +483,6 @@ class InterfaceFieldCore(nn.Module):
                 if not values or not all(torch.is_tensor(value) for value in values):
                     continue
                 first = values[0]
-                if key.startswith(("hypergraph_", "pair_")) and key.endswith((
-                    "_unique_pairs", "_eligible_pairs", "_repeated_paths_removed",
-                    "_executed_rows", "_padded_rows", "_fine_calls",
-                    "_control_calls",
-                    "_allocated_rows", "_executed_eligible_pairs", "_skipped_eligible_pairs",
-                    "_attention_cells",
-                    "_near_mandatory_pairs", "_near_full_pairs",
-                    "_structural_numerator", "_structural_denominator",
-                )):
-                    aux[key] = torch.stack(values).sum()
-                    continue
-                if key.startswith("cover_") and key.endswith((
-                    "_raw_active_frontier_nodes",
-                    "_source_bearing_active_frontier_nodes",
-                    "_nonredundant_packets",
-                    "_source_union_count",
-                )):
-                    # These describe the same frozen case plans in every
-                    # receiver chunk; retain one structural count rather than
-                    # multiplying it by the number of read tiles.
-                    aux[key] = torch.stack(values).max()
-                    continue
-                if key.startswith("cover_") and key.endswith((
-                    "_unique_rows", "_actual_rows", "_executed_rows", "_padded_rows", "_raw_paths",
-                    "_rectangular_rows", "_fallback_queries", "_query_degree_sum",
-                    "_query_count", "_unique_source_receiver_pairs",
-                    "_gradient_bridge_native_rows", "_gradient_bridge_surrogate_rows",
-                    "_gradient_bridge_duplicate_rows", "_gradient_bridge_extra_rows",
-                )):
-                    # A cover is chosen once per case, but physically read
-                    # pairs and fallback work accrue in every query chunk.
-                    # Actual and gradient-bridge source rows follow the same
-                    # additive rule as executed rows; retaining one chunk
-                    # undercounts a tiled receiver call.
-                    aux[key] = torch.stack(values).sum()
-                    continue
-                if key == "cover_query_degree_max":
-                    aux[key] = torch.stack(values).max()
-                    continue
-                if key == "cover_executor_dense_fallback":
-                    aux[key] = torch.stack(values).sum()
-                    continue
-                if key.startswith("routing_") and key.endswith(("_raw_path_count", "_unique_pair_count")):
-                    aux[key] = torch.stack(values).sum()
-                    continue
-                # Pair-cost components are live numerator/denominator
-                # scalars.  Receiver chunking must combine them across the
-                # full read before the case loss forms their ratio; retaining
-                # only the first chunk would bias the objective toward the
-                # first receiver tile.
-                if key.endswith(("routing_paircost_numerator", "routing_paircost_denominator")):
-                    if first.ndim == 2 and all(value.shape[1] == width for value, width in values_and_widths):
-                        aux[key] = torch.cat(values, dim=1)
-                    else:
-                        aux[key] = torch.stack(values).sum()
-                    continue
-                if key.startswith(("routing_module_pair_", "routing_environment_pair_")):
-                    if key.endswith("_receiver"):
-                        offset = 0
-                        shifted = []
-                        for chunk_aux, width in backend_aux_chunks:
-                            if key in chunk_aux:
-                                shifted.append(chunk_aux[key] + offset)
-                            offset += width
-                        aux[key] = torch.cat(shifted, dim=0)
-                    else:
-                        aux[key] = torch.cat(values, dim=0)
-                    continue
-                if key.startswith("routing_") and key.endswith("_duplicate_expansion"):
-                    prefix = key.removesuffix("_duplicate_expansion")
-                    raw = torch.stack([entry[prefix + "_raw_path_count"] for entry, _ in backend_aux_chunks]).sum()
-                    unique = torch.stack([entry[prefix + "_unique_pair_count"] for entry, _ in backend_aux_chunks]).sum()
-                    aux[key] = raw / unique.clamp_min(1)
-                    continue
-                if key in {"hierarchical_traversal_rows", "hierarchical_incidence_rows"}:
-                    aux[key] = torch.stack(values).sum()
-                    continue
-                if key.startswith("hierarchical_incidence_"):
-                    # The optional tree maps are ragged incidence rows, not
-                    # dense receiver/source arrays. Preserve every row and
-                    # translate chunk-local query indices to this read call.
-                    if key == "hierarchical_incidence_query":
-                        offset = 0
-                        shifted = []
-                        for chunk_aux, width in backend_aux_chunks:
-                            if key in chunk_aux:
-                                shifted.append(chunk_aux[key] + offset)
-                            offset += width
-                        aux[key] = torch.cat(shifted, dim=0)
-                    else:
-                        aux[key] = torch.cat(values, dim=0)
-                    continue
                 # Backend summaries such as latent_count are batch-level and
                 # repeated for each receiver chunk.  Keep one copy rather
                 # than accidentally concatenating it across chunks.
@@ -1604,11 +493,6 @@ class InterfaceFieldCore(nn.Module):
                 # [B,H,Q,S].  The chunk widths are retained explicitly so a
                 # query count equal to the number of heads cannot confuse the
                 # axis selection.
-                if key.startswith("routing_") and first.ndim >= 2 and all(
-                    value.shape[1] == width for value, width in values_and_widths
-                ):
-                    aux[key] = torch.cat(values, dim=1)
-                    continue
                 if first.ndim >= 4 and all(
                     value.shape[2] == width for value, width in values_and_widths
                 ):
@@ -1620,33 +504,20 @@ class InterfaceFieldCore(nn.Module):
                     aux[key] = torch.cat(values, dim=1)
                     continue
                 aux[key] = first
-        if "cover_coarse_path_bypass_active" in prepared.interaction_aux:
-            aux["cover_coarse_path_bypass_active"] = prepared.interaction_aux["cover_coarse_path_bypass_active"]
-            aux["cover_local_path_bypass_active"] = prepared.interaction_aux["cover_local_path_bypass_active"]
-            aux["cover_coarse_module_source_rows"] = prepared.interaction_aux["cover_coarse_module_source_rows"]
-            aux["cover_coarse_environment_source_rows"] = prepared.interaction_aux[
-                "cover_coarse_environment_source_rows"
-            ]
-            aux["cover_coarse_query_latent_rows"] = torch.tensor(
-                int(receivers.shape[0]) * int(prepared.coarse_state.shape[1]) * int(receivers.shape[1]),
-                device=receivers.device,
-                dtype=torch.long,
-            )
-            aux["cover_local_bypass_neighbor_rows"] = aux["local_neighbor_count"].sum().to(torch.long)
         return InterfaceRead(torch.cat(contexts, dim=1), aux)
 
     def decode_queries(
         self,
         prepared: PreparedInterfaceField,
         query_xy: torch.Tensor,
-        query_features: torch.Tensor | None = None,
+        query_features: Optional[torch.Tensor] = None,
         *,
         return_routing_maps: bool = False,
         return_edge_fields: bool = False,
         return_interaction_aux: bool = False,
-        receiver_chunk_size: int | None = None,
-        interaction_context: InteractionContext | None = None,
-    ) -> dict[str, Any]:
+        receiver_chunk_size: Optional[int] = None,
+        interaction_context: Any = None,
+    ) -> Dict[str, Any]:
         if return_edge_fields:
             raise ValueError("Per-edge fields are not defined for interface-field baselines.")
         read = self.read(
@@ -1654,8 +525,6 @@ class InterfaceFieldCore(nn.Module):
             query_xy,
             receiver_chunk_size=receiver_chunk_size,
             return_routing_maps=bool(return_routing_maps),
-            interaction_context=interaction_context,
-            include_cover_diagnostics=bool(return_routing_maps or return_interaction_aux),
         )
         receiver_features = self._receiver_features(prepared, query_xy.float())
         pred_field = self.common.predict_field(
@@ -1665,7 +534,7 @@ class InterfaceFieldCore(nn.Module):
             prepared.encoded.global_token,
             query_features,
         )
-        result: dict[str, torch.Tensor] = {"pred_field": pred_field}
+        result: Dict[str, torch.Tensor] = {"pred_field": pred_field}
         if return_routing_maps:
             result.update(read.interaction_aux)
         if return_interaction_aux:

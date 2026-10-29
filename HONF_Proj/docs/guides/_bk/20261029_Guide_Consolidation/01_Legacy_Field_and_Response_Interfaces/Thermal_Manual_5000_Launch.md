@@ -8,7 +8,7 @@ Continuation and fresh seed 0 below are two alternatives for the same architectu
 
 ## Actual preparation and bounded verification
 
-The durable [launcher](../../../../../tools/thermal_campaign_long_run.py) accepts `--completed-stage 500` or `1000` (default 1000); its 50 focused CPU tests passed. Actual Tree 500 continuation/fresh preparation and both printed native `train.py --dry-run` commands exited 0 at source `5c06293fcbcc157ac54918fbfa06089fb69cec64`. Preparation checked complete native configuration, case physics and frozen Stage-A binding; only duration and placement changed. Preparation and parsers constructed no model or optimizer.
+The durable [launcher](https://github.com/cosmos2w/ModularDT/blob/7981c173e8b1d29ee2b3addb7b972d0f15003542/HONF_Proj/tools/thermal_campaign_long_run.py) accepts `--completed-stage 500` or `1000` (default 1000); its 50 focused CPU tests passed. Actual Tree 500 continuation/fresh preparation and both printed native `train.py --dry-run` commands exited 0 at source `5c06293fcbcc157ac54918fbfa06089fb69cec64`. Preparation checked complete native configuration, case physics and frozen Stage-A binding; only duration and placement changed. Preparation and parsers constructed no model or optimizer.
 
 Run2503 contains a byte-identical copy of the original Run2203 **top-level exact 500** parent, not selected467 or recovered Run2303 state:
 

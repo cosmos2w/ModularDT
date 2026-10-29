@@ -29,13 +29,13 @@ Implement the supplement in the current non-default branch, preserving later use
 
 | Maintained source | Relevant work |
 | --- | --- |
-| [joint.py](../../../src/honf_forward_core/interaction_reused_member_routing/joint.py) | Four-block H, whole-row retrieval, M/E proposals, joint member prefix, integration and work counts |
-| [guided.py](../../../src/honf_forward_core/interaction_reused_member_routing/guided.py) | Prior-weighted score calibration and explicit read-mode capture for checkpoint replay |
-| [relative.py](../../../src/honf_forward_core/interaction_reused_member_routing/relative.py) | Feature normalization, selected-member scoring and smooth bounded read strength |
+| [joint.py](https://github.com/cosmos2w/ModularDT/blob/7981c173e8b1d29ee2b3addb7b972d0f15003542/HONF_Proj/src/honf_forward_core/interaction_reused_member_routing/joint.py) | Four-block H, whole-row retrieval, M/E proposals, joint member prefix, integration and work counts |
+| [guided.py](https://github.com/cosmos2w/ModularDT/blob/7981c173e8b1d29ee2b3addb7b972d0f15003542/HONF_Proj/src/honf_forward_core/interaction_reused_member_routing/guided.py) | Prior-weighted score calibration and explicit read-mode capture for checkpoint replay |
+| [relative.py](https://github.com/cosmos2w/ModularDT/blob/7981c173e8b1d29ee2b3addb7b972d0f15003542/HONF_Proj/src/honf_forward_core/interaction_reused_member_routing/relative.py) | Feature normalization, selected-member scoring and smooth bounded read strength |
 | [core.py](../../../src/honf_forward_core/interaction_reused_member_routing/core.py) | Applied relation policy, original values, pair scorer and tiled checkpoint execution |
 | [staged_attention_v2.py](../../../src/honf_forward_core/content_hypergraph/staged_attention_v2.py) | Actual directed exchange and stage provenance |
 | [joint_member_routing_task.py](../../../Case_ThermalChannel/src/channelthermal/training/joint_member_routing_task.py) | Shared native preparation, paired full/restricted execution and physical objectives |
-| [joint_member_routing_evaluation.py](../../../src/honf_runtime/joint_member_routing_evaluation.py) | Fixed-panel native evaluation and fieldwise evidence |
+| [joint_member_routing_evaluation.py](https://github.com/cosmos2w/ModularDT/blob/7981c173e8b1d29ee2b3addb7b972d0f15003542/HONF_Proj/src/honf_runtime/joint_member_routing_evaluation.py) | Fixed-panel native evaluation and fieldwise evidence |
 
 Keep the public prepare/decode and case-adapter interfaces small. Encapsulate scene-local reusable tensors and query-local common planning behind the existing module; do not make every optimization a caller-visible switch. Use private interfaces only where behavior actually differs between A and B. No new training engine, generic admission service, plugin framework or speculative abstraction is needed. Final configurations identify one chosen equation per candidate; diagnostic alternatives are not an accumulating production option matrix.
 

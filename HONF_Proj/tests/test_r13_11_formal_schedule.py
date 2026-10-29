@@ -9,7 +9,7 @@ from honf_runtime.contextual_frontier_training import load_contextual_frontier_c
 CONFIGS = Path(__file__).resolve().parents[1] / 'configs' / 'research'
 
 
-@pytest.mark.parametrize('label', ['s', 'c', 'x_s_active'])
+@pytest.mark.parametrize('label', ['s', 'x_s_active'])
 def test_scratch_formal_5000_schedule_round_trips(label, tmp_path):
     config = json.loads((CONFIGS / f'thermal_r13_11{label}_e_anchor_train150_v1.json').read_text())
     config['initialization']['normalization_mode'] = 'scratch_train600_stats'

@@ -70,7 +70,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/unified_interaction_formal.py resume --recip
 CUDA_VISIBLE_DEVICES=2 python tools/unified_interaction_formal.py resume --recipe diagnostics/generated/manual_wind5000/recipe.json --run-dir Trained_Results/WindFarm/HONF_Forward_Runs/Run_NEW_wind_adaptive_full5000 --checkpoint Trained_Results/WindFarm/HONF_Forward_Runs/Run_NEW_wind_adaptive_full5000/checkpoints/latest_model.pt --device cuda:0 --stop-after 5000 --microbatch-cases 8 >> diagnostics/generated/manual_wind5000/wind_console.log
 ```
 
-The maintained implementation is [unified_interaction_formal.py](../../../../../tools/unified_interaction_formal.py), with dataset factories [Thermal](../../../../../Case_ThermalChannel/src/channelthermal/training/unified_formal.py) and [Wind](../../../../../Case_WindFarm/src/windfarm/training/unified_formal.py). The [development guide](Unified_Interaction_Training_and_Refinement.md) describes the shared numerical contracts and retained histories.
+The maintained implementation is [unified_interaction_formal.py](https://github.com/cosmos2w/ModularDT/blob/7981c173e8b1d29ee2b3addb7b972d0f15003542/HONF_Proj/tools/unified_interaction_formal.py), with dataset factories [Thermal](../../../../../Case_ThermalChannel/src/channelthermal/training/unified_formal.py) and [Wind](../../../../../Case_WindFarm/src/windfarm/training/unified_formal.py). The [development guide](Unified_Interaction_Training_and_Refinement.md) describes the shared numerical contracts and retained histories.
 
 ### Measured Thermal query and packing choices for a fresh run
 

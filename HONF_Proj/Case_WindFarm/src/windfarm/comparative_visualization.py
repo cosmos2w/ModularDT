@@ -322,6 +322,13 @@ def render_comparison_plane(
                 xlim=(float(x_axis[0]), float(x_axis[-1])),
                 ylim=(float(y_axis[0]), float(y_axis[-1])),
             )
+            if is_error:
+                error = np.asarray(values[..., channel], dtype=np.float64)
+                finite = np.isfinite(error)
+                rmse = float(np.sqrt(np.mean(error[finite] ** 2))) if finite.any() else float("nan")
+                axes[channel, column].text(.02, .98, f"RMSE = {rmse:.4g} m/s", transform=axes[channel, column].transAxes,
+                                           ha="left", va="top", fontsize=7,
+                                           bbox={"facecolor": "white", "edgecolor": "none", "alpha": .85})
             axes[channel, column].tick_params(labelsize=7)
             fig.colorbar(artist, ax=axes[channel, column], shrink=0.74, pad=0.015)
     fig.suptitle(

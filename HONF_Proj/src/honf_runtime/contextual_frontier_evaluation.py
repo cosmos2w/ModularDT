@@ -16,12 +16,7 @@ import torch
 from .compat import load_trusted_checkpoint
 
 
-_EVALUABLE_ARMS = ("J-D", "J-H", "G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1",
-                   "R13-3-Full", "R13-3-Route", "R13-3-Relative",
-                   "R13-5-M-Joint95", "R13-5-ME-Joint95",
-                   "R13-6-O-ME-FaithfulJoint95", "R13-6-H-ME-TypedOrganizationJoint95",
-                   "R13-7-U-ME-SingleDistributionJoint95",
-                   "R13-8-A-EAnchor", "R13-8-L-LocalECover")
+_EVALUABLE_ARMS = ("R13-8-A-EAnchor", "R13-8-L-LocalECover")
 _MAX_OUTPUT_BYTES = 256 * 1024**2
 _OBSERVABLES = (
     "u", "v", "p", "omega", "temperature_fluid", "temperature_surface",
@@ -33,177 +28,49 @@ def _contextual_checkpoint_parts(
     payload: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     identity = payload.get("experiment_identity")
-    if not isinstance(identity, Mapping) or identity.get("workflow") not in {
-            "contextual_frontier_joint_training_v1", "interaction_groups_joint_training_v1",
-            "spatial_interaction_groups_joint_training_v1",
-            "interaction_reused_member_routing_joint_training_v1",
-            "interaction_reused_member_routing_joint_training_v2",
-            "interaction_reused_joint_member_routing_joint_training_v1",
-            "interaction_reused_faithful_member_routing_training_v1",
-            "interaction_reused_typed_organization_member_routing_training_v1",
-            "interaction_reused_single_distribution_member_routing_training_v1",
-            "interaction_reused_e_anchored_member_routing_training_v1"}:
-        raise ValueError("Checkpoint is not a maintained contextual or interaction-groups training checkpoint.")
+    if not isinstance(identity, Mapping) or identity.get("workflow") != "interaction_reused_e_anchored_member_routing_training_v1":
+        raise ValueError("Checkpoint is not an anchored member-routing training checkpoint.")
     provider_identity = identity.get("provider_identity")
-    if not isinstance(provider_identity, Mapping):
-        raise ValueError("Contextual-frontier checkpoint is missing its provider identity.")
-    expected_provider_schema = {
-        "interaction_groups_joint_training_v1": "thermal_interaction_groups_provider_v1",
-        "spatial_interaction_groups_joint_training_v1": "thermal_spatial_interaction_groups_provider_v1",
-        "contextual_frontier_joint_training_v1": "thermal_contextual_frontier_provider_v1",
-        "interaction_reused_member_routing_joint_training_v1": "thermal_interaction_reused_member_routing_provider_v1",
-        "interaction_reused_member_routing_joint_training_v2": "thermal_interaction_reused_member_routing_provider_v2",
-        "interaction_reused_joint_member_routing_joint_training_v1": "thermal_joint_member_routing_provider_v1",
-        "interaction_reused_faithful_member_routing_training_v1": "thermal_r13_6_faithful_member_routing_provider_v1",
-        "interaction_reused_typed_organization_member_routing_training_v1": "thermal_r13_6_typed_organization_member_routing_provider_v1",
-        "interaction_reused_single_distribution_member_routing_training_v1": "thermal_r13_7_single_distribution_member_routing_provider_v1",
-        "interaction_reused_e_anchored_member_routing_training_v1": "thermal_r13_8_e_anchored_member_routing_provider_v1",
-    }[identity["workflow"]]
-    if provider_identity.get("schema") != expected_provider_schema:
-        raise ValueError("Checkpoint provider identity does not match its maintained model workflow.")
+    if not isinstance(provider_identity, Mapping) or provider_identity.get("schema") != "thermal_r13_8_e_anchored_member_routing_provider_v1":
+        raise ValueError("Checkpoint provider identity does not match its anchored workflow.")
     adapter_state = provider_identity.get("adapter_state")
     recipe = provider_identity.get("recipe")
     if not isinstance(adapter_state, Mapping) or not isinstance(recipe, Mapping):
         raise ValueError("Checkpoint must contain the adapter state payload and the original provider recipe.")
     arm = str(payload.get("arm", provider_identity.get("architecture", "")))
-    supported = {
-        "interaction_groups_joint_training_v1": ("G-EE", "G-F", "G-H", "G-EE-H"),
-        "spatial_interaction_groups_joint_training_v1": ("F13-0", "F13-1"),
-        "contextual_frontier_joint_training_v1": ("J-D", "J-H"),
-        "interaction_reused_member_routing_joint_training_v1": ("R13-3-Full", "R13-3-Route"),
-        "interaction_reused_member_routing_joint_training_v2": ("R13-3-Relative",),
-        "interaction_reused_joint_member_routing_joint_training_v1": (
-            "R13-5-M-Joint95", "R13-5-ME-Joint95"),
-        "interaction_reused_faithful_member_routing_training_v1": (
-            "R13-6-O-ME-FaithfulJoint95",),
-        "interaction_reused_typed_organization_member_routing_training_v1": (
-            "R13-6-H-ME-TypedOrganizationJoint95",),
-        "interaction_reused_single_distribution_member_routing_training_v1": (
-            "R13-7-U-ME-SingleDistributionJoint95",),
-        "interaction_reused_e_anchored_member_routing_training_v1": (
-            "R13-8-A-EAnchor", "R13-8-L-LocalECover",
-            "R13-12-P-EAnchor", "R13-12-G-EAnchor",
-            "R13-12-P-LocalECover", "R13-12-G-LocalECover",
-            "R13-12-G-Radial-EAnchor", "R13-12-G-Radial-LocalECover"),
-    }[identity["workflow"]]
-    if arm not in supported or provider_identity.get("architecture") != arm:
-        raise ValueError("Checkpoint arm and provider architecture must agree with the workflow schema.")
-    if identity["workflow"] == "spatial_interaction_groups_joint_training_v1":
-        adapter_schema = str(adapter_state.get("schema", ""))
-        core_config = adapter_state.get("core")
-        if (adapter_schema != "thermal_spatial_interaction_groups_adapter_v1"
-                or not isinstance(core_config, Mapping)
-                or core_config.get("schema") != "spatial_interaction_group_fields_v1"
-                or provider_identity.get("spatial_interaction_group_schema") != "spatial_interaction_group_fields_v1"):
-            raise ValueError("Round13 checkpoint adapter and core schemas must match the spatial provider identity.")
-    if identity["workflow"] == "interaction_reused_member_routing_joint_training_v1":
-        core_config = adapter_state.get("core")
-        if (adapter_state.get("schema") != "thermal_interaction_reused_member_routing_adapter_v1"
-                or not isinstance(core_config, Mapping)
-                or core_config.get("schema") != "interaction_reused_member_routing_v1"
-                or core_config.get("architecture") != arm
-                or provider_identity.get("member_routing_schema") != "interaction_reused_member_routing_v1"):
-            raise ValueError("Round13-3 adapter, core, and provider identities must match the member-routing workflow.")
-    if identity["workflow"] == "interaction_reused_member_routing_joint_training_v2":
-        core_config = adapter_state.get("core")
-        if (adapter_state.get("schema") != "thermal_interaction_reused_member_routing_adapter_v2"
-                or not isinstance(core_config, Mapping)
-                or core_config.get("schema") != "interaction_reused_member_routing_v2"
-                or core_config.get("architecture") != arm
-                or arm != "R13-3-Relative"
-                or provider_identity.get("member_routing_schema") != "interaction_reused_member_routing_v2"):
-            raise ValueError("R13-3-Relative adapter, core, and provider identities must match the v2 workflow.")
-    if identity["workflow"] == "interaction_reused_joint_member_routing_joint_training_v1":
-        core_config = adapter_state.get("core")
-        if (adapter_state.get("schema") != "thermal_interaction_reused_joint_member_routing_adapter_v1"
-                or not isinstance(core_config, Mapping)
-                or core_config.get("schema") != "interaction_reused_joint_member_routing_v1"
-                or core_config.get("architecture") != arm
-                or core_config.get("address_mode") != ("M" if arm == "R13-5-M-Joint95" else "ME")
-                or core_config.get("joint_member_coverage") != 0.95
-                or provider_identity.get("member_routing_schema") != "interaction_reused_joint_member_routing_v1"):
-            raise ValueError("R13-5 adapter, core, address mode, and provider identities must match the joint95 workflow.")
-    r13_6_adapters = {
-        "interaction_reused_faithful_member_routing_training_v1": (
-            "thermal_interaction_reused_faithful_member_routing_adapter_v1",
-            "interaction_reused_faithful_joint_member_routing_v1",
-            "R13-6-O-ME-FaithfulJoint95",
-        ),
-        "interaction_reused_typed_organization_member_routing_training_v1": (
-            "thermal_interaction_reused_typed_organization_member_routing_adapter_v1",
-            "interaction_reused_typed_organization_member_routing_v1",
-            "R13-6-H-ME-TypedOrganizationJoint95",
-        ),
-    }
-    if identity["workflow"] in r13_6_adapters:
-        adapter_schema, core_schema, expected_arm = r13_6_adapters[identity["workflow"]]
-        core_config = adapter_state.get("core")
-        if (adapter_state.get("schema") != adapter_schema
-                or not isinstance(core_config, Mapping)
-                or core_config.get("schema") != core_schema
-                or core_config.get("architecture") != expected_arm
-                or core_config.get("address_mode") != "ME"
-                or core_config.get("joint_member_coverage") != 0.95
-                or core_config.get("retained_prior_law") != "none"
-                or provider_identity.get("member_routing_schema") != core_schema):
-            raise ValueError("R13-6 adapter, core, address mode, prior law and provider identities must agree.")
-    if identity["workflow"] == "interaction_reused_single_distribution_member_routing_training_v1":
-        core_config = adapter_state.get("core")
-        if (adapter_state.get("schema") != "thermal_interaction_reused_single_distribution_member_routing_adapter_v1"
-                or not isinstance(core_config, Mapping)
-                or core_config.get("schema") != "interaction_reused_single_distribution_member_routing_v1"
-                or core_config.get("architecture") != "R13-7-U-ME-SingleDistributionJoint95"
-                or core_config.get("address_mode") != "ME"
-                or core_config.get("address_temperature") != 1.0
-                or core_config.get("joint_member_coverage") != 0.95
-                or core_config.get("retained_prior_law") != "none"
-                or provider_identity.get("member_routing_schema") != "interaction_reused_single_distribution_member_routing_v1"):
-            raise ValueError("R13-7 U adapter, core, address mode, temperature, prior law and provider identities must agree.")
-    if identity["workflow"] == "interaction_reused_e_anchored_member_routing_training_v1":
-        core_config = adapter_state.get("core")
-        expected_locator = {
-            "R13-8-A-EAnchor": "e_anchor",
-            "R13-8-L-LocalECover": "local_e_cover",
-            "R13-12-P-EAnchor": "e_anchor",
-            "R13-12-G-EAnchor": "e_anchor",
-            "R13-12-P-LocalECover": "local_e_cover",
-            "R13-12-G-LocalECover": "local_e_cover",
-            "R13-12-G-Radial-EAnchor": "e_anchor",
-            "R13-12-G-Radial-LocalECover": "local_e_cover",
-        }.get(arm)
-        expected_mediated = {
-            "R13-12-P-EAnchor": "P", "R13-12-P-LocalECover": "P",
-            "R13-12-G-EAnchor": "G", "R13-12-G-LocalECover": "G",
-            "R13-12-G-Radial-EAnchor": "G", "R13-12-G-Radial-LocalECover": "G",
-        }.get(arm, "none")
-        recipe_section = recipe.get("member_routing")
-        recipe_model = recipe_section.get("model") if isinstance(recipe_section, Mapping) else None
-        if (adapter_state.get("schema") != "thermal_interaction_reused_e_anchored_member_routing_adapter_v1"
-                or not isinstance(core_config, Mapping)
-                or core_config.get("schema") != "interaction_reused_e_anchored_member_routing_v1"
-                or core_config.get("architecture") != arm
-                or core_config.get("locator_mode") != expected_locator
-                or core_config.get("retained_mass") != 0.95
-                or core_config.get("score_calibration") not in ("inherited", "bounded_tanh")
-                or not isinstance(recipe_model, Mapping)
-                or recipe_model.get("score_calibration") != core_config.get("score_calibration")
-                or core_config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one", "active_domain")
-                or recipe_model.get("access_measure", "inventory_unit_total") != core_config.get("access_measure", "inventory_unit_total")
-                or core_config.get("ee_incidence_aggregation", "pre_gate") not in ("pre_gate", "post_gate")
-                or recipe_model.get("ee_incidence_aggregation", "pre_gate") != core_config.get("ee_incidence_aggregation", "pre_gate")
-                or recipe_model.get("ee_gate_mode", "legacy") != core_config.get("ee_gate_mode", "legacy")
-                or recipe_model.get("ee_initial_tau") != core_config.get("ee_initial_tau")
-                or core_config.get("mediated_mode", "none") != expected_mediated
-                or recipe_model.get("mediated_mode", "none") != expected_mediated
-                or core_config.get("mediated_geometry_law", "ee_head_mean") !=
-                   ("native_cell_radial" if "-Radial-" in arm else "ee_head_mean")
-                or recipe_model.get("mediated_geometry_law", "ee_head_mean") !=
-                   core_config.get("mediated_geometry_law", "ee_head_mean")
-                or any(recipe_model.get(name, .95) != core_config.get(name, .95)
-                       for name in ("source_retained_mass", "environment_retained_mass"))
-                or recipe_section.get("arm") != arm
-                or provider_identity.get("member_routing_schema") != "interaction_reused_e_anchored_member_routing_v1"):
-            raise ValueError("R13-8 adapter, core locator, access law and provider identities must agree.")
+    if arm not in _EVALUABLE_ARMS or provider_identity.get("architecture") != arm:
+        raise ValueError("Checkpoint arm and provider architecture must agree with the anchored workflow.")
+    core_config = adapter_state.get("core")
+    expected_locator = {"R13-8-A-EAnchor": "e_anchor", "R13-8-L-LocalECover": "local_e_cover"}.get(arm)
+    expected_mediated = "none"
+    recipe_section = recipe.get("member_routing")
+    recipe_model = recipe_section.get("model") if isinstance(recipe_section, Mapping) else None
+    if (adapter_state.get("schema") != "thermal_interaction_reused_e_anchored_member_routing_adapter_v1"
+            or not isinstance(core_config, Mapping)
+            or core_config.get("schema") != "interaction_reused_e_anchored_member_routing_v1"
+            or core_config.get("architecture") != arm
+            or core_config.get("locator_mode") != expected_locator
+            or core_config.get("retained_mass") != 0.95
+            or core_config.get("score_calibration") not in ("inherited", "bounded_tanh")
+            or not isinstance(recipe_model, Mapping)
+            or recipe_model.get("score_calibration") != core_config.get("score_calibration")
+            or core_config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one", "active_domain")
+            or recipe_model.get("access_measure", "inventory_unit_total") != core_config.get("access_measure", "inventory_unit_total")
+            or core_config.get("ee_incidence_aggregation", "pre_gate") not in ("pre_gate", "post_gate")
+            or recipe_model.get("ee_incidence_aggregation", "pre_gate") != core_config.get("ee_incidence_aggregation", "pre_gate")
+            or recipe_model.get("ee_gate_mode", "legacy") != core_config.get("ee_gate_mode", "legacy")
+            or recipe_model.get("ee_initial_tau") != core_config.get("ee_initial_tau")
+            or core_config.get("mediated_mode", "none") != expected_mediated
+            or recipe_model.get("mediated_mode", "none") != expected_mediated
+            or core_config.get("mediated_geometry_law", "ee_head_mean") !=
+               ("native_cell_radial" if "-Radial-" in arm else "ee_head_mean")
+            or recipe_model.get("mediated_geometry_law", "ee_head_mean") !=
+               core_config.get("mediated_geometry_law", "ee_head_mean")
+            or any(recipe_model.get(name, .95) != core_config.get(name, .95)
+                   for name in ("source_retained_mass", "environment_retained_mass"))
+            or recipe_section.get("arm") != arm
+            or provider_identity.get("member_routing_schema") != "interaction_reused_e_anchored_member_routing_v1"):
+        raise ValueError("R13-8 adapter, core locator, access law and provider identities must agree.")
     return identity, provider_identity, {"adapter_state": adapter_state, "recipe": recipe, "arm": arm}
 
 
@@ -239,27 +106,7 @@ def load_contextual_checkpoint(
     # Import through the maintained runner so model/provider reconstruction
     # uses the same task factory as training and resume.
     from .contextual_frontier_training import _build_task
-    workflow = _identity["workflow"]
-    if workflow == "spatial_interaction_groups_joint_training_v1":
-        from channelthermal.spatial_interaction_groups import ThermalSpatialInteractionGroupsAdapter as Adapter
-    elif workflow == "interaction_reused_member_routing_joint_training_v1":
-        from channelthermal.member_routing import ThermalInteractionReusedMemberRoutingAdapter as Adapter
-    elif workflow == "interaction_reused_member_routing_joint_training_v2":
-        from channelthermal.member_routing import ThermalRelativeMemberRoutingAdapter as Adapter
-    elif workflow == "interaction_reused_joint_member_routing_joint_training_v1":
-        from channelthermal.joint_member_routing import ThermalJointMemberRoutingAdapter as Adapter
-    elif workflow == "interaction_reused_faithful_member_routing_training_v1":
-        from channelthermal.member_routing import ThermalFaithfulMemberRoutingAdapter as Adapter
-    elif workflow == "interaction_reused_typed_organization_member_routing_training_v1":
-        from channelthermal.member_routing import ThermalTypedOrganizationMemberRoutingAdapter as Adapter
-    elif workflow == "interaction_reused_single_distribution_member_routing_training_v1":
-        from channelthermal.member_routing import ThermalSingleDistributionMemberRoutingAdapter as Adapter
-    elif workflow == "interaction_reused_e_anchored_member_routing_training_v1":
-        from channelthermal.member_routing import ThermalAnchoredMemberRoutingAdapter as Adapter
-    elif workflow == "interaction_groups_joint_training_v1":
-        from channelthermal.interaction_groups import ThermalInteractionGroupsAdapter as Adapter
-    else:
-        from channelthermal.contextual_joint import ThermalContextualJointAdapter as Adapter
+    from channelthermal.member_routing import ThermalAnchoredMemberRoutingAdapter as Adapter
 
     evaluation_device = torch.device(device)
     recipe = dict(saved["recipe"])

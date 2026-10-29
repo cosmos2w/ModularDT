@@ -243,3 +243,23 @@ def test_no_M_own_only_or_empty_directory_never_invents_members(scene, memory_fi
     incidence = overview.render_incidence([changed], Path("not-written"))
     assert incidence.evidence["models"][changed.name]["nonzero_shared_entries"] == 0
     np.testing.assert_array_equal(changed.C, original)
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_overview_title_does_not_overlap_panel_headings(scene, monkeypatch, count):
+    import honf_viz.organization_data as data
+
+    def inspect(fig, output, stem, title, caption, evidence):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        main = fig._suptitle.get_window_extent(renderer)
+        panel_titles = [ax._left_title.get_window_extent(renderer) for ax in fig.axes if ax.get_title(loc="left")]
+        assert panel_titles and all(main.y0 > panel.y1 for panel in panel_titles)
+        plt.close(fig)
+        return FigureArtifact(stem, title, caption, evidence)
+
+    monkeypatch.setattr(data, "save_figure", inspect)
+    scenes = [replace(scene, name="Relation-anchored")]
+    if count == 2:
+        scenes.append(replace(scene, name="Active-domain relation-anchored"))
+    overview.render_overview(scenes, Path("not-written"))

@@ -7,6 +7,7 @@ those indices remain connected to the applied final-cycle EM/EE tensors.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import contextmanager
 import math
 from typing import Any, Mapping
 
@@ -17,10 +18,7 @@ from torch.utils.checkpoint import checkpoint
 
 from ..content_hypergraph.query_chunks_v1 import slice_query_v1
 from .core import InteractionJointOutput, InteractionReusedMemberRoutingCore, _pack_work_counts, _tensor_version
-from .guided import prior_weighted_scores
-from .joint import build_joint_member_measure
-from .relative import read_probability
-from .single_distribution_core import SingleDistributionMemberRoutingCore
+from .primitives import build_joint_member_measure, prior_weighted_scores, read_probability
 
 
 @dataclass(frozen=True)
@@ -489,7 +487,7 @@ class _AnchorReadGroup:
     row: EAccessRow
 
 
-class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
+class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
     """R13-8 A/L core with actual E exchange rows governing member reads."""
 
     schema = "interaction_reused_e_anchored_member_routing_v1"
@@ -515,9 +513,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                  retained_mass: float = 0.95, score_calibration: str = "inherited",
                  access_measure: str = "inventory_unit_total",
                  ee_incidence_aggregation: str = "pre_gate",
-                 ee_gate_mode: str = "legacy", ee_initial_tau: float | None = None,
-                 mediated_mode: str = "none", source_retained_mass: float = 0.95,
-                 environment_retained_mass: float = 0.95, mediated_geometry_law: str = "ee_head_mean"):
+                 ee_gate_mode: str = "legacy", ee_initial_tau: float | None = None):
         if locator_mode not in ("e_anchor", "local_e_cover"):
             raise ValueError("locator_mode must be 'e_anchor' or 'local_e_cover'.")
         if (isinstance(retained_mass, bool) or not isinstance(retained_mass, (float, int))
@@ -537,17 +533,6 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                 or isinstance(ee_initial_tau, bool) or not isinstance(ee_initial_tau, (int, float))
                 or not math.isfinite(ee_initial_tau) or ee_initial_tau <= 0):
             raise ValueError("Relative EE requires post-gate aggregation and a positive finite initial tau.")
-        if mediated_mode not in ("none", "P", "G"):
-            raise ValueError("Unsupported mediated routing mode.")
-        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 < x <= 1
-               for x in (source_retained_mass, environment_retained_mass)):
-            raise ValueError("Mediated coverage values must be in (0,1].")
-        if mediated_geometry_law not in ("ee_head_mean", "native_cell_radial") or (mediated_geometry_law != "ee_head_mean" and mediated_mode != "G"):
-            raise ValueError("Native cell radial geometry requires mediated mode G.")
-        self.mediated_geometry_law = mediated_geometry_law
-        self.mediated_mode = mediated_mode
-        self.source_retained_mass = float(source_retained_mass)
-        self.environment_retained_mass = float(environment_retained_mass)
         self.access_measure = access_measure
         self.ee_incidence_aggregation = ee_incidence_aggregation
         self.ee_gate_mode = ee_gate_mode
@@ -555,8 +540,21 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         self.locator_mode = locator_mode
         self.retained_mass = float(retained_mass)
         self.score_calibration = score_calibration
-        super().__init__(base_model_config, address_mode="ME", input_dataset=input_dataset,
-                         query_tile_size=query_tile_size, retained_prior_law="none")
+        super().__init__(base_model_config, member_routing_mode="route", input_dataset=input_dataset,
+                         query_tile_size=query_tile_size)
+        # Preserve the original seeded typed gates and state-dict names. They
+        # govern the anchored member read, independent of earlier model arms.
+        self._read_execution_override = None
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(self._stable_seed("relative_typed_read_skip"))
+            self.typed_read_gates = nn.ModuleDict({role: nn.Sequential(
+                nn.Linear(self.context_dim + 2, max(8, self.context_dim // 4)),
+                nn.SiLU(), nn.Linear(max(8, self.context_dim // 4), 2),
+            ) for role in ("M", "E")})
+            for module in self.typed_read_gates.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.xavier_uniform_(module.weight)
+                    nn.init.zeros_(module.bias)
         self.applied_incidence.ee_incidence_aggregation = ee_incidence_aggregation
         if ee_gate_mode != "legacy":
             self.applied_incidence.set_relative_ee_gate(ee_gate_mode, float(ee_initial_tau))
@@ -568,16 +566,28 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             del self.member_router.proposal_M
         self.architecture = self.architecture_name
 
+    @contextmanager
+    def read_execution(self, mode: str):
+        """Select full or restricted member access."""
+        if mode not in ("full", "restricted"):
+            raise ValueError("Read execution must be 'full' or 'restricted'.")
+        previous = self._read_execution_override
+        self._read_execution_override = mode
+        try:
+            yield self
+        finally:
+            self._read_execution_override = previous
+
+    @staticmethod
+    def _routing_features(features):
+        return F.layer_norm(features, (features.shape[-1],))
+
     @staticmethod
     def _anchored_arm_name(locator_mode: str) -> str:
         return "R13-8-A-EAnchor" if locator_mode == "e_anchor" else "R13-8-L-LocalECover"
 
     @property
     def architecture_name(self) -> str:
-        if self.mediated_mode != "none":
-            locator = "EAnchor" if self.locator_mode == "e_anchor" else "LocalECover"
-            arm = "G-Radial" if self.mediated_geometry_law == "native_cell_radial" else self.mediated_mode
-            return f"R13-12-{arm}-{locator}"
         return self._anchored_arm_name(self.locator_mode)
 
     @property
@@ -597,11 +607,6 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             "retained_mass": self.retained_mass,
             "score_calibration": self.score_calibration,
         }
-        if self.mediated_mode != "none":
-            config.update(mediated_mode=self.mediated_mode, source_retained_mass=self.source_retained_mass,
-                          environment_retained_mass=self.environment_retained_mass)
-        if self.mediated_geometry_law != "ee_head_mean":
-            config["mediated_geometry_law"] = self.mediated_geometry_law
         if self.access_measure != "inventory_unit_total":
             config["access_measure"] = self.access_measure
         if self.ee_incidence_aggregation != "pre_gate":
@@ -614,20 +619,6 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
     @classmethod
     def validate_config(cls, config: Mapping[str, Any]) -> None:
         config = dict(config)
-        mediated = config.pop("mediated_mode", "none")
-        geometry_law = config.pop("mediated_geometry_law", "ee_head_mean")
-        if geometry_law not in ("ee_head_mean", "native_cell_radial") or (geometry_law != "ee_head_mean" and mediated != "G"):
-            raise ValueError("Invalid mediated geometry law.")
-        source_mass = config.pop("source_retained_mass", 0.95)
-        environment_mass = config.pop("environment_retained_mass", 0.95)
-        if mediated not in ("none", "P", "G") or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 < x <= 1 for x in (source_mass, environment_mass)):
-            raise ValueError("Invalid mediated routing configuration.")
-        if mediated != "none":
-            locator = "EAnchor" if config.get("locator_mode") == "e_anchor" else "LocalECover"
-            arm = "G-Radial" if geometry_law == "native_cell_radial" else mediated
-            if config.get("architecture") != f"R13-12-{arm}-{locator}":
-                raise ValueError("Mediated architecture and locator disagree.")
-            config["architecture"] = cls._anchored_arm_name(config["locator_mode"])
         required = {"schema", "architecture", "locator_mode", "base_model_config", "input_dataset",
                     "input_capability", "query_tile_size", "retained_mass", "score_calibration"}
         if (set(config) - {"access_measure", "ee_incidence_aggregation", "ee_gate_mode", "ee_initial_tau"} != required or config.get("schema") != cls.schema
@@ -678,11 +669,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                    access_measure=config.get("access_measure", "inventory_unit_total"),
                    ee_incidence_aggregation=config.get("ee_incidence_aggregation", "pre_gate"),
                    ee_gate_mode=config.get("ee_gate_mode", "legacy"),
-                   ee_initial_tau=config.get("ee_initial_tau"),
-                   mediated_mode=config.get("mediated_mode", "none"),
-                   source_retained_mass=config.get("source_retained_mass", 0.95),
-                   environment_retained_mass=config.get("environment_retained_mass", 0.95),
-                   mediated_geometry_law=config.get("mediated_geometry_law", "ee_head_mean"))
+                   ee_initial_tau=config.get("ee_initial_tau"))
 
     @staticmethod
     def _directory_versions(directory: EAccessDirectory) -> tuple[int, ...]:
@@ -696,15 +683,6 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
     def prepare(self, scene, **options):
         """Prepare the shared encoder and only member scorer key terms."""
         prepared = InteractionReusedMemberRoutingCore.prepare(self, scene, **options)
-        if self.mediated_mode != "none":
-            from .mediated import prepare_scene
-            prepare_scene(self, prepared)
-            cache = prepared._mediated_scene_cache
-            prepared.work_counts.update({
-                "mediated_prepared_direct_entries": int(cache["direct"].numel()),
-                "mediated_prepared_module_mass_entries": int(cache["module_mass"].numel()),
-                "mediated_prepared_positive_ME_edges": int(cache["edge_mass"].numel()),
-            })
         prepared._anchored_normalized_member_keys_M = self._routing_features(prepared.member_keys_M)
         prepared._anchored_normalized_member_keys_E = self._routing_features(prepared.member_keys_E)
         width = self.context_dim
@@ -771,14 +749,6 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             cycles.add(stage.rsplit("/", 1)[0])
         if len(cycles) != 1:
             raise ValueError("Anchored EM and EE must come from one actual final contextual cycle.")
-        if self.mediated_mode != "none":
-            me = cycle_trace.get("me_native_route_snapshot")
-            ee = snapshots["ee"]
-            if me is None or me.route != "me" or me.stage_identity.rsplit("/", 1)[0] not in cycles or not torch.equal(me.destination_ids, scene.module_ids) or not torch.equal(me.donor_ids, scene.environment_ids):
-                raise ValueError("Final cycle lacks the actual directed ME route and IDs.")
-            organization.mediated_applied_ME = self._safe_snapshot_gate(cycle_trace, "me", scene)
-            organization.mediated_ee_geometry = ee.geometry_bias.mean(dim=1)
-            organization.mediated_me_stage = me.stage_identity
         organization.anchored_applied_EM = applied_em
         organization.anchored_applied_EE = applied_ee
         organization.anchored_route_provenance = {
@@ -1132,9 +1102,6 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
 
     def _decode_tile(self, prepared, query, read_modes, *, return_trace=False, intervention=None):
         controls = {} if intervention is None else dict(intervention)
-        if self.mediated_mode != "none":
-            from .mediated import decode_tile
-            return decode_tile(self, prepared, query, read_modes, return_trace=return_trace, intervention=intervention)
         if set(controls) - {"read_mode", "access_intervention", "directory_intervention", "member_role",
                             "member_id", "source_role", "source_id", "target_role", "target_id", "anchor_id"}:
             raise ValueError("Unsupported anchored read intervention.")
@@ -1198,7 +1165,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             raise ValueError("Anchored joint prediction accepts no historical affine controls.")
         intervention = {} if intervention is None else dict(intervention)
         mode = intervention.get("read_mode", self._read_execution_override or "full")
-        valid_modes = ("full", "restricted", "source95_all", "all_e95") if self.mediated_mode != "none" else ("full", "restricted")
+        valid_modes = ("full", "restricted")
         if mode not in valid_modes:
             raise ValueError("Unsupported anchored read mode.")
         outputs, shared = self._decode_requests(organization, query, (mode,), intervention=intervention,

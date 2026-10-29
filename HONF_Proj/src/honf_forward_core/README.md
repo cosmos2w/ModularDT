@@ -1,46 +1,17 @@
-# HONF forward-core contract
+# HONF forward core
 
-This package implements the application-neutral Hypergraph Operator Neural
-Field. It accepts `BatchData` tensors, creates module and environment tokens,
-organizes them into learned hyperedges, and decodes a field at arbitrary query
-coordinates. It does not own physical field names, HDF5 schemas, material
-features, boundary conditions, local solvers, or plotting.
+The forward core owns reusable interaction, organization and query prediction. Case adapters own physical record schemas, units, geometry, controls, normalization, target extraction, physical laws and plotting. Core modules must not import a case package. See the [project README](../../README.md) for the maintained six families and their equations, and [case integration](../../docs/case_plugin.md) for adding data and physics.
 
-Supported decoder modes are preserved from the reference implementation,
-including global HONF decoding, local near-field augmentation, and the enhanced
-pairwise kernel. Learned/uniform organizer assignment, learned/geometric query
-routing, sparse top-k routing, Fourier geometry features, mechanism features,
-geometry bias, auxiliary incidence output, and prepared-state chunked decoding
-remain configurable.
+## Public model selection
 
-Reusable neural blocks live in `nn.py`. One configurable MLP implementation
-preserves both historical dropout-index layouts, and one Fourier implementation
-explicitly supports the core's grouped $\pi 2^k$ convention and the local
-module's interleaved $2\pi 2^k$ convention. These options prevent silent
-feature-order or state-key changes when loading established checkpoints.
+[`models.py`](models.py) exposes immutable `MODEL_FAMILIES`, `model_family(name)` and `build_model(name, config)`. Public families are `hypergraph_routed`, `dense_pairwise`, `content_attention`, `unified_hypergraph`, `relation_anchored` and `relation_anchored_active`. Development aliases remain accepted at this boundary; serialized architecture IDs, configuration keys and state-dictionary names are preserved. Construction takes the selected core's original strict configuration and initializes a bare core. Loading a trained case still requires that case's loader, saved normalizer and matching adapter.
 
-The stable batch fields are `module_centers`, `module_present`,
-`module_features`, `global_context`, `env_coords`, `env_features`,
-`query_xy`, optional `query_features`/`query_time`, optional `target_field`, and
-JSON-safe metadata. `query_xy` is retained as a compatibility name; its
-semantics are generic query coordinates.
+The original six-slot and dense cores retain established main-branch interfaces. `HONFNeuralField` accepts `BatchData`; `InterfaceFieldCore` retains `encode_case(batch)`, `prepare(encoded, encoded.module_tokens)` and `decode_queries(prepared, query_xy, query_features)`. `ContentHypergraphCoreV2` uses its own `SceneBatch` and `QueryBatch` contracts. Unified and anchored cores preserve their original scene/query interfaces. The [electro-thermal handoff](../../Case_ElectroThermal/docs/COWORKER_HANDOFF.md) demonstrates six-slot, dense and content-attention adapters without Thermal's local-surrogate dependency.
 
-Maintained cases supply domain boundary descriptors through `query_features`;
-the core's `rectangular` mode and its historical `channel` alias remain only to
-reconstruct established checkpoints without changing their query-encoder input.
-Neutral `coordinate_scale=[s_x,s_y]` and `periodic_axes=[...]` settings govern
-normalization and minimum-image geometry. Historical configs fall back to
-`domain_length_x/y` and interpret `geometry_mode="periodic"` as both axes.
+## Compatibility and extension
 
-Core code may depend on PyTorch and NumPy only. A physical case must adapt its
-samples to this contract and interpret output channels itself. See the root
-`Model_Explain.md` for equations and `docs/case_plugin.md` for the extension
-boundary.
+The legacy batch fields include `module_centers`, `module_present`, `module_features`, `global_context`, `env_coords`, `env_features`, `query_xy`, optional `query_features`/`query_time`, optional `target_field`, and JSON-safe metadata. `query_xy` is an established name for query coordinates. Masks and original identities remain explicit. Contemporary case adapters may use a family-specific scene contract instead.
 
-## HET-MF field interfaces on the research branch
+Reusable blocks in `nn.py` preserve historical MLP dropout indices and Fourier feature order. Neutral `coordinate_scale` and `periodic_axes` settings describe coordinates; historical domain and geometry aliases remain loadable. Existing physical heads and local coupling are reconstructed faithfully for their checkpoints, without making Thermal-specific output laws generic defaults.
 
-The HET-MF integration adds the case adapters and shared epoch trainer from GitHub `main` while retaining the research branch's complete forward-core implementation. In particular, the research configuration options, contextual value policies, native route capture, source-read execution, and package exports remain available. The smaller source selection documented on `main` does not replace these research implementations.
-
-HET-MF uses `HONFNeuralField` for six-hyperedge contextualized member reads, `InterfaceFieldCore` with `forward_architecture="dense_pairwise_field"` for dense MM/ME/EM interaction, and `ContentHypergraphCoreV2` for A2-D. Case-specific fields, units, material/contact features, record identity, physical measures, normalization, and HDF5 loading remain in `Case_ElectroThermal`.
-
-The `InterfaceFieldCore` call boundary is `encode_case(batch)`, `prepare(encoded, encoded.module_tokens)`, and `decode_queries(prepared, query_xy, query_features)`; `HONFNeuralField` retains its `forward(BatchData)` interface. `ContentHypergraphCoreV2` accepts its own `SceneBatch` and `QueryBatch` contracts. See [the coworker handoff](../../Case_ElectroThermal/docs/COWORKER_HANDOFF.md) for the three model configurations and CPU interface checks.
+Relation-anchored S/X directly share the anchored core and reusable member-routing primitives. Their access-measure policies remain distinct. Applied contextual relations, prepared directory support and query contributions have separate provenance; organization-controlled reads preserve original members. Intermediate research variants are excluded from maintained public selection, while required shared implementation and historical configuration types remain internal dependencies. The historical milestone branch preserves the complete predecessor source.

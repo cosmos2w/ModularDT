@@ -13,7 +13,6 @@ import torch
 from honf_runtime.unified_training import LossTerm, OptimizerGroupSpec, SamplingKey, ScheduleSpec
 from ..data.datasets import fit_global_normalizer
 from ..data.development_split import read_case_catalog
-from ..joint_member_routing import ThermalJointMemberRoutingAdapter
 from .content_hypergraph_task import THERMAL_CONTENT_LOSS_WEIGHTS, ThermalContentPredictions
 from .joint_task import _load_data_binding, _read_selected_cases
 from .member_routing_task import (
@@ -551,34 +550,10 @@ class JointMemberRoutingHealth:
             "interpretation": "Per-role losses, candidate support and block gradients are descriptive; unused M or E value reads are not failures when prescribed context carries their controls.",
         }
 
-class ThermalJointMemberRoutingTask(ThermalInteractionReusedMemberRoutingTask):
+class _PairedMemberRoutingTask(ThermalInteractionReusedMemberRoutingTask):
     """Keep Thermal data, normalization, objective and sampling on the maintained provider."""
 
     training_state_schema = TRAINING_STATE_SCHEMA
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if self.model.CORE_SCHEMA != ThermalJointMemberRoutingAdapter.CORE_SCHEMA:
-            raise ValueError("R13-5 Thermal task requires the joint member-routing core.")
-        self.workflow = WORKFLOW
-        self.provider_schema = PROVIDER_SCHEMA
-        self.training_state_schema = TRAINING_STATE_SCHEMA
-        initialization = self.recipe["initialization"]
-        self.source_kind = str(initialization["source_kind"])
-        self.source_parent_age = int(initialization.get("source_parent_age", 0))
-        if self.source_kind not in ("scratch_joint_member_routing", "relation_guided_joint_member_routing_e500_transfer"):
-            raise ValueError("R13-5 requires explicit scratch or R13-4 Guide e500 initialization.")
-        if self.source_parent_age not in (0, 500) or (
-                (self.source_kind == "relation_guided_joint_member_routing_e500_transfer") !=
-                (self.source_parent_age == 500)):
-            raise ValueError("R13-5 source kind and parent epoch disagree.")
-        self.training_sampling_arm = str(
-            self.recipe["training"].get("sampling_arm", "R13-3-Relative")
-        )
-        health_config = self.recipe.get("member_routing", {}).get("health")
-        self._member_routing_health = None
-        if isinstance(health_config, Mapping) and health_config.get("enabled") is True:
-            self._member_routing_health = JointMemberRoutingHealth(self, health_config)
 
     def identity_payload(self):
         payload = super().identity_payload()
@@ -783,61 +758,3 @@ class ThermalJointMemberRoutingTask(ThermalInteractionReusedMemberRoutingTask):
                 "per_case_mean_normalized_mse": paths,
                 "objective": "arithmetic mean of matching all-eligible and joint95 native role losses",
             }
-
-
-def build_thermal_joint_member_routing_task(config, *, arm=None, device="cpu"):
-    """Build the versioned R13-5 adapter/provider using maintained Thermal inputs."""
-    recipe = copy.deepcopy(dict(config))
-    section = recipe.get("member_routing", {})
-    model_config = section.get("model")
-    selected_arm = str(arm or section.get("arm", ""))
-    if section.get("schema") != CONFIG_SECTION_SCHEMA:
-        raise ValueError("R13-5 requires thermal_member_routing_r13_5_v1.")
-    if (not isinstance(model_config, Mapping) or model_config.get("architecture") != selected_arm
-            or selected_arm not in ARMS):
-        raise ValueError("R13-5 model config must match its named M/ME arm.")
-    if (model_config.get("schema") != ThermalJointMemberRoutingAdapter.CORE_SCHEMA
-            or model_config.get("address_mode") != ("M" if selected_arm == ARMS[0] else "ME")):
-        raise ValueError("R13-5 model schema and M/ME address mode disagree.")
-    manifest, data_path, manifest_path = _load_data_binding(
-        recipe["dataset"].get("manifest_path"), recipe["dataset"].get("data_path"),
-    )
-    catalog_source, catalog = read_case_catalog(data_path)
-    train_ids, validation_ids = _training_membership(recipe, catalog, manifest)
-    normalizer = fit_global_normalizer(data_path, train_ids)
-    training_cases = _read_selected_cases(data_path, train_ids, split="train", normalizer=normalizer, include_grid=False)
-    validation_cases = _read_selected_cases(data_path, validation_ids, split="test", normalizer=normalizer, include_grid=False)
-    heat_values = np.concatenate([
-        np.asarray(case["structure"]["heat_powers"])[
-            np.asarray(case["structure"]["module_present"]) > 0.5
-        ] for case in training_cases
-    ])
-    heat_scale = max(float(np.sqrt(np.mean(heat_values.astype(np.float64) ** 2))), 1e-6)
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(int(recipe["initialization"].get("seed", 0)))
-        model = ThermalJointMemberRoutingAdapter(
-            normalizer.stats, core_config=model_config, heat_scale=heat_scale,
-        ).to(device)
-    source_stat = data_path.stat()
-    provider = ThermalJointMemberRoutingTask(
-        model=model, training_cases=training_cases, validation_cases=validation_cases,
-        manifest=manifest, data_path=data_path, recipe=recipe, device=device,
-        manifest_path=manifest_path, catalog=catalog,
-        source_binding={
-            "dataset_path": str(data_path), "dataset_size_bytes": int(source_stat.st_size),
-            "dataset_mtime_ns": int(source_stat.st_mtime_ns),
-            "catalog_metadata_sha256": catalog_source["metadata_sha256"],
-            "manifest_path": None if manifest_path is None else str(manifest_path),
-            "manifest_sha256": manifest["manifest_sha256"],
-            "normalization_source": "TRAIN-only fit_global_normalizer",
-            "dataset_copy_created": False, "persistent_cache_created": False,
-        },
-    )
-    return model, provider
-
-
-__all__ = [
-    "ARMS", "WORKFLOW", "PROVIDER_SCHEMA", "CONFIG_SECTION_SCHEMA", "TRAINING_STATE_SCHEMA",
-    "ThermalJointPairPredictions", "JointMemberRoutingHealth", "ThermalJointMemberRoutingTask",
-    "build_thermal_joint_member_routing_task",
-]

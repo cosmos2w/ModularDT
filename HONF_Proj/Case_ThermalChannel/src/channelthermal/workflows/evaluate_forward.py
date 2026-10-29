@@ -99,8 +99,12 @@ def load_model(
 ) -> tuple[ChannelThermalHONFModel, Dict[str, Any]]:
     """Preserve the workflow-level trusted-loader injection contract."""
 
+    previous_loader = _evaluation_loading.load_trusted_checkpoint
     _evaluation_loading.load_trusted_checkpoint = load_trusted_checkpoint
-    return _evaluation_loading.load_model(checkpoint_path, device)
+    try:
+        return _evaluation_loading.load_model(checkpoint_path, device)
+    finally:
+        _evaluation_loading.load_trusted_checkpoint = previous_loader
 
 
 def evaluation_output_dir(

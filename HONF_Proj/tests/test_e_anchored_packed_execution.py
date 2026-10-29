@@ -3,9 +3,8 @@ from dataclasses import fields, replace
 import copy
 import pytest
 import torch
-from tests.test_faithful_member_routing import _base_config, _scene, _query
+from tests.anchored_fixtures import _base_config, _scene, _query
 from honf_forward_core.interaction_reused_member_routing.anchored import AnchoredMemberRoutingCore, anchored_row_read
-from honf_forward_core.interaction_reused_member_routing.single_distribution_core import SingleDistributionMemberRoutingCore
 
 
 def fixture(mode):
@@ -88,12 +87,6 @@ def test_packed_matches_independent_dense_fields_contexts_and_live_gradients(loc
             torch.testing.assert_close(a,e,rtol=2e-8,atol=2e-9,msg=name)
 
 
-def test_common_initial_parameters_equal_u_without_entrance_parameters():
-    u = SingleDistributionMemberRoutingCore(_base_config())
-    a = AnchoredMemberRoutingCore(_base_config())
-    assert all("proposal" not in name for name in a.state_dict())
-    for name,value in a.state_dict().items():
-        torch.testing.assert_close(value,u.state_dict()[name],rtol=0,atol=0,msg=name)
 
 
 def test_paired_checkpoint_replay_matches_separate_reads_and_shares_raw_scores():
@@ -220,7 +213,7 @@ def test_packed_singleton_and_empty_role_with_traces(locator):
 
 def test_one_anchor_local_cover_equals_a_and_row_only_m_fades_with_lambda():
     from honf_forward_core.interaction_reused_member_routing.anchored import compile_e_access_directory
-    from honf_forward_core.interaction_reused_member_routing.joint import build_joint_member_measure
+    from honf_forward_core.interaction_reused_member_routing.primitives import build_joint_member_measure
     a,scene,query=fixture('e_anchor')
     local=AnchoredMemberRoutingCore(_base_config(),locator_mode='local_e_cover',query_tile_size=4).double().eval()
     a.eval();local.load_state_dict(a.state_dict(),strict=True)

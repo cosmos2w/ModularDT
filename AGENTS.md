@@ -26,6 +26,10 @@
 - Preserve blank lines between paragraphs and the required structure of headings, lists, tables, fenced code, display math, and figure embeds. Figure captions are prose paragraphs and must also remain on one source line.
 - When revising or formatting a report, preserve this rule and check that no prose paragraph contains inserted line breaks. Configure any formatter used on reports to preserve unwrapped prose.
 
+# Reconstruction field visualization
+
+- Every reconstruction field/cloud plot must display a fieldwise L2 error (state whether relative) or RMSE computed from the plotted prediction and reference on the declared physical mask and units. Put the value on the error panel when present, otherwise on the reconstruction panel; a caption alone is insufficient. When no reference exists, explicitly label the error unavailable instead of inventing it. Apply this rule to all future reconstruction figures and revisions.
+
 # Scientific experiment reporting
 
 - Begin final experiment reports with a plain-language account of what changed, then state gains, misses, measured evidence, and next steps separately for predictor, organizer, and inverse results. Distinguish completed measurements from startup checks, surrogate checks, and untested claims.

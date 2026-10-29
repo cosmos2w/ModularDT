@@ -45,7 +45,7 @@ def plot_top_candidate(candidate: CandidateRecord, output_dir: str | Path) -> No
     figure, axes = plt.subplots(2, 3, figsize=(13, 6))
     for index, name in enumerate(channel_order):
         image = axes.flat[index].pcolormesh(x, y, field[..., index], shading="auto")
-        axes.flat[index].set_title(f"Predicted {name}")
+        axes.flat[index].set_title(f"Predicted {name} (no reference)")
         figure.colorbar(image, ax=axes.flat[index])
     axes.flat[-1].axis("off")
     _save(figure, directory / "predicted_fields.png")

@@ -10,10 +10,6 @@ import numpy as np
 import torch
 
 from honf_runtime.unified_training import OptimizerGroupSpec, ScheduleSpec
-from ..member_routing import (
-    ThermalInteractionReusedMemberRoutingAdapter,
-    ThermalRelativeMemberRoutingAdapter,
-)
 from .content_hypergraph_task import ThermalContentPredictions, THERMAL_CONTENT_LOSS_WEIGHTS
 from .contextual_joint_task import ThermalContextualJointTask
 from .joint_task import _load_data_binding, _read_selected_cases, validate_full_train_followup_membership
@@ -48,7 +44,7 @@ class ThermalInteractionReusedMemberRoutingTask(ThermalContextualJointTask):
         if any(not math.isfinite(float(value)) or float(value) < 0
                for value in self.native_weights.values()):
             raise ValueError("Round13-3 native objective weights must be finite and nonnegative.")
-        relative = self.model.CORE_SCHEMA == ThermalRelativeMemberRoutingAdapter.CORE_SCHEMA
+        relative = False  # Anchored adapters use their own identity below.
         self.workflow = RELATIVE_WORKFLOW if relative else WORKFLOW
         self.provider_schema = RELATIVE_PROVIDER_SCHEMA if relative else PROVIDER_SCHEMA
         self.training_state_schema = RELATIVE_TRAINING_STATE_SCHEMA if relative else self.training_state_schema
@@ -744,116 +740,3 @@ def _training_membership(config, catalog, manifest):
     if membership == "fixed25_train150_dev22":
         return tuple(development_case_ids(manifest, "train")), tuple(development_case_ids(manifest, "test"))
     raise ValueError(f"Unsupported Round13-3 membership {membership!r}.")
-
-
-def build_thermal_member_routing_task(config, *, arm=None, device="cpu"):
-    recipe = copy.deepcopy(dict(config))
-    section = recipe.get("member_routing", {})
-    model_config = section.get("model")
-    selected_arm = str(arm or section.get("arm", ""))
-    if not isinstance(model_config, Mapping) or model_config.get("architecture") != selected_arm:
-        raise ValueError("Round13-3 model config must match the selected named arm.")
-    adapter_type = {
-        "interaction_reused_member_routing_v1": ThermalInteractionReusedMemberRoutingAdapter,
-        "interaction_reused_member_routing_v2": ThermalRelativeMemberRoutingAdapter,
-    }.get(model_config.get("schema"))
-    if adapter_type is None or selected_arm not in adapter_type.ARCHITECTURES:
-        raise ValueError("Round13-3 builder requires a supported versioned member-routing arm.")
-    manifest, data_path, manifest_path = _load_data_binding(
-        recipe["dataset"].get("manifest_path"), recipe["dataset"].get("data_path"),
-    )
-    catalog_source, catalog = read_case_catalog(data_path)
-    train_ids, validation_ids = _training_membership(recipe, catalog, manifest)
-    normalizer = fit_global_normalizer(data_path, train_ids)
-    training_cases = _read_selected_cases(data_path, train_ids, split="train",
-                                          normalizer=normalizer, include_grid=False)
-    validation_cases = _read_selected_cases(data_path, validation_ids, split="test",
-                                            normalizer=normalizer, include_grid=False)
-    heat_values = np.concatenate([
-        np.asarray(case["structure"]["heat_powers"])[
-            np.asarray(case["structure"]["module_present"]) > 0.5
-        ] for case in training_cases
-    ])
-    heat_scale = max(float(np.sqrt(np.mean(heat_values.astype(np.float64) ** 2))), 1e-6)
-    initialization_seed = int(recipe["initialization"].get("seed", 0))
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(initialization_seed)
-        model = adapter_type(
-            normalizer.stats, core_config=model_config, heat_scale=heat_scale,
-        ).to(device)
-    source_stat = data_path.stat()
-    provider = ThermalInteractionReusedMemberRoutingTask(
-        model=model,
-        training_cases=training_cases,
-        validation_cases=validation_cases,
-        manifest=manifest,
-        data_path=data_path,
-        recipe=recipe,
-        device=device,
-        manifest_path=manifest_path,
-        catalog=catalog,
-        source_binding={
-            "dataset_path": str(data_path),
-            "dataset_size_bytes": int(source_stat.st_size),
-            "dataset_mtime_ns": int(source_stat.st_mtime_ns),
-            "catalog_metadata_sha256": catalog_source["metadata_sha256"],
-            "manifest_path": None if manifest_path is None else str(manifest_path),
-            "manifest_sha256": manifest["manifest_sha256"],
-            "normalization_source": "TRAIN-only fit_global_normalizer",
-            "dataset_copy_created": False,
-            "persistent_cache_created": False,
-        },
-    )
-    return model, provider
-
-
-def load_member_routing_checkpoint(checkpoint, device):
-    """Rebuild a trusted Round13-3 checkpoint's adapter/provider without fitting."""
-    from honf_runtime.compat import load_trusted_checkpoint
-    from honf_runtime.contextual_frontier_training import _build_task, _read_json
-
-    checkpoint_path = Path(checkpoint).expanduser().resolve(strict=True)
-    payload = load_trusted_checkpoint(checkpoint_path, map_location="cpu")
-    identity = payload.get("experiment_identity")
-    provider_identity = identity.get("provider_identity") if isinstance(identity, Mapping) else None
-    expected_workflows = {
-        WORKFLOW: PROVIDER_SCHEMA,
-        RELATIVE_WORKFLOW: RELATIVE_PROVIDER_SCHEMA,
-    }
-    workflow = identity.get("workflow") if isinstance(identity, Mapping) else None
-    if (not isinstance(identity, Mapping) or workflow not in expected_workflows
-            or not isinstance(provider_identity, Mapping)
-            or provider_identity.get("schema") != expected_workflows[workflow]):
-        raise ValueError("Checkpoint is not a maintained Round13-3 member-routing training checkpoint.")
-    run_dir = checkpoint_path.parent.parent if checkpoint_path.parent.name == "checkpoints" else checkpoint_path.parent
-    manifest = _read_json(run_dir / "run_manifest.json")
-    config = manifest.get("config")
-    arm = manifest.get("arm")
-    if not isinstance(config, Mapping) or not isinstance(config.get("member_routing"), Mapping):
-        raise ValueError("Member-routing checkpoint run manifest is malformed.")
-    saved_model = config["member_routing"].get("model")
-    schema_to_adapter = {
-        ThermalInteractionReusedMemberRoutingAdapter.CORE_SCHEMA: ThermalInteractionReusedMemberRoutingAdapter,
-        ThermalRelativeMemberRoutingAdapter.CORE_SCHEMA: ThermalRelativeMemberRoutingAdapter,
-    }
-    if not isinstance(saved_model, Mapping):
-        raise ValueError("Member-routing checkpoint model config is malformed.")
-    adapter_type = schema_to_adapter.get(saved_model.get("schema"))
-    if (adapter_type is None or arm not in adapter_type.ARCHITECTURES
-            or workflow != (RELATIVE_WORKFLOW if adapter_type is ThermalRelativeMemberRoutingAdapter else WORKFLOW)):
-        raise ValueError("Member-routing checkpoint workflow, core schema, and arm do not agree.")
-    model, provider = _build_task(config, arm, torch.device(device))
-    model.load_state_dict(payload["model_state_dict"], strict=True)
-    provider.load_training_state_dict(payload.get("provider_training_state", {}))
-    if provider.identity_payload() != dict(provider_identity):
-        raise ValueError("Rebuilt member-routing provider identity differs from the checkpoint.")
-    model.eval()
-    return model, provider, payload
-
-
-__all__ = [
-    "WORKFLOW", "PROVIDER_SCHEMA", "CONFIG_SECTION_SCHEMA",
-    "RELATIVE_WORKFLOW", "RELATIVE_PROVIDER_SCHEMA", "RELATIVE_CONFIG_SECTION_SCHEMA",
-    "ThermalInteractionReusedMemberRoutingTask",
-    "build_thermal_member_routing_task", "load_member_routing_checkpoint",
-]
