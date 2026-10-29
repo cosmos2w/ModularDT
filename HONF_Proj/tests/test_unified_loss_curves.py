@@ -225,6 +225,44 @@ def test_round13_member_routing_native_losses_and_zero_read_work_are_explicit(tm
     assert "core_decode_primary_query_E_cheap_score_rows" in metadata["work_counter_definitions"]
 
 
+@pytest.mark.parametrize("arm", ["R13-8-A-EAnchor", "R13-8-L-LocalECover"])
+def test_anchored_paired_history_renders_native_losses_and_actual_work(tmp_path, monkeypatch, arm):
+    names = ("flow/u", "flow/v", "flow/p", "flow/omega", "temperature/fluid",
+             "temperature/surface", "temperature/material", "q_proxy")
+    work = {
+        "core_decode_joint_full_query_anchor_value_reduction_pairs_M": 10,
+        "core_decode_joint_restricted_query_anchor_value_reduction_pairs_M": 7,
+        "core_decode_joint_full_query_anchor_value_reduction_pairs_E": 20,
+        "core_decode_joint_restricted_query_anchor_value_reduction_pairs_E": 8,
+        "core_decode_joint_shared_query_unique_union_raw_score_pairs_M": 11,
+        "core_decode_joint_shared_query_unique_union_raw_score_pairs_E": 23,
+    }
+    history = [{"epoch": 200, "arm": arm, "phase": "joint", "case_visits": 150,
+                "train_losses": {name: .2 for name in names},
+                "validation": {"scope": "fixed25_v1_DEV22_exposed", "case_count": 22,
+                               "field_score": .3},
+                "validation_objective": _objective({name: .1 for name in names}, list(names), 1.6, .8),
+                "work_counts": work}]
+    original = copy.deepcopy(history)
+    figure = _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history, tmp_path, "field_score")
+    assert "paired loss: 0.5 full + 0.5 joint95 restricted" in figure[0]["title"]
+    assert len(figure[0]["labels"][1]) == 16
+    assert "No prediction losses saved" not in figure[0]["texts"][1]
+    assert "No separately fitted routing loss" in figure[0]["texts"][4]
+    plotted = dict(zip(figure[0]["labels"][5], figure[0]["lines"][5]))
+    assert list(plotted["M full + restricted value-reduction pairs (TRAIN)"]) == [17.]
+    assert list(plotted["E full + restricted value-reduction pairs (TRAIN)"]) == [28.]
+    assert list(plotted["M shared raw-score pairs (TRAIN)"]) == [11.]
+    assert list(plotted["E shared raw-score pairs (TRAIN)"]) == [23.]
+    metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
+    assert all(metadata["term_definitions"][name]["panel"] == "native_prediction" for name in names)
+    assert metadata["training_objective_pairing"]["full_loss_weight"] == .5
+    assert metadata["training_objective_pairing"]["restricted_loss_weight"] == .5
+    assert "not latency or executor savings" in metadata["panel_definitions"]["train_work"]
+    assert history == original
+
+
 @pytest.mark.parametrize("arm", [
     "R13-5-ME-Joint95",
     "R13-5A-ME-ConsistentJoint95",
