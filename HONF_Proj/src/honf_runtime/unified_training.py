@@ -835,7 +835,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         return objective if isinstance(objective, Mapping) else {}
 
     def term_group(name: str) -> int:
-        if member_routing_run and name in member_routing_native_terms:
+        if name in member_routing_native_terms:
             return 0
         if loss_metadata and name in loss_metadata:
             return {"native_prediction": 0, "physics": 1, "routing": 2}.get(
@@ -875,7 +875,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 "background": "Background-region",
             }
             return f"{role_labels.get(role, role.replace('_', ' ').title())} velocity loss"
-        if member_routing_run:
+        if name in member_routing_native_terms:
             member_routing_labels = {
                 "flow/u": "Flow u loss",
                 "flow/v": "Flow v loss",
@@ -905,7 +905,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     }
 
     def term_definition(name: str) -> dict[str, str]:
-        if member_routing_run and name in member_routing_native_terms:
+        if loss_metadata and name in loss_metadata:
+            return dict(loss_metadata[name])
+        if name in member_routing_native_terms:
             return {
                 "panel": "native_prediction",
                 "label": term_label(name),
@@ -913,8 +915,6 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 "formula": "Native field prediction objective for this output, using the run's TRAIN-fitted normalizer and the native task reduction.",
                 "weight": "Native task configuration; TRAIN history records the weighted contribution.",
             }
-        if loss_metadata and name in loss_metadata:
-            return dict(loss_metadata[name])
         if name == "reconstruction":
             return {
                 "panel": "native_prediction",
@@ -1011,7 +1011,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         axis.set_yscale("log")
         if masked_count < len(values):
             axis.plot(epochs, np.ma.masked_where(invalid, numeric), linestyle=linestyle,
-                      marker=marker, label=label, color=color)
+                      marker=(marker if len(values) <= 100 else None), label=label, color=color)
         elif len(values):
             axis.set_ylim(1.0, 10.0)
         return masked_count
@@ -1030,9 +1030,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     def set_panel_title(axis: Any, heading: str, explanation: str, *, fontsize: float = 9.5) -> None:
         axis.set_title(f"{heading}\n{explanation}", fontsize=fontsize, linespacing=1.1, pad=5)
 
-    def plot_term_group(axis: Any, group_index: int) -> None:
+    def plot_term_group(axis: Any, group_index: int, selected_names: Sequence[str] | None = None) -> None:
         nonlocal masked_count_total
-        group_names = [name for name in all_names if term_group(name) == group_index]
+        group_names = ([name for name in all_names if term_group(name) == group_index]
+                       if selected_names is None else list(selected_names))
         for name in group_names:
             color = colors[name]
             for source, series_label in (("train", "TRAIN"), ("validation", "HELD-OUT VALIDATION")):
@@ -1082,8 +1083,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             comparable_rows.append((int(row["epoch"]), objective))
     if comparable_rows:
         for key, label, color, style, marker in (
-            ("training_matched_total", "TRAIN shared-name sum", "C0", "-", "."),
-            ("validation_matched_total", "HELD-OUT VALIDATION shared-name sum", "C1", "--", "o"),
+            ("training_matched_total", "TRAIN at review epochs", "C0", "-", "."),
+            ("validation_matched_total", "EXPOSED VALIDATION", "C1", "--", "o"),
         ):
             points = [(epoch, objective.get(key)) for epoch, objective in comparable_rows
                       if objective.get(key) is not None]
@@ -1128,7 +1129,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     total_axis.grid(alpha=0.25, which="both")
 
     native_axis, physics_axis, selector_axis, routing_axis, work_axis = axes[1:]
+    masked_before_native = masked_count_total
     plot_term_group(native_axis, 0)
+    native_masked_count = masked_count_total - masked_before_native
     wind_role_names = [name for name in all_names if name.startswith("native_role/")]
     if wind_role_names:
         set_panel_title(
@@ -1425,12 +1428,6 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         "Provider counter sum (rows or pairs / epoch)"
     )
     work_axis.grid(alpha=0.25, which="both")
-    if masked_count_total:
-        routing_axis.text(
-            0.02, 0.02,
-            f"{masked_count_total} nonpositive/nonfinite values masked for log display; history unchanged.",
-            ha="left", va="bottom", fontsize=8, transform=routing_axis.transAxes,
-        )
     arms = sorted({str(row["arm"]) for row in history if row.get("arm")})
     case_counts = sorted({int(row["case_visits"]) for row in history if row.get("case_visits") is not None})
     scope = ""
@@ -1438,31 +1435,89 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         scope = f"{case_counts[0]} TRAIN cases/epoch"
     elif case_counts:
         scope = f"{case_counts[0]}–{case_counts[-1]} TRAIN cases/epoch"
-    title_parts = [", ".join(arms) if arms else "training"]
     guided_rows = [row for row in history if isinstance(row.get("reader_epoch_context"), Mapping)]
     if guided_rows:
-        reader = guided_rows[-1]["reader_epoch_context"]
-        origin = int(reader["source_parent_completed_epoch"])
-        title_parts.append(f"parent {origin}; new reader {reader['additional_epochs_after_parent']} epochs")
+        origin = int(guided_rows[-1]["reader_epoch_context"]["source_parent_completed_epoch"])
         if origin:
             for axis in axes:
                 axis.axvline(origin, color="grey", linewidth=0.9, linestyle=":", alpha=0.8)
-        if any(row.get("arm") == "R13-4-Guide" for row in guided_rows):
-            work_axis.set_title("Guide TRAIN work sums full + restricted reads", fontsize=9, pad=18)
+    run_name = output.parents[1].name if output.name == "training" and output.parent.name == "plots" else ", ".join(arms) or "Training"
+    epochs_present = [int(row["epoch"]) for row in history if type(row.get("epoch")) is int]
+    heading = [run_name]
+    if epochs_present:
+        heading.append(f"epoch {max(epochs_present)}")
     if scope:
-        title_parts.append(scope)
-    if paired_member_routing_run:
-        title_parts.append("paired loss: 0.5 full + 0.5 joint95 restricted")
-        title_parts.append(f"{joint_validation_label} joint95 inference")
-    else:
-        title_parts.append(f"TRAIN optimization vs {joint_validation_label} joint inference" if joint_run
-                           else "TRAIN optimization vs exposed VALIDATION hard inference")
-    figure.suptitle(" | ".join(title_parts), fontsize=10.8 if paired_member_routing_run else 13)
+        heading.append(scope)
+    figure.suptitle(" | ".join(heading), fontsize=12)
     epochs = sorted({int(row["epoch"]) for row in history if type(row.get("epoch")) is int})
     if epochs:
         limits = (epochs[0] - 0.5, epochs[-1] + 0.5) if len(epochs) == 1 else (epochs[0], epochs[-1])
         for axis in axes:
             axis.set_xlim(*limits)
+
+    # Retain only measured panels and split the crowded native flow/thermal
+    # family into readable groups. Historical histories use the same renderer.
+    visible_axes = [total_axis, selector_axis, native_axis, physics_axis, routing_axis]
+    native_names = [name for name in all_names if term_group(name) == 0]
+    flow_names = [name for name in native_names if name.startswith("flow/")]
+    thermal_names = [name for name in native_names if name.startswith("temperature/") or name == "q_proxy"]
+    if flow_names and thermal_names and len(native_names) > 5:
+        other_names = [name for name in native_names if name not in flow_names + thermal_names]
+        native_axis.clear()
+        masked_count_total -= native_masked_count
+        plot_term_group(native_axis, 0, flow_names)
+        set_panel_title(native_axis, "Flow prediction losses", "Sampled TRAIN and held-out validation")
+        native_axis.set_ylabel("Weighted loss contribution (dimensionless)")
+        thermal_axis = figure.add_subplot(1, 1, 1)
+        plot_term_group(thermal_axis, 0, thermal_names + other_names)
+        set_panel_title(thermal_axis, "Thermal prediction losses", "Sampled TRAIN and held-out validation")
+        thermal_axis.set_ylabel("Weighted loss contribution (dimensionless)")
+        visible_axes.insert(3, thermal_axis)
+    data_present = {axis: any(not line.get_label().startswith("_") for line in axis.lines)
+                    for axis in visible_axes}
+    # Concise labels keep definitions in the metadata sidecar. Work counters
+    # remain in history/metadata rather than the default loss figure.
+    total_axis.set_title("Weighted loss (shared terms; different reductions)")
+    total_axis.set_ylabel("Weighted loss (dimensionless)")
+    native_axis.set_title("Flow losses" if flow_names and thermal_names and len(native_names) > 5 else "Prediction losses")
+    if flow_names and thermal_names and len(native_names) > 5:
+        thermal_axis.set_title("Thermal losses")
+    selector_axis.set_title((f"{joint_validation_label.capitalize()} field error" if joint_run else "Exposed validation field error") if field_metric == "field_score" else "Exposed validation selector")
+    physics_axis.set_title("Physics and response losses")
+    routing_axis.set_title("Other objective losses")
+    for axis in [native_axis, physics_axis, routing_axis] + ([thermal_axis] if flow_names and thermal_names and len(native_names) > 5 else []):
+        handles, labels = axis.get_legend_handles_labels()
+        by_name = {}
+        for handle, label in zip(handles, labels):
+            name = label.removeprefix("TRAIN: ").removeprefix("HELD-OUT VALIDATION: ")
+            by_name.setdefault(name, handle)
+        if by_name:
+            axis.legend(list(by_name.values()), list(by_name), ncol=2, fontsize=8, frameon=False,
+                        title="TRAIN: solid   VALIDATION: dashed", title_fontsize=8)
+    visible_axes = [axis for axis in visible_axes if data_present.get(axis, True)]
+    for axis in list(figure.axes):
+        if axis not in visible_axes:
+            figure.delaxes(axis)
+    if visible_axes:
+        if masked_count_total:
+            visible_axes[0].text(
+                0.02, 0.02,
+                "Nonpositive/nonfinite values masked on log axes; history unchanged.",
+                ha="left", va="bottom", fontsize=8, transform=visible_axes[0].transAxes,
+            )
+        if not comparable_rows and not any(objective_at(row).get("terms") for row in history):
+            visible_axes[0].text(0.02, 0.09, "Validation objective losses were not recorded.",
+                                 transform=visible_axes[0].transAxes, fontsize=8)
+        columns = min(2, len(visible_axes))
+        rows = math.ceil(len(visible_axes) / columns)
+        grid = figure.add_gridspec(rows, columns)
+        figure.set_size_inches(14, max(4.6, 3.7 * rows))
+        for index, axis in enumerate(visible_axes):
+            axis.set_subplotspec(grid[index // columns, :] if index == len(visible_axes) - 1 and len(visible_axes) % columns else grid[index // columns, index % columns])
+            if epochs:
+                axis.set_xlim(*limits)
+    elif not history:
+        figure.suptitle("No recorded training or validation metrics")
 
     validation_weights: dict[str, dict[str, float]] = {}
     for row in history:
@@ -1475,7 +1530,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             validation_weights.setdefault(str(name), {})[str(epoch)] = float(weight)
     metadata = {
         "figure": "loss_curves",
-        "layout": "2x3 grouped overview",
+        "layout": "data-dependent loss panels; absent groups and work counts omitted",
+        "missing_validation_losses": "Validation objectives cannot be recovered when absent from saved history.",
         "panel_definitions": {
         "shared_name_loss_summary": "Sum same-named weighted loss terms recorded in both TRAIN and hard VALIDATION; this summary is not directly comparable because TRAIN uses a mean of macro-update means and validation pools valid elements. Adaptive TRAIN may include 25% fine-path loss replay; validation uses hard main-path loss only.",
             "native_prediction": "Visible note: prediction versus reference, scaled squared error. Validation uses the deployed hard-route main prediction and omits full-detail replay.",
@@ -1787,6 +1843,149 @@ def _atomic_json(path: Path, payload: Any) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+_OBJECTIVE_METADATA_FIELDS = (
+    "aggregation", "comparability_note", "definition", "is_full_training_objective_note",
+    "training_prediction_mode", "training_reduction", "validation_prediction_mode",
+    "validation_reduction", "term_definitions", "parameter_scope", "representation_scope",
+)
+
+
+def _compact_training_history(
+    history: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Use stable run defaults and append-only objective definitions."""
+    rows = copy.deepcopy(list(history))
+    if metadata is None:
+        metadata = {"schema": "training_history_metadata_v1", "shared": {},
+                    "reader_context": {}, "zero_work_counts": {}, "objectives": []}
+        if rows:
+            for key in ("arm", "phase"):
+                if all(key in row and row[key] == rows[0].get(key) for row in rows):
+                    metadata["shared"][key] = rows[0][key]
+            contexts = [row.get("reader_epoch_context") for row in rows]
+            if all(isinstance(context, dict) for context in contexts):
+                metadata["reader_context"] = {
+                    key: value for key, value in contexts[0].items()
+                    if all(key in context and context[key] == value for context in contexts)
+                }
+            counts = [row.get("work_counts") for row in rows]
+            if all(isinstance(count, dict) for count in counts):
+                metadata["zero_work_counts"] = {
+                    key: value for key, value in counts[0].items()
+                    if type(value) in (int, float) and value == 0
+                    and all(key in count and type(count[key]) is type(value) and count[key] == 0 for count in counts)
+                }
+    else:
+        metadata = copy.deepcopy(dict(metadata))
+    if not rows:
+        return rows, metadata
+    for row in rows:
+        absent = []
+        for key, value in metadata["shared"].items():
+            if key not in row:
+                absent.append(key)
+            elif row[key] == value:
+                del row[key]
+        if absent:
+            row["history_absent_shared"] = absent
+        for field, defaults, marker in (
+            ("reader_epoch_context", metadata["reader_context"], "history_absent_context"),
+            ("work_counts", metadata["zero_work_counts"], "history_absent_zero_counts"),
+        ):
+            item = row.get(field)
+            if not isinstance(item, dict):
+                continue
+            absent = []
+            for key, value in defaults.items():
+                if key not in item:
+                    absent.append(key)
+                elif type(item[key]) is type(value) and item[key] == value:
+                    del item[key]
+            if absent:
+                row[marker] = absent
+    for row, original in zip(rows, history):
+        paired = row.get("paired_reader_native_losses")
+        if (isinstance(paired, dict) and "epoch_context" in paired
+                and paired["epoch_context"] == original.get("reader_epoch_context")):
+            del paired["epoch_context"]
+            paired["epoch_context_is_reader_context"] = True
+        validation = row.get("validation")
+        objective = validation.get("loss_objective") if isinstance(validation, dict) else None
+        if isinstance(objective, dict):
+            if row.get("validation_objective") == objective:
+                del row["validation_objective"]
+                row["validation_objective_is_loss_objective"] = True
+            definitions = {key: objective.pop(key) for key in _OBJECTIVE_METADATA_FIELDS if key in objective}
+            if definitions:
+                entries = metadata["objectives"]
+                if definitions not in entries:
+                    entries.append(definitions)
+                objective["metadata_index"] = entries.index(definitions)
+    rows[0]["history_metadata_version"] = 1
+    return rows, metadata
+
+
+def _expand_training_history(rows: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Restore the ordinary history view for maintained readers."""
+    expanded = copy.deepcopy(list(rows))
+    if expanded:
+        expanded[0].pop("history_metadata_version", None)
+    for row in expanded:
+        absent_shared = set(row.pop("history_absent_shared", ()))
+        for key, value in metadata.get("shared", {}).items():
+            if key not in absent_shared:
+                row.setdefault(key, value)
+        context = row.get("reader_epoch_context")
+        counts = row.get("work_counts")
+        for item, defaults, marker in (
+            (context, metadata.get("reader_context", {}), "history_absent_context"),
+            (counts, metadata.get("zero_work_counts", {}), "history_absent_zero_counts"),
+        ):
+            absent = set(row.pop(marker, ()))
+            if isinstance(item, dict):
+                for key, value in defaults.items():
+                    if key not in absent:
+                        item.setdefault(key, value)
+        paired = row.get("paired_reader_native_losses")
+        if isinstance(paired, dict) and paired.pop("epoch_context_is_reader_context", False):
+            paired["epoch_context"] = copy.deepcopy(context)
+        validation = row.get("validation")
+        objective = validation.get("loss_objective") if isinstance(validation, dict) else None
+        if isinstance(objective, dict) and "metadata_index" in objective:
+            index = objective.pop("metadata_index")
+            objective.update(metadata["objectives"][index])
+        if row.pop("validation_objective_is_loss_objective", False):
+            row["validation_objective"] = copy.deepcopy(objective)
+    return expanded
+
+
+def _write_training_history(path: Path, history: Sequence[Mapping[str, Any]], *, compact: bool) -> None:
+    if not compact:
+        _atomic_json(path, history)
+        return
+    metadata_path = path.parent / "history_metadata.json"
+    prior_metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else None
+    rows, metadata = _compact_training_history(history, prior_metadata)
+    _atomic_json(metadata_path, metadata)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text("[\n" + ",\n".join(
+        json.dumps(row, separators=(",", ":"), sort_keys=True, allow_nan=False) for row in rows
+    ) + "\n]\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def read_training_history(path: Path) -> list[dict[str, Any]]:
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    sidecar = path.parent / "history_metadata.json"
+    if rows and rows[0].get("history_metadata_version") == 1:
+        metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        if metadata.get("schema") != "training_history_metadata_v1":
+            raise ValueError("Compact history metadata has an unsupported schema.")
+        return _expand_training_history(rows, metadata)
+    return rows
 
 
 def _read_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
@@ -3551,6 +3750,7 @@ class TrainingEngine:
         joint_native_child: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
+        compact_history: bool = False,
         relation_guided_transfer: Mapping[str, Any] | None = None,
         joint_member_routing_transfer: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -5307,7 +5507,7 @@ class TrainingEngine:
                         payload["resume_amendments"] = resume_amendments
                     if branch_parent is not None:
                         payload["branch_parent"] = branch_parent
-                    _atomic_json(layout.write_path("history.json"), history)
+                    _write_training_history(layout.write_path("history.json"), history, compact=compact_history)
                     if milestone:
                         _atomic_torch_save(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
                     validation_sidecar_due = (
@@ -5338,7 +5538,7 @@ class TrainingEngine:
                     _atomic_torch_save(layout.write_path("latest_model.pt"), payload)
                     latest_epoch = epoch
                 if curve_due:
-                    _atomic_json(layout.write_path("history.json"), history)
+                    _write_training_history(layout.write_path("history.json"), history, compact=compact_history)
                     curve_rng = capture_rng_state()
                     try:
                         _render_loss_curves(

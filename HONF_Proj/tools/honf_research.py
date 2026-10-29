@@ -54,6 +54,10 @@ def _parser() -> argparse.ArgumentParser:
     train_member_routing.add_argument("--dry-run", action="store_true",
                                       help="build the provider and print its identity without creating run output")
 
+    for producer in (train_contextual, train_member_routing):
+        producer.add_argument("--compact-history", action=argparse.BooleanOptionalAction, default=True,
+                              help="store complete epoch values with shared metadata recorded once")
+
     continue_contextual = commands.add_parser(
         "continue-contextual", help="continue an F13 development checkpoint with full state in a fresh namespace",
     )
@@ -113,6 +117,10 @@ def _parser() -> argparse.ArgumentParser:
         "--extend-horizon", action="store_true",
         help="explicitly continue a completed configured endpoint with the same optimizer schedule",
     )
+
+    for resumer in (resume_contextual, resume_member_routing):
+        resumer.add_argument("--compact-history", action=argparse.BooleanOptionalAction, default=None,
+                             help="output-only history format; omitted preserves the run's current format")
 
     evaluate_member_routing = commands.add_parser(
         "evaluate-member-routing", help="evaluate native VAL89, routing probes, and measured work for a checkpoint",
@@ -235,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = train_contextual_frontier(
                 args.config, device=args.device, devices=args.devices,
-                epochs=args.epochs, output=args.output,
+                epochs=args.epochs, output=args.output, compact_history=args.compact_history,
             )
     elif args.command == "continue-contextual":
         from honf_runtime.contextual_frontier_training import continue_contextual_frontier
@@ -270,12 +278,14 @@ def main(argv: list[str] | None = None) -> int:
             devices=args.devices,
             stop_after_epoch=args.stop_after_epoch,
             wall_clock_budget_seconds=args.wall_clock_budget_seconds,
+            compact_history=args.compact_history,
         )
     elif args.command in ("resume-member-routing", "resume-single-distribution-member-routing"):
         from honf_runtime.contextual_frontier_training import resume_contextual_frontier
         result = resume_contextual_frontier(
             args.run, device=args.device, devices=args.devices,
             stop_after_epoch=args.stop_after_epoch, extend_horizon=args.extend_horizon,
+            compact_history=args.compact_history,
         )
     elif args.command == "evaluate-joint-member-routing":
         from honf_runtime.joint_member_routing_evaluation import evaluate

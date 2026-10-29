@@ -3496,7 +3496,11 @@ def assess(run_dir: str | Path, *, dataset: str = "thermal") -> dict[str, Any]:
     value, _ = _load_run_manifest(run)
     layout = RunLayout(run)
     history_path = layout.read_path("history.json")
-    history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else []
+    if history_path.is_file():
+        from .unified_training import read_training_history
+        history = read_training_history(history_path)
+    else:
+        history = []
     if not isinstance(history, list):
         raise TypeError("Run history must be a JSON list.")
     checkpoints = {}

@@ -1152,7 +1152,8 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
          training_identity: Mapping[str, Any] | None = None,
          branch_from_checkpoint: Path | None = None,
          relation_guided_transfer: Mapping[str, Any] | None = None,
-         joint_member_routing_transfer: Mapping[str, Any] | None = None) -> dict[str, Any]:
+         joint_member_routing_transfer: Mapping[str, Any] | None = None,
+         compact_history: bool | None = None) -> dict[str, Any]:
     from .research_training import ResearchTrainingEngine
 
     arm = _arm(config)
@@ -1192,6 +1193,8 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
                 continuation_options["relation_guided_transfer"] = relation_guided_transfer
             if joint_member_routing_transfer is not None:
                 continuation_options["joint_member_routing_transfer"] = joint_member_routing_transfer
+        if compact_history is not None:
+            continuation_options["compact_history"] = compact_history
         return engine.fit(
             model, provider, output,
             identity=_run_identity(config, provider) if training_identity is None else training_identity,
@@ -1207,7 +1210,7 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
 def train_contextual_frontier(config_path: str | Path, *, device: str, output: str | Path,
                               epochs: int | None = None, devices: Sequence[str] | None = None,
                               task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None,
-                              verify_bindings: bool = True) -> dict[str, Any]:
+                              verify_bindings: bool = True, compact_history: bool = True) -> dict[str, Any]:
     config, resolved_config_path = load_contextual_frontier_config(config_path)
     training = config["training"]
     stop_after = int(training["first_segment_epochs"] if epochs is None else epochs)
@@ -1260,7 +1263,7 @@ def train_contextual_frontier(config_path: str | Path, *, device: str, output: s
         }
     return _fit(model, provider, config, output_path, device=selected_device, stop_after=stop_after,
                 branch_from_checkpoint=branch_from_checkpoint,
-                joint_member_routing_transfer=joint_transfer)
+                joint_member_routing_transfer=joint_transfer, compact_history=compact_history)
 
 
 def continue_contextual_frontier(config_path: str | Path, *, device: str, output: str | Path,
@@ -1346,7 +1349,8 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
                                task_factory: Callable[..., tuple[torch.nn.Module, Any]] | None = None,
                                wall_clock_budget_seconds: int | None = None,
                                extend_horizon: bool = False,
-                               verify_bindings: bool = True) -> dict[str, Any]:
+                               verify_bindings: bool = True,
+                               compact_history: bool | None = None) -> dict[str, Any]:
     run = Path(run_dir).expanduser().resolve(strict=True)
     layout = RunLayout(run)
     manifest_path = layout.read_path("run_manifest.json")
@@ -1375,6 +1379,10 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         raise ValueError("Saved run arm differs from its versioned config.")
     # Revalidate the stored config with a temporary on-disk-free structural pass.
     _validate_loaded_contextual_config(config)
+    if compact_history is None:
+        history_path = layout.read_path("history.json")
+        saved_history = _read_json(history_path) if history_path.exists() else []
+        compact_history = bool(saved_history and saved_history[0].get("history_metadata_version") == 1)
     latest_path = resolve_checkpoint(run, "latest")
     from .compat import load_trusted_checkpoint
 
@@ -1436,7 +1444,7 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
                 wall_clock_budget_seconds=selected_budget,
                 engine_horizon=(stop_after_epoch if horizon_extension else None),
                 engine_checkpoint_epochs=engine_checkpoint_epochs,
-                allow_horizon_extension=horizon_extension)
+                allow_horizon_extension=horizon_extension, compact_history=compact_history)
 
 
 def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:

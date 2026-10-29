@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
 from collections.abc import Iterable
 from pathlib import Path
@@ -306,6 +307,98 @@ def _save_organizer_health_plot(history: dict[str, list[float]], diagnostics_dir
     plt.close(fig)
 
 
+def _read_common_csv_history(metrics_path: Path, *, expanded_predicted_1804: bool = False) -> dict[str, list[float]]:
+    """Discard validation fields in 1804 rows with an expanded unknown schema."""
+    history = _read_metric_history(metrics_path)
+    if not expanded_predicted_1804:
+        return history
+    with metrics_path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.reader(stream)
+        header = next(reader, [])
+        for index, values in enumerate(reader):
+            if len(values) == len(header):
+                continue
+            if len(values) != len(header) + 38 or header[-3:] != [
+                    "val_predicted_loss_total", "val_predicted_field_mse", "val_predicted_temperature_mse"]:
+                raise ValueError("Unrecognized expanded 1804 metrics schema; validation columns cannot be mapped safely.")
+            for key in history:
+                if key.startswith("val_"):
+                    history[key][index] = math.nan
+    return history
+
+
+def _save_common_csv_loss_plot(history: dict[str, list[float]], output: Path, *, run_name: str,
+                               validation_label: str = "Validation") -> None:
+    """Show saved legacy measurements using the common loss-monitor layout."""
+    import matplotlib.pyplot as plt
+
+    panels = [
+        ("Weighted objective (reductions may differ)", (("loss_total", "TRAIN"), ("val_loss_total", validation_label),
+                                ("val_predicted_loss_total", validation_label + " predicted ports"))),
+        ("Validation field error", (("val_field_mse", validation_label),)),
+        ("Field prediction loss", (("loss_field", "TRAIN"), ("val_loss_field", validation_label))),
+        ("Temperature error", (("temperature_mse", "TRAIN"), ("val_temperature_mse", validation_label))),
+        ("Physical losses", (("loss_internal_temperature", "TRAIN internal temperature"),
+                             ("val_loss_internal_temperature", validation_label + " internal temperature"),
+                             ("loss_interface", "TRAIN interface"), ("val_loss_interface", validation_label + " interface"))),
+        ("Boundary losses", (("loss_port_condition", "TRAIN boundary"),
+                             ("val_loss_port_condition", validation_label + " boundary"),
+                             ("loss_port_global_consistency", "TRAIN consistency"),
+                             ("val_loss_port_global_consistency", validation_label + " consistency"))),
+    ]
+    panels = [(title, [(key, label) for key, label in series
+                       if any(math.isfinite(value) and value > 0 for value in history.get(key, ()))])
+              for title, series in panels]
+    panels = [(title, series) for title, series in panels if series]
+    if not panels:
+        return
+    columns = min(2, len(panels))
+    fig, axes = plt.subplots(math.ceil(len(panels) / columns), columns,
+                             figsize=(14, 3.7 * math.ceil(len(panels) / columns)),
+                             squeeze=False, constrained_layout=True)
+    epochs = history["epoch"]
+    masked = 0
+    for ax, (title, series) in zip(axes.flat, panels):
+        for key, label in series:
+            values = history[key]
+            points = [(x, y) for x, y in zip(epochs, values) if math.isfinite(x) and math.isfinite(y) and y > 0]
+            masked += sum(math.isfinite(x) and math.isfinite(y) and y <= 0 for x, y in zip(epochs, values))
+            if points:
+                ax.plot([p[0] for p in points], [p[1] for p in points], label=label,
+                        linestyle="--" if key.startswith("val_") else "-", linewidth=1.3)
+        ax.set_title(title)
+        finite_x = [x for x in epochs if math.isfinite(x)]
+        if len(finite_x) > 1 and min(finite_x) < max(finite_x):
+            ax.set_xlim(min(finite_x), max(finite_x))
+        if run_name.startswith("Run_1804_") and title == "Validation field error":
+            ax.text(.98, .98, "Expanded-row validation omitted", ha="right", va="top", transform=ax.transAxes, fontsize=8)
+        ax.set_xlabel("Completed epoch")
+        ax.set_ylabel("Recorded value")
+        ax.set_yscale("log")
+        ax.grid(alpha=.25, which="both")
+        if ax.lines:
+            ax.legend(fontsize=8, frameon=False)
+    for ax in list(axes.flat)[len(panels):]:
+        fig.delaxes(ax)
+    finite_epochs = [int(epoch) for epoch in epochs if math.isfinite(epoch)]
+    fig.suptitle(f"{run_name} | epoch {max(finite_epochs)}" if finite_epochs else run_name)
+    output.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output / "loss_curve.pdf")
+    fig.savefig(output / "loss_curve.png", dpi=140)
+    plt.close(fig)
+    (output / "loss_curve_metadata.json").write_text(json.dumps({
+        "source": "legacy metrics.csv",
+        "panels": {title: [key for key, _ in series] for title, series in panels},
+        "training": "Saved sampled training metrics; see the historical run configuration for reductions and weights.",
+        "validation": f"{validation_label}; saved values only, with the historical run's reductions and prediction path.",
+        "comparison": "Training and validation may use different reductions or prediction paths; no equality is assumed.",
+        "missing_validation_losses": "A missing historical measurement cannot be reconstructed from this plot.",
+        "legacy_1804_expanded_rows": ("Shifted validation columns in expanded rows omitted as ambiguous."
+                                      if run_name.startswith("Run_1804_") else None),
+        "masked_nonpositive_values": masked,
+    }, indent=2) + "\n", encoding="utf-8")
+
+
 def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
     """Save readable grouped plots instead of one overcrowded metric figure."""
 
@@ -344,74 +437,8 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             validation_label = "Validation (source test split)" if split == "test" else "Validation (source validation split)"
         except (OSError, TypeError, ValueError):
             pass
-    architecture = _resolved_forward_architecture(run_dir)
-    if architecture == "group_control_pairwise_honf":
-        activity_panel = (
-            "Learned Group-Control Activity",
-            (
-                "interaction_module_group_incidence_count",
-                "val_interaction_module_group_incidence_count",
-                "interaction_environment_group_incidence_count",
-                "val_interaction_environment_group_incidence_count",
-                "interaction_group_read_degree_mean",
-                "val_interaction_group_read_degree_mean",
-            ),
-            "active learned assignments",
-            True,
-            False,
-        )
-    else:
-        activity_panel = (
-            "Selected and Functional H-Edge Activity",
-            (
-                "selected_edge_count",
-                "val_selected_edge_count",
-                "functional_edge_count",
-                "val_functional_edge_count",
-                "soft_functional_edge_count",
-                "val_soft_functional_edge_count",
-            ),
-            "edges",
-            False,
-            True,
-        )
-    panels = [
-        ("Total loss\nWeighted sum of configured loss terms", ("loss_total", "val_loss_total", "val_predicted_loss_total"), "loss", True, False),
-        ("Field prediction loss\nError over predicted physical fields", ("loss_field", "val_loss_field", "field_mse", "val_field_mse"), "loss / mse", True, False),
-        (
-            "Internal and boundary losses\nModule temperature and interface matching",
-            ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface"),
-            "loss",
-            True,
-            False,
-        ),
-        (
-            "Port consistency losses\nBoundary conditions and cross-module agreement",
-            ("loss_port_condition", "val_loss_port_condition", "loss_port_global_consistency", "val_loss_port_global_consistency"),
-            "loss",
-            True,
-            False,
-        ),
-        ("Temperature prediction error\nMean squared temperature error", ("temperature_mse", "val_temperature_mse"), "mse", True, False),
-        activity_panel,
-    ]
-    fig, axes = plt.subplots(2, 3, figsize=(15.5, 7.4), constrained_layout=True)
-    for ax, (title, keys, ylabel, log_scale, y_min_zero) in zip(axes.reshape(-1), panels):
-        _plot_metric_group(
-            ax,
-            history,
-            keys,
-            title=title,
-            ylabel=ylabel,
-            log_scale=log_scale,
-            y_min_zero=y_min_zero,
-            reference_lines=active_edge_references if y_min_zero else (),
-            validation_label=validation_label,
-        )
-    fig.suptitle(f"HONF-CL Training and {validation_label} History", fontsize=13)
-    fig.savefig(str(training_dir / "loss_curve.pdf"))
-    fig.savefig(str(training_dir / "loss_curve.png"), dpi=160)
-    plt.close(fig)
+    common_history = _read_common_csv_history(metrics_path, expanded_predicted_1804=run_dir.name.startswith("Run_1804_"))
+    _save_common_csv_loss_plot(common_history, training_dir, run_name=run_dir.name, validation_label=validation_label)
 
     focused = {
         "loss_total_curve.png": ("Total Loss", ("loss_total", "val_loss_total", "val_predicted_loss_total"), "loss", True, False),

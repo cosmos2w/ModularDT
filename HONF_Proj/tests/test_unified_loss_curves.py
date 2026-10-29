@@ -58,31 +58,20 @@ def test_loss_curves_group_terms_compare_matched_objective_and_write_both_aliase
 
     assert [item["format"] for item in captured] == ["pdf", "png"]
     for item in captured:
-        assert len(item["yscales"]) == 6
-        assert item["yscales"] == ["log"] * 6
+        assert len(item["yscales"]) == 5
+        assert item["yscales"] == ["log"] * 5
         assert "adaptive_detail" in item["title"] and "600 TRAIN cases/epoch" in item["title"]
-        assert "exposed VALIDATION hard inference" in item["title"]
-        assert item["titles"] == [
-            "Shared-name loss summaries\nTRAIN: mean of per-update means\n"
-            "VALIDATION: pooled valid-element mean\nAdaptive TRAIN: 25% fine-path loss replay\n"
-            "VALIDATION: hard main path",
-            "Prediction losses\nPrediction vs reference; scaled squared error",
-            "Physics and response losses\nDiscrete stored-flow residual; response prediction",
-            "Held-out field prediction error\nNormalized field MSE for checkpoint selection; not a loss",
-            "Approximation and routing losses\nCoarse/fine prediction mismatch; router probability error vs residual-importance target\n"
-            "Penalty on expected selected fine reads",
-            "Recorded TRAIN work counters\nCounter sums; not measured executor time or savings",
-        ]
+        assert item["titles"] == ["Weighted loss (shared terms; different reductions)",
+                                  "Prediction losses", "Physics and response losses",
+                                  "Exposed validation field error", "Other objective losses"]
         assert item["labels"][1] == [
             "TRAIN: Field prediction loss",
             "HELD-OUT VALIDATION: Field prediction loss",
         ]
         assert item["labels"][2] == ["TRAIN: Response prediction loss"]
         assert item["labels"][0] == [
-            "TRAIN shared-name sum", "HELD-OUT VALIDATION shared-name sum"]
+            "TRAIN at review epochs", "EXPOSED VALIDATION"]
         assert item["labels"][3] == ["HELD-OUT VALIDATION: Held-out field prediction error"]
-        assert all("Counts do not establish sparse executor savings" not in text
-                   for text in item["texts"][5])
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     assert "do not establish sparse executor savings" in metadata["panel_definitions"]["train_work"]
     assert "0.05" in metadata["term_definitions"]["reconstruction"]["formula"]
@@ -118,7 +107,7 @@ def test_loss_curves_mask_invalid_values_without_mutating_saved_history(tmp_path
         validation_values = item["lines"][1][1]
         assert np.ma.getmaskarray(train_values).tolist() == [False, True, True]
         assert np.ma.getmaskarray(validation_values).tolist() == [False, True, True]
-        assert any("nonpositive/nonfinite values masked" in text for text in item["texts"][4])
+        assert any("nonpositive/nonfinite values masked" in text.lower() for panel in item["texts"] for text in panel)
     assert history == before
 
 
@@ -134,13 +123,11 @@ def test_legacy_field_selector_is_not_fabricated_as_validation_loss(tmp_path, mo
     _render_loss_curves(history, tmp_path, "field_score")
 
     for item in captured:
-        assert item["labels"][1] == [
-            "TRAIN: Field prediction loss",
-        ]
-        assert item["labels"][3] == ["HELD-OUT VALIDATION: Held-out field prediction error"]
-        assert "Held-out loss was not recorded in this history." in item["texts"][0][0]
+        assert ["TRAIN: Field prediction loss"] in item["labels"]
+        assert ["HELD-OUT VALIDATION: Held-out field prediction error"] in item["labels"]
+        assert any("Validation objective losses were not recorded" in text for panel in item["texts"] for text in panel)
         assert not any(label.startswith("HELD-OUT VALIDATION: Field prediction loss")
-                       for label in item["labels"][1])
+                       for panel in item["labels"] for label in panel)
 
 
 def test_wind_role_losses_use_plain_names_with_definition(tmp_path, monkeypatch):
@@ -159,7 +146,7 @@ def test_wind_role_losses_use_plain_names_with_definition(tmp_path, monkeypatch)
 
     _render_loss_curves(history, tmp_path, "field_score")
 
-    assert captured[0]["labels"][1] == [
+    assert captured[0]["labels"][0] == [
         "TRAIN: Downstream-region velocity loss",
         "TRAIN: Hub-height slab velocity loss",
         "TRAIN: Near-turbine hub-slab velocity loss",
@@ -171,7 +158,6 @@ def test_wind_role_losses_use_plain_names_with_definition(tmp_path, monkeypatch)
     assert "not a physical wake" in metadata["term_definitions"]["native_role/downstream_envelope"]["role_region"]
     assert "hub height" in metadata["term_definitions"]["native_role/hub_slab"]["role_region"]
     assert "D is the reference rotor diameter" in metadata["term_definitions"]["native_role/hub_slab"]["role_region"]
-    assert "D = reference rotor diameter" in captured[0]["titles"][1]
 
 
 def test_round13_member_routing_native_losses_and_zero_read_work_are_explicit(tmp_path, monkeypatch):
@@ -202,21 +188,9 @@ def test_round13_member_routing_native_losses_and_zero_read_work_are_explicit(tm
     _render_loss_curves(history, tmp_path, "field_score")
 
     figure = captured[0]
-    assert figure["titles"][1] == "Prediction losses\nPrediction vs reference; scaled squared error"
-    assert figure["labels"][1] == [
-        "TRAIN: Vorticity loss", "TRAIN: Pressure loss", "TRAIN: Flow u loss", "TRAIN: Flow v loss",
-        "TRAIN: Heat-flux proxy loss", "TRAIN: Fluid temperature loss", "TRAIN: Material temperature loss",
-        "TRAIN: Surface temperature loss",
-    ]
-    assert "No separate residual / response objective" in figure["titles"][2]
-    assert "No separately fitted residual or response objective" in figure["texts"][2]
-    assert "No separate routing penalty" in figure["titles"][4]
-    assert figure["yscales"][5] == "symlog"
-    work_lines = dict(zip(figure["labels"][5], figure["lines"][5]))
-    assert np.asarray(work_lines["M selected value rows (TRAIN)"]).tolist() == [6.0, 0.0]
-    assert np.asarray(work_lines["E selected value rows (TRAIN)"]).tolist() == [3.0, 0.0]
-    assert np.asarray(work_lines["M cheap-score rows (TRAIN)"]).tolist() == [40.0, 25.0]
-    assert np.asarray(work_lines["E cheap-score rows (TRAIN)"]).tolist() == [60.0, 30.0]
+    assert "Flow losses" in figure["titles"]
+    assert "Thermal losses" in figure["titles"]
+    assert not any("work" in title.lower() for title in figure["titles"])
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     for name in loss_names:
         assert metadata["term_definitions"][name]["panel"] == "native_prediction"
@@ -246,15 +220,9 @@ def test_anchored_paired_history_renders_native_losses_and_actual_work(tmp_path,
     original = copy.deepcopy(history)
     figure = _capture_figures(monkeypatch, tmp_path)
     _render_loss_curves(history, tmp_path, "field_score")
-    assert "paired loss: 0.5 full + 0.5 joint95 restricted" in figure[0]["title"]
-    assert len(figure[0]["labels"][1]) == 16
-    assert "No prediction losses saved" not in figure[0]["texts"][1]
-    assert "No separately fitted routing loss" in figure[0]["texts"][4]
-    plotted = dict(zip(figure[0]["labels"][5], figure[0]["lines"][5]))
-    assert list(plotted["M full + restricted value-reduction pairs (TRAIN)"]) == [17.]
-    assert list(plotted["E full + restricted value-reduction pairs (TRAIN)"]) == [28.]
-    assert list(plotted["M shared raw-score pairs (TRAIN)"]) == [11.]
-    assert list(plotted["E shared raw-score pairs (TRAIN)"]) == [23.]
+    assert arm in figure[0]["title"]
+    assert "Flow losses" in figure[0]["titles"] and "Thermal losses" in figure[0]["titles"]
+    assert not any("work" in title.lower() for title in figure[0]["titles"])
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     assert all(metadata["term_definitions"][name]["panel"] == "native_prediction" for name in names)
     assert metadata["training_objective_pairing"]["full_loss_weight"] == .5
@@ -302,34 +270,12 @@ def test_r13_5_paired_native_losses_and_actual_full_restricted_work_are_explicit
     _render_loss_curves(history, tmp_path, "field_score")
 
     figure = captured[0]
-    assert "paired loss: 0.5 full + 0.5 joint95 restricted" in figure["title"]
-    assert figure["titles"][1] == "Prediction losses\nPrediction vs reference; scaled squared error"
-    expected_native_train_labels = [
-        "TRAIN: Vorticity loss", "TRAIN: Pressure loss", "TRAIN: Flow u loss", "TRAIN: Flow v loss",
-        "TRAIN: Heat-flux proxy loss", "TRAIN: Fluid temperature loss", "TRAIN: Material temperature loss",
-        "TRAIN: Surface temperature loss",
-    ]
-    assert [label for label in figure["labels"][1] if label.startswith("TRAIN:")] == expected_native_train_labels
-    assert sum(label.startswith("HELD-OUT VALIDATION:") for label in figure["labels"][1]) == len(loss_names)
-    assert "No prediction losses saved" not in figure["texts"][1]
-    assert "exposed DEV joint95 inference" in figure["title"]
-    work_series = dict(zip(figure["labels"][5], figure["lines"][5]))
-    assert np.asarray(work_series[
-        "M selected value rows (full + joint95 restricted TRAIN)"
-    ]).tolist() == [13.0]
-    assert np.asarray(work_series[
-        "E selected value rows (full + joint95 restricted TRAIN)"
-    ]).tolist() == [8.0]
-    assert np.asarray(work_series[
-        "M cheap-score rows (full + joint95 restricted TRAIN)"
-    ]).tolist() == [65.0]
-    assert np.asarray(work_series[
-        "E cheap-score rows (full + joint95 restricted TRAIN)"
-    ]).tolist() == [90.0]
-    assert np.asarray(work_series["Shared joint-address score rows (TRAIN)"]).tolist() == [11.0]
-    assert "No recorded work counters" not in figure["texts"][5]
-    assert "Sum full + joint95 restricted TRAIN counts" in figure["titles"][5]
-    assert "Shared address score once" in figure["titles"][5]
+    assert arm in figure["title"]
+    native_indices = [i for i, title in enumerate(figure["titles"]) if title in ("Flow losses", "Thermal losses")]
+    native_labels = [label for i in native_indices for label in figure["labels"][i]]
+    assert sum(label.startswith("TRAIN:") for label in native_labels) == len(loss_names)
+    assert sum(label.startswith("HELD-OUT VALIDATION:") for label in native_labels) == len(loss_names)
+    assert not any("work" in title.lower() for title in figure["titles"])
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     assert metadata["validation_scope"] == "fixed exposed DEV joint inference; not an independent TEST result"
     assert metadata["training_objective_pairing"]["full_loss_weight"] == 0.5
@@ -368,6 +314,6 @@ def test_r13_5_full_train_history_uses_canonical_val89_label(tmp_path, monkeypat
 
     _render_loss_curves(history, tmp_path, "field_score")
 
-    assert "exposed VAL89 joint95 inference" in captured[0]["title"]
+    assert any("Exposed val89 field error" in title for title in captured[0]["titles"])
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     assert metadata["validation_scope"] == "exposed canonical VAL89 joint inference; not an independent TEST result"

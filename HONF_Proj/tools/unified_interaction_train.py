@@ -329,7 +329,8 @@ def _command_status(args: argparse.Namespace) -> int:
             result["status"] = active.get("status")
     history = layout.read_path("history.json")
     if history.is_file():
-        rows = json.loads(history.read_text(encoding="utf-8"))
+        from honf_runtime.unified_training import read_training_history
+        rows = read_training_history(history)
         result["history"] = {
             "epochs": len(rows),
             "last_epoch": rows[-1]["epoch"] if rows else None,
