@@ -159,7 +159,9 @@ class ThermalAnchoredMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingA
 
     SCHEMA = "thermal_interaction_reused_e_anchored_member_routing_adapter_v1"
     CORE_SCHEMA = "interaction_reused_e_anchored_member_routing_v1"
-    ARCHITECTURES = ("R13-8-A-EAnchor", "R13-8-L-LocalECover")
+    ARCHITECTURES = ("R13-8-A-EAnchor", "R13-8-L-LocalECover",
+                     "R13-12-P-EAnchor", "R13-12-G-EAnchor",
+                     "R13-12-P-LocalECover", "R13-12-G-LocalECover")
 
 
 __all__ = [

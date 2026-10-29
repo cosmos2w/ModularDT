@@ -87,11 +87,24 @@ R13_8_E_ANCHORED_CONFIG_SCHEMA = "thermal_r13_8_e_anchored_member_routing_v1"
 R13_8_E_ANCHORED_CORE_SCHEMA = "interaction_reused_e_anchored_member_routing_v1"
 R13_8_A_ARM = "R13-8-A-EAnchor"
 R13_8_L_ARM = "R13-8-L-LocalECover"
-R13_8_E_ANCHORED_ARMS = (R13_8_A_ARM, R13_8_L_ARM)
+R13_12_E_ANCHORED_ARMS = ("R13-12-P-EAnchor", "R13-12-G-EAnchor",
+                         "R13-12-P-LocalECover", "R13-12-G-LocalECover")
+R13_8_E_ANCHORED_ARMS = (R13_8_A_ARM, R13_8_L_ARM) + R13_12_E_ANCHORED_ARMS
 R13_8_E_ANCHORED_WORKFLOW = "interaction_reused_e_anchored_member_routing_training_v1"
 R13_8_E_ANCHORED_PROVIDER_SCHEMA = "thermal_r13_8_e_anchored_member_routing_provider_v1"
 R13_8_E_ANCHORED_MANIFEST_SCHEMA = "honf_r13_8_e_anchored_member_routing_run_manifest_v1"
 R13_8_E_ANCHORED_SOURCE_KIND = "scratch_r13_8_e_anchored_member_routing"
+
+
+def _member_routing_seed(training, model):
+    # R13-12's independent confirmation uses the predeclared seed1. Historical
+    # recipes retain their seed0 contract, as do all fresh full-population runs.
+    if (model.get("architecture") in R13_12_E_ANCHORED_ARMS
+            and model.get("mediated_mode") in ("P", "G")
+            and training.get("membership") == "fixed25_train150_dev22"
+            and training.get("seed") == 1):
+        return 1
+    return 0
 
 
 def _anchored_schedule_and_model(training, initialization, model, arm):
@@ -114,13 +127,25 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
                      (5000, 200, 5000, list(range(100, 5001, 100)), "scratch_train600_stats"))
     else:
         schedules = ()
-    locator = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}.get(arm)
+    locators = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}
+    locators.update({name: "e_anchor" if name.endswith("EAnchor") else "local_e_cover"
+                     for name in R13_12_E_ANCHORED_ARMS})
+    locator = locators.get(arm)
     valid_model = (model.get("architecture") == arm and locator is not None
         and model.get("locator_mode") == locator and model.get("retained_mass") == 0.95
         and (model.get("score_calibration") == "inherited"
              or (training.get("local_horizon") == 1000 and model.get("score_calibration") == "bounded_tanh"))
         and model.get("access_measure", "inventory_unit_total") in ("inventory_unit_total", "mean_one", "active_domain")
         and model.get("ee_incidence_aggregation", "pre_gate") in ("pre_gate", "post_gate"))
+    if arm in R13_12_E_ANCHORED_ARMS:
+        valid_model = (valid_model and model.get("mediated_mode") == arm.split("-")[2]
+                       and model.get("source_retained_mass") == 0.95
+                       and model.get("environment_retained_mass") == 0.95
+                       and model.get("access_measure") == "inventory_unit_total"
+                       and model.get("ee_incidence_aggregation") == "post_gate"
+                       and model.get("ee_gate_mode") == "relative_quadratic")
+    else:
+        valid_model = valid_model and model.get("mediated_mode") in (None, "none")
     return actual in schedules and training.get("curve_every") == 10, valid_model
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"
 INTERACTION_GROUPS_ARMS = ("G-EE", "G-F", "G-H", "G-EE-H", "F13-0", "F13-1")
@@ -490,7 +515,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                 and initialization.get("source_checkpoint") is None
                 and initialization.get("pretrained_weights") is False
                 and initialization.get("source_parent_age") == 0
-                and initialization.get("source_arm") == "scratch_common_seed0"
+                and initialization.get("source_arm") == f"scratch_common_seed{_member_routing_seed(training, model)}"
             )
         else:
             valid_source = (
@@ -513,7 +538,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                 or not valid_source
                 or initialization.get("seed") != training.get("seed")
                 or not valid_schedule
-                or training.get("seed") != 0
+                or training.get("seed") != _member_routing_seed(training, model)
                 or training.get("primary_queries") != 1024
                 or training.get("effective_batch_size") != 48
                 or training.get("microbatch_cases") != 24
@@ -534,8 +559,8 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
                 or float(objective.get("guide_kl_weight", -1)) != 0.0
                 or model.get("input_dataset") != "thermal"
                 or model.get("input_capability") != "joint_prescribed_records_v1"
-                or training.get("seed") != 0
-                or initialization.get("seed") != 0):
+                or training.get("seed") != _member_routing_seed(training, model)
+                or initialization.get("seed") != _member_routing_seed(training, model)):
             raise ValueError("Paired member-routing objective, input contract, and seed must retain declared values.")
     spatial_groups = section_name == "interaction_groups" and _is_spatial_interaction_group_section(frontier)
     if spatial_groups:
@@ -1577,7 +1602,7 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                 and initialization.get("source_checkpoint") is None
                 and initialization.get("pretrained_weights") is False
                 and initialization.get("source_parent_age") == 0
-                and initialization.get("source_arm") == "scratch_common_seed0"
+                and initialization.get("source_arm") == f"scratch_common_seed{_member_routing_seed(training, model)}"
             )
         else:
             valid_source = (
@@ -1597,9 +1622,9 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                     base.get("output_dim")) != (9, 6, 12, 2, 4)
                 or not valid_schedule
                 or not valid_source
-                or training.get("seed") != 0 or training.get("primary_queries") != 1024
+                or training.get("seed") != _member_routing_seed(training, model) or training.get("primary_queries") != 1024
                 or ((r13_6_member_routing or r13_7_single_distribution or r13_8_e_anchored)
-                    and initialization.get("seed") != 0)
+                    and initialization.get("seed") != _member_routing_seed(training, model))
                 or optimizer.get("schedule") != "constant_config_lr"
                 or float(optimizer.get("lr", -1)) != 3e-4
                 or objective.get("response_training_families") != []

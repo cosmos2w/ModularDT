@@ -512,7 +512,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                  retained_mass: float = 0.95, score_calibration: str = "inherited",
                  access_measure: str = "inventory_unit_total",
                  ee_incidence_aggregation: str = "pre_gate",
-                 ee_gate_mode: str = "legacy", ee_initial_tau: float | None = None):
+                 ee_gate_mode: str = "legacy", ee_initial_tau: float | None = None,
+                 mediated_mode: str = "none", source_retained_mass: float = 0.95,
+                 environment_retained_mass: float = 0.95):
         if locator_mode not in ("e_anchor", "local_e_cover"):
             raise ValueError("locator_mode must be 'e_anchor' or 'local_e_cover'.")
         if (isinstance(retained_mass, bool) or not isinstance(retained_mass, (float, int))
@@ -532,6 +534,14 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                 or isinstance(ee_initial_tau, bool) or not isinstance(ee_initial_tau, (int, float))
                 or not math.isfinite(ee_initial_tau) or ee_initial_tau <= 0):
             raise ValueError("Relative EE requires post-gate aggregation and a positive finite initial tau.")
+        if mediated_mode not in ("none", "P", "G"):
+            raise ValueError("Unsupported mediated routing mode.")
+        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 < x <= 1
+               for x in (source_retained_mass, environment_retained_mass)):
+            raise ValueError("Mediated coverage values must be in (0,1].")
+        self.mediated_mode = mediated_mode
+        self.source_retained_mass = float(source_retained_mass)
+        self.environment_retained_mass = float(environment_retained_mass)
         self.access_measure = access_measure
         self.ee_incidence_aggregation = ee_incidence_aggregation
         self.ee_gate_mode = ee_gate_mode
@@ -550,7 +560,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         # remove the learned entrance scorer from the actual A/L state dict.
         if hasattr(self.member_router, "proposal_M"):
             del self.member_router.proposal_M
-        self.architecture = self._anchored_arm_name(locator_mode)
+        self.architecture = self.architecture_name
 
     @staticmethod
     def _anchored_arm_name(locator_mode: str) -> str:
@@ -558,6 +568,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
 
     @property
     def architecture_name(self) -> str:
+        if self.mediated_mode != "none":
+            locator = "EAnchor" if self.locator_mode == "e_anchor" else "LocalECover"
+            return f"R13-12-{self.mediated_mode}-{locator}"
         return self._anchored_arm_name(self.locator_mode)
 
     @property
@@ -577,6 +590,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             "retained_mass": self.retained_mass,
             "score_calibration": self.score_calibration,
         }
+        if self.mediated_mode != "none":
+            config.update(mediated_mode=self.mediated_mode, source_retained_mass=self.source_retained_mass,
+                          environment_retained_mass=self.environment_retained_mass)
         if self.access_measure != "inventory_unit_total":
             config["access_measure"] = self.access_measure
         if self.ee_incidence_aggregation != "pre_gate":
@@ -588,6 +604,17 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
 
     @classmethod
     def validate_config(cls, config: Mapping[str, Any]) -> None:
+        config = dict(config)
+        mediated = config.pop("mediated_mode", "none")
+        source_mass = config.pop("source_retained_mass", 0.95)
+        environment_mass = config.pop("environment_retained_mass", 0.95)
+        if mediated not in ("none", "P", "G") or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 < x <= 1 for x in (source_mass, environment_mass)):
+            raise ValueError("Invalid mediated routing configuration.")
+        if mediated != "none":
+            locator = "EAnchor" if config.get("locator_mode") == "e_anchor" else "LocalECover"
+            if config.get("architecture") != f"R13-12-{mediated}-{locator}":
+                raise ValueError("Mediated architecture and locator disagree.")
+            config["architecture"] = cls._anchored_arm_name(config["locator_mode"])
         required = {"schema", "architecture", "locator_mode", "base_model_config", "input_dataset",
                     "input_capability", "query_tile_size", "retained_mass", "score_calibration"}
         if (set(config) - {"access_measure", "ee_incidence_aggregation", "ee_gate_mode", "ee_initial_tau"} != required or config.get("schema") != cls.schema
@@ -638,7 +665,10 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                    access_measure=config.get("access_measure", "inventory_unit_total"),
                    ee_incidence_aggregation=config.get("ee_incidence_aggregation", "pre_gate"),
                    ee_gate_mode=config.get("ee_gate_mode", "legacy"),
-                   ee_initial_tau=config.get("ee_initial_tau"))
+                   ee_initial_tau=config.get("ee_initial_tau"),
+                   mediated_mode=config.get("mediated_mode", "none"),
+                   source_retained_mass=config.get("source_retained_mass", 0.95),
+                   environment_retained_mass=config.get("environment_retained_mass", 0.95))
 
     @staticmethod
     def _directory_versions(directory: EAccessDirectory) -> tuple[int, ...]:
@@ -718,6 +748,14 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             cycles.add(stage.rsplit("/", 1)[0])
         if len(cycles) != 1:
             raise ValueError("Anchored EM and EE must come from one actual final contextual cycle.")
+        if self.mediated_mode != "none":
+            me = cycle_trace.get("me_native_route_snapshot")
+            ee = snapshots["ee"]
+            if me is None or me.route != "me" or me.stage_identity.rsplit("/", 1)[0] not in cycles or not torch.equal(me.destination_ids, scene.module_ids) or not torch.equal(me.donor_ids, scene.environment_ids):
+                raise ValueError("Final cycle lacks the actual directed ME route and IDs.")
+            organization.mediated_applied_ME = self._safe_snapshot_gate(cycle_trace, "me", scene)
+            organization.mediated_ee_geometry = ee.geometry_bias.mean(dim=1)
+            organization.mediated_me_stage = me.stage_identity
         organization.anchored_applied_EM = applied_em
         organization.anchored_applied_EE = applied_ee
         organization.anchored_route_provenance = {
@@ -920,7 +958,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                 "entries": entries, "members": members, "prior": prior, "original": original,
                 "is_module": is_module, "pair_key": pair_key}
 
-    def _raw_union_scores(self, prepared, query, qstates, keys):
+    def _raw_union_scores(self, prepared, query, qstates, keys, *, query_terms=None):
         """Evaluate the unchanged factored scorer exactly once per union pair."""
         total = prepared.scene.num_modules + prepared.scene.num_environment_tokens
         query_index = torch.div(keys, total, rounding_mode="floor")
@@ -937,7 +975,8 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             if role == "E":
                 rm = rm - prepared.scene.num_modules
             scorer = self.member_router.member_M if role == "M" else self.member_router.member_E
-            query_term = F.linear(qnorm, scorer[0].weight[:, :self.context_dim], scorer[0].bias)
+            query_term = (F.linear(qnorm, scorer[0].weight[:, :self.context_dim], scorer[0].bias)
+                          if query_terms is None else query_terms[role])
             key_term = prepared._anchored_affine_key_terms[f"member_{role}_{role}"]
             rows = torch.stack((rb, rq, rm), dim=-1)
             geometry = self._pair_geometry(prepared.scene, query, role, rows)
@@ -961,15 +1000,28 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         if self.score_calibration == "bounded_tanh":
             ell = 4. * torch.tanh(scores / 4.)
         else:
-            conditional = prior / mass[group].clamp_min(tiny)
+            denominator = mass[group]
+            if "source_ell" in packed:
+                denominator = torch.where(denominator > 0, denominator, torch.ones_like(denominator))
+            else:
+                denominator = denominator.clamp_min(tiny)
+            conditional = prior / denominator
             means = self._segment_sum(conditional * scores, group, groups)
             centered = scores - means[group]
             variance = self._segment_sum(conditional * centered.square(), group, groups)
             ell = 4. * torch.tanh(centered / (4. * torch.sqrt(variance[group] + 1.)))
-        log_weight = prior.clamp_min(tiny).log() + ell
+        if "source_ell" in packed:
+            ell = torch.where(packed["is_module"], packed["source_ell"], ell)
+        if "source_ell" in packed:
+            log_prior = torch.where(prior > 0, prior, torch.ones_like(prior)).log()
+            log_weight = log_prior + torch.where(packed["is_module"], torch.zeros_like(ell), ell)
+        else:
+            log_weight = prior.clamp_min(tiny).log() + ell
         maximum = scores.new_full((groups,), -torch.inf).scatter_reduce(
             0, group, log_weight, reduce="amax", include_self=True)
-        numerator = torch.exp(log_weight - maximum[group]).clamp_min(tiny)
+        smallest = (torch.nextafter(scores.new_zeros(()), scores.new_ones(()))
+                    if "source_ell" in packed else tiny)
+        numerator = torch.exp(log_weight - maximum[group]).clamp_min(smallest)
         normalizer = self._segment_sum(numerator, group, groups)
         probabilities = numerator / normalizer[group].clamp_min(tiny)
         expectation = self._segment_sum(probabilities * ell, group, groups).reshape(read_count, 2)
@@ -987,6 +1039,8 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             strength_parts.append(read_probability(logits[:, 0] - logits[:, 1]) * (mass.reshape(read_count, 2)[:, role_index] > 0))
             gate_parts.append(logits)
         strength = torch.stack(strength_parts, -1)
+        if packed.get("suppress_module_values", False):
+            strength = torch.stack((torch.zeros_like(strength[:, 0]), strength[:, 1]), dim=-1)
         beta = packed["weights"][rid] * strength.reshape(-1)[group] * probabilities
         coalesced = self._segment_sum(beta, union_index, len(union_keys))
         total = prepared.scene.num_modules + prepared.scene.num_environment_tokens
@@ -1051,6 +1105,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
 
     def _decode_tile(self, prepared, query, read_modes, *, return_trace=False, intervention=None):
         controls = {} if intervention is None else dict(intervention)
+        if self.mediated_mode != "none":
+            from .mediated import decode_tile
+            return decode_tile(self, prepared, query, read_modes, return_trace=return_trace, intervention=intervention)
         if set(controls) - {"read_mode", "access_intervention", "directory_intervention", "member_role",
                             "member_id", "source_role", "source_id", "target_role", "target_id", "anchor_id"}:
             raise ValueError("Unsupported anchored read intervention.")
@@ -1114,8 +1171,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             raise ValueError("Anchored joint prediction accepts no historical affine controls.")
         intervention = {} if intervention is None else dict(intervention)
         mode = intervention.get("read_mode", self._read_execution_override or "full")
-        if mode not in ("full", "restricted"):
-            raise ValueError("Anchored read mode must be full or restricted.")
+        valid_modes = ("full", "restricted", "source95_all", "all_e95") if self.mediated_mode != "none" else ("full", "restricted")
+        if mode not in valid_modes:
+            raise ValueError("Unsupported anchored read mode.")
         outputs, shared = self._decode_requests(organization, query, (mode,), intervention=intervention,
                                                 return_trace=return_trace or trace_request is not None)
         output = outputs[mode]

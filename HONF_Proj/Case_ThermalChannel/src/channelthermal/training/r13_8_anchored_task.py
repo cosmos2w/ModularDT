@@ -500,27 +500,34 @@ class ThermalR138AnchoredMemberRoutingTask(ThermalR136MemberRoutingTask):
         # not describe the compiled E directory.
         ThermalInteractionReusedMemberRoutingTask.__init__(self, **kwargs)
         variant = _VARIANTS.get(self.model.CORE_SCHEMA)
-        if variant is None or self.model.architecture not in (ARM_A, ARM_L):
+        if variant is None or self.model.architecture not in ThermalAnchoredMemberRoutingAdapter.ARCHITECTURES:
             raise ValueError("R13-8 task requires an A/L anchored adapter.")
         self._member_routing_variant = variant
         self.arm = str(self.model.architecture)
-        self.candidate = "A" if self.arm == ARM_A else "L"
+        self.candidate = (self.arm.split("-")[2] if self.arm.startswith("R13-12-")
+                          else "A" if self.arm == ARM_A else "L")
         self.workflow = WORKFLOW
         self.provider_schema = PROVIDER_SCHEMA
         self.training_state_schema = TRAINING_STATE_SCHEMA
         initialization = self.recipe["initialization"]
+        if getattr(self.model.core, "mediated_mode", "none") in ("P", "G"):
+            self.seed = int(initialization["seed"])
         self.source_kind = str(initialization["source_kind"])
         self.source_parent_age = int(initialization.get("source_parent_age", 0))
         if (self.source_kind != SOURCE_KIND or self.source_parent_age != 0
                 or initialization.get("source_checkpoint") is not None
                 or initialization.get("pretrained_weights") is not False
-                or initialization.get("source_arm") != "scratch_common_seed0"):
-            raise ValueError("R13-8 requires a fresh seed-0 scratch lineage with no source checkpoint.")
+                or initialization.get("source_arm") != f"scratch_common_seed{self.seed}"):
+            raise ValueError("Anchored training requires a declared fresh scratch lineage with no source checkpoint.")
         self.training_sampling_arm = str(self.recipe["training"].get("sampling_arm", "R13-3-Relative"))
         health_config = self.recipe.get("member_routing", {}).get("health")
         self._member_routing_health = None
         if isinstance(health_config, Mapping) and health_config.get("enabled") is True:
-            self._member_routing_health = AnchoredMemberRoutingHealth(self, health_config)
+            if getattr(self.model.core, "mediated_mode", "none") in ("P", "G"):
+                from .r13_12_mediated_health import MediatedMemberRoutingHealth
+                self._member_routing_health = MediatedMemberRoutingHealth(self, health_config)
+            else:
+                self._member_routing_health = AnchoredMemberRoutingHealth(self, health_config)
 
     def anchored_organization_trace(self, model, prediction, query_indices, *, read_mode="restricted"):
         if model is not self.model or model.core.schema != CORE_SCHEMA:
