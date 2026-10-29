@@ -106,6 +106,57 @@ def _native_prediction(model: Any, prepared: Any, heat: Any, mode: str, **contro
     return ThermalContentPredictions(prepared, native, work=counts)
 
 
+def _native_receiver_arrays(prepared: Any) -> dict[str, np.ndarray]:
+    """Exact role receivers from the same prepared inputs as native extraction.
+
+    Keep the historical native exporter unchanged. Receiver stencils retain
+    clipped grid cells rather than their original physical positions, so those
+    positions must be rebuilt from the retained catalogue and prescribed radius,
+    not inferred from interpolation indices or guessed by a figure renderer.
+    """
+    scene = prepared.scene_batch
+    centers = scene.module_coordinates
+    if centers.shape[0] != 1:
+        raise ValueError("Native evidence exports require exactly one case.")
+    # Both maintained Thermal adapters recover this same radius from r/Lx.
+    radius = scene.module_features[:, :1, 2] * scene.coordinate_scale[:, 0:1]
+    theta = torch.arange(prepared.ntheta, device=centers.device, dtype=centers.dtype)
+    theta = theta * (2 * torch.pi / prepared.ntheta)
+    normals = torch.stack((theta.cos(), theta.sin()), -1)
+    surface = centers[:, :, None] + radius[:, None, :, None] * normals[None, None]
+    outside = centers[:, :, None] + (radius + prepared.interface_delta)[:, None, :, None] * normals[None, None]
+    local = torch.as_tensor(prepared.local_query_points, device=centers.device, dtype=centers.dtype)
+    if local.ndim == 3:
+        local = local[:, None].expand(-1, centers.shape[1], -1, -1)
+    material = centers[:, :, None] + radius[:, None, :, None] * local
+    return {
+        "surface_receiver_xy": _array(surface)[0],
+        "outside_receiver_xy": _array(outside)[0],
+        "material_receiver_xy": _array(material)[0],
+        "material_local_query_points": _array(local)[0],
+        "surface_theta_radians": _array(theta),
+        "surface_normals": _array(normals),
+        "native_module_radius": _array(radius)[0],
+        "native_interface_delta": _array(prepared.interface_delta)[0],
+        "native_interface_conductivity": _array(prepared.interface_conductivity)[0],
+        "native_receiver_geometry_json": np.asarray(json.dumps({
+            "schema": "honf_r13_12_native_receiver_geometry_v1",
+            "source": "ThermalContentHypergraphAdapter._query_union retained prepared inputs",
+            "radius_source": "prepared scene r/Lx feature times Lx; identical to adapter _prepared_material radius",
+            "coordinates": "ThermalChannel native physical coordinates",
+            "surface_order": "prepared ntheta catalogue: 2*pi*arange(ntheta)/ntheta",
+            "material_order": "unchanged prepared local_query_points; module_ids align first axis",
+            "validity": "Use original native surface/outside/material and target-valid masks separately",
+        }, sort_keys=True)),
+    }
+
+
+def _evidence_native_arrays(prediction: Any, batch: Any, case_id: str) -> dict[str, np.ndarray]:
+    """R13-12-only physical receiver evidence added to historical native arrays."""
+    return {**_native_arrays_with_residuals(prediction, batch, case_id),
+            **_native_receiver_arrays(prediction.native_prepared)}
+
+
 def _reduce(provider: Any, records: Sequence[Mapping[str, Any]], case_ids: Sequence[str]) -> dict[str, Any]:
     reduced = provider.reduce_native_evaluation_metrics(records, split="validation", case_keys=case_ids)
     rows = reduced["per_case"]
@@ -162,7 +213,7 @@ def evaluate_native(checkpoint: str | Path, device: str, output: str | Path, *,
                     counts[mode][name] = counts[mode].get(name, 0) + int(value)
                 if cid in details:
                     np.savez_compressed(directory / mode / f"case_{cid}.npz",
-                                        **_native_arrays_with_residuals(prediction, batch, cid))
+                                        **_evidence_native_arrays(prediction, batch, cid))
             print(json.dumps({"task": "native", "case": cid, "completed_cases": len(records[modes[0]]),
                               "total_cases": len(ids)}), flush=True)
         for mode in modes:
@@ -178,7 +229,7 @@ def evaluate_native(checkpoint: str | Path, device: str, output: str | Path, *,
                     prediction = _native_prediction(model, prepared, batch.receivers.heat, mode)
                     extra[mode].append(provider.validation_metrics(prediction, batch.targets, None))
                     np.savez_compressed(directory / mode / f"case_{cid}.npz",
-                                        **_native_arrays_with_residuals(prediction, batch, cid))
+                                        **_evidence_native_arrays(prediction, batch, cid))
             for mode in modes:
                 result["executions"][mode]["detail_only_outside_validation_membership"] = _reduce(provider, extra[mode], missing)
     result.update(status="completed", seconds=time.perf_counter() - started)
@@ -451,7 +502,7 @@ def evaluate_interventions(checkpoint: str | Path, device: str, output: str | Pa
                 metrics = _native_metric_summary(provider, batch, base, None)
                 base_means = {name: float(value["mean"]) for name, value in metrics.items()}
                 vectors = _observation_vectors(prepared, batch, base.native_main)
-                base_arrays = _native_arrays_with_residuals(base, batch, cid)
+                base_arrays = _evidence_native_arrays(base, batch, cid)
                 base_read = _intervention_read_evidence(model, prepared, batch, mode, {})
                 np.savez_compressed(evidence / "baseline.npz", **base_arrays, **base_read)
                 def trial(controls, name=None):
