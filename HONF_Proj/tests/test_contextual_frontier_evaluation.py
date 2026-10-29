@@ -102,6 +102,64 @@ def test_checkpoint_loader_uses_saved_adapter_and_preserves_saved_dtype(tmp_path
             torch.testing.assert_close(loaded.state_dict()[key], value)
 
 
+def _production_anchored_checkpoint(mode, locator):
+    from channelthermal.member_routing import ThermalAnchoredMemberRoutingAdapter
+    from honf_forward_core.interaction_reused_member_routing.anchored import AnchoredMemberRoutingCore
+    from tests.test_r13_8_anchored_core_helpers import _base_config
+
+    core = AnchoredMemberRoutingCore(_base_config(), mediated_mode=mode, locator_mode=locator,
+                                    source_retained_mass=.91, environment_retained_mass=.87)
+    model = ThermalAnchoredMemberRoutingAdapter(_normalization_stats(), core=core).double()
+    arm = model.architecture
+    adapter_state = model.state_payload()
+    recipe = {"member_routing": {"arm": arm, "model": dict(adapter_state["core"])}}
+    provider_identity = {
+        "schema": "thermal_r13_8_e_anchored_member_routing_provider_v1",
+        "architecture": arm,
+        "member_routing_schema": "interaction_reused_e_anchored_member_routing_v1",
+        "adapter_state": adapter_state,
+        "recipe": recipe,
+    }
+    return model, {"arm": arm, "epoch": 2, "model_state_dict": model.state_dict(),
+                   "experiment_identity": {
+                       "workflow": "interaction_reused_e_anchored_member_routing_training_v1",
+                       "provider_identity": provider_identity}}
+
+
+@pytest.mark.parametrize("mode", ("none", "P", "G"))
+@pytest.mark.parametrize("locator", ("e_anchor", "local_e_cover"))
+def test_production_anchored_checkpoint_loader_preserves_historical_and_mediated_states(
+    tmp_path: Path, monkeypatch, mode, locator,
+) -> None:
+    # Real adapter metadata and real parameter state exercise the public loader,
+    # including Adapter.from_state_payload, rather than just the arm allowlist.
+    model, payload = _production_anchored_checkpoint(mode, locator)
+    path = tmp_path / "anchored.pt"
+    torch.save(payload, path)
+    provider = SimpleNamespace(model=None, adapter=None)
+    monkeypatch.setattr(contextual_frontier_training, "_build_task", lambda *_args: (model, provider))
+    loaded, actual_provider, actual_payload = load_contextual_checkpoint(path, "cpu")
+    assert actual_provider.model is loaded and actual_provider.adapter is loaded
+    assert loaded.architecture == model.architecture
+    assert loaded.core.locator_mode == locator and loaded.core.mediated_mode == mode
+    assert actual_payload["epoch"] == 2
+    assert next(loaded.parameters()).dtype == torch.float64
+    assert loaded.get_config() == model.get_config()
+    for name, tensor in model.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[name], tensor, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("field,value", (("mediated_mode", "G"), ("source_retained_mass", .9),
+                                         ("environment_retained_mass", .9)))
+def test_mediated_checkpoint_loader_rejects_recipe_equation_mismatch(tmp_path: Path, field, value) -> None:
+    _, payload = _production_anchored_checkpoint("P", "e_anchor")
+    payload["experiment_identity"]["provider_identity"]["recipe"]["member_routing"]["model"][field] = value
+    path = tmp_path / "mismatched.pt"
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match="adapter, core locator, access law"):
+        load_contextual_checkpoint(path, "cpu")
+
+
 class _FakeCore:
     def __init__(self):
         self.clock = None

@@ -479,13 +479,22 @@ def _fixed_training_batch(provider: Any):
     temporary[:len(ids)] = cases
     provider.training_cases = temporary
     provider._train_index_by_id = {cid: index for index, cid in enumerate(ids)}
-    key = SamplingKey(seed=int(provider.seed), epoch=1, update_index=0, microbatch_index=0,
+    key = SamplingKey(seed=0, epoch=1, update_index=0, microbatch_index=0,
                       stage="joint", arm=provider.training_sampling_arm,
                       sampling_version=provider.sampling_version, dataset_id=provider.sampling_dataset_id)
     try:
         return provider.make_batch(ids, key)
     finally:
         provider.training_cases, provider._train_index_by_id = old_cases, old_indices
+
+
+def _workload_description(batch: Any) -> dict[str, Any]:
+    present = batch.scene_inputs.structure["module_present"]
+    return {"case_ids": list(map(str, batch.case_keys)),
+            "fluid_xy_shape": list(batch.receivers.fluid_xy.shape),
+            "local_query_points_shape": list(batch.receivers.local_query_points.shape),
+            "physical_heat_shape": list(batch.receivers.heat.shape),
+            "physical_module_counts": _array((present > .5).sum(-1)).astype(int).tolist()}
 
 
 def benchmark_native(checkpoint: str | Path, device: str, output: str | Path, *,
@@ -519,7 +528,7 @@ def benchmark_native(checkpoint: str | Path, device: str, output: str | Path, *,
         # uses one sampled case rather than the complete measured workload.
         cid = str(provider.training_case_ids[0])
         from .unified_training import SamplingKey
-        key = SamplingKey(seed=int(provider.seed), epoch=1, update_index=0, microbatch_index=0,
+        key = SamplingKey(seed=0, epoch=1, update_index=0, microbatch_index=0,
                           stage="joint", arm=provider.training_sampling_arm,
                           sampling_version=provider.sampling_version, dataset_id=provider.sampling_dataset_id)
         hosts["train_sampled_smoke"] = provider.make_batch((cid,), key)
@@ -532,8 +541,10 @@ def benchmark_native(checkpoint: str | Path, device: str, output: str | Path, *,
               "cpu_smoke_not_benchmark": cpu_smoke, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
               "scope": "complete host-to-host inference includes H2D, prepare, decode, extraction and D2H; prepared decode reuses resident preparation; paired backward includes prepare, both native physical objectives and backward, with no optimizer update",
               "low_high_cases": LOW_HIGH_CASES, "training_case_ids": list(TRAIN24_CASES),
+              "workload_inputs": {name: _workload_description(batch) for name, batch in hosts.items()},
               "training_query_recipe": {"sampling_version": provider.sampling_version,
-                  "sampling_dataset_id": provider.sampling_dataset_id, "seed": provider.seed,
+                  "sampling_dataset_id": provider.sampling_dataset_id, "seed": 0,
+                  "checkpoint_training_seed": provider.seed,
                   "sampling_arm": provider.training_sampling_arm, "epoch": 1, "primary_queries": provider.primary_queries},
               "precision": str(next(model.parameters()).dtype), "scenarios": {}}
     rng = capture_rng_state()

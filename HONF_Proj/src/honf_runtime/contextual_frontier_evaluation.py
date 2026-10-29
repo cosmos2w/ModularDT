@@ -81,7 +81,9 @@ def _contextual_checkpoint_parts(
         "interaction_reused_single_distribution_member_routing_training_v1": (
             "R13-7-U-ME-SingleDistributionJoint95",),
         "interaction_reused_e_anchored_member_routing_training_v1": (
-            "R13-8-A-EAnchor", "R13-8-L-LocalECover"),
+            "R13-8-A-EAnchor", "R13-8-L-LocalECover",
+            "R13-12-P-EAnchor", "R13-12-G-EAnchor",
+            "R13-12-P-LocalECover", "R13-12-G-LocalECover"),
     }[identity["workflow"]]
     if arm not in supported or provider_identity.get("architecture") != arm:
         raise ValueError("Checkpoint arm and provider architecture must agree with the workflow schema.")
@@ -161,7 +163,15 @@ def _contextual_checkpoint_parts(
         expected_locator = {
             "R13-8-A-EAnchor": "e_anchor",
             "R13-8-L-LocalECover": "local_e_cover",
+            "R13-12-P-EAnchor": "e_anchor",
+            "R13-12-G-EAnchor": "e_anchor",
+            "R13-12-P-LocalECover": "local_e_cover",
+            "R13-12-G-LocalECover": "local_e_cover",
         }.get(arm)
+        expected_mediated = {
+            "R13-12-P-EAnchor": "P", "R13-12-P-LocalECover": "P",
+            "R13-12-G-EAnchor": "G", "R13-12-G-LocalECover": "G",
+        }.get(arm, "none")
         recipe_section = recipe.get("member_routing")
         recipe_model = recipe_section.get("model") if isinstance(recipe_section, Mapping) else None
         if (adapter_state.get("schema") != "thermal_interaction_reused_e_anchored_member_routing_adapter_v1"
@@ -179,6 +189,10 @@ def _contextual_checkpoint_parts(
                 or recipe_model.get("ee_incidence_aggregation", "pre_gate") != core_config.get("ee_incidence_aggregation", "pre_gate")
                 or recipe_model.get("ee_gate_mode", "legacy") != core_config.get("ee_gate_mode", "legacy")
                 or recipe_model.get("ee_initial_tau") != core_config.get("ee_initial_tau")
+                or core_config.get("mediated_mode", "none") != expected_mediated
+                or recipe_model.get("mediated_mode", "none") != expected_mediated
+                or any(recipe_model.get(name, .95) != core_config.get(name, .95)
+                       for name in ("source_retained_mass", "environment_retained_mass"))
                 or recipe_section.get("arm") != arm
                 or provider_identity.get("member_routing_schema") != "interaction_reused_e_anchored_member_routing_v1"):
             raise ValueError("R13-8 adapter, core locator, access law and provider identities must agree.")
