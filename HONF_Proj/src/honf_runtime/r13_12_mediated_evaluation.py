@@ -386,6 +386,37 @@ def _prediction_delta(base: Mapping[str, torch.Tensor], trial: Mapping[str, torc
             for name in base for value in (trial[name] - base[name],)}
 
 
+def _intervention_read_evidence(model: Any, prepared: Any, batch: Any, mode: str,
+                                controls: Mapping[str, Any]) -> dict[str, np.ndarray]:
+    """Actual fixed-panel query sets under the same contextual preparation."""
+    from channelthermal.e_anchor_locator import attach_thermal_e_anchor_query
+    from honf_forward_core.content_hypergraph.contracts import QueryBatch
+
+    scene = prepared.scene_batch
+    coordinates = batch.receivers.fluid_xy[:, QUERY_IDS]
+    query = QueryBatch(
+        coordinates=coordinates,
+        query_ids=torch.as_tensor(QUERY_IDS, device=coordinates.device)[None],
+        query_mask=torch.ones(coordinates.shape[:2], dtype=torch.bool, device=coordinates.device),
+        scene_key=scene.scene_key, coordinate_frame_key=scene.coordinate_frame_key,
+        receiver_key=(QUERY_KEY, str(batch.case_keys[0])),
+    )
+    query = attach_thermal_e_anchor_query(
+        query, scene, model.core.locator_mode,
+        environment_nx=model.environment_nx, environment_ny=model.environment_ny,
+    )
+    output = model.core.decode(prepared.organization, query,
+                               intervention={"read_mode": mode, **controls}, return_trace=True)
+    names = ("anchor_weights", "anchor_read_indices", "anchor_read_E_slots",
+             "anchor_read_member_read_index", "anchor_read_member_index", "anchor_read_original_id",
+             "anchor_read_is_module", "anchor_read_access_prior", "anchor_read_probabilities",
+             "anchor_read_strength", "anchor_read_coalesced_union_keys",
+             "anchor_read_coalesced_member_coefficients", "mediated_source_alpha",
+             "mediated_source_selected", "mediated_environment_prior")
+    return {"query_ids": QUERY_IDS.copy(), "query_xy": _array(coordinates)[0],
+            **{"read_" + name: _array(output.trace[name]) for name in names}}
+
+
 def evaluate_interventions(checkpoint: str | Path, device: str, output: str | Path, *,
                            case_ids: Sequence[str] = DETAIL_CASES,
                            modes: Sequence[str] = ("full", "restricted"), collective: bool = True) -> dict[str, Any]:
@@ -414,20 +445,37 @@ def evaluate_interventions(checkpoint: str | Path, device: str, output: str | Pa
             region = tuple(map(int, scene.environment_ids[0][mask].cpu().tolist()))
             row = {"case_id": cid, "region_original_E_ids": list(region), "modes": {}}
             for mode in modes:
+                evidence = directory / cid / mode
+                evidence.mkdir(parents=True)
                 base = _native_prediction(model, prepared, batch.receivers.heat, mode)
                 metrics = _native_metric_summary(provider, batch, base, None)
                 base_means = {name: float(value["mean"]) for name, value in metrics.items()}
                 vectors = _observation_vectors(prepared, batch, base.native_main)
-                def trial(controls):
+                base_arrays = _native_arrays_with_residuals(base, batch, cid)
+                base_read = _intervention_read_evidence(model, prepared, batch, mode, {})
+                np.savez_compressed(evidence / "baseline.npz", **base_arrays, **base_read)
+                def trial(controls, name=None):
                     prediction = _native_prediction(model, prepared, batch.receivers.heat, mode, **controls)
                     measured = _native_metric_summary(provider, batch, prediction, None)
                     means = {name: float(value["mean"]) for name, value in measured.items()}
                     vec = _observation_vectors(prepared, batch, prediction.native_main)
-                    return {"rmse": means, "delta_rmse": {name: means[name] - base_means[name] for name in means},
-                            "prediction_change": _prediction_delta(vectors, vec)}, vec
-                route, _ = trial({"remove_module_mediated_environment": True})
-                values, _ = trial({"suppress_module_values": True})
-                item = {"baseline_rmse": base_means, "remove_M_mediated_E": route, "suppress_M_values": values}
+                    record = {"rmse": means, "delta_rmse": {key: means[key] - base_means[key] for key in means},
+                              "prediction_change": _prediction_delta(vectors, vec)}
+                    if name is not None:
+                        arrays = _native_arrays_with_residuals(prediction, batch, cid)
+                        saved = {key: value for key, value in arrays.items() if key.startswith("pred_")}
+                        saved.update({"delta_" + key: value - base_arrays[key] for key, value in saved.items()})
+                        read = _intervention_read_evidence(model, prepared, batch, mode, controls)
+                        np.savez_compressed(evidence / (name + ".npz"), **saved, **read)
+                        record["arrays"] = str((evidence / (name + ".npz")).relative_to(directory))
+                        base_mass = base_read["read_mediated_environment_prior"].sum(-1)
+                        mass = read["read_mediated_environment_prior"].sum(-1)
+                        record["fixed_panel_E_path_mass_relative_to_baseline"] = _stats(mass / base_mass)
+                    return record, vec
+                route, _ = trial({"remove_module_mediated_environment": True}, "remove_M_mediated_E")
+                values, _ = trial({"suppress_module_values": True}, "suppress_M_values")
+                item = {"baseline_rmse": base_means, "baseline_arrays": str((evidence / "baseline.npz").relative_to(directory)),
+                        "remove_M_mediated_E": route, "suppress_M_values": values}
                 if collective:
                     singles, deltas = [], {name: torch.zeros_like(value) for name, value in vectors.items()}
                     for identity in region:
@@ -435,11 +483,21 @@ def evaluate_interventions(checkpoint: str | Path, device: str, output: str | Pa
                         singles.append({"original_E_id": identity, **measurement})
                         for name in deltas:
                             deltas[name] += vec[name] - vectors[name]
-                    group, vec = trial({"exclude_environment_ids": region})
+                    group, vec = trial({"exclude_environment_ids": region}, "remove_E_region")
                     group_delta = {name: vec[name] - vectors[name] for name in vectors}
                     zeros = {name: torch.zeros_like(value) for name, value in vectors.items()}
                     residual = {name: group_delta[name] - deltas[name] for name in deltas}
+                    collective_arrays = {
+                        **{"sum_individual_" + name: _array(value) for name, value in deltas.items()},
+                        **{"set_" + name: _array(value) for name, value in group_delta.items()},
+                        **{"set_minus_sum_" + name: _array(value) for name, value in residual.items()},
+                        "region_original_E_ids": np.asarray(region, dtype=np.int64),
+                        "vector_order": np.asarray(
+                            "Original valid native-point order from _observation_vectors; coordinates, targets and masks in baseline.npz"),
+                    }
+                    np.savez_compressed(evidence / "collective_vectors.npz", **collective_arrays)
                     item["collective_probe"] = {"individual": singles, "set": group,
+                        "arrays": str((evidence / "collective_vectors.npz").relative_to(directory)),
                         "sum_individual_prediction_change": _prediction_delta(zeros, deltas),
                         "set_minus_sum_individual_prediction_change": _prediction_delta(zeros, residual)}
                 row["modes"][mode] = item
