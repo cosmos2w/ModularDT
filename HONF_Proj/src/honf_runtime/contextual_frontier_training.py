@@ -110,7 +110,8 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
         schedules = ((100, 100, 500, [100], "scratch_train600_stats"),
                      (500, 100, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS, "scratch_train600_stats"),
                      (1000, 100, 1000, list(range(100, 1001, 100)), "scratch_train600_stats"),
-                     (1000, 200, 1000, list(range(100, 1001, 100)), "scratch_train600_stats"))
+                     (1000, 200, 1000, list(range(100, 1001, 100)), "scratch_train600_stats"),
+                     (5000, 200, 5000, list(range(100, 5001, 100)), "scratch_train600_stats"))
     else:
         schedules = ()
     locator = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}.get(arm)
