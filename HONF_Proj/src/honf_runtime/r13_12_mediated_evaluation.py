@@ -82,6 +82,7 @@ def _identity(checkpoint: Any, payload: Mapping[str, Any], model: Any, device: A
             "architecture": model.architecture, "device": str(device), "fit_epochs": 0,
             "normalization": "literal checkpoint selected-TRAIN adapter state; no refit",
             "mediated_mode": getattr(model.core, "mediated_mode", "none"),
+            "mediated_geometry_law": getattr(model.core, "mediated_geometry_law", "ee_head_mean"),
             "source_retained_mass": getattr(model.core, "source_retained_mass", None),
             "environment_retained_mass": getattr(model.core, "environment_retained_mass", None)}
 

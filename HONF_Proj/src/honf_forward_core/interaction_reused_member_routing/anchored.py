@@ -517,7 +517,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                  ee_incidence_aggregation: str = "pre_gate",
                  ee_gate_mode: str = "legacy", ee_initial_tau: float | None = None,
                  mediated_mode: str = "none", source_retained_mass: float = 0.95,
-                 environment_retained_mass: float = 0.95):
+                 environment_retained_mass: float = 0.95, mediated_geometry_law: str = "ee_head_mean"):
         if locator_mode not in ("e_anchor", "local_e_cover"):
             raise ValueError("locator_mode must be 'e_anchor' or 'local_e_cover'.")
         if (isinstance(retained_mass, bool) or not isinstance(retained_mass, (float, int))
@@ -542,6 +542,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 < x <= 1
                for x in (source_retained_mass, environment_retained_mass)):
             raise ValueError("Mediated coverage values must be in (0,1].")
+        if mediated_geometry_law not in ("ee_head_mean", "native_cell_radial") or (mediated_geometry_law != "ee_head_mean" and mediated_mode != "G"):
+            raise ValueError("Native cell radial geometry requires mediated mode G.")
+        self.mediated_geometry_law = mediated_geometry_law
         self.mediated_mode = mediated_mode
         self.source_retained_mass = float(source_retained_mass)
         self.environment_retained_mass = float(environment_retained_mass)
@@ -573,7 +576,8 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
     def architecture_name(self) -> str:
         if self.mediated_mode != "none":
             locator = "EAnchor" if self.locator_mode == "e_anchor" else "LocalECover"
-            return f"R13-12-{self.mediated_mode}-{locator}"
+            arm = "G-Radial" if self.mediated_geometry_law == "native_cell_radial" else self.mediated_mode
+            return f"R13-12-{arm}-{locator}"
         return self._anchored_arm_name(self.locator_mode)
 
     @property
@@ -596,6 +600,8 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         if self.mediated_mode != "none":
             config.update(mediated_mode=self.mediated_mode, source_retained_mass=self.source_retained_mass,
                           environment_retained_mass=self.environment_retained_mass)
+        if self.mediated_geometry_law != "ee_head_mean":
+            config["mediated_geometry_law"] = self.mediated_geometry_law
         if self.access_measure != "inventory_unit_total":
             config["access_measure"] = self.access_measure
         if self.ee_incidence_aggregation != "pre_gate":
@@ -609,13 +615,17 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
     def validate_config(cls, config: Mapping[str, Any]) -> None:
         config = dict(config)
         mediated = config.pop("mediated_mode", "none")
+        geometry_law = config.pop("mediated_geometry_law", "ee_head_mean")
+        if geometry_law not in ("ee_head_mean", "native_cell_radial") or (geometry_law != "ee_head_mean" and mediated != "G"):
+            raise ValueError("Invalid mediated geometry law.")
         source_mass = config.pop("source_retained_mass", 0.95)
         environment_mass = config.pop("environment_retained_mass", 0.95)
         if mediated not in ("none", "P", "G") or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 < x <= 1 for x in (source_mass, environment_mass)):
             raise ValueError("Invalid mediated routing configuration.")
         if mediated != "none":
             locator = "EAnchor" if config.get("locator_mode") == "e_anchor" else "LocalECover"
-            if config.get("architecture") != f"R13-12-{mediated}-{locator}":
+            arm = "G-Radial" if geometry_law == "native_cell_radial" else mediated
+            if config.get("architecture") != f"R13-12-{arm}-{locator}":
                 raise ValueError("Mediated architecture and locator disagree.")
             config["architecture"] = cls._anchored_arm_name(config["locator_mode"])
         required = {"schema", "architecture", "locator_mode", "base_model_config", "input_dataset",
@@ -671,7 +681,8 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
                    ee_initial_tau=config.get("ee_initial_tau"),
                    mediated_mode=config.get("mediated_mode", "none"),
                    source_retained_mass=config.get("source_retained_mass", 0.95),
-                   environment_retained_mass=config.get("environment_retained_mass", 0.95))
+                   environment_retained_mass=config.get("environment_retained_mass", 0.95),
+                   mediated_geometry_law=config.get("mediated_geometry_law", "ee_head_mean"))
 
     @staticmethod
     def _directory_versions(directory: EAccessDirectory) -> tuple[int, ...]:

@@ -88,7 +88,8 @@ R13_8_E_ANCHORED_CORE_SCHEMA = "interaction_reused_e_anchored_member_routing_v1"
 R13_8_A_ARM = "R13-8-A-EAnchor"
 R13_8_L_ARM = "R13-8-L-LocalECover"
 R13_12_E_ANCHORED_ARMS = ("R13-12-P-EAnchor", "R13-12-G-EAnchor",
-                         "R13-12-P-LocalECover", "R13-12-G-LocalECover")
+                         "R13-12-P-LocalECover", "R13-12-G-LocalECover",
+                         "R13-12-G-Radial-EAnchor", "R13-12-G-Radial-LocalECover")
 R13_8_E_ANCHORED_ARMS = (R13_8_A_ARM, R13_8_L_ARM) + R13_12_E_ANCHORED_ARMS
 R13_8_E_ANCHORED_WORKFLOW = "interaction_reused_e_anchored_member_routing_training_v1"
 R13_8_E_ANCHORED_PROVIDER_SCHEMA = "thermal_r13_8_e_anchored_member_routing_provider_v1"
@@ -143,7 +144,9 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
                        and model.get("environment_retained_mass") == 0.95
                        and model.get("access_measure") == "inventory_unit_total"
                        and model.get("ee_incidence_aggregation") == "post_gate"
-                       and model.get("ee_gate_mode") == "relative_quadratic")
+                       and model.get("ee_gate_mode") == "relative_quadratic"
+                       and model.get("mediated_geometry_law", "ee_head_mean") ==
+                           ("native_cell_radial" if "-Radial-" in arm else "ee_head_mean"))
     else:
         valid_model = valid_model and model.get("mediated_mode") in (None, "none")
     return actual in schedules and training.get("curve_every") == 10, valid_model

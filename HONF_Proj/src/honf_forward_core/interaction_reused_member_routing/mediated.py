@@ -110,7 +110,18 @@ def decode_tile(core, prepared, query, modes, *, return_trace=False, interventio
     unique_edge = row_offsets[unique_row[unique_owner]] + unique_local
     unique_destination = ej[unique_edge]
     if core.mediated_mode == 'G' and unique_edge.numel():
-        unique_logits = edge_mass[unique_edge].log() + prepared.mediated_ee_geometry[unique_batch[unique_owner], unique_anchor[unique_owner], unique_destination]
+        edge_batch = unique_batch[unique_owner]
+        edge_anchor = unique_anchor[unique_owner]
+        if core.mediated_geometry_law == 'native_cell_radial':
+            lengths = scene.environment_characteristic_lengths
+            if lengths is None:
+                raise ValueError('Native cell radial routing requires environment characteristic lengths.')
+            delta = (scene.environment_coordinates[edge_batch, unique_destination]
+                     - scene.environment_coordinates[edge_batch, edge_anchor])
+            geometry = -torch.linalg.vector_norm(delta / lengths[edge_batch, edge_anchor], dim=-1)
+        else:
+            geometry = prepared.mediated_ee_geometry[edge_batch, edge_anchor, unique_destination]
+        unique_logits = edge_mass[unique_edge].log() + geometry
         maxima = torch.segment_reduce(unique_logits, 'max', lengths=unique_lengths, initial=-torch.inf)
         numerator = (unique_logits - maxima[unique_owner]).exp().clamp_min(tiny)
         denominator = torch.segment_reduce(numerator, 'sum', lengths=unique_lengths)
@@ -227,6 +238,7 @@ def decode_tile(core, prepared, query, modes, *, return_trace=False, interventio
                          mediated_applied_ME=prepared.mediated_applied_ME, mediated_ee_geometry=prepared.mediated_ee_geometry,
                          mediated_me_stage=prepared.mediated_me_stage, mediated_source_selected=selected,
                          mediated_environment_prior=environment, mediated_direct_rows=direct_rows,
+                         mediated_geometry_law=core.mediated_geometry_law,
                          mediated_conditional_rows=conditional_rows, mediated_conditional_module_slots=conditional_slots,
                          mediated_conditioned_anchor_module_rows=unique_address)
         outputs[mode] = fields, trace, local_counts

@@ -10,7 +10,9 @@ from honf_forward_core.interaction_reused_member_routing.anchored import Anchore
 def model_fixture(mode='P', locator='e_anchor', dtype=torch.float64):
     old, scene, query = fixture(locator)
     model = AnchoredMemberRoutingCore(old.get_config()['base_model_config'], locator_mode=locator,
-        mediated_mode=mode, query_tile_size=4).to(dtype=dtype)
+        mediated_mode="G" if mode == "R" else mode,
+        mediated_geometry_law="native_cell_radial" if mode == "R" else "ee_head_mean",
+        query_tile_size=4).to(dtype=dtype)
     if dtype == torch.float32:
         from dataclasses import fields
         scene = replace(scene, **{f.name: v.float() for f in fields(scene)
@@ -19,7 +21,7 @@ def model_fixture(mode='P', locator='e_anchor', dtype=torch.float64):
     return model, scene, query
 
 
-@pytest.mark.parametrize('mode', ['P', 'G'])
+@pytest.mark.parametrize('mode', ['P', 'G', 'R'])
 @pytest.mark.parametrize('execution', ['full', 'all_e95', 'source95_all', 'restricted'])
 def test_composition_and_true_me(mode, execution):
     model, scene, query = model_fixture(mode)
@@ -46,6 +48,9 @@ def test_composition_and_true_me(mode, execution):
         weighted = actual_mass
         if mode == 'G':
             weighted = weighted * prepared.mediated_ee_geometry[bi, ai].exp()
+        if mode == 'R':
+            delta = (scene.environment_coordinates[bi] - scene.environment_coordinates[bi, ai]) / scene.environment_characteristic_lengths[bi, ai]
+            weighted = weighted * (-torch.linalg.vector_norm(delta, dim=-1)).exp()
         denom = weighted.sum(-1, keepdim=True)
         reference = torch.where(denom > 0, weighted / denom.clamp_min(torch.finfo(weighted.dtype).tiny), torch.zeros_like(weighted))
         consulted = selected[:, slots + 1].any(0)
@@ -55,7 +60,7 @@ def test_composition_and_true_me(mode, execution):
     assert torch.isfinite(result.joint_fields).all()
 
 
-@pytest.mark.parametrize('mode', ['P', 'G'])
+@pytest.mark.parametrize('mode', ['P', 'G', 'R'])
 def test_live_e_path_gradient_and_interventions(mode):
     model, scene, query = model_fixture(mode)
     prepared = model.prepare(scene)
@@ -84,8 +89,9 @@ def test_float32_paired_checkpoint_and_config_roundtrip():
     assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
 
 
-def test_no_m_selected_and_empty_me_still_reads_own():
-    model, scene, query = model_fixture()
+@pytest.mark.parametrize("mode", ["P", "G", "R"])
+def test_no_m_selected_and_empty_me_still_reads_own(mode):
+    model, scene, query = model_fixture(mode)
     model.source_retained_mass = 0.000001
     prepared = model.prepare(scene)
     prepared.mediated_applied_ME = torch.zeros_like(prepared.mediated_applied_ME)
@@ -107,7 +113,7 @@ def test_geometry_prior_has_live_gradient():
     grad, = torch.autograd.grad(result.trace['context_E'].square().sum(), prepared.mediated_ee_geometry)
     assert torch.isfinite(grad).all() and grad.abs().sum() > 0
 
-@pytest.mark.parametrize('mode', ['P', 'G'])
+@pytest.mark.parametrize('mode', ['P', 'G', 'R'])
 def test_dense_reference_fields_and_gradients(mode):
     from honf_forward_core.interaction_reused_member_routing.anchored import anchored_row_read, build_e_access_measure
     from honf_forward_core.interaction_reused_member_routing.guided import prior_weighted_scores
@@ -141,6 +147,9 @@ def test_dense_reference_fields_and_gradients(mode):
                 alpha = torch.softmax(source_prior.log() + source_ell, -1)
                 rows = p.mediated_applied_ME[b, mids] * em[b]
                 if mode == 'G': rows = rows * p.mediated_ee_geometry[b, a].exp()
+                if mode == 'R':
+                    delta = (scene.environment_coordinates[b] - scene.environment_coordinates[b, a]) / scene.environment_characteristic_lengths[b, a]
+                    rows = rows * (-torch.linalg.vector_norm(delta, dim=-1)).exp()
                 mass = rows.sum(-1,keepdim=True)
                 rows = torch.where(mass > 0, rows / mass.clamp_min(torch.finfo(rows.dtype).tiny), torch.zeros_like(rows))
                 environmental = alpha[0] * dm / dm.sum() + alpha[1:] @ rows
@@ -166,12 +175,12 @@ def test_dense_reference_fields_and_gradients(mode):
         if a is not None: torch.testing.assert_close(a,b,rtol=3e-7,atol=3e-9,msg=name)
 
 
-@pytest.mark.parametrize('mode',['P','G'])
+@pytest.mark.parametrize('mode',['P','G','R'])
 def test_empty_physical_m_inventory(mode):
     from dataclasses import fields
     from tests.test_r13_8_anchored_core_helpers import _scene, _base_config
     from tests.test_faithful_member_routing import _query
-    model = AnchoredMemberRoutingCore(_base_config(), mediated_mode=mode).eval()
+    model = AnchoredMemberRoutingCore(_base_config(), mediated_mode="G" if mode == "R" else mode, mediated_geometry_law="native_cell_radial" if mode == "R" else "ee_head_mean").eval()
     scene = _scene(0,4); query = _query()
     query = replace(query, **{f.name: v[:1] for f in fields(query) if torch.is_tensor(v := getattr(query,f.name)) and v.ndim and v.shape[0] == 2})
     query = replace(query, scene_key=scene.scene_key, coordinate_frame_key=scene.coordinate_frame_key, anchor_indices=torch.zeros((1,query.num_queries,1),dtype=torch.long), anchor_weights=torch.ones((1,query.num_queries,1)))
@@ -182,7 +191,7 @@ def test_empty_physical_m_inventory(mode):
         assert torch.count_nonzero(output.trace['context_M']) == 0
         assert torch.all(output.trace['mediated_environment_prior'][:,0] > 0)
 
-@pytest.mark.parametrize('mode',['P','G'])
+@pytest.mark.parametrize('mode',['P','G','R'])
 def test_native_fp32_high_contrast_own_access(mode):
     model, scene, query = model_fixture(mode, dtype=torch.float32)
     measure = scene.environment_measure.clone(); measure[:,0] = 1e-35
@@ -201,7 +210,7 @@ def test_native_fp32_high_contrast_own_access(mode):
         assert int(use.sum()) == len(trace['anchor_read_indices'])
         assert torch.all(trace['anchor_read_access_prior'][use] > 0)
 
-@pytest.mark.parametrize('mode',['P','G'])
+@pytest.mark.parametrize('mode',['P','G','R'])
 def test_padded_noncontiguous_original_ids_and_zero_area(mode):
     model, scene, query = model_fixture(mode)
     mids=scene.module_ids.clone(); mids[0]=torch.tensor([81,7,450]); emids=scene.environment_ids.clone(); emids[0]=torch.tensor([103,990,52,701]); measure=scene.environment_measure.clone(); measure[0,2]=0
@@ -240,3 +249,30 @@ def test_shared_planning_and_per_mode_work_counts():
     assert full.work_counts['mediated_E_prefix_sort_entries'] == 0
     assert restricted.work_counts['mediated_source_prefix_sort_entries'] == query.batch_size * query.num_queries * (scene.num_modules + 1)
     assert restricted.work_counts['mediated_E_prefix_sort_entries'] == query.batch_size * query.num_queries * scene.num_environment_tokens
+
+
+@pytest.mark.parametrize('locator', ['e_anchor', 'local_e_cover'])
+def test_radial_serialization_paired_and_geometry_gradient(locator):
+    model, scene, query = model_fixture('R', locator, torch.float32)
+    baseline, _, _ = model_fixture('G', locator, torch.float32)
+    assert model.state_dict().keys() == baseline.state_dict().keys()
+    clone = AnchoredMemberRoutingCore.from_config(model.get_config())
+    assert clone.architecture_name == ('R13-12-G-Radial-EAnchor' if locator == 'e_anchor' else 'R13-12-G-Radial-LocalECover')
+    clone.load_state_dict(model.state_dict())
+    coords = scene.environment_coordinates.detach().clone().requires_grad_()
+    scene = replace(scene, environment_coordinates=coords)
+    prepared = model.prepare(scene)
+    full, restricted, _ = model.decode_paired(prepared, query)
+    independent_full = model.decode(prepared, query, intervention={'read_mode': 'full'})
+    independent_restricted = model.decode(prepared, query, intervention={'read_mode': 'restricted'})
+    torch.testing.assert_close(full.joint_fields, independent_full.joint_fields)
+    torch.testing.assert_close(restricted.joint_fields, independent_restricted.joint_fields)
+    copied = clone.prepare(scene)
+    cf, cr, _ = clone.decode_paired(copied, query)
+    torch.testing.assert_close(full.joint_fields, cf.joint_fields)
+    torch.testing.assert_close(restricted.joint_fields, cr.joint_fields)
+    grad, = torch.autograd.grad(full.joint_fields.square().sum(), coords)
+    assert torch.isfinite(grad).all() and grad.abs().sum() > 0
+    assert 'mediated_geometry_law' not in baseline.get_config()
+    assert model.get_config()['mediated_geometry_law'] == 'native_cell_radial'
+    assert all(torch.equal(model.state_dict()[k], baseline.state_dict()[k]) for k in model.state_dict())
