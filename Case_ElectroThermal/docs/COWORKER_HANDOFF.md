@@ -6,7 +6,7 @@
 
 The shared read-only case repository is `/data/public/ModularDT-HETMF`; the dataset and evidence bundle is `/data/public/ModularDT-HETMF-Dataset/v1`, with `standard.h5` and `expanded.h5`. The H5 files and generated evidence are outside Git. Browse the shared repository read-only; for code changes, clone the GitHub repository into your own private worktree and use a working branch.
 
-After the bundle has been published, run this from `HONF_Proj/Case_ElectroThermal` to create the case-local links used by report figures:
+After the bundle has been published, run this from `Case_ElectroThermal` to create the case-local links used by report figures:
 
 ```bash
 python -m hetmf link-shared --bundle /data/public/ModularDT-HETMF-Dataset/v1 --case-dir .
@@ -45,8 +45,8 @@ Sampled native queries are deterministic from the configured seed, epoch, stable
 
 | Component | Responsibility |
 |---|---|
-| `HONF_Proj/src/honf_forward_core/` | Case-neutral HONF contracts, general interaction models, organization, and field decoding |
-| `HONF_Proj/src/honf_runtime/field_training.py` | Shared field-training engine |
+| `src/honf_forward_core/` | Case-neutral HONF contracts, general interaction models, organization, and field decoding |
+| `src/honf_runtime/field_training.py` | Shared field-training engine |
 | `src/hetmf/training_data.py` | H5 reader, saved target normalization, and deterministic native-query sampling |
 | `src/hetmf/honf_adapter.py` | HET-MF contact/material features and case-to-HONF batch mapping |
 | `src/hetmf/training.py` | Case task binding for the shared training engine |
@@ -56,7 +56,7 @@ Sampled native queries are deterministic from the configured seed, epoch, stable
 |---|---|
 | **Six-hyperedge organization controlling contextualized member reads** | Six learned hyperedge slots feed the query/read path with contextualized contact and material members while preserving individual record identity. Forward computation is currently dense; six is a model setting, not a discovered physical group count. |
 | **Dense MM/ME/EM interaction and direct field reads** | Dense contact–contact, contact–environment, and environment–contact interactions provide the comparator, with direct reads of individual source records for field queries. |
-| **A2-D** | General full-access HONF baseline with no explicit six-hyperedge organizer. |
+| **Content-attention neural field** | General full-access HONF baseline with no explicit six-hyperedge organizer. |
 
 All three models use the same five-field output contract and prescribed physical inputs. Applied voltage and positive material coefficients enter their owning objects before interactions. Do not add Thermal StageA/port-specific branches, affine thermal heads, or pretrained Thermal checkpoints; HET-MF heat and temperature respond quadratically to terminal voltage.
 
@@ -64,18 +64,19 @@ The loader metadata includes provenance, split labels, family/root identities, s
 
 ## Install and dry-run commands
 
-Until this PR is merged into `main`, clone the preparation branch into your own account:
+Clone `main` and create your own working branch:
 
 ```bash
-git clone --branch codex/hetmf-main-handoff https://github.com/cosmos2w/ModularDT.git ModularDT
+git clone --branch main https://github.com/cosmos2w/ModularDT.git ModularDT
 cd ModularDT
+git switch -c my-case-study
 ```
 
-After merge, a normal `main` checkout contains the same case. The host's shared checkout already uses the preparation branch; it is for read-only browsing. From the ModularDT repository root, install the general core and case packages, then work from the case directory:
+From the repository root, install the core and case packages, then work from the case directory:
 
 ```bash
-python -m pip install -e HONF_Proj -e HONF_Proj/Case_ElectroThermal
-cd HONF_Proj/Case_ElectroThermal
+python -m pip install -e . -e Case_ElectroThermal
+cd Case_ElectroThermal
 ```
 
 Set the input path and a per-user output root. The commands below are CPU dry runs and create no training trajectory:
@@ -86,7 +87,7 @@ RUN_ROOT="/data2/$USER/ModularDT/hetmf/runs"
 
 python -m hetmf train --config configs/train_six_hyperedge_standard.yaml --dataset "$DATASET" --output "$RUN_ROOT/six-hyperedge-standard-seed0" --device cpu --dry-run
 python -m hetmf train --config configs/train_dense_pairwise_standard.yaml --dataset "$DATASET" --output "$RUN_ROOT/dense-pairwise-standard-seed0" --device cpu --dry-run
-python -m hetmf train --config configs/train_a2d_standard.yaml --dataset "$DATASET" --output "$RUN_ROOT/a2d-standard-seed0" --device cpu --dry-run
+python -m hetmf train --config configs/train_a2d_standard.yaml --dataset "$DATASET" --output "$RUN_ROOT/content-attention-standard-seed0" --device cpu --dry-run
 ```
 
 No model is trained by this handoff. A real fit requires the trainer's explicit `--yes` flag and a separately selected experiment. The first full-data segment is capped at 100 epochs for each explicitly selected model; there is no automatic extension. Resume with the same config, dataset, and output directory using `--resume <run>/latest.pt`; use `--epochs` only for an explicitly chosen epoch horizon.

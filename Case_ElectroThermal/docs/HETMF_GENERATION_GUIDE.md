@@ -2,7 +2,7 @@
 
 For shared-dataset processing and the three portable model configurations, start with [the coworker handoff](COWORKER_HANDOFF.md). The private paths and approval-bound generation commands below reproduce the owner archive; training on the published H5 files does not require these original paths or fresh simulations.
 
-The case is independent of ThermalChannel and Round9. Use `/home/wanglz/miniconda3/envs/ModularDT/bin/python` with `PYTHONPATH=src` from `HONF_Proj/Case_ElectroThermal`; the system Python's torch installation was not used for the pilot. Set `PYTHONDONTWRITEBYTECODE=1` so Python bytecode is not written into the source tree. Generated input plans, arrays, diagnostics, figures, caches, and logs belong below the verified `/data2/wanglz/ModularDT/datasets/hetmf/` root.
+The case owns its electro-thermal physics and has no dependency on a ThermalChannel checkpoint. Use a Python environment with the installed core and case packages, and run case-relative commands from `Case_ElectroThermal`. Keep generated input plans, arrays, diagnostics, figures, caches and logs in an explicitly selected external output root with the required free-space budget.
 
 ## Pilot
 
@@ -32,7 +32,7 @@ An explicitly bound `inheritance={"root":"<standard-release>","plan_hash":"<stan
 
 ## Single-file training archives
 
-Use `PYTHONPATH=src:../src` from the case directory for commands that connect to the general HONF core. A complete release can be exported without creating another set of per-case arrays or raw shards:
+Install both the core and case packages before running commands that connect to the general HONF core. A complete release can be exported without creating another set of per-case arrays or raw shards:
 
 ```bash
 python -m hetmf export-training --release <release-root> --output <data2-training.h5> \
@@ -44,7 +44,7 @@ python -m hetmf honf-smoke --dataset <data2-training.h5> --queries 17 \
 
 The exporter writes one self-contained `hetmf_training_h5_v1` archive and refuses an existing output path. It stores unnormalized physical targets, separate prescribed inputs, native queries and measures, explicit split indices, source lineage, and exact TRAIN-only population statistics. It verifies every source and the complete staged archive before atomic publication. Reuse an existing verified archive instead of exporting comparison-arm copies. The full verifier checks the entire numerical payload and metadata seal and recomputes the TRAIN normalizer. Loader construction performs cheaper structural checks; run full verification at dataset admission and after any suspected storage change.
 
-The read-only `HETMFDataset(path, split="train", query_count=1024, seed=0, normalize=True)` exposes prescribed inputs, queries, targets, and separate metadata. It binds sampled queries to stable physical case identity and supports pickle/fork/spawn workers. `ElectroThermalHONFAdapter.collate` makes CPU `SceneBatch`/`QueryBatch` tensors, and `HONFReadyBatch.to(device)` moves a complete batch in the main process. Worker collation should remain on CPU; use spawn after Torch threads are initialized. The general A2-D smoke uses five nonlinear outputs and zero optimizer steps; it establishes an interface connection, not predictor accuracy or a trained organizer. A later campaign still needs a case TaskProvider and explicit training recipe.
+The read-only `HETMFDataset(path, split="train", query_count=1024, seed=0, normalize=True)` exposes prescribed inputs, queries, targets, and separate metadata. It binds sampled queries to stable physical case identity and supports pickle/fork/spawn workers. `ElectroThermalHONFAdapter.collate` makes CPU `SceneBatch`/`QueryBatch` tensors, and `HONFReadyBatch.to(device)` moves a complete batch in the main process. Worker collation should remain on CPU; use spawn after Torch threads are initialized. The content-attention smoke uses five nonlinear outputs and zero optimizer steps; it establishes an interface connection, not predictor accuracy or a trained organizer. Fitting uses the case task provider and an explicitly selected training recipe.
 
 ```bash
 python -m hetmf link-training --case-dir <home-case-directory> \
@@ -60,6 +60,6 @@ The saved-field diagnostic freezes six representative inputs and two complete qu
 
 ## Storage maintenance
 
-Use [the Dataset storage index](../Dataset/README.md) for current paths and retention rules. The approved 2026-10-24 cleanup retires the legacy Standard raw/processed shards after exact comparison against all 4,608 original cases and the current Standard training archive. The original FP64 source files, training H5 files, physical-reference arrays, ledgers, historical receipts, selected figures, and source worktrees remain retained. The explicit legacy pack command can regenerate shards and must have a declared storage budget; routine model loading should use the existing standalone training H5 files.
+Use [the Dataset storage index](../Dataset/README.md) for the archive format and location settings. Reuse an existing verified standalone training archive rather than copying per-case shards for each model. Any export, regeneration or reference solve needs an explicit output location and disk budget.
 
-The pilot link helper now creates only `Dataset/pilot`; it does not recreate the retired top-level `raw`, `processed`, `figures`, `catalogues`, or `links/active_manifest.json` aliases. Existing old aliases require ownership and dependency checks before explicit retirement. Empty staging directories can be removed at closeout; raw and pilot processed writers recreate staging when needed. Identical frozen plan/approval copies may share hardlinks, so preserve their bytes and never edit them in place.
+Retain source physical references, training archives, normalizers, verification receipts and the numerical evidence behind reported figures. Before retiring an older copy or alias, establish ownership, confirm that no active reader depends on it and verify a retained replacement. Do not edit shared hardlinked provenance files in place.

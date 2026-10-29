@@ -1,12 +1,10 @@
-# Root layout and compatibility
+# Project layout and compatibility
 
-The HONF project now occupies the repository root. Its content is selected from `cosmos2w/honf-consolidation-test` at `282fb3f26008eabbedba9479e5a1fed291700423`; the publication commit has the old main `49b1bf3369b0418b1f23eefd559ff5f436fb6eb7` as its sole parent. Main advances by ordinary fast-forward. The intervening research commits are not merged or copied into main's ancestry.
-
-The complete old main history is retained on `cosmos2w/historical-main-20261029`. The complete research milestone remains on `cosmos2w/historical-honf-r13-20261029`. Existing source worktrees, checkpoints, histories, test code, numerical data and postprocessing materials stay local. `docs/reports/` and `UpgradePlan/` are explicitly local-only directories and are excluded from the new main tree.
+HONF occupies the repository root. The shared Python packages live in `src/`, physical data and adapters live in `Case_*/`, and reusable commands live in `tools/`. Case packages own units, normalization, geometry, targets and verification; shared model code does not infer those semantics from a model-family name.
 
 ## Installation and commands
 
-From the repository root, install the core and the case you use:
+Install the core and the case you use from an editable source checkout:
 
 ```bash
 python -m pip install -e '.[dev,visualization]' -e ./Case_ThermalChannel
@@ -19,24 +17,18 @@ python -m hetmf train --help
 python -m pytest -q
 ```
 
-The documented training/evaluation entry points use an editable source checkout because configurations and case schemas live beside the source. A core wheel exposes the Python model packages; it does not bundle external datasets, checkpoints, research reports or all source-tree launch profiles. Configure each case's ignored dataset-location map from its checked-in example. A dry-run must not start an optimizer or write a run. Training and dataset generation always require separately selected data, budget and output locations.
+Managed training/evaluation entry points use the source checkout because configurations and case schemas live beside the source. Core wheels expose Python model packages; external datasets, checkpoints, research reports and all source-tree launch profiles are not bundled. Configure each case's ignored dataset-location map from its checked-in example. Dry-runs inspect configuration and integration without starting an optimizer or a training run.
 
 ## Existing checkpoints and resume
 
-Package names, configuration keys, serialized architecture IDs, tensor names, normalization and physical laws are preserved. The directory lift changes source/document locations rather than checkpoint contents. Use the matching case loader for each saved model; a public family name alone does not load an adapter. Existing absolute external checkpoint/data paths remain external and are not rewritten. `project://` paths now resolve relative to this repository root, independent of the shell's current directory.
+The six public model-family names describe model choices. Package names, configuration keys, serialized architecture IDs, tensor names, normalization and physical laws remain part of the checkpoint contract. Use the matching case loader, original model configuration and saved normalization. Existing absolute external checkpoint/data paths are not rewritten; `project://` paths resolve relative to this repository root, independent of the shell's current directory.
 
-Resume preserves case membership, input/normalization identity, optimizer/scaler, RNG, sampler, selection, schedule and complete history. Latest, best-field and literal epoch checkpoints remain distinct. A compatible load is not a completed continuation. Existing S/X long-running jobs retain their original source checkout and receive no new observer or restart from this publication.
+Resume preserves case membership, input identity, optimizer/scaler, RNG, sampler, selection, schedule and complete history. Latest, best-field and literal epoch checkpoints remain distinct. A compatible load is not a completed continuation. See the [compatibility contract](architecture/compatibility.md) and [run-artifact guide](guides/Run_Artifacts_and_Monitoring.md).
 
-The published contract suite covers all six families, strict original six-hyperedge/dense next-update resume, S/X and U-H task handoffs, case adapters and field/organization visualization. A single exact historical SHA mismatch is marked expected only for the already observed digest; any new digest mismatch still fails. CUDA/external-data checks may skip when their required resources are absent. Historical campaign-specific suites remain local with their source branch rather than presenting retired experimental workflows as current tests.
+The maintained contract suite covers all six families, original six-hyperedge/dense next-update resume, relation-anchored and unified-hypergraph task handoffs, case adapters and field/organization visualization. A historical numerical-digest test marks only its exact known mismatch as expected; a new mismatch still fails. CUDA and external-data checks require their declared resources. Consult the actual test output for the environment being used.
 
-## Documentation figures and local artifacts
+## Documentation figures and external resources
 
-The [README asset index](assets/readme/README.md) lists the eight user-approved PNG/PDF figure pairs, totaling about 3.4 MB. They are versioned only under `docs/assets/readme/`, use relative links, preserve aspect ratio and carry source/checkpoint/error interpretation. Update that same directory for future README revisions. Numerical arrays, weights, full histories, generated reports and one-time scripts remain excluded. The artifact hook recognizes the root and historical nested layouts and allows only this narrow curated-figure exception.
+The [README asset index](assets/readme/README.md) lists eight selected PNG/PDF pairs totaling about 3.4 MB. They live under `docs/assets/readme/`, use relative links, preserve aspect ratio and state checkpoint age, physical error and interpretation limits. Update this same directory for future README revisions. Numerical arrays, weights, full histories, generated reports and one-time scripts remain external to Git. The artifact hook allows only the curated README figure directory as an exception.
 
-On the maintained workstation, `diagnostics` and `Trained_Results` remain symlinks to the existing DATA2 roots whose physical paths still contain the historical `HONF_Proj` name. The Wind native catalogue uses its existing DATA2 target. The directory lift does not move, duplicate or rewrite those physical payloads. Other hosts should use their own explicit external-resource maps and output settings rather than copying workstation paths.
-
-## Publication validation
-
-The root-layout regression suite passed 587 tests in the independent installed environment, with one CUDA-dependent skip and one exact known historical digest marked expected. All six retained real checkpoint families loaded strictly on CPU through the lifted implementation: Hypergraph-routed epoch 4890, Dense pairwise epoch 4738, Content-attention and Unified hypergraph epoch 5000, frozen Relation-anchored epoch 2813 and completed Active-domain relation-anchored TRAIN150 epoch 999. These are load checks, not newly measured physical accuracy or completed long-run claims. Legacy six-hyperedge/dense exact next-update resume and S/X/U-H task handoffs are covered by the contract suite.
-
-An independent DATA2 environment validated editable core/case installations, seven command inspections including a real read-only managed dry-run, and four wheel builds/imports from outside the checkout. The predictor implementation files remain byte-identical to the final test branch. The only existing Python changes are a project-root guard, a path-description docstring and the precise historical-digest expected-failure handling; the root-layout test is new. No dataset or checkpoint was migrated, no new training or physical-validation campaign ran, and existing long continuations were not observed.
+Datasets, checkpoints and output locations are machine-owned resources. Configure them explicitly on each host; do not assume that a maintainer's storage paths exist elsewhere. Existing workspace aliases may retain earlier directory names without changing their payloads. Local `docs/reports/` and `UpgradePlan/` archives are ignored and are not part of the source distribution.

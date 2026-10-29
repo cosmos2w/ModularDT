@@ -1,15 +1,9 @@
 # Forward compatibility contract
 
-Run 1401 epoch 4585 is the current scientific baseline. Run 1000 remains the
-historical golden compatibility reference. Both must strict-load all 237 state
-keys and exactly match the case-0653 golden replay fixture.
+The public catalogue exposes hypergraph-routed, dense pairwise, content-attention, unified hypergraph, relation-anchored and active-domain relation-anchored families. Existing six-hyperedge and dense checkpoints retain their serialized architecture identifiers, tensor names, normalization, physical transforms and case adapters. Public family names do not replace those saved interfaces.
 
-Stage-1--6 fixed/additive, exchangeable, adaptive, scheduled-entmax, and
-gathered modes remain loadable research modes. Historical configuration files
-are immutable; their status and expected base profiles are recorded separately
-in `src/config_core/forward/profile_registry.json`.
+Use the matching case loader and original model configuration. Evaluation loads state strictly rather than accepting missing or unexpected weights. Managed profiles are indexed in `src/config_core/forward/profile_registry.json`; a profile describes a compatible workflow, not a scientific baseline or a guarantee for every case.
 
-Training resume preserves parameter order, optimizer group membership, group
-count, and optimizer state. Evaluation uses strict state loading. The canonical
-run/evaluation layout has one producer location; historical aliases remain
-readable and historical run directories are not rewritten.
+Training resume preserves parameter order, optimizer groups and state, RNG, sampler, data membership, normalization, schedule and complete history. Contract tests cover strict checkpoint loading and optimizer/RNG next-update behavior. A successful load alone does not establish a completed continuation or field accuracy on new data.
+
+Canonical run and evaluation layouts have one producer location. Historical selectors remain readable, and existing run artifacts are not silently rewritten. See [checkpoint handling](../checkpoints.md) and [run artifacts](../guides/Run_Artifacts_and_Monitoring.md).

@@ -20,7 +20,7 @@ The maintained implementation is [honf_viz](../../src/honf_viz/organization_data
 
 For a fixed physical scene `s`, let `V_s = M_s ∪ E_s` contain original records with their identities and geometry. An E-addressed organization prepares a directory `R[a,i]` before query decoding. Its restricted directory is `C[a,i] = R[a,i] · 1[i ∈ candidate(a)]`, preserving the actual stored weights. The native hyperedge at address `a` is `h_a = {i : C[a,i] > 0}`, and its weighted incidence is `I[i,a] = C[a,i]`. All directory rows together form a scene-wide organization even though individual queries later invoke different rows.
 
-This object depends on the prescribed physical inputs, including layout, materials, boundaries and controls. It is not necessarily a geometry-only graph. In the anchored S/X examples, the E-receiver directory reuses actual final-cycle E←M and E←E relations plus separately recorded structural self access and the model's access measure. Do not replace those equations with a visualization's normalization.
+This object depends on the prescribed physical inputs, including layout, materials, boundaries and controls. It is not necessarily a geometry-only graph. In the relation-anchored examples, the E-receiver directory reuses actual final-cycle E←M and E←E relations plus separately recorded structural self access and the model's access measure. Do not replace those equations with a visualization's normalization.
 
 | Quantity | Question answered | Appropriate evidence |
 | --- | --- | --- |
@@ -30,7 +30,7 @@ This object depends on the prescribed physical inputs, including layout, materia
 | Query coefficient `β(q,i)` | How did one query actually use permitted members? | Native read trace including locator, type strength and within-role preference. |
 | Field/design response | What happens to a physical objective when inputs change? | Field evaluation, perturbation or sensitivity, not graph degree alone. |
 
-The historical 1404 interface had six explicitly parameterized shared hyperedges. The current anchored interface has a fine-grained library of E-address rows. Both admit a global view; the latter does not automatically contain a small learned group-assignment variable. Display colors, similarity ordering and representative selection summarize the library without claiming that the model merged it.
+The hypergraph-routed interface had six explicitly parameterized shared hyperedges. The current anchored interface has a fine-grained library of E-address rows. Both admit a global view; the latter does not automatically contain a small learned group-assignment variable. Display colors, similarity ordering and representative selection summarize the library without claiming that the model merged it.
 
 ## 2. Whole-layout access regions and joint M/E participation
 
@@ -82,7 +82,7 @@ The plotting tool expects one NPZ per scene/checkpoint with adjacent metadata JS
 | `environment_polygons` | `[E,vertices,2]` | Optional physical coverage polygons; do not infer them from model colors. |
 | `radius` | Scalar or `[M_slots]` | Optional circular M geometry; omit when circles are not the adapter's geometry. |
 
-The adjacent JSON records at least the literal case, partition, epoch, checkpoint, coordinate units/projection, prescribed controls or their existing scene identity, directory mode/coverage, and route-stage provenance. Historical S/X exports retain this information; units absent from historical metadata must be described as source geometry units rather than invented. Keep prescribed controls fixed when comparing models. Record whether any environment features or normalization differ. Existing manifests/IDs suffice; no new hashes or frozen-baseline service is needed.
+The adjacent JSON records at least the literal case, partition, epoch, checkpoint, coordinate units/projection, prescribed controls or their existing scene identity, directory mode/coverage, and route-stage provenance. Existing relation-anchored exports retain this information; units absent from historical metadata must be described as source geometry units rather than invented. Keep prescribed controls fixed when comparing models. Record whether any environment features or normalization differ. Existing manifests/IDs suffice; no new hashes or frozen-baseline service is needed.
 
 For new exports, prepare the scene once using its native adapter and evaluation model; do not pass unknown field targets into the model. Capture actual route snapshots while the encoder runs, including their receiver/donor IDs and stage. In the maintained implementation, `NativeRouteSnapshot.applied_incidence` is the applied G source in [route_capture.py](../../src/honf_forward_core/native_retrieval/route_capture.py), and MM/EM/EE/ME execute in [staged_attention_v2.py](../../src/honf_forward_core/content_hypergraph/staged_attention_v2.py). The anchored preparation stores `anchored_applied_EM`, `anchored_applied_EE`, `anchored_route_provenance` and `e_access_directory` in [anchored.py](../../src/honf_forward_core/interaction_reused_member_routing/anchored.py).
 
@@ -98,7 +98,7 @@ Run the plotter on saved scene evidence using explicit local input/output paths.
 python tools/plot_honf_organization.py --help
 ```
 
-The [packaged README examples](../../README.md#relation-anchored-organization) show the three standard views from frozen S epoch 2813 on exposed VAL0678. Their [image index](../assets/readme/README.md) states original IDs, units, source age, thresholds and limitations. Historical S/X comparison galleries and full numerical evidence remain local; they are not silently relabeled as these examples.
+The [packaged README examples](../../README.md#relation-anchored-organization) show the three standard views from a frozen relation-anchored checkpoint at epoch 2813 on exposed VAL0678. Their [image index](../assets/readme/README.md) states original IDs, units, source age, thresholds and limitations. Other comparison galleries and full numerical evidence remain local; they are not silently relabeled as these examples.
 
 The Python entry points support composition in another report generator. Use the installed editable package or add `src` to the import path or use the installed package with its visualization dependencies:
 
