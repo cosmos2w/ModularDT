@@ -1,211 +1,122 @@
 # Hypergraph Organized Neural Fields
 
-HONF predicts physical fields for systems built from variable numbers of interacting objects. A case supplies physical records and query locations; the model exchanges information between the records, prepares an organization of their relationships where the selected architecture supports it, and predicts fields at the requested locations. Individual records, their geometry and prescribed controls remain available throughout the applicable read path.
+**HONF learns how objects interact, then uses those relationships to predict physical fields.** Describe a system with object records, geometry and prescribed conditions; query the trained model at the locations where you need a prediction. The same core mechanisms can support different physical cases through a dataset-specific adapter.
 
-This project contains reusable forward and inverse components, execution services, and case-owned data and physics for ThermalChannel, WindFarm and electro-thermal systems. Its research families differ in how they organize and read information; a name identifies a model family, not a claim of universal superiority or a compatible checkpoint for every case.
+<p align="center"><img src="docs/assets/readme/honf_showcase.png" alt="HONF showcase: overlapping original-member hyperedges, spatial access regions, and velocity and temperature reconstruction" width="1100"></p>
 
-## Start here
+A thermal-channel example of relation-anchored HONF: overlapping relationships, their spatial access regions, and reconstructed fields. Temperature uses a cool-to-warm palette; signed errors use a dark diverging palette and display native-unit RMSE on the fluid mask. The overlapping sets preserve original membership; their ellipse shapes are illustrative. [PDF master](docs/assets/readme/honf_showcase.pdf) · [Figure details](docs/assets/readme/README.md).
 
-From the repository root, install the core and the case you intend to use. Python 3.10 or later and an appropriate PyTorch installation are required.
+## The idea
 
-```bash
-python -m pip install -e . -e ./Case_ThermalChannel
-# For the electro-thermal case instead:
-python -m pip install -e . -e ./Case_ElectroThermal
-# For the Wind case:
-python -m pip install -e . -e ./Case_WindFarm
+Many physical systems contain a variable number of interacting components: heat sources, turbines, material regions, boundary elements or other objects. HONF represents them as individual records rather than requiring one fixed arrangement. A record can carry coordinates, material properties, physical measures and prescribed controls.
+
+The model contextualizes these records through information exchange. In its organized families, it also prepares relationships that guide which original members can contribute to a field query. A hyperedge describes an overlapping set of members and their permitted interactions; it does not require replacing those members with a single pooled feature.
+
+Write the input records as $V=M\cup E$, where $M$ and $E$ identify input-object roles—for example, components and their environment. They do not assign different output fields to different roles. At a query location $q$, the overall computation is:
+
+```math
+Z=\mathrm{Exchange}_{\theta}(M,E;G),\qquad
+\widehat{\mathbf{y}}(q)=\mathrm{Read}_{\theta}(q,Z,\mathcal{O}).
 ```
 
-Datasets and trained checkpoints are external to Git. For a Thermal installation, copy `Case_ThermalChannel/Dataset/dataset_locations.example.json` to the ignored `dataset_locations.local.json` beside it and enter the actual locations. See [Thermal data and physics](Case_ThermalChannel/Dataset/PHYSICS_AND_DATA.md), [Wind data and physics](Case_WindFarm/Dataset/PHYSICS_AND_DATA.md), and the [electro-thermal handoff](Case_ElectroThermal/docs/COWORKER_HANDOFF.md) for formats and split rules. The electro-thermal case also documents a shared dataset bundle; do not assume that its machine-specific path is available on another host.
-
-The case-specific commands below expose existing interfaces. Examine the selected configuration, resources and output location before fitting. `--dry-run` checks the configuration and integration without fitting; a useful fit requires an explicitly selected experiment and epoch budget.
-
-```bash
-# Legacy Thermal managed workflow: inspect a historical compatible profile.
-python train.py --config src/config_core/forward/stage7_structured_context.json \
-  --experiment-overlay src/config_core/forward/experiments/stage7_fused_query_module.json \
-  --run-id 1 --device cpu --dry-run
-
-# Electro-thermal: inspect the shared field-training interface.
-python -m hetmf train --config Case_ElectroThermal/configs/train_six_hyperedge_standard.yaml \
-  --dataset /path/to/standard.h5 --output /path/to/your-project/own-run \
-  --device cpu --dry-run
-```
-
-The first example is a historical Thermal architecture with its own local-surrogate dependency; it is not the generic default for all cases. Use an unused run ID and a trusted local checkpoint where required. The electro-thermal command uses its own adapter and has no Thermal Stage-A checkpoint dependency.
+Here $G$ contains contextual relations, $Z$ contains contextualized records, and $\mathcal{O}$ is the selected model's organization, when present. The reader combines accessible information to predict the requested field channels. This is a schematic description: the families below differ in their exchange, organization and readout. A learned relationship describes model information flow, not physical causality.
 
 ## Model families
 
-| Model family | Information flow and scope |
+| Public identifier | Main distinction |
 | --- | --- |
-| Hypergraph-routed neural field (`hypergraph_routed`) | Soft shared latent hyperedges organize routing and original-module pair reading. Existing Thermal checkpoints retain their decoder and coupling. |
-| Dense pairwise neural field (`dense_pairwise`) | Dense pairwise and environmental reads provide a non-organized comparison. Existing Thermal checkpoints retain their own head and normalization. |
-| Content-attention neural field (`content_attention`) | Dense contextual M/E exchange prepares member states before field reads. The case adapter determines the physical prediction law and available query paths. |
-| Unified hypergraph neural field (`unified_hypergraph`) | Contextual exchange and a learned hypergraph govern original-record access. Existing case implementations retain their saved physical interfaces. |
-| Relation-anchored neural field (`relation_anchored`) | Applied contextual relations build an environment-addressed member directory used by the joint reader, with inventory-normalized access measure. |
-| Active-domain relation-anchored neural field (`relation_anchored_active`) | The related anchored family uses an active-domain access measure, with its own saved configuration and weights. |
+| `hypergraph_routed` | Shared latent hyperedges organize routing and original-member pair reads. |
+| `dense_pairwise` | Dense pairwise and environmental reads, without hypergraph routing. |
+| `content_attention` | Contextual record exchange followed by direct attention to member content. |
+| `unified_hypergraph` | Learned hypergraph organization governs access to contextualized original members. |
+| `relation_anchored` | Reuses contextual relations to build an environment-addressed member directory for joint field prediction. |
+| `relation_anchored_active` | Uses the relation-anchored reader with access measures normalized over the active domain rather than the full inventory. |
 
-These public names describe families. Existing configuration identifiers, model classes, and checkpoint keys remain part of the compatibility contract; a family name alone does not reconstruct the case, dimensions, physical law or training state. The public registry is `honf_forward_core.models.MODEL_FAMILIES`; `honf_forward_core.models.build_model(model_name, config)` constructs a bare core model from the selected family and its original constructor configuration. The registry exposes immutable family records and does not rewrite historical serialized identifiers. A case adapter supplies physical input and output semantics around the bare core. Load a checkpoint only with its matching case, model configuration, normalizer and weights; a Thermal checkpoint is not a generic checkpoint for other cases. Six is a fixed capacity in the hypergraph-routed example configuration, not a discovered number of physical groups. Models using a generic joint predictor can be adapted to different cases, but a case adapter and a compatible trained checkpoint are still required. Historical Thermal-specific output laws must not be treated as general electro-thermal or Wind laws.
+Choose a family together with a case adapter and its configuration. Input dimensions, physical output laws and normalization are case-dependent; trained weights are not interchangeable across cases or families. Existing checkpoints retain their saved interfaces. See the [model registry](src/honf_forward_core/models.py) and [checkpoint compatibility guide](docs/Root_Layout_and_Compatibility.md).
 
-A core constructor takes the selected family and its original configuration mapping. In this example, `core_config.json` is a configuration exported with the matching core's `get_config()` method; supply your own file and matching case dimensions. Construction initializes weights; use the case checkpoint loader to restore trained weights and normalization.
+For programmatic construction, use the public registry with a configuration exported by the matching core's `get_config()` method or configuration object's `to_dict()` method:
 
 ```python
 import json
 from pathlib import Path
-from honf_forward_core.models import MODEL_FAMILIES, build_model
+from honf_forward_core.models import build_model
 
-core_config = json.loads(Path("core_config.json").read_text())
-core = build_model("relation_anchored", core_config)
-print(type(core).__name__, [family.name for family in MODEL_FAMILIES])
+config = json.loads(Path("core_config.json").read_text())
+core = build_model("relation_anchored", config)
 ```
 
-A case adapter converts its records into the core's expected representation and interprets the predicted channels in the case's native units. To use trained weights, follow the matching case checkpoint loader and its saved configuration and normalization; constructing a bare core initializes a new model and does not restore a trained case adapter.
+This initializes a core model. To restore trained predictions, use the matching case loader with the saved configuration and normalization.
 
-## How the information is organized
+## Quick start
 
-For a scene, write the input records as $V=M\cup E$, where $M$ and $E$ name input-object roles, not output-field responsibilities. Coordinates, measures, identities, masks, materials, boundary conditions and controls belong to the case and enter the appropriate records. A generic joint field predictor produces all requested channels together:
-
-```math
-Z=\mathrm{Exchange}(M,E;G),\qquad \widehat{y}(q)=\mathrm{Read}_{\theta}(q,Z,\mathcal{O}).
-```
-
-Here $G$ denotes the relations actually applied during contextual exchange and $\mathcal{O}$ is the selected family's prepared organization, if present. The equation is a schematic interface, not a claim that all six implementations share the same exchange, readout or output law. The current anchored implementation executes directed stages in the recorded order M←M, E←M, E←E, M←E; each stage has its own provenance.
-
-In the anchored directory, $a$ is an E address and $i$ is an original M or E member. A restricted row retains its stored weights for eligible members:
-
-```math
-C_{ai}=R_{ai}\,\mathbf{1}[i\in\mathrm{candidate}(a)],\qquad h_a=\{i:C_{ai}>0\}.
-```
-
-The following notation summarizes the information each family exposes; $z_i$ is a contextual member, $q$ a query and $K$ an architecture setting. It is a conceptual map of access, not a common numerical decoder equation or a shared physical output head.
-
-| Family | Organization and read in symbols |
-| --- | --- |
-| Hypergraph-routed, historical softmax configuration | $`A^M_{ik}, A^E_{jk} > 0`$, with $\sum_k A^M_{ik}=\sum_k A^E_{jk}=1$ for active members; six fixed slots in the historical example condition query and original-member reads. |
-| Dense pairwise | $q$ reads dense eligible member and environmental context, without a reusable sparse member directory in the historical example. |
-| Content-attention | Contextual $`\{z_i\}`$ are read directly by query-to-member attention; the existing Thermal content-attention instance reads M after contextual exchange rather than a direct E query path. |
-| Unified hypergraph | Contextual members and the learned hypergraph jointly govern the reader; original member values remain accessible. |
-| Relation-anchored | Applied E←M and E←E relations contribute to the E-addressed directory $R$; this family uses inventory-normalized access measure. |
-| Active-domain relation-anchored | The same anchored joint-field family uses active-domain role normalization during directory compilation while preserving relative physical E measures. |
-
-$R$ and $C$ are prepared directory weights; query-dependent read coefficients are separate quantities. A directory row is an overlapping hyperedge of original records, rather than a pooled replacement for them. The hypergraph-routed model instead uses six explicitly parameterized shared hyperedges. For details and the saved-evidence visualization API, see the [global organization guide](docs/guides/Global_Hypergraph_Organization_Visualization.md).
-
-## Saved examples
-
-The examples below use the fixed exposed Thermal VAL0678 scene with ten original modules. The hypergraph-routed checkpoint is latest at epoch 5000; the relation-anchored checkpoint is a frozen latest state at epoch 2813. These are literal selected files, not best-field checkpoints, and the different training ages and historical prediction laws prevent a controlled architecture comparison. No new fitting or solver call was performed. The selected previews and PDF masters are distributed in [`docs/assets/readme/`](docs/assets/readme/README.md). Numerical arrays, checkpoints, full histories and research reports remain local; the image index records the literal source identities and interpretation limits.
-
-| Example | Checkpoint or history | Figure |
-| --- | --- | --- |
-| Hypergraph-routed neural field | Latest, epoch 5000 | [Native fields and organization](#hypergraph-routed-native-fields-and-organization) |
-| Relation-anchored neural field | Frozen latest, epoch 2813 | [Native fields](#relation-anchored-native-fields), [whole-layout access](#relation-anchored-organization), original-member service, overlapping hyperedges |
-| Training histories | Hypergraph-routed through epoch 5000; relation-anchored through epoch 2697 | [Loss curves](#saved-loss-histories) |
-
-### Hypergraph-routed native fields and organization
-
-<p align="center"><img src="docs/assets/readme/hypergraph_routed_fields.png" alt="Hypergraph-routed neural field native predictions and signed errors on VAL0678, epoch 5000" width="1100"></p>
-
-The saved latest hypergraph-routed state uses its historical Thermal model and saved normalization. Reference, prediction and signed prediction-minus-reference are shown on the common physical-fluid mask of 7,464 native grid points; source geometry and field values use the packed dataset's native units. Streamwise velocity and fluid-temperature RMSE are 0.01170 and 0.29471, respectively, on this one scene. Prediction and reference share a scale within each row; residuals have their own scale. [PDF master](docs/assets/readme/hypergraph_routed_fields.pdf).
-
-<p align="center"><img src="docs/assets/readme/hypergraph_routed_organization.png" alt="Hypergraph-routed neural field six shared slot membership maps and original record incidence" width="1000"></p>
-
-On the same exposed VAL0678 scene and latest epoch-5000 checkpoint, six panels map the actual environment-to-slot assignments $A^E_{jk}$ at the original E coordinates; white circles identify original M records. The two matrices show all ten active original M rows and 192 original E rows against the same six learned shared slots, with E row ticks labeling original IDs. All 60 M and 1,152 E assignments are positive, so memberships overlap densely; per-member softmax weights sum to one. Coordinates use source geometry units. These legacy slot assignments are not E-addressed directory rows. [PDF master](docs/assets/readme/hypergraph_routed_organization.pdf).
-
-### Relation-anchored native fields
-
-<p align="center"><img src="docs/assets/readme/relation_anchored_fields.png" alt="Relation-anchored neural field native predictions and signed errors on VAL0678, epoch 2813" width="1100"></p>
-
-The frozen relation-anchored latest state uses its saved TRAIN-only normalization and restricted joint95 read. On the same 7,464 physical-fluid points, streamwise velocity and fluid-temperature RMSE are 0.01941 and 0.57633 in packed native units. Each row shares its prediction/reference scale and has a separate signed-error scale; colors are scaled independently from the hypergraph-routed figure. This single exposed scene illustrates the field behavior and is not a population ranking. [PDF master](docs/assets/readme/relation_anchored_fields.pdf).
-
-### Relation-anchored organization
-
-<p align="center"><img src="docs/assets/readme/relation_anchored_regions.png" alt="Relation-anchored neural field epoch 2813 whole-layout access regions and module service" width="900"></p>
-
-On the same scene, restricted directory weights across 192 E addresses yield nine leading nonself display labels, all M members. Colored regions identify leading members; module rings summarize each M member's service across those regions. Own E is omitted only from this display, and coordinates use source geometry units. [PDF master](docs/assets/readme/relation_anchored_regions.pdf).
-
-<p align="center"><img src="docs/assets/readme/relation_anchored_member_services.png" alt="Relation-anchored neural field epoch 2813 original module service and contextual receiver maps" width="900"></p>
-
-The same restricted directory serves 190 and 170 E addresses from M2 and M3, selected by total nonself directory service. Cell colors show directory weights; arrows show actual final-cycle M←M gates on a separate scale. These are distinct recorded operations. [PDF master](docs/assets/readme/relation_anchored_member_services.pdf).
-
-<p align="center"><img src="docs/assets/readme/relation_anchored_hyperedges.png" alt="Relation-anchored neural field epoch 2813 overlapping native original-member hyperedges" width="560"></p>
-
-Representative directory rows h(E120), h(E104), and h(E85) contain 5M+1E, 7M+2E, and 10M+1E, respectively. The E display threshold is 0.02 with all positive M and own-E memberships preserved; these rows retain 100% of their directory mass. Original memberships and intersections are exact, while ellipse geometry is illustrative and the displayed rows are not three discovered physical groups. [PDF master](docs/assets/readme/relation_anchored_hyperedges.pdf).
-
-### Saved loss histories
-
-<p align="center"><img src="docs/assets/readme/hypergraph_routed_loss.png" alt="Hypergraph-routed neural field historical sampled training and validation loss curves" width="1100"></p>
-
-The hypergraph-routed history reaches epoch 5000. The sampled training and validation measurements use their recorded reductions; its selected best-field checkpoint is epoch 4890, separate from the latest example above. [PDF master](docs/assets/readme/hypergraph_routed_loss.pdf).
-
-<p align="center"><img src="docs/assets/readme/relation_anchored_loss.png" alt="Relation-anchored neural field recorded training and validation loss curves through epoch 2697" width="1100"></p>
-
-The relation-anchored example uses a 600-case training population. This earlier preserved epoch-2697 redraw separates sampled weighted training terms from exposed validation measurements; their reductions differ. It does not assert current run progress or convergence. [PDF master](docs/assets/readme/relation_anchored_loss.pdf).
-
-The [global organization guide](docs/guides/Global_Hypergraph_Organization_Visualization.md) explains the three views and saved-evidence plotter; the [image index](docs/assets/readme/README.md) records the distributed examples and limitations. Learned support describes model access and does not establish physical causality. Reduced selected records or memory alone does not establish faster complete execution.
-
-## Bring your own data
-
-1. Define each case's independent TRAIN, validation and test membership before fitting. Preserve related layouts or repeated physical configurations in the same split where appropriate, and fit normalization on TRAIN only.
-2. Supply variable-size original M and E records with stable IDs, native coordinates, physical measures, prescribed controls, valid masks and native query locations. Padded arrays require masks; ragged storage requires explicit lengths or offsets. Keep targets, post-solve diagnostics and split labels out of model inputs.
-3. Implement a case-owned reader, deterministic query sampler and adapter that produce the model's expected batch representation. The historical `BatchData` contract is defined in [`config.py`](src/honf_forward_core/config.py); newer families can use their own adapter contracts, as demonstrated by the case packages.
-4. Define the joint output channels, inverse normalization, units, native geometry extraction, physical losses and fieldwise metrics in the case. Preserve the training normalizer and configuration with the checkpoint. Report residuals and physical constraints separately from field errors.
-5. Exercise a small synthetic batch through the chosen model, loss and saved-checkpoint reload; add case tests for input validation, masks, reproducibility and artifacts. The [case plugin guide](docs/case_plugin.md) describes the historical managed workflow protocol and how to implement a plugin without modifying the core.
-
-ThermalChannel supplies its own local module coupling and native observables. WindFarm owns turbine/layout geometry, native CFD arrays and layout-group splits. Electro-thermal inputs are variable contacts and 144 material-control records; the shared dataset uses five jointly predicted cell-centered targets: potential, two current components, temperature rise and total heat. Its saved target normalization is TRAIN-only, and native face quantities are required for exact reference conservation checks. See the relevant case documentation before interpreting units or physical metrics.
-
-## Training, evaluation and inverse use
-
-The maintained Thermal research interface provides `train-member-routing`, `resume-member-routing`, and family-specific evaluation subcommands in [`tools/honf_research.py`](tools/honf_research.py). Use `--help` on the relevant subcommand to inspect its options and select a configuration matching the exact model and dataset. The older `train.py` and `evaluate.py` dispatch historical managed case workflows; their checkpoints and profiles remain supported under their own contracts.
+Python 3.10+ and a suitable PyTorch installation are required. From the repository root, install the shared package and the case you want to use:
 
 ```bash
-# Read the available options before choosing a configuration or existing run.
-python tools/honf_research.py train-member-routing --help
-python tools/honf_research.py resume-member-routing --help
-python tools/honf_research.py evaluate-member-routing --help
+python -m pip install -e ".[visualization]"
+python -m pip install -e ./Case_ElectroThermal
+# Other case packages: ./Case_ThermalChannel or ./Case_WindFarm
 python -m hetmf train --help
-python -m hetmf evaluate --help
 ```
 
-For a selected compatible Thermal member-routing configuration and a new output directory, the following illustrates a bounded fit, then an in-place continuation to an explicitly authorized absolute epoch and a checkpoint evaluation. These examples use placeholders; select the correct evaluator for the exact family because the member-routing evaluation command implements a particular Thermal native panel.
+Datasets and trained checkpoints are supplied separately. The electro-thermal case provides a concrete HDF5-based workflow; with a compatible dataset, inspect the configuration before training:
 
 ```bash
-python tools/honf_research.py train-member-routing --config /path/to/config.json \
-  --output /path/to/your-project/new-run --device cuda:0 --epochs 100
-python tools/honf_research.py resume-member-routing --run /path/to/your-project/new-run \
-  --device cuda:0 --stop-after-epoch 200
-python tools/honf_research.py evaluate-member-routing --checkpoint /path/to/compatible/checkpoint.pt \
-  --device cuda:0 --output /path/to/your-project/evaluation
+python -m hetmf train \
+  --config Case_ElectroThermal/configs/train_six_hyperedge_standard.yaml \
+  --dataset /path/to/standard.h5 --output /data2/your-project/new-run \
+  --device cpu --dry-run
 ```
 
-For electro-thermal, choose the exact original config and dataset on resume; evaluation uses a saved checkpoint and the chosen split. The examples assume the run paths have been set locally.
+The dry run reads a small portion of the supplied dataset and checks the model integration without fitting. To train, replace `--dry-run` with `--epochs 100 --yes` and choose the appropriate device. This case's trainer currently requires a mounted `/data2` output filesystem and the free-space headroom declared in its configuration. A run groups its configuration, checkpoints, training history and validation outputs; the electro-thermal normalizer is stored in the matching HDF5 dataset.
 
 ```bash
-python -m hetmf train --config Case_ElectroThermal/configs/train_six_hyperedge_standard.yaml \
-  --dataset /path/to/standard.h5 --output /path/to/your-project/own-run --device cuda:0 --epochs 100 --yes
-python -m hetmf train --config Case_ElectroThermal/configs/train_six_hyperedge_standard.yaml \
-  --dataset /path/to/standard.h5 --output /path/to/your-project/own-run --device cuda:0 \
-  --resume /path/to/your-project/own-run/latest.pt --epochs 200 --yes
-python -m hetmf evaluate --run /path/to/your-project/own-run --dataset /path/to/standard.h5 \
-  --checkpoint best_field.pt --split dev --device cuda:0 --queries 1024
+# Continue the same run to 200 total epochs using its original config and dataset.
+python -m hetmf train \
+  --config Case_ElectroThermal/configs/train_six_hyperedge_standard.yaml \
+  --dataset /path/to/standard.h5 --output /data2/your-project/new-run \
+  --resume /data2/your-project/new-run/latest.pt --epochs 200 --device cuda:0 --yes
+
+# Evaluate a saved checkpoint on the development split.
+python -m hetmf evaluate --run /data2/your-project/new-run \
+  --dataset /path/to/standard.h5 --checkpoint best_field.pt \
+  --split dev --device cuda:0 --queries 1024
 ```
 
-Resume stops must advance beyond the saved checkpoint. Extending a completed configured horizon is a separate decision; `--extend-horizon` on the Thermal research interface does not by itself authorize an extension.
+An epoch visits the declared training population once. Resume with the same data, model configuration and saved normalization. `latest.pt` contains the most recent continuation state; `best_field.pt` is selected by validation performance and may come from an earlier epoch. See the [electro-thermal walkthrough](Case_ElectroThermal/docs/COWORKER_HANDOFF.md), [Thermal data guide](Case_ThermalChannel/Dataset/PHYSICS_AND_DATA.md), and [Wind data guide](Case_WindFarm/Dataset/PHYSICS_AND_DATA.md) for each case's data and commands. Thermal workflows also expose their family-specific interfaces through `python tools/honf_research.py --help`.
 
-An epoch visits the declared training membership once. Preserve run identity, sampling, normalization and optimizer state on resume; retain complete history, latest state, best-field selector and declared milestone checkpoints. A `latest` state is the most recent saved continuation state; `best_field` is selected by a validation metric and can be from a different epoch. Record the literal checkpoint, split and metric when comparing results. The [run artifacts guide](docs/guides/Run_Artifacts_and_Monitoring.md) explains monitoring and compatibility layouts.
+## Adapting HONF to your dataset
 
-The inverse core provides structured requests, design and verification contracts, while a case supplies physical objectives, geometry constraints and an independent verifier. A sampled or surrogate-ranked candidate is not automatically a valid physical design. Select a compatible forward model and verify candidate geometry, controls and physical behavior with the case's reference workflow. The saved forward-field examples above do not establish an inverse-design result.
+The shared core handles information exchange, organization and field reading. Your **case adapter** defines what the records mean, how physical data enters the model, and how predictions return to native units. Add a case package rather than embedding dataset assumptions in the core.
 
-## Project map
+1. **Define the data schema.** Give each scene stable object IDs, coordinates, prescribed features and controls, physical measures, query coordinates and target channels. Use masks for padded arrays or offsets for ragged arrays; retain the native geometry and units.
+2. **Define independent splits and normalization.** Separate training, validation and test scenes before fitting. Keep dependent configurations together where appropriate, fit normalization on training data only, and save it with the run. Targets and post-solve quantities must not become input features.
+3. **Implement the reader and adapter.** Map your schema to the chosen family's actual batch contract. The shared [`BatchData`](src/honf_forward_core/config.py) container and the existing case packages are useful references; some families use a specialized adapter. Set output channels, coordinate transforms and inverse normalization explicitly.
+4. **Supply the learning task.** Define query sampling, physical losses, fieldwise metrics and native-unit visualization. The electro-thermal `HETMFTask` illustrates integration with the shared field-training engine; the [case plugin guide](docs/case_plugin.md) also describes the managed workflow interface.
+5. **Check a small end-to-end example.** Verify input masks, a forward prediction, loss calculation, checkpoint loading and continuation before a full fit. Compare reconstructed fields with references on the physical domain, and label each field's RMSE or relative L2 error on its plot.
 
-| Path | Responsibility |
+For inverse problems, the inverse core supplies request, design and verification interfaces. Your case supplies the design variables, admissible geometry and controls, physical objectives and reference verifier. Verify proposed candidates against that physical workflow before treating them as valid designs.
+
+## Example outputs
+
+<p align="center"><img src="docs/assets/readme/hypergraph_routed_fields.png" alt="Hypergraph-routed thermal-channel example showing reference, prediction and signed error for velocity and temperature" width="1000"></p>
+
+A hypergraph-routed thermal-channel reconstruction. Reference and prediction share a scale within each row; RMSE is computed over 7,464 fluid points in packed native units. These examples illustrate model outputs rather than a controlled comparison between families. [PDF master](docs/assets/readme/hypergraph_routed_fields.pdf).
+
+<p align="center"><img src="docs/assets/readme/relation_anchored_loss.png" alt="Example relation-anchored training history with sampled training losses and validation measurements" width="1000"></p>
+
+A saved relation-anchored training history. Sampled training terms and validation measurements are shown separately because their reductions differ. [PDF master](docs/assets/readme/relation_anchored_loss.pdf).
+
+The [figure collection](docs/assets/readme/README.md) provides full-resolution field and organization views, checkpoint provenance and interpretation details. The [organization visualization guide](docs/guides/Global_Hypergraph_Organization_Visualization.md) explains spatial access regions, original-member service maps and overlapping hyperedges.
+
+## Repository map
+
+| Location | Purpose |
 | --- | --- |
-| `src/honf_forward_core/` | Reusable model families, interaction, organization and readout |
+| `src/honf_forward_core/` | Reusable model families and field-prediction mechanisms |
 | `src/honf_inverse_core/` | Inverse requests, design and verification contracts |
-| `src/honf_runtime/` | Workflow dispatch, training services, artifacts and case interfaces |
-| `Case_ThermalChannel/`, `Case_WindFarm/`, `Case_ElectroThermal/` | Data readers, adapters, physical models and case workflows |
-| `tools/` | Maintained command-line workflows and visualization tools |
-| `docs/guides/` | Current practices, case evidence and historical compatibility guides |
-| `docs/assets/readme/` | Curated README image previews and PDF masters |
+| `src/honf_runtime/` | Shared workflows, training services and run artifacts |
+| `Case_ThermalChannel/`, `Case_WindFarm/`, `Case_ElectroThermal/` | Dataset readers, physical adapters and case workflows |
+| `tools/` | Command-line workflows and visualization tools |
+| `docs/` | Integration guides and curated README figure resources |
 
-Start with the [guide index](docs/guides/README.md), [case plugin guide](docs/case_plugin.md), and [organization visualization guide](docs/guides/Global_Hypergraph_Organization_Visualization.md). Dataset payloads, numerical exports and checkpoints remain outside Git. The selected README previews and PDF masters are distributed in the dedicated image directory; documentation and code provide the interface and provenance needed to use the appropriate local evidence.
-
-The [root-layout and compatibility guide](docs/Root_Layout_and_Compatibility.md) describes installation, checkpoint compatibility, image delivery and external-resource handling. Research reports and work plans are local archives and are excluded from this source distribution.
+Continue with the [guide index](docs/guides/README.md), [case integration guide](docs/case_plugin.md), or [installation and compatibility guide](docs/Root_Layout_and_Compatibility.md).

@@ -23,7 +23,8 @@ def test_project_paths_are_root_relative_and_independent_of_cwd(tmp_path, monkey
 def test_homepage_images_are_portable_decodable_and_not_upscaled():
     text = (ROOT/'README.md').read_text()
     images = re.findall(r'<img src="([^"]+)" alt="([^"]+)" width="(\d+)"', text)
-    assert len(images) == 8
+    assert images
+    assert images[0][0] == 'docs/assets/readme/honf_showcase.png'
     for rel, alt, width in images:
         assert rel.startswith('docs/assets/readme/')
         assert alt.strip()
