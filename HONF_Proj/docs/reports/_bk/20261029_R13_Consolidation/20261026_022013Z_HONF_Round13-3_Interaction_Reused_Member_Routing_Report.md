@@ -1,6 +1,6 @@
 # HONF Round13-3: applied interaction reuse and original-member routing
 
-Historical endpoint report. The implemented correction, native diagnosis, new TRAIN600 epoch-100 lineage, measured approximation costs and tested continuation are recorded in the [corrective relative-member report](HONF_Round13-3_Corrective_Relative_Member_Routing_Report.md). The measurements below remain the original failed Route and Full evidence.
+Historical endpoint report. The implemented correction, native diagnosis, new TRAIN600 epoch-100 lineage, measured approximation costs and tested continuation are recorded in the [corrective relative-member report](20261026_044023Z_HONF_Round13-3_Corrective_Relative_Member_Routing_Report.md). The measurements below remain the original failed Route and Full evidence.
 
 Completed first segments, 26 October 2026 UTC. ThermalChannel only. Both scratch TRAIN600 lineages stopped at epoch 100; no later training is authorized or running for this round.
 
@@ -26,9 +26,9 @@ At each present M address, B_E is the actual applied final `me` gate and B_M is 
 
 Proposal entmax1.5 has a fixed zero-logit null; M/E member entmax distributions have separate nulls. The union of positive proposal/B paths defines candidate IDs, and only beta>0 causes deduplicated query-member value execution. Address coefficients use deterministic batched matrix multiplication; this corrected a real CUDA checkpoint-replay support mismatch caused by sparse atomic accumulation. Its dense scalar coefficient products are charged explicitly. Empty/all-null M addresses give zero typed contexts, with no unorganized E fallback. Query coordinates still enter the permitted joint trunk, so zero member context does not force zero physical output.
 
-The scratch comparison verified 186 exactly equal common state tensors, identical TRAIN600 normalization, case order and sampled native query/control inputs. Heat RMS is 1.319898732. Both objects contain 1,402,049 parameters; Full has 1,368,384 trainable parameters and Route 1,402,049. Full does not exercise/follow gradients through the proposal path. This is not an equal-trainable-parameter or equal-work causal comparison. [Initialization evidence](../../diagnostics/round13_3_20261025/initialization_comparison.json).
+The scratch comparison verified 186 exactly equal common state tensors, identical TRAIN600 normalization, case order and sampled native query/control inputs. Heat RMS is 1.319898732. Both objects contain 1,402,049 parameters; Full has 1,368,384 trainable parameters and Route 1,402,049. Full does not exercise/follow gradients through the proposal path. This is not an equal-trainable-parameter or equal-work causal comparison. [Initialization evidence](../../../../diagnostics/round13_3_20261025/initialization_comparison.json).
 
-Four segmented fitting epochs were used in total: Full epoch 1 then actual resume to epoch 2, and Route epoch 1 then actual resume to epoch 2, on the existing fixed input-stratified TRAIN150/DEV22 manifest. These qualified execution, learning paths, save and recovery only; their weights were not promoted into TRAIN600. Native TRAIN M1 case 0006 and M12 case 0231 checks measured nonzero applicable proposal, member-score/value, joint-head and applied-gate gradients. The finite gate bias is 1.5; proposal output bias −1.5 was selected from TRAIN-only gradient health, not validation errors. No forced exposure or dormant-support fitting was used. [Gradient evidence](../../diagnostics/round13_3_20261025/native_gradient_probe.json).
+Four segmented fitting epochs were used in total: Full epoch 1 then actual resume to epoch 2, and Route epoch 1 then actual resume to epoch 2, on the existing fixed input-stratified TRAIN150/DEV22 manifest. These qualified execution, learning paths, save and recovery only; their weights were not promoted into TRAIN600. Native TRAIN M1 case 0006 and M12 case 0231 checks measured nonzero applicable proposal, member-score/value, joint-head and applied-gate gradients. The finite gate bias is 1.5; proposal output bias −1.5 was selected from TRAIN-only gradient health, not validation errors. No forced exposure or dormant-support fitting was used. [Gradient evidence](../../../../diagnostics/round13_3_20261025/native_gradient_probe.json).
 
 | Arm | Recorded epochs / endpoint | Case visits | TRAIN seconds | Recorded review seconds | Engine active interval s | CLI logged span s | Review epochs |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -115,7 +115,7 @@ Populated input-count strata; each cell is mean / p90 / worst RMSE. Empty catego
 | Route / q_proxy | 9.4246 / 10.25 / 10.457 | 15.622 / 17.255 / 17.664 |
 | Route / module_peak_endpoint_rmse | 2.7909 / 2.8239 / 2.8322 | 4.0583 / 5.6155 / 6.0048 |
 
-Numerical fields, residuals, physical heat and original module/environment coordinates/IDs are retained in four `case_*.npz` files per arm; only those fixed representatives were exported. The reference fluid-valid/physical-weight mask, interface validity and present material masks determine plotted/error supports. [Full metrics, source IDs and traces](../../diagnostics/round13_3_20261025/evaluation_full/result.json); [Route metrics, source IDs and traces](../../diagnostics/round13_3_20261025/evaluation_route/result.json).
+Numerical fields, residuals, physical heat and original module/environment coordinates/IDs are retained in four `case_*.npz` files per arm; only those fixed representatives were exported. The reference fluid-valid/physical-weight mask, interface validity and present material masks determine plotted/error supports. [Full metrics, source IDs and traces](../../../../diagnostics/round13_3_20261025/evaluation_full/result.json); [Route metrics, source IDs and traces](../../../../diagnostics/round13_3_20261025/evaluation_route/result.json).
 
 ## Routing and fixed-checkpoint interventions
 
@@ -242,63 +242,63 @@ The zero-heat probe re-prepares TRAIN M1 case 0003 and M10 case 0348 with origin
 
 The following figures are rendered from retained numerical arrays and histories, with PDF masters and one PNG companion per displayed page. Source IDs, partitions, literal epoch-100 checkpoint, native units/masks, controls and interpretation limits are on the pages/captions. All pages are embedded below; PDF links do not require viewer-side conversion. The short index is: learning/read collapse; M1 fields/detail; M10 fields/detail; three-query routing and applied B; nine-field fidelity; timing; executed work/context/interventions; physical responses/zero heat. The final figure manifest provides the literal inventory.
 
-![Actual TRAIN600 weighted native losses and primary selected-value work through epoch 100](../../diagnostics/round13_3_20261025/figures/training_curves_work.png)
+![Actual TRAIN600 weighted native losses and primary selected-value work through epoch 100](../../../../diagnostics/round13_3_20261025/figures/training_curves_work.png)
 
 Figure 1. Actual TRAIN600 weighted native losses and primary selected-value work through epoch 100. Route M/E rows become zero after epochs 2/1 and remain zero; Full keeps original-member reads and continues reducing native losses. These are training histories, not a reconstructed validation trajectory or a convergence claim.
 
-[PDF master, page 1](../../diagnostics/round13_3_20261025/figures/training_curves_work.pdf#page=1)
+[PDF master, page 1](../../../../diagnostics/round13_3_20261025/figures/training_curves_work.pdf#page=1)
 
-![TRAIN600 source 0003, M1, literal epoch-100 checkpoints: u/p/T references, predictions and signed residuals, surface temperature/q_proxy by original module/sample ID, and material maxima](../../diagnostics/round13_3_20261025/figures/native_fields_M1.png)
+![TRAIN600 source 0003, M1, literal epoch-100 checkpoints: u/p/T references, predictions and signed residuals, surface temperature/q_proxy by original module/sample ID, and material maxima](../../../../diagnostics/round13_3_20261025/figures/native_fields_M1.png)
 
 Figure 2. TRAIN600 source 0003, M1, literal epoch-100 checkpoints: u/p/T references, predictions and signed residuals, surface temperature/q_proxy by original module/sample ID, and material maxima. Fluid-temperature RMSE is Full 1.640 versus Route 8.053; material RMSE is 0.778 versus 5.151. The failed routed field is visible despite an allowed all-null computation; saved native units and physical masks apply.
 
-[PDF master, page 1](../../diagnostics/round13_3_20261025/figures/native_fields.pdf#page=1)
+[PDF master, page 1](../../../../diagnostics/round13_3_20261025/figures/native_fields.pdf#page=1)
 
-![Exposed VAL89 source 0678, M10, epoch 100, with the same field/reference/residual conventions and original module IDs](../../diagnostics/round13_3_20261025/figures/native_fields_M10.png)
+![Exposed VAL89 source 0678, M10, epoch 100, with the same field/reference/residual conventions and original module IDs](../../../../diagnostics/round13_3_20261025/figures/native_fields_M10.png)
 
 Figure 3. Exposed VAL89 source 0678, M10, epoch 100, with the same field/reference/residual conventions and original module IDs. Fluid-temperature RMSE is Full 2.654 versus Route 6.472; material RMSE is 2.669 versus 10.913. Module-peak endpoint RMSE is 2.329 versus 12.912. This is a fixed validation representative, distinct from TRAIN cost anchor 0348.
 
-[PDF master, page 2](../../diagnostics/round13_3_20261025/figures/native_fields.pdf#page=2)
+[PDF master, page 2](../../../../diagnostics/round13_3_20261025/figures/native_fields.pdf#page=2)
 
-![Three fixed physical query locations each for TRAIN M1 0003 and VAL M10 0678](../../diagnostics/round13_3_20261025/figures/routing_support.png)
+![Three fixed physical query locations each for TRAIN M1 0003 and VAL M10 0678](../../../../diagnostics/round13_3_20261025/figures/routing_support.png)
 
 Figure 4. Three fixed physical query locations each for TRAIN M1 0003 and VAL M10 0678. Every final typed read is null, so no positive-beta value edge is drawn; all omitted M/E IDs are retained. Actual B_E remains broad (192/192 M1 and 1,920/1,920 M10 positive entries). Proposal pi, member nulls and final applied MM/ME gates are separate quantities. These are computational access relations, not physical causality or the complete upstream influence graph.
 
-[PDF master, page 1](../../diagnostics/round13_3_20261025/figures/routing_support.pdf#page=1)
+[PDF master, page 1](../../../../diagnostics/round13_3_20261025/figures/routing_support.pdf#page=1)
 
-![All nine equal-case native RMSE observables, overall and over populated VAL89 strata M3/M5/M7/M10 (24/25/25/15 cases)](../../diagnostics/round13_3_20261025/figures/native_fidelity.png)
+![All nine equal-case native RMSE observables, overall and over populated VAL89 strata M3/M5/M7/M10 (24/25/25/15 cases)](../../../../diagnostics/round13_3_20261025/figures/native_fidelity.png)
 
 Figure 5. All nine equal-case native RMSE observables, overall and over populated VAL89 strata M3/M5/M7/M10 (24/25/25/15 cases). Solid/dashed/dotted lines show mean/p90/worst. Full has lower overall mean for all nine; material-temperature mean is 2.354 versus Route 6.204. Exposed validation and native unit keys are labelled; categories with no cases are omitted.
 
-[PDF master, page 1](../../diagnostics/round13_3_20261025/figures/native_fidelity.pdf#page=1)
+[PDF master, page 1](../../../../diagnostics/round13_3_20261025/figures/native_fidelity.pdf#page=1)
 
-![Same physical GPU 1, TRAIN anchors 0003 (M1) and 0348 (M10), one warmup and three repetitions](../../diagnostics/round13_3_20261025/figures/costs_selection_work.png)
+![Same physical GPU 1, TRAIN anchors 0003 (M1) and 0348 (M10), one warmup and three repetitions](../../../../diagnostics/round13_3_20261025/figures/costs_selection_work.png)
 
 Figure 6. Same physical GPU 1, TRAIN anchors 0003 (M1) and 0348 (M10), one warmup and three repetitions. Bars show medians and observed min–max, while the report table gives mean/p90. Route M10 complete native is about 109 ms versus Full 90 ms, despite zero selected M/E values; its 48-case macro is about 503 ms versus 1,380 ms. Native query work and the mixed-case macro are distinct. Lower allocation/training cost accompanies failed reads and does not establish useful acceleration.
 
-[PDF master, page 1](../../diagnostics/round13_3_20261025/figures/cost_work_interventions.pdf#page=1)
+[PDF master, page 1](../../../../diagnostics/round13_3_20261025/figures/cost_work_interventions.pdf#page=1)
 
-![Actually scored, eligible and positive-gate executed contextual pairs for the complete-native anchors and maintained mixed-case 48-case macro](../../diagnostics/round13_3_20261025/figures/context_pair_work.png)
+![Actually scored, eligible and positive-gate executed contextual pairs for the complete-native anchors and maintained mixed-case 48-case macro](../../../../diagnostics/round13_3_20261025/figures/context_pair_work.png)
 
 Figure 7. Actually scored, eligible and positive-gate executed contextual pairs for the complete-native anchors and maintained mixed-case 48-case macro. Both arms score 73,728 EE pairs per scene; Full M1 executes 55,860 EE value edges and Route 73,728 through the segment backend. Decoder null collapse does not remove contextual exchange, cached projections or preparation cost. Route names are destination first; these tables are execution evidence, not causal graphs.
 
-[PDF master, page 2](../../diagnostics/round13_3_20261025/figures/cost_work_interventions.pdf#page=2)
+[PDF master, page 2](../../../../diagnostics/round13_3_20261025/figures/cost_work_interventions.pdf#page=2)
 
-![Five no-fit Route interventions on fixed sources 0003/0274/0293/0678 (TRAIN M1 and exposed VAL M3/M7/M10)](../../diagnostics/round13_3_20261025/figures/route_interventions.png)
+![Five no-fit Route interventions on fixed sources 0003/0274/0293/0678 (TRAIN M1 and exposed VAL M3/M7/M10)](../../../../diagnostics/round13_3_20261025/figures/route_interventions.png)
 
 Figure 8. Five no-fit Route interventions on fixed sources 0003/0274/0293/0678 (TRAIN M1 and exposed VAL M3/M7/M10). B-only, count-matched geometry-B, dense zero-weight candidate execution and dependent-stage recomputation have zero field effect at this endpoint. Geometry member scores reopen 9/272, 21/274 and 30/275 M/E rows over the three VAL queries, with native fluid-field delta RMSE 3.061/3.100/3.186. This changes the function and is not a recovered trained model; the baseline zero-count match is degenerate.
 
-[PDF master, page 3](../../diagnostics/round13_3_20261025/figures/cost_work_interventions.pdf#page=3)
+[PDF master, page 3](../../../../diagnostics/round13_3_20261025/figures/cost_work_interventions.pdf#page=3)
 
-![Existing saved TRAIN reference families 0001/0318/0333/0348 and known homogeneous-zero-heat diagnostics on TRAIN 0003/0348, epoch 100, without response fitting or new solves](../../diagnostics/round13_3_20261025/figures/saved_responses_limits.png)
+![Existing saved TRAIN reference families 0001/0318/0333/0348 and known homogeneous-zero-heat diagnostics on TRAIN 0003/0348, epoch 100, without response fitting or new solves](../../../../diagnostics/round13_3_20261025/figures/saved_responses_limits.png)
 
 Figure 9. Existing saved TRAIN reference families 0001/0318/0333/0348 and known homogeneous-zero-heat diagnostics on TRAIN 0003/0348, epoch 100, without response fitting or new solves. Full mixed-geometry q-normal response error is 14.28; Route is 3.554 with a failed member path. Zero-heat material-temperature RMSE for M10 is Full 7.096 and Route 10.376. Predicted positive-heat flow changes are separate from saved-reference fidelity. These bounded controls do not establish general response or inverse readiness.
 
-[PDF master, page 1](../../diagnostics/round13_3_20261025/figures/saved_responses_limits.pdf#page=1)
+[PDF master, page 1](../../../../diagnostics/round13_3_20261025/figures/saved_responses_limits.pdf#page=1)
 
 ## Verification and recovery handoff
 
-Final focused verification passed 113 CPU tests, 10 plotting/progress/output tests, a final five-test plot rerun, and the actual M12 CUDA checkpoint-replay regression (one test on physical GPU 1). Coverage includes safe loading/recovery, output-only policies, applied-stage provenance, original-ID path witnesses and coalescing, present zero-donor-measure M, independent typed nulls, all-null/absent-M behavior, E eligibility, live gradients, permutation and query ordering/tiling. The native M1/M12 backward and actual four segmented fitting epochs are additional execution evidence, not mature quality qualification. A plotting-classification defect for the new native names/counters was corrected without changing fitting math; final curves are regenerated from unchanged complete histories. [Verification receipt](../../diagnostics/round13_3_20261025/test_results.json).
+Final focused verification passed 113 CPU tests, 10 plotting/progress/output tests, a final five-test plot rerun, and the actual M12 CUDA checkpoint-replay regression (one test on physical GPU 1). Coverage includes safe loading/recovery, output-only policies, applied-stage provenance, original-ID path witnesses and coalescing, present zero-donor-measure M, independent typed nulls, all-null/absent-M behavior, E eligibility, live gradients, permutation and query ordering/tiling. The native M1/M12 backward and actual four segmented fitting epochs are additional execution evidence, not mature quality qualification. A plotting-classification defect for the new native names/counters was corrected without changing fitting math; final curves are regenerated from unchanged complete histories. [Verification receipt](../../../../diagnostics/round13_3_20261025/test_results.json).
 
 Both retained epoch-100 checkpoints were loaded and restored in memory using exact named optimizer moments and Python/NumPy/Torch/CUDA RNG state, preserving TRAIN600/VAL89 membership. This checks endpoint recoverability without executing a post-100 epoch. Actual epoch-advancing resume was tested separately on each qualification lineage from epoch 1 to epoch 2. Latest, best-field and declared epoch-100 checkpoints remain (both best-field aliases select epoch 100); use latest for interruption recovery and the explicit epoch-100 file for this report’s measurements.
 
@@ -321,12 +321,12 @@ python tools/honf_research.py resume-member-routing --run /data2/wanglz/ModularD
 python tools/honf_research.py resume-member-routing --run /data2/wanglz/ModularDT/round13_3_20261025/route --device cuda:1 --devices cuda:1 --stop-after-epoch AUTHORIZED_EPOCH --extend-horizon
 ```
 
-The narrow extension changes only the maintained engine endpoint/milestone inventory; it preserves provider membership, normalization, constant optimizer schedule and named optimizer/RNG state. Ordinary identity/recovery tests reject unrelated provider or schedule changes. No new hash/freeze/admission service was added. Launch and evaluator interfaces are documented in [the maintained guide](../guides/_bk/20261029_Guide_Consolidation/03_R12_R13_Predecessor_Recipes/Interaction_Reused_Member_Routing.md).
+The narrow extension changes only the maintained engine endpoint/milestone inventory; it preserves provider membership, normalization, constant optimizer schedule and named optimizer/RNG state. Ordinary identity/recovery tests reject unrelated provider or schedule changes. No new hash/freeze/admission service was added. Launch and evaluator interfaces are documented in [the maintained guide](../../../guides/_bk/20261029_Guide_Consolidation/03_R12_R13_Predecessor_Recipes/Interaction_Reused_Member_Routing.md).
 
 ## Storage, preservation and closeout
 
 Payload root: `/data2/wanglz/ModularDT/round13_3_20261025`, exposed through the ignored workspace diagnostics symlink. DATA2 was verified mounted before materialization; the declared new payload limit was 4 GiB, peak temporary limit 512 MiB, minimum free headroom 200 GiB on DATA2 and 20 GiB on home. No datasets or historical geometry catalogues were copied and no new persistent cache was created. Protected historical results/checkpoints/shared data, migration backups and unrelated jobs were excluded from cleanup. The original unrelated user deletion/report edit/untracked Round12 plan remain unstaged.
 
-Closeout removed 893 exact-allowlisted disposable files (61,088,598 logical bytes) and 588 empty directories, including successful test fixtures, temporary browser/render caches, superseded figure sets and redundant original response PNG exports. The response summaries retain their original export names; [the cleanup manifest](../../diagnostics/round13_3_20261025/cleanup_manifest.json) and [receipt](../../diagnostics/round13_3_20261025/cleanup_receipt.json) identify every removed visual and its validated replacement. No historical evidence was rewritten. All numerical arrays, metrics/provenance/manifests, logs/failure receipts, complete histories, required checkpoints and the nine selected PDF/PNG pages remain. Protected checkpoint metadata was identical before/after cleanup; every allowlisted payload is absent. Before/after free space was DATA2 3,214,405,898,240 / 3,214,471,663,616 bytes and home 83,003,346,944 / 83,003,346,944 bytes. The retained payload is approximately 303.3 MiB, below the 4 GiB limit; actual DATA2 capacity remains 3.214 TB free and home 77.30 GiB free. The unrelated existing GPU-2 U-S process (PID 2032806) continues unchanged. Required DATA2 bindings remain in place.
+Closeout removed 893 exact-allowlisted disposable files (61,088,598 logical bytes) and 588 empty directories, including successful test fixtures, temporary browser/render caches, superseded figure sets and redundant original response PNG exports. The response summaries retain their original export names; [the cleanup manifest](../../../../diagnostics/round13_3_20261025/cleanup_manifest.json) and [receipt](../../../../diagnostics/round13_3_20261025/cleanup_receipt.json) identify every removed visual and its validated replacement. No historical evidence was rewritten. All numerical arrays, metrics/provenance/manifests, logs/failure receipts, complete histories, required checkpoints and the nine selected PDF/PNG pages remain. Protected checkpoint metadata was identical before/after cleanup; every allowlisted payload is absent. Before/after free space was DATA2 3,214,405,898,240 / 3,214,471,663,616 bytes and home 83,003,346,944 / 83,003,346,944 bytes. The retained payload is approximately 303.3 MiB, below the 4 GiB limit; actual DATA2 capacity remains 3.214 TB free and home 77.30 GiB free. The unrelated existing GPU-2 U-S process (PID 2032806) continues unchanged. Required DATA2 bindings remain in place.
 
-The Markdown was rendered to standalone HTML and visually checked in the existing headless Firefox; all nine selected figure pages were inspected, all relative links/PNG decodes/PDF page counts passed, and prose/captions remain on one continuous source line. [Render/link validation](../../diagnostics/round13_3_20261025/report_validation.json) and [browser inspection](../../diagnostics/round13_3_20261025/report_browser_validation.json) are retained locally. Generated figures, data and one-time helpers remain ignored on DATA2; only durable implementation, tests, configurations, guide/specification and this report are uploaded on the current working branch.
+The Markdown was rendered to standalone HTML and visually checked in the existing headless Firefox; all nine selected figure pages were inspected, all relative links/PNG decodes/PDF page counts passed, and prose/captions remain on one continuous source line. [Render/link validation](../../../../diagnostics/round13_3_20261025/report_validation.json) and [browser inspection](../../../../diagnostics/round13_3_20261025/report_browser_validation.json) are retained locally. Generated figures, data and one-time helpers remain ignored on DATA2; only durable implementation, tests, configurations, guide/specification and this report are uploaded on the current working branch.

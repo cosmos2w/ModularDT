@@ -1,8 +1,23 @@
 # Thermal forward-run archive
 
-**Scope note, 29 October 2026:** this is a preserved location/history ledger for earlier baselines. The 25 October inventory below predates later R13 runs and is not a live enumeration of the current forward-run root. Use the [current guide index](README.md) and each round's report for newer lineages; no run status was refreshed by this documentation cleanup.
+**Scope note, 29 October 2026:** the current section records the six retained references and the new archival mapping. The preserved 25 October ledger below predates later R13 runs and is not a live enumeration of the current forward-run root. Use the [current guide index](README.md) and [consolidated R13 report](../reports/HONF_R13_Consolidated_Work_Report.md) for current scientific and continuation status; historical status statements below retain their original observation dates.
 
-## Current curated layout: 25 October 2026
+## Current curated layout: 29 October 2026
+
+The forward-run root retains exactly the four requested historical references (1404,1804,A2-D,U-H) and the two R13-11 formal candidates (S,X). Eighteen inactive intermediate entries were moved into `_bk/15_20261029_Intermediate_Runs`: three real run directories and fifteen aliases. Real directories were renamed on DATA2; aliases were moved without relocating their external payloads. All recursive payload metadata and the six protected run inventories were verified unchanged. No scientific files or bytes were deleted, and no dataset or checkpoint was copied. The date in the group name is the archive date, not a claimed completion date.
+
+| Retained reference | Current location |
+| --- | --- |
+| 1404 | [routing-only reference](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise) |
+| 1804 | [dense-field reference](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1804_20260905_081349_dense_pairwise_field_adaptation) |
+| A2-D | [existing source alias](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_a2d_full5000) |
+| U-H | [historical full-population lineage](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_u_h_full5000_v1) |
+| R13-11 S | [formal TRAIN600 lineage](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_r13_11s_e_anchor_train600_formal_v1) |
+| R13-11 X | [formal TRAIN600 lineage](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_r13_11x_s_active_e_anchor_train600_formal_v1) |
+
+The [R13 consolidated report](../reports/HONF_R13_Consolidated_Work_Report.md) records the current continuation and scientific status. The exact old→new mapping, entry sizes/inodes, process/open-handle checks and verification are retained in the ignored [archive receipt](../../diagnostics/r13_consolidation_20261029/receipts/run_archive_receipt.json). The existing A2-D payload remains on its original external filesystem. Historical manifests, configs and checkpoint identity strings are provenance and were not rewritten; replaying an archived predecessor recipe may require restoring its original paths. Archival does not upgrade scientific status or authorize another run.
+
+## Historical curated layout: 25 October 2026
 
 The forward-run root now contains seven run entries: the classic 1401/1404/1804 references, A2-D, U-H, U-S and compact soft-only. At the user’s follow-up request, all four Round13-1 runs were also archived, including both development500 parents and both full-data runs; no F13 compatibility aliases remain at the root. This is a navigation and archival change; no training, model selection or scientific-status upgrade is implied.
 
@@ -10,13 +25,13 @@ Twelve other runs (268 regular files, 1,825,784,260 logical bytes) were moved wi
 
 | Key run | Current location | Observed status / reason |
 | --- | --- | --- |
-| 1401 | [Run_1401_20260823_151126_stage7_modern_structured_context](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context) | Classic structured-context reference; saved epoch 5000 milestone |
+| 1401 | [Run_1401_20260823_151126_stage7_modern_structured_context](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/15_20261029_Intermediate_Runs/Run_1401_20260823_151126_stage7_modern_structured_context) | Classic structured-context reference; saved epoch 5000 milestone |
 | 1404 | [Run_1404_20260916_092508_routing_only_pairwise](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise) | Classic routing-only reference; saved epoch 5000 milestone |
 | 1804 | [Run_1804_20260905_081349_dense_pairwise_field_adaptation](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1804_20260905_081349_dense_pairwise_field_adaptation) | Classic dense-field reference; saved epoch 5000 milestone |
 | A2-D | [thermal_a2d_full5000](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_a2d_full5000) | External formal source alias; target unchanged |
 | U-H | [thermal_u_h_full5000_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_u_h_full5000_v1) | Observed full history 5000 |
-| U-S | [thermal_u_s_full5000_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_u_s_full5000_v1) | Restored from archive at epoch 1940; user authorized exact continuation on physical GPU 2 to epoch 5000 |
-| Compact soft-only | [thermal_compact_softonly_full1000_scratch_v2](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_compact_softonly_full1000_scratch_v2) | Observed history 2500; original basename retained |
+| U-S | [thermal_u_s_full5000_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/15_20261029_Intermediate_Runs/thermal_u_s_full5000_v1) | Restored from archive at epoch 1940; user authorized exact continuation on physical GPU 2 to epoch 5000 |
+| Compact soft-only | [thermal_compact_softonly_full1000_scratch_v2](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/15_20261029_Intermediate_Runs/thermal_compact_softonly_full1000_scratch_v2) | Observed history 2500; original basename retained |
 
 The follow-up moved the four Round13-1 runs (116 regular files, 1,123,171,969 logical bytes) into `_bk/14_20261025_Round13_1_Maturation`. All 8,054 original recursive metadata entries were verified after the same-filesystem move; no checkpoint, history, scientific config or manifest was rewritten or deleted. The six retained references were unchanged.
 
@@ -62,13 +77,13 @@ Frozen historical manifests, numerical summaries and checkpoint payloads retain 
 
 | Run | Location | State observed during archive preflight |
 | --- | --- | --- |
-| `Run_1401_20260823_151126_stage7_modern_structured_context` | [Run_1401_20260823_151126_stage7_modern_structured_context](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context) | Observed max saved/history epoch 5000; completed |
+| `Run_1401_20260823_151126_stage7_modern_structured_context` | [Run_1401_20260823_151126_stage7_modern_structured_context](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/15_20261029_Intermediate_Runs/Run_1401_20260823_151126_stage7_modern_structured_context) | Observed max saved/history epoch 5000; completed |
 | `Run_1404_20260916_092508_routing_only_pairwise` | [Run_1404_20260916_092508_routing_only_pairwise](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise) | Observed max saved/history epoch 5000; completed |
 | `Run_1804_20260905_081349_dense_pairwise_field_adaptation` | [Run_1804_20260905_081349_dense_pairwise_field_adaptation](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1804_20260905_081349_dense_pairwise_field_adaptation) | Observed max saved/history epoch 5000; completed |
 | `thermal_compact_tiestop_full1000_scratch_v1` | [thermal_compact_tiestop_full1000_scratch_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/10_20261023_Compact_TieStop_and_U_Controls/thermal_compact_tiestop_full1000_scratch_v1) | Active training; live mutable state excluded from immutable before/after claims |
 | `thermal_u_d_full5000_v1` | [thermal_u_d_full5000_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/10_20261023_Compact_TieStop_and_U_Controls/thermal_u_d_full5000_v1) | Observed max saved/history epoch 3313; no matching live trainer at preflight |
 | `thermal_u_h_full5000_v1` | [thermal_u_h_full5000_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_u_h_full5000_v1) | Observed max saved/history epoch 2273; no matching live trainer at preflight |
-| `thermal_u_s_full5000_v1` | [thermal_u_s_full5000_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/thermal_u_s_full5000_v1) | Observed max saved/history epoch 1940; no matching live trainer at preflight |
+| `thermal_u_s_full5000_v1` | [thermal_u_s_full5000_v1](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/_bk/15_20261029_Intermediate_Runs/thermal_u_s_full5000_v1) | Observed max saved/history epoch 1940; no matching live trainer at preflight |
 
 ### Earlier archived runs and supporting outputs
 

@@ -57,4 +57,4 @@ python tools/honf_research.py evaluate-contextual --kind responses \
   --device cuda:1 --output /data2/wanglz/ModularDT/round13_3_20261025/response_route
 ```
 
-These literal evaluation commands were executed for the retained endpoint; their output directories now contain evidence and must not be overwritten. Use a fresh DATA2 output directory for a later authorized re-evaluation. Read [the Round13-3 report](../../../../reports/HONF_Round13-3_Interaction_Reused_Member_Routing_Report.md) for measured outcomes, the all-null member-read failure, costs, selected figures and the bounded recovery handoff.
+These literal evaluation commands were executed for the retained endpoint; their output directories now contain evidence and must not be overwritten. Use a fresh DATA2 output directory for a later authorized re-evaluation. Read [the Round13-3 report](../../../../reports/_bk/20261029_R13_Consolidation/20261026_022013Z_HONF_Round13-3_Interaction_Reused_Member_Routing_Report.md) for measured outcomes, the all-null member-read failure, costs, selected figures and the bounded recovery handoff.

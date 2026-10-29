@@ -29,7 +29,7 @@ documented in the [consolidation and maturation report](docs/reports/_bk/2026100
 
 `Case_ElectroThermal` provides a standalone HDF5 reader, dimensionless physical reference generator, and portable field-training interface for **Six-hyperedge organization controlling contextualized member reads**, **Dense MM/ME/EM interaction and direct field reads**, and **A2-D**. All three predict the same five fields jointly, with prescribed contact voltage and material records entering before interaction. Start with [the coworker handoff](Case_ElectroThermal/docs/COWORKER_HANDOFF.md) and [dataset introduction report](Case_ElectroThermal/HETMF_DATASET_AND_TRAINING_READINESS_REPORT.md). The shared epoch trainer is `honf_runtime.field_training`; case-owned features, normalization, and physical metrics are in `hetmf.training`. These commands use `python -m hetmf`, independently of the historical Thermal launcher and local-surrogate checkpoints. Shared data and generated report figures remain outside Git.
 
-For the current R13 research workflow, start with the [current guide index](docs/guides/README.md). The profile-registry defaults and earlier family descriptions in this README retain their historical compatibility scope; they are not a replacement for the current round's model design or training authorization.
+For the R13 development outcome and S/X formal candidates, start with the [consolidated R13 report](docs/reports/HONF_R13_Consolidated_Work_Report.md) and [current guide index](docs/guides/README.md). The profile-registry defaults and earlier family descriptions in this README retain their historical compatibility scope; they are not a replacement for the current round's model design or training authorization.
 
 ## 1. Quick start
 
