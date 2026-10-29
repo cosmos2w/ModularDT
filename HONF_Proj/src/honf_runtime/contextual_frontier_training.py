@@ -118,7 +118,7 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
         and model.get("locator_mode") == locator and model.get("retained_mass") == 0.95
         and (model.get("score_calibration") == "inherited"
              or (training.get("local_horizon") == 1000 and model.get("score_calibration") == "bounded_tanh"))
-        and model.get("access_measure", "inventory_unit_total") in ("inventory_unit_total", "mean_one")
+        and model.get("access_measure", "inventory_unit_total") in ("inventory_unit_total", "mean_one", "active_domain")
         and model.get("ee_incidence_aggregation", "pre_gate") in ("pre_gate", "post_gate"))
     return actual in schedules and training.get("curve_every") == 10, valid_model
 INTERACTION_GROUPS_CONFIG_SCHEMA = "thermal_interaction_groups_v1"

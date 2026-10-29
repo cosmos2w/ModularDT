@@ -156,12 +156,15 @@ def build_e_access_measure(
     """Prepare directory measures independently of contextual exchange.
 
     Mean-one counts only active positive-measure E records; M is discrete.
+    Active-domain uses the same inventory measure here and renormalizes it
+    per receiver and role during compilation: M remains a discrete count,
+    while E retains its original physical cell-area ratios.
     """
     measure = build_joint_member_measure(module_mask, environment_mask, environment_measure, dtype=dtype)
-    if access_measure == "inventory_unit_total":
+    if access_measure in ("inventory_unit_total", "active_domain"):
         return measure
     if access_measure != "mean_one":
-        raise ValueError("access_measure must be 'inventory_unit_total' or 'mean_one'.")
+        raise ValueError("Unsupported anchored access_measure.")
     m_count = module_mask.sum(-1, keepdim=True).to(dtype)
     e_count = (environment_mask & (environment_measure > 0)).sum(-1, keepdim=True).to(dtype)
     return torch.cat((measure[:, :module_mask.shape[1]] * m_count,
@@ -180,13 +183,16 @@ def compile_e_access_directory(
     *,
     own_e_member_index: Tensor | None = None,
     retained_mass: float = 0.95,
+    access_measure: str = "inventory_unit_total",
 ) -> EAccessDirectory:
     """Compile receiver-first ``(applied EM + applied EE + self) * μ`` rows.
 
     Each E slot is one directory receiver. The applied blocks are the actual
     final-cycle ``E←M`` and ``E←E`` relations. ``module_measure`` and
     ``environment_measure`` are the caller's already prepared μ values and
-    are multiplied exactly once. The 95% prefix is selected over the whole
+    are multiplied exactly once. Active-domain additionally normalizes their
+    positive support per receiver and role before joint row normalization.
+    The 95% prefix is selected over the whole
     normalized M+E row, with role/original-ID tie ordering; the anchor E
     member is appended if it did not enter that prefix.
     """
@@ -219,6 +225,8 @@ def compile_e_access_directory(
     if (isinstance(retained_mass, bool) or not isinstance(retained_mass, (float, int))
             or not 0.0 < float(retained_mass) <= 1.0):
         raise ValueError("retained_mass must be in (0,1].")
+    if access_measure not in ("inventory_unit_total", "active_domain"):
+        raise ValueError("Unsupported directory access measure.")
 
     if own_e_member_index is None:
         own_e_member_index = torch.arange(environment_count, device=applied_em.device, dtype=torch.long)
@@ -255,7 +263,22 @@ def compile_e_access_directory(
         destinations = module_count + own_e_member_index.clamp(0, max(environment_count - 1, 0))
         valid_self = (environment_mask & (environment_measure > 0)).to(exchange.dtype)
         self_access[batches, rows, destinations] = valid_self
-    unnormalized = (exchange + self_access) * member_measure[:, None, :]
+    if access_measure == "active_domain":
+        gate = exchange + self_access
+        expanded_measure = member_measure[:, None, :].expand_as(gate)
+        active = (gate > 0) & (expanded_measure > 0)
+        role = is_module[None, None, :]
+        module_total = (expanded_measure * (active & role)).sum(-1, keepdim=True)
+        environment_total = (expanded_measure * (active & ~role)).sum(-1, keepdim=True)
+        denominator = torch.where(role, module_total, environment_total)
+        scaled_measure = torch.where(
+            active & (denominator > 0),
+            expanded_measure / denominator.clamp_min(torch.finfo(gate.dtype).tiny),
+            torch.zeros_like(gate),
+        )
+        unnormalized = gate * scaled_measure
+    else:
+        unnormalized = (exchange + self_access) * member_measure[:, None, :]
     row_total = unnormalized.sum(-1, keepdim=True)
     tiny = torch.finfo(unnormalized.dtype).tiny
     access = torch.where(row_total > 0, unnormalized / row_total.clamp_min(tiny),
@@ -497,7 +520,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             raise ValueError("retained_mass must be in (0,1].")
         if score_calibration not in ("inherited", "bounded_tanh"):
             raise ValueError("score_calibration must be 'inherited' or 'bounded_tanh'.")
-        if access_measure not in ("inventory_unit_total", "mean_one"):
+        if access_measure not in ("inventory_unit_total", "mean_one", "active_domain"):
             raise ValueError("Unsupported anchored access_measure.")
         if ee_incidence_aggregation not in ("pre_gate", "post_gate"):
             raise ValueError("Unsupported EE incidence aggregation.")
@@ -568,7 +591,7 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         required = {"schema", "architecture", "locator_mode", "base_model_config", "input_dataset",
                     "input_capability", "query_tile_size", "retained_mass", "score_calibration"}
         if (set(config) - {"access_measure", "ee_incidence_aggregation", "ee_gate_mode", "ee_initial_tau"} != required or config.get("schema") != cls.schema
-                or config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one")
+                or config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one", "active_domain")
                 or config.get("ee_incidence_aggregation", "pre_gate") not in ("pre_gate", "post_gate")):
             raise ValueError("R13-8 anchored routing configuration inventory/schema differs.")
         gate_mode = config.get("ee_gate_mode", "legacy")
@@ -713,6 +736,8 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
             member_measure[:, scene.num_modules:],
             scene.module_mask, scene.environment_mask, scene.module_ids, scene.environment_ids,
             retained_mass=self.retained_mass,
+            access_measure=("active_domain" if self.access_measure == "active_domain"
+                            else "inventory_unit_total"),
         )
         organization.e_access_directory = directory
         organization.work_counts.update({
