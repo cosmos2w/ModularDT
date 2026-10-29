@@ -1,0 +1,1017 @@
+"""CORE HONF scalar diagnostics and generic organizer regularization.
+
+Inputs are the legacy-compatible model output dictionary containing
+`organizer_aux` and `routing_aux`. Outputs are scalar diagnostics for training
+logs plus optional generic anti-collapse regularization. The metrics are
+domain-reusable HONF quantities: assignment entropy, mass concentration,
+query-to-H attention summaries, pairwise/context norms, and feature flags.
+
+This helper does not retain dense query-routing maps; it consumes only scalar
+decoder summaries and static organizer tensors already returned by the model.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, Dict
+
+import torch
+
+EPS = 1.0e-8
+
+HONF_DIAGNOSTIC_KEYS = [
+    "candidate_edge_count",
+    "selected_edge_count",
+    "viable_selected_edge_count",
+    "hard_selected_edge_count",
+    # Case-adaptive residual metrics are reductions of organizer exports only;
+    # tensor SVD/effective-rank work remains evaluation-only.
+    "case_adaptive_edge_count_mean",
+    "case_adaptive_edge_count_min",
+    "case_adaptive_edge_count_max",
+    "case_adaptive_edge_cap_mean",
+    "case_adaptive_soft_edge_count_mean",
+    "case_adaptive_stop_reached_fraction",
+    "case_adaptive_cap_hit_fraction",
+    "residual_fraction_final_mean",
+    "residual_fraction_final_max",
+    "residual_fraction_final_p95",
+    "residual_first_marginal_mean",
+    "residual_second_marginal_mean",
+    "residual_third_marginal_mean",
+    "residual_last_active_marginal_mean",
+    "case_adaptive_stop_margin_mean",
+    "case_adaptive_stop_margin_min",
+    "residual_monotonic_violation_max",
+    "case_adaptive_support_probability_gap_mean",
+    "case_adaptive_support_gap_mean",
+    "case_adaptive_empty_support_count_mean",
+    "case_adaptive_fallback_support_count_mean",
+    "edge_transition_gate_mean",
+    "selection_transition_fraction",
+    "module_sparsity_fraction",
+    "environment_sparsity_fraction",
+    "query_sparsity_fraction",
+    "functional_edge_count",
+    "soft_functional_edge_count",
+    "empty_selected_edge_count",
+    "effective_query_edge_count",
+    "selection_module_coverage",
+    "selection_environment_coverage",
+    "candidate_module_nonzero_fraction",
+    "selected_module_nonzero_fraction",
+    "candidate_environment_nonzero_fraction",
+    "selected_environment_nonzero_fraction",
+    "candidate_module_mass_fraction_min",
+    "candidate_module_mass_fraction_p05",
+    "candidate_module_mass_fraction_mean",
+    "candidate_module_mass_fraction_max",
+    "candidate_environment_mass_fraction_min",
+    "candidate_environment_mass_fraction_p05",
+    "candidate_environment_mass_fraction_mean",
+    "candidate_environment_mass_fraction_max",
+    "candidate_module_purity_min",
+    "candidate_module_purity_mean",
+    "candidate_module_purity_max",
+    "candidate_environment_purity_min",
+    "candidate_environment_purity_mean",
+    "candidate_environment_purity_max",
+    "candidate_source_scale_min",
+    "candidate_source_scale_mean",
+    "candidate_source_scale_max",
+    "candidate_region_scale_min",
+    "candidate_region_scale_mean",
+    "candidate_region_scale_max",
+    "selected_module_probability_mass_min",
+    "selected_module_probability_mass_p05",
+    "selected_module_probability_mass_mean",
+    "selected_environment_probability_mass_min",
+    "selected_environment_probability_mass_p05",
+    "selected_environment_probability_mass_mean",
+    "pre_fallback_zero_support_module_rows",
+    "post_fallback_zero_support_module_rows",
+    "pre_fallback_zero_support_environment_rows",
+    "post_fallback_zero_support_environment_rows",
+    "query_edge_retained_probability_mass_min",
+    "query_edge_retained_probability_mass_p05",
+    "query_edge_retained_probability_mass_mean",
+    "routed_module_retained_mass_min",
+    "routed_module_retained_mass_p05",
+    "routed_module_retained_mass_mean",
+    "routed_query_edge_pair_count",
+    "all_candidate_module_retained_mass_min",
+    "all_candidate_module_retained_mass_p05",
+    "all_candidate_module_retained_mass_mean",
+    "pairwise_dense_route_count",
+    "pairwise_gathered_route_count",
+    "pairwise_selection_ratio",
+    "edge_head_dense_route_count",
+    "edge_head_gathered_route_count",
+    "edge_head_selection_ratio",
+    "routing_execution_gathered",
+    "additive_edge_gate",
+    "background_field_norm",
+    "summed_edge_field_norm",
+    "edge_field_fraction",
+    "edge_contribution_fraction_min",
+    "edge_contribution_fraction_p05",
+    "edge_contribution_fraction_mean",
+    "edge_contribution_fraction_max",
+    "background_edge_cancellation_ratio",
+    "A_mh_entropy",
+    "A_eh_entropy",
+    "module_mass_entropy_norm",
+    "env_mass_entropy_norm",
+    "module_mass_max",
+    "env_mass_max",
+    "query_attention_entropy",
+    "query_attention_effective_edges",
+    "query_attention_max",
+    "pairwise_kernel_gate",
+    "pairwise_context_norm",
+    "hyper_value_context_norm",
+    "total_hyper_context_norm",
+    "nonhyper_context_norm",
+    "uses_hyper_value_context",
+    "uses_pairwise_kernel",
+]
+
+
+def _scalar(value: Any, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Reduce a tensor/value to one scalar on the requested device and dtype."""
+
+    if torch.is_tensor(value):
+        return value.to(device=device, dtype=dtype).mean()
+    if value is None:
+        return torch.zeros((), device=device, dtype=dtype)
+    return torch.as_tensor(float(value), device=device, dtype=dtype)
+
+
+def _entropy(prob: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Compute categorical entropy along one tensor dimension."""
+
+    p = prob.clamp_min(EPS)
+    return -(p * torch.log(p)).sum(dim=dim)
+
+
+def _entropy_norm(prob: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Normalize categorical entropy by its maximum ``log(category_count)``."""
+
+    count = max(int(prob.shape[dim]), 2)
+    return _entropy(prob, dim=dim) / math.log(float(count))
+
+
+def _distribution_stat(
+    value: Any,
+    statistic: str,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Reduce a candidate/edge diagnostic tensor with an explicit statistic."""
+
+    if not torch.is_tensor(value) or value.numel() == 0:
+        return torch.zeros((), device=device, dtype=dtype)
+    flat = value.detach().to(device=device, dtype=dtype).reshape(-1)
+    if statistic == "min":
+        return flat.amin()
+    if statistic == "p05":
+        return torch.quantile(flat.float(), 0.05).to(dtype=dtype)
+    if statistic == "p95":
+        return torch.quantile(flat.float(), 0.95).to(dtype=dtype)
+    if statistic == "mean":
+        return flat.mean()
+    if statistic == "max":
+        return flat.amax()
+    raise ValueError(f"Unknown distribution statistic: {statistic!r}.")
+
+
+def _case_vector(
+    value: Any,
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return a per-case vector from a direct organizer diagnostic.
+
+    Residual-organizer values such as counts, stop margins, and violation
+    bounds are normally ``[B]``.  The small amount of shape tolerance here
+    keeps diagnostics usable with scalar test fixtures and with a future
+    organizer that stores an extra singleton dimension, without changing the
+    legacy organizer path.
+    """
+
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        value = value.to(device=device, dtype=dtype)
+    else:
+        try:
+            value = torch.as_tensor(value, device=device, dtype=dtype)
+        except (TypeError, ValueError):
+            return None
+    if value.numel() == 0:
+        return None
+    if value.ndim == 0:
+        return value.expand(batch_size)
+    if value.shape[0] == batch_size:
+        return value.reshape(batch_size, -1).mean(dim=-1)
+    return value.reshape(-1).mean().expand(batch_size)
+
+
+def _batch_matrix(
+    value: Any,
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return an optional organizer tensor flattened after its batch axis.
+
+    Phase-2 support and marginal tensors have a small, explicit case axis but
+    can carry singleton dimensions depending on whether they came from a
+    packed or an unpacked organizer.  Flattening only the non-batch axes keeps
+    the scalar training diagnostics independent of those storage details.
+    """
+
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        value = value.to(device=device, dtype=dtype)
+    else:
+        try:
+            value = torch.as_tensor(value, device=device, dtype=dtype)
+        except (TypeError, ValueError):
+            return None
+    if value.numel() == 0:
+        return None
+    if value.ndim == 0:
+        return value.reshape(1, 1).expand(batch_size, 1)
+    if value.shape[0] == batch_size:
+        return value.reshape(batch_size, -1)
+    if batch_size == 1:
+        return value.reshape(1, -1)
+    return None
+
+
+def _case_adaptive_count_vector(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Read the residual organizer's explicit hard count, if available."""
+
+    count = _case_vector(
+        organizer.get("case_adaptive_edge_count"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if count is not None:
+        return count
+    hard_mask = organizer.get("hard_case_edge_mask")
+    if torch.is_tensor(hard_mask) and hard_mask.numel():
+        hard_mask = hard_mask.to(device=device, dtype=dtype)
+        if hard_mask.ndim >= 2 and hard_mask.shape[0] == batch_size:
+            return hard_mask.reshape(batch_size, -1).sum(dim=-1)
+    return None
+
+
+def _residual_fraction_at_hard_count(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return the final residual at each case's direct hard mechanism count."""
+
+    explicit = _case_vector(
+        organizer.get("residual_fraction_final"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit is not None:
+        return explicit
+    trace = organizer.get("residual_fraction_trace")
+    if not torch.is_tensor(trace) or trace.numel() == 0 or trace.ndim < 2:
+        return None
+    trace = trace.to(device=device, dtype=dtype)
+    if trace.shape[0] != batch_size or trace.shape[-1] == 0:
+        return None
+    trace = trace.reshape(batch_size, -1)
+    count = _case_adaptive_count_vector(
+        organizer,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if count is None:
+        return trace[:, -1]
+    indices = count.round().long().clamp(min=0, max=trace.shape[-1] - 1)
+    return trace.gather(dim=1, index=indices[:, None]).squeeze(dim=1)
+
+
+def _residual_first_marginal(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return the first extracted marginal explained fraction per case."""
+
+    explicit = _case_vector(
+        organizer.get("residual_first_marginal"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit is not None:
+        return explicit
+    marginal = organizer.get("residual_marginal_explained_fraction")
+    if not torch.is_tensor(marginal) or marginal.numel() == 0 or marginal.ndim < 2:
+        return None
+    marginal = marginal.to(device=device, dtype=dtype)
+    if marginal.shape[0] != batch_size or marginal.shape[-1] == 0:
+        return None
+    return marginal.reshape(batch_size, -1)[:, 0]
+
+
+def _residual_marginal_position(
+    organizer: Dict[str, Any],
+    position: int,
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return one cheap per-case residual marginal by extraction position."""
+
+    aliases = {
+        0: (
+            "residual_first_marginal",
+            "residual_marginal_0",
+            "residual_marginal_explained_fraction_0",
+        ),
+        1: (
+            "residual_second_marginal",
+            "residual_marginal_1",
+            "residual_marginal_explained_fraction_1",
+        ),
+        2: (
+            "residual_third_marginal",
+            "residual_marginal_2",
+            "residual_marginal_explained_fraction_2",
+        ),
+    }
+    for key in aliases.get(position, ()):
+        direct = _batch_matrix(
+            organizer.get(key),
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+        )
+        if direct is not None and direct.shape[-1] > 0:
+            # A direct scalar/vector export is the common case.  If an
+            # organizer stores several values under an alias, use the
+            # requested position while remaining shape tolerant.
+            return direct[:, min(position, direct.shape[-1] - 1)]
+
+    marginal = _batch_matrix(
+        organizer.get("residual_marginal_explained_fraction"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if marginal is None or marginal.shape[-1] <= position:
+        return None
+    return marginal[:, position]
+
+
+def _residual_last_active_marginal(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return the marginal explained fraction at each case's final active step."""
+
+    explicit = _case_vector(
+        organizer.get("residual_last_active_marginal"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit is not None:
+        return explicit
+    marginal = organizer.get("residual_marginal_explained_fraction")
+    if not torch.is_tensor(marginal) or marginal.numel() == 0 or marginal.ndim < 2:
+        return None
+    marginal = marginal.to(device=device, dtype=dtype)
+    if marginal.shape[0] != batch_size or marginal.shape[-1] == 0:
+        return None
+    marginal = marginal.reshape(batch_size, -1)
+    count = _case_adaptive_count_vector(
+        organizer,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if count is None:
+        indices = marginal.new_full((batch_size,), marginal.shape[-1] - 1, dtype=torch.long)
+    else:
+        indices = count.round().long().clamp(min=1, max=marginal.shape[-1]) - 1
+    return marginal.gather(dim=1, index=indices[:, None]).squeeze(dim=1)
+
+
+def _residual_monotonic_violation(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Read the organizer's violation bound, with a trace-only fallback."""
+
+    explicit = _case_vector(
+        organizer.get("residual_monotonic_violation_max"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit is not None:
+        return explicit
+    trace = organizer.get("residual_fraction_trace")
+    if not torch.is_tensor(trace) or trace.numel() == 0 or trace.ndim < 2:
+        return None
+    trace = trace.to(device=device, dtype=dtype)
+    if trace.shape[0] != batch_size or trace.shape[-1] < 2:
+        return trace.new_zeros(batch_size)
+    trace = trace.reshape(batch_size, -1)
+    return torch.relu(trace[:, 1:] - trace[:, :-1]).amax(dim=-1)
+
+
+def _support_probability_gap(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return the per-case absolute hard/soft support probability gap.
+
+    ``edge_survival_soft`` is the Phase-2 gradient surrogate and
+    ``hard_case_edge_mask`` is the support used for the forward path.  The
+    diagnostic intentionally does not substitute the legacy effective mask:
+    doing so would hide a missing Phase-2 export and would make established
+    organizer modes report a misleading zero.
+    """
+
+    direct = _case_vector(
+        organizer.get("case_adaptive_support_gap"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if direct is not None:
+        return direct
+
+    soft = _batch_matrix(
+        organizer.get("edge_survival_soft"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    hard = organizer.get("hard_case_edge_mask")
+    if hard is None:
+        hard = organizer.get("hard_selected_edge_mask")
+    hard_matrix = _batch_matrix(
+        hard,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if soft is None or hard_matrix is None or soft.shape != hard_matrix.shape:
+        return None
+    return (soft - hard_matrix).abs().mean(dim=-1)
+
+
+def _case_sum(
+    organizer: Dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Sum optional per-case count exports without inventing missing values."""
+
+    result: torch.Tensor | None = None
+    for key in keys:
+        value = _case_vector(
+            organizer.get(key),
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+        )
+        if value is None:
+            continue
+        result = value if result is None else result + value
+    return result
+
+
+def compute_code_permutation_equivariance_diagnostics(
+    reference: Dict[str, Any],
+    permuted: Dict[str, Any],
+    permutation: torch.Tensor,
+) -> Dict[str, float]:
+    """Compare two explicit-code runs after aligning anonymous edge order.
+
+    This is an opt-in diagnostic because producing ``permuted`` requires a
+    second organizer/decoder pass. Keeping it outside the standard training
+    logger avoids doubling Phase-2 execution while still providing a reusable,
+    auditable equivariance check for focused tests and evaluations.
+    """
+
+    edge_axes = {
+        "candidate_A_mh": 2,
+        "candidate_A_eh": 2,
+        "candidate_hyper_state": 1,
+        "hyper_state": 1,
+        "edge_quality": 1,
+        "edge_active_mask": 1,
+        "hard_selected_edge_mask": 1,
+        "edge_transition_gate": 1,
+        "edge_viable_mask": 1,
+        "effective_edge_mask": 1,
+        "candidate_module_mass_fraction": 1,
+        "candidate_environment_mass_fraction": 1,
+        "candidate_module_purity": 1,
+        "candidate_environment_purity": 1,
+        "candidate_source_coords": 1,
+        "candidate_source_scale": 1,
+        "candidate_region_coords": 1,
+        "candidate_region_scale": 1,
+        "residual_content_factor": 2,
+        "residual_module_factor": 2,
+        "residual_environment_factor": 2,
+        "residual_mechanism_strength": 1,
+        "edge_survival_weight": 1,
+        "edge_survival_soft": 1,
+        "residual_marginal_explained_fraction": 1,
+        "pred_field_by_edge": 2,
+    }
+    results: Dict[str, float] = {}
+    maxima = []
+    for key, edge_axis in edge_axes.items():
+        reference_value = reference.get(key)
+        permuted_value = permuted.get(key)
+        if not torch.is_tensor(reference_value) or not torch.is_tensor(permuted_value):
+            continue
+        order = permutation.to(device=reference_value.device, dtype=torch.long)
+        aligned = torch.index_select(reference_value, edge_axis, order)
+        residual = (aligned - permuted_value.to(device=aligned.device, dtype=aligned.dtype)).abs()
+        maximum = residual.amax() if residual.numel() else aligned.new_zeros(())
+        mean = residual.mean() if residual.numel() else aligned.new_zeros(())
+        results[f"code_permutation_{key}_max_error"] = float(maximum.detach().cpu())
+        results[f"code_permutation_{key}_mean_error"] = float(mean.detach().cpu())
+        maxima.append(maximum)
+    if torch.is_tensor(reference.get("pred_field")) and torch.is_tensor(permuted.get("pred_field")):
+        residual = (reference["pred_field"] - permuted["pred_field"]).abs()
+        maximum = residual.amax() if residual.numel() else reference["pred_field"].new_zeros(())
+        mean = residual.mean() if residual.numel() else reference["pred_field"].new_zeros(())
+        results["code_permutation_pred_field_max_error"] = float(maximum.detach().cpu())
+        results["code_permutation_pred_field_mean_error"] = float(mean.detach().cpu())
+        maxima.append(maximum)
+    results["code_permutation_equivariance_max_error"] = float(
+        torch.stack(maxima).amax().detach().cpu() if maxima else 0.0
+    )
+    return results
+
+
+def compute_honf_diagnostics(
+    output: Dict[str, Any],
+    *,
+    edge_strength_threshold: float = 0.05,
+    edge_strength_temperature: float = 0.05,
+) -> Dict[str, float]:
+    """Return scalar HONF diagnostics suitable for `metrics.csv`."""
+
+    pred = output["pred_field"]
+    device, dtype = pred.device, pred.dtype
+    org = output.get("organizer_aux", {})
+    routing = output.get("routing_aux", {})
+    strength = org.get("hyper_strength")
+    if not torch.is_tensor(strength):
+        strength = pred.new_zeros(pred.shape[0], 0)
+    strength = strength.to(device=device, dtype=dtype)
+    threshold = float(edge_strength_threshold)
+    temperature = max(float(edge_strength_temperature), EPS)
+    functional = (strength > threshold).to(dtype=dtype).sum(dim=-1).mean() if strength.numel() else pred.new_zeros(())
+    candidate_count = _scalar(org.get("candidate_edge_count"), device, dtype)
+    if org.get("candidate_edge_count") is None:
+        candidate_count = pred.new_tensor(float(strength.shape[-1]))
+    selected_mask = org.get("edge_active_mask")
+    if torch.is_tensor(selected_mask):
+        selected_mask = selected_mask.to(device=device, dtype=dtype)
+        selected_count = selected_mask.sum(dim=-1).mean()
+    else:
+        selected_mask = torch.ones_like(strength)
+        selected_count = _scalar(org.get("selected_edge_count"), device, dtype)
+        if org.get("selected_edge_count") is None:
+            selected_count = candidate_count
+    effective_mask = org.get("effective_edge_mask")
+    if torch.is_tensor(effective_mask):
+        effective_mask = effective_mask.to(device=device, dtype=dtype)
+        viable_selected = (effective_mask > 0).to(dtype=dtype).sum(dim=-1).mean()
+    else:
+        viable_selected = _scalar(org.get("viable_selected_edge_count"), device, dtype)
+        if org.get("viable_selected_edge_count") is None:
+            viable_selected = selected_count
+    soft_effective_mask = (
+        (effective_mask > 0).to(dtype=dtype)
+        if torch.is_tensor(effective_mask)
+        else (selected_mask > 0).to(dtype=dtype)
+    )
+    soft_functional = (
+        (
+            torch.sigmoid((strength - threshold) / temperature)
+            * soft_effective_mask
+        ).sum(dim=-1).mean()
+        if strength.numel()
+        else pred.new_zeros(())
+    )
+
+    # Case-adaptive residual metrics are intentionally sourced from the
+    # organizer's explicit support/count contract.  In particular, do not
+    # infer a residual K from ``hyper_strength``: that threshold belongs to
+    # the legacy functional-edge diagnostic and has different semantics.
+    batch_size = int(pred.shape[0])
+    case_adaptive_count = _case_adaptive_count_vector(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    case_adaptive_cap = _case_vector(
+        org.get("case_adaptive_edge_cap"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_mode = any(
+        key in org
+        for key in (
+            "case_adaptive_edge_count",
+            "case_adaptive_edge_cap",
+            "residual_fraction_trace",
+            "residual_marginal_explained_fraction",
+            "edge_survival_soft",
+        )
+    )
+    edge_survival = org.get("edge_survival_soft")
+    if edge_survival is None:
+        edge_survival = org.get("edge_survival_weight")
+    explicit_soft_count = _case_vector(
+        org.get("case_adaptive_soft_edge_count"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit_soft_count is not None:
+        case_adaptive_soft_count = explicit_soft_count
+    elif residual_mode and torch.is_tensor(edge_survival) and edge_survival.numel() and edge_survival.ndim >= 2:
+        edge_survival = edge_survival.to(device=device, dtype=dtype)
+        case_adaptive_soft_count = edge_survival.reshape(batch_size, -1).sum(dim=-1)
+    else:
+        case_adaptive_soft_count = None
+    stop_reached = _case_vector(
+        org.get("case_adaptive_stop_reached"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    cap_hit = _case_vector(
+        org.get("case_adaptive_cap_hit"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    stop_margin = _case_vector(
+        org.get("case_adaptive_stop_margin"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_final = _residual_fraction_at_hard_count(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_first = _residual_first_marginal(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_second = _residual_marginal_position(
+        org,
+        1,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_third = _residual_marginal_position(
+        org,
+        2,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_last = _residual_last_active_marginal(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_violation = _residual_monotonic_violation(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    support_gap = _support_probability_gap(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    empty_support = _case_vector(
+        org.get("empty_support_count"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if empty_support is None and residual_mode:
+        empty_support = _case_vector(
+            org.get("empty_selected_edge_count"),
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+        )
+    fallback_support = _case_vector(
+        org.get("fallback_support_count"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if fallback_support is None and residual_mode:
+        fallback_support = _case_sum(
+            org,
+            (
+                # These are the rows that required the deterministic
+                # fallback before the organizer repaired their support.  The
+                # post-fallback counters describe the final support quality
+                # and are therefore normally zero after a successful repair;
+                # they must not be reported as fallback usage.
+                "pre_fallback_zero_support_module_rows",
+                "pre_fallback_zero_support_environment_rows",
+            ),
+            batch_size=batch_size,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _mean_or_zero(value: torch.Tensor | None) -> torch.Tensor:
+        return value.mean() if value is not None else pred.new_zeros(())
+
+    def _max_or_zero(value: torch.Tensor | None) -> torch.Tensor:
+        return value.amax() if value is not None else pred.new_zeros(())
+
+    A_mh = org.get("A_mh")
+    A_eh = org.get("A_eh")
+    module_mass = org.get("hyper_module_mass")
+    env_mass = org.get("hyper_env_mass")
+    candidate_module_mass_fraction = org.get("candidate_module_mass_fraction")
+    candidate_environment_mass_fraction = org.get("candidate_environment_mass_fraction")
+    candidate_module_purity = org.get("candidate_module_purity", org.get("hyper_module_purity"))
+    candidate_environment_purity = org.get("candidate_environment_purity", org.get("hyper_env_purity"))
+    candidate_source_scale = org.get("candidate_source_scale", org.get("hyper_source_scale"))
+    candidate_region_scale = org.get("candidate_region_scale", org.get("hyper_region_scale"))
+    edge_contribution_fraction = output.get(
+        "edge_contribution_energy_fraction",
+        routing.get("edge_contribution_energy_fraction"),
+    )
+    if torch.is_tensor(A_mh):
+        A_mh = A_mh.to(device=device, dtype=dtype)
+        module_present = org.get("module_present")
+        if torch.is_tensor(module_present):
+            weights = module_present.to(device=device, dtype=dtype)
+            A_mh_entropy = (_entropy(A_mh, dim=-1) * weights).sum() / weights.sum().clamp_min(EPS)
+        else:
+            A_mh_entropy = _entropy(A_mh, dim=-1).mean()
+    else:
+        A_mh_entropy = pred.new_zeros(())
+    A_eh_entropy = _entropy(A_eh.to(device=device, dtype=dtype), dim=-1).mean() if torch.is_tensor(A_eh) else pred.new_zeros(())
+    module_mass = module_mass.to(device=device, dtype=dtype) if torch.is_tensor(module_mass) else pred.new_zeros(*strength.shape)
+    env_mass = env_mass.to(device=device, dtype=dtype) if torch.is_tensor(env_mass) else pred.new_zeros(*strength.shape)
+
+    empty_selected = org.get("empty_selected_edge_count")
+    if empty_selected is None and strength.numel():
+        empty_mask = selected_mask.to(dtype=torch.bool) & (
+            (module_mass <= EPS) | (env_mass <= EPS)
+        )
+        empty_selected_value = empty_mask.to(dtype=dtype).sum(dim=-1).mean()
+    else:
+        empty_selected_value = _scalar(empty_selected, device, dtype)
+
+    values = {
+        "candidate_edge_count": candidate_count,
+        "selected_edge_count": selected_count,
+        "viable_selected_edge_count": viable_selected,
+        "hard_selected_edge_count": _scalar(org.get("hard_selected_edge_count"), device, dtype),
+        "case_adaptive_edge_count_mean": _mean_or_zero(case_adaptive_count),
+        "case_adaptive_edge_count_min": _distribution_stat(case_adaptive_count, "min", device, dtype),
+        "case_adaptive_edge_count_max": _distribution_stat(case_adaptive_count, "max", device, dtype),
+        "case_adaptive_edge_cap_mean": _mean_or_zero(case_adaptive_cap),
+        "case_adaptive_soft_edge_count_mean": _mean_or_zero(case_adaptive_soft_count),
+        "case_adaptive_stop_reached_fraction": _mean_or_zero(stop_reached),
+        "case_adaptive_cap_hit_fraction": _mean_or_zero(cap_hit),
+        "residual_fraction_final_mean": _mean_or_zero(residual_final),
+        "residual_fraction_final_max": _max_or_zero(residual_final),
+        "residual_fraction_final_p95": _distribution_stat(residual_final, "p95", device, dtype),
+        "residual_first_marginal_mean": _mean_or_zero(residual_first),
+        "residual_second_marginal_mean": _mean_or_zero(residual_second),
+        "residual_third_marginal_mean": _mean_or_zero(residual_third),
+        "residual_last_active_marginal_mean": _mean_or_zero(residual_last),
+        "case_adaptive_stop_margin_mean": _mean_or_zero(stop_margin),
+        "case_adaptive_stop_margin_min": stop_margin.amin() if stop_margin is not None else pred.new_zeros(()),
+        "residual_monotonic_violation_max": _max_or_zero(residual_violation),
+        "case_adaptive_support_probability_gap_mean": _mean_or_zero(support_gap),
+        "case_adaptive_support_gap_mean": _mean_or_zero(support_gap),
+        "case_adaptive_empty_support_count_mean": _mean_or_zero(empty_support),
+        "case_adaptive_fallback_support_count_mean": _mean_or_zero(fallback_support),
+        "edge_transition_gate_mean": _scalar(org.get("edge_transition_gate"), device, dtype),
+        "selection_transition_fraction": _scalar(org.get("selection_transition_fraction"), device, dtype),
+        "module_sparsity_fraction": _scalar(org.get("module_sparsity_fraction"), device, dtype),
+        "environment_sparsity_fraction": _scalar(org.get("environment_sparsity_fraction"), device, dtype),
+        "query_sparsity_fraction": _scalar(org.get("query_sparsity_fraction"), device, dtype),
+        "functional_edge_count": functional,
+        "soft_functional_edge_count": soft_functional,
+        "empty_selected_edge_count": empty_selected_value,
+        "effective_query_edge_count": _scalar(
+            routing.get("effective_query_edge_count", routing.get("mean_query_nonzero_edges")),
+            device,
+            dtype,
+        ),
+        "selection_module_coverage": _scalar(org.get("selection_module_coverage"), device, dtype),
+        "selection_environment_coverage": _scalar(org.get("selection_environment_coverage"), device, dtype),
+        "candidate_module_nonzero_fraction": _scalar(org.get("candidate_module_nonzero_fraction"), device, dtype),
+        "selected_module_nonzero_fraction": _scalar(org.get("selected_module_nonzero_fraction"), device, dtype),
+        "candidate_environment_nonzero_fraction": _scalar(org.get("candidate_environment_nonzero_fraction"), device, dtype),
+        "selected_environment_nonzero_fraction": _scalar(org.get("selected_environment_nonzero_fraction"), device, dtype),
+        "candidate_module_mass_fraction_min": _distribution_stat(candidate_module_mass_fraction, "min", device, dtype),
+        "candidate_module_mass_fraction_p05": _distribution_stat(candidate_module_mass_fraction, "p05", device, dtype),
+        "candidate_module_mass_fraction_mean": _distribution_stat(candidate_module_mass_fraction, "mean", device, dtype),
+        "candidate_module_mass_fraction_max": _distribution_stat(candidate_module_mass_fraction, "max", device, dtype),
+        "candidate_environment_mass_fraction_min": _distribution_stat(candidate_environment_mass_fraction, "min", device, dtype),
+        "candidate_environment_mass_fraction_p05": _distribution_stat(candidate_environment_mass_fraction, "p05", device, dtype),
+        "candidate_environment_mass_fraction_mean": _distribution_stat(candidate_environment_mass_fraction, "mean", device, dtype),
+        "candidate_environment_mass_fraction_max": _distribution_stat(candidate_environment_mass_fraction, "max", device, dtype),
+        "candidate_module_purity_min": _distribution_stat(candidate_module_purity, "min", device, dtype),
+        "candidate_module_purity_mean": _distribution_stat(candidate_module_purity, "mean", device, dtype),
+        "candidate_module_purity_max": _distribution_stat(candidate_module_purity, "max", device, dtype),
+        "candidate_environment_purity_min": _distribution_stat(candidate_environment_purity, "min", device, dtype),
+        "candidate_environment_purity_mean": _distribution_stat(candidate_environment_purity, "mean", device, dtype),
+        "candidate_environment_purity_max": _distribution_stat(candidate_environment_purity, "max", device, dtype),
+        "candidate_source_scale_min": _distribution_stat(candidate_source_scale, "min", device, dtype),
+        "candidate_source_scale_mean": _distribution_stat(candidate_source_scale, "mean", device, dtype),
+        "candidate_source_scale_max": _distribution_stat(candidate_source_scale, "max", device, dtype),
+        "candidate_region_scale_min": _distribution_stat(candidate_region_scale, "min", device, dtype),
+        "candidate_region_scale_mean": _distribution_stat(candidate_region_scale, "mean", device, dtype),
+        "candidate_region_scale_max": _distribution_stat(candidate_region_scale, "max", device, dtype),
+        "selected_module_probability_mass_min": _scalar(org.get("selected_module_probability_mass_min"), device, dtype),
+        "selected_module_probability_mass_p05": _scalar(org.get("selected_module_probability_mass_p05"), device, dtype),
+        "selected_module_probability_mass_mean": _scalar(org.get("selected_module_probability_mass_mean"), device, dtype),
+        "selected_environment_probability_mass_min": _scalar(org.get("selected_environment_probability_mass_min"), device, dtype),
+        "selected_environment_probability_mass_p05": _scalar(org.get("selected_environment_probability_mass_p05"), device, dtype),
+        "selected_environment_probability_mass_mean": _scalar(org.get("selected_environment_probability_mass_mean"), device, dtype),
+        "pre_fallback_zero_support_module_rows": _scalar(org.get("pre_fallback_zero_support_module_rows"), device, dtype),
+        "post_fallback_zero_support_module_rows": _scalar(org.get("post_fallback_zero_support_module_rows"), device, dtype),
+        "pre_fallback_zero_support_environment_rows": _scalar(org.get("pre_fallback_zero_support_environment_rows"), device, dtype),
+        "post_fallback_zero_support_environment_rows": _scalar(org.get("post_fallback_zero_support_environment_rows"), device, dtype),
+        "query_edge_retained_probability_mass_min": _scalar(routing.get("query_edge_retained_probability_mass_min"), device, dtype),
+        "query_edge_retained_probability_mass_p05": _scalar(routing.get("query_edge_retained_probability_mass_p05"), device, dtype),
+        "query_edge_retained_probability_mass_mean": _scalar(routing.get("query_edge_retained_probability_mass_mean"), device, dtype),
+        "routed_module_retained_mass_min": _scalar(routing.get("routed_module_retained_mass_min"), device, dtype),
+        "routed_module_retained_mass_p05": _scalar(routing.get("routed_module_retained_mass_p05"), device, dtype),
+        "routed_module_retained_mass_mean": _scalar(routing.get("routed_module_retained_mass_mean"), device, dtype),
+        "routed_query_edge_pair_count": _scalar(routing.get("routed_query_edge_pair_count"), device, dtype),
+        "all_candidate_module_retained_mass_min": _scalar(routing.get("all_candidate_module_retained_mass_min"), device, dtype),
+        "all_candidate_module_retained_mass_p05": _scalar(routing.get("all_candidate_module_retained_mass_p05"), device, dtype),
+        "all_candidate_module_retained_mass_mean": _scalar(routing.get("all_candidate_module_retained_mass_mean"), device, dtype),
+        "pairwise_dense_route_count": _scalar(routing.get("pairwise_dense_route_count"), device, dtype),
+        "pairwise_gathered_route_count": _scalar(routing.get("pairwise_gathered_route_count"), device, dtype),
+        "pairwise_selection_ratio": _scalar(routing.get("pairwise_selection_ratio"), device, dtype),
+        "edge_head_dense_route_count": _scalar(routing.get("edge_head_dense_route_count"), device, dtype),
+        "edge_head_gathered_route_count": _scalar(routing.get("edge_head_gathered_route_count"), device, dtype),
+        "edge_head_selection_ratio": _scalar(routing.get("edge_head_selection_ratio"), device, dtype),
+        "routing_execution_gathered": _scalar(org.get("routing_execution_gathered"), device, dtype),
+        "additive_edge_gate": _scalar(routing.get("additive_edge_gate"), device, dtype),
+        "background_field_norm": _scalar(routing.get("background_field_norm"), device, dtype),
+        "summed_edge_field_norm": _scalar(routing.get("summed_edge_field_norm"), device, dtype),
+        "edge_field_fraction": _scalar(routing.get("edge_field_fraction"), device, dtype),
+        "edge_contribution_fraction_min": _distribution_stat(edge_contribution_fraction, "min", device, dtype),
+        "edge_contribution_fraction_p05": _distribution_stat(edge_contribution_fraction, "p05", device, dtype),
+        "edge_contribution_fraction_mean": _distribution_stat(edge_contribution_fraction, "mean", device, dtype),
+        "edge_contribution_fraction_max": _distribution_stat(edge_contribution_fraction, "max", device, dtype),
+        "background_edge_cancellation_ratio": _scalar(
+            routing.get("background_edge_cancellation_ratio"), device, dtype
+        ),
+        "A_mh_entropy": A_mh_entropy,
+        "A_eh_entropy": A_eh_entropy,
+        "module_mass_entropy_norm": _entropy_norm(module_mass, dim=-1).mean() if module_mass.numel() else pred.new_zeros(()),
+        "env_mass_entropy_norm": _entropy_norm(env_mass, dim=-1).mean() if env_mass.numel() else pred.new_zeros(()),
+        "module_mass_max": module_mass.amax(dim=-1).mean() if module_mass.numel() else pred.new_zeros(()),
+        "env_mass_max": env_mass.amax(dim=-1).mean() if env_mass.numel() else pred.new_zeros(()),
+        "query_attention_entropy": _scalar(routing.get("hyper_attention_entropy"), device, dtype),
+        "query_attention_effective_edges": _scalar(routing.get("hyper_attention_effective_edges"), device, dtype),
+        "query_attention_max": _scalar(routing.get("hyper_attention_max"), device, dtype),
+        "pairwise_kernel_gate": _scalar(routing.get("pairwise_kernel_gate"), device, dtype),
+        "pairwise_context_norm": _scalar(routing.get("pairwise_context_norm"), device, dtype),
+        "hyper_value_context_norm": _scalar(routing.get("hyper_value_context_norm"), device, dtype),
+        "total_hyper_context_norm": _scalar(routing.get("total_hyper_context_norm", routing.get("hyper_context_norm")), device, dtype),
+        "nonhyper_context_norm": _scalar(routing.get("nonhyper_context_norm"), device, dtype),
+        "uses_hyper_value_context": _scalar(routing.get("uses_hyper_value_context"), device, dtype),
+        "uses_pairwise_kernel": _scalar(routing.get("pairwise_kernel_enabled"), device, dtype),
+    }
+    packed = torch.stack(
+        [values[key].reshape(()) for key in HONF_DIAGNOSTIC_KEYS]
+    ).detach().cpu()
+    return {
+        key: float(value)
+        for key, value in zip(HONF_DIAGNOSTIC_KEYS, packed.tolist())
+    }
+
+
+def organizer_regularization_loss(output: Dict[str, Any], config: Dict[str, Any] | None) -> torch.Tensor:
+    """Generic HONF anti-collapse regularization; disabled unless configured."""
+
+    cfg = dict(config or {})
+    pred = output["pred_field"]
+    if not bool(cfg.get("enabled", False)):
+        return pred.new_zeros(())
+    org = output.get("organizer_aux", {})
+    strength = org.get("hyper_strength")
+    if not torch.is_tensor(strength):
+        return pred.new_zeros(())
+    strength = strength.to(device=pred.device, dtype=pred.dtype)
+    threshold = float(cfg.get("edge_strength_threshold", 0.05))
+    temperature = max(float(cfg.get("edge_strength_temperature", 0.05)), EPS)
+    soft_active = torch.sigmoid((strength - threshold) / temperature).sum(dim=-1)
+    target_active = float(cfg.get("target_active_edges", max(1, strength.shape[-1])))
+    loss = pred.new_zeros(())
+    active_weight = float(cfg.get("active_edge_weight", 0.0))
+    if active_weight:
+        loss = loss + pred.new_tensor(active_weight) * (soft_active - target_active).square().mean()
+
+    min_fraction = float(cfg.get("min_mass_entropy_fraction", 0.0))
+    for key, weight_key in (
+        ("hyper_env_mass", "env_mass_entropy_floor_weight"),
+        ("hyper_module_mass", "module_mass_entropy_floor_weight"),
+    ):
+        weight = float(cfg.get(weight_key, 0.0))
+        mass = org.get(key)
+        if weight and torch.is_tensor(mass):
+            entropy_norm = _entropy_norm(mass.to(device=pred.device, dtype=pred.dtype), dim=-1)
+            loss = loss + pred.new_tensor(weight) * torch.relu(pred.new_tensor(min_fraction) - entropy_norm).square().mean()
+
+    max_weight = float(cfg.get("max_mass_weight", 0.0))
+    max_fraction = float(cfg.get("max_mass_fraction", 1.0))
+    if max_weight:
+        for key in ("hyper_env_mass", "hyper_module_mass"):
+            mass = org.get(key)
+            if torch.is_tensor(mass):
+                mass = mass.to(device=pred.device, dtype=pred.dtype)
+                loss = loss + pred.new_tensor(max_weight) * torch.relu(mass.amax(dim=-1) - max_fraction).square().mean()
+
+    duplicate_weight = float(cfg.get("duplicate_weight", 0.0))
+    if duplicate_weight:
+        src = org.get("hyper_source_coords")
+        dst = org.get("hyper_region_coords")
+        if torch.is_tensor(src) and torch.is_tensor(dst) and src.shape[-2] > 1:
+            vectors = torch.cat([src, dst], dim=-1).to(device=pred.device, dtype=pred.dtype)
+            vectors = vectors - vectors.mean(dim=-2, keepdim=True)
+            vectors = vectors / vectors.norm(dim=-1, keepdim=True).clamp_min(EPS)
+            sim = torch.einsum("bkh,blh->bkl", vectors, vectors)
+            eye = torch.eye(sim.shape[-1], device=sim.device, dtype=torch.bool).unsqueeze(0)
+            threshold_sim = float(cfg.get("duplicate_similarity_threshold", 0.95))
+            dup = torch.relu(sim.masked_fill(eye, -1.0) - threshold_sim).square()
+            loss = loss + pred.new_tensor(duplicate_weight) * dup.mean()
+    return loss

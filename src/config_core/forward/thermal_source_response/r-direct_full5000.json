@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "profile_name": "thermal_source_response_r_direct_full5000_v1",
+  "workflow_scope": "formal_full_train_v1",
+  "preferred_response_family": "R-direct",
+  "mode": "direct",
+  "seed": 0,
+  "architecture": {
+    "hidden": 64,
+    "message": 64,
+    "background_mode": true
+  },
+  "data": {
+    "training_split": "train",
+    "normalization_source": "all_original_train_only",
+    "expected_train_case_count": 600,
+    "startup_validation": {
+      "scope": "fixed25_v1_DEV22_exposed",
+      "manifest_sha256": "933b0138ba2f8447a1ecadfe31fd0bb2cb4a05607d3ac3d9f0dc79419f196044",
+      "expected_case_count": 22,
+      "maximum_new_epochs": 3
+    },
+    "formal_validation": {
+      "primary_scope": "original_test_excluding_train_duplicate",
+      "compatibility_scope": "original_test_all_rows",
+      "excluded_training_duplicate_case_id": "0273",
+      "expected_primary_case_count": 89,
+      "expected_compatibility_case_count": 90
+    }
+  },
+  "budget": {
+    "fluid_queries": 1024,
+    "material_queries_per_module": 32,
+    "surface_stride": 4,
+    "microbatch_cases": 8,
+    "effective_cases": 48,
+    "operator_rows_per_case": 128
+  },
+  "schedule": {
+    "horizon_epochs": 5000,
+    "hold_fraction": 0.4,
+    "initial_lr": 0.0003,
+    "final_lr": 0.000003
+  },
+  "optimizer": {
+    "name": "AdamW",
+    "weight_decay": 0.00001,
+    "gradient_clip": 1.0
+  },
+  "loss": {
+    "q_proxy_coefficient": 0.05,
+    "use_measured_response": true,
+    "use_qualified_operator": true
+  },
+  "checkpointing": {
+    "monitoring_interval_epochs": 100,
+    "save_latest": true,
+    "save_best_field": true,
+    "milestone_epochs": [
+      100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
+      1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000,
+      2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900, 3000,
+      3100, 3200, 3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000,
+      4100, 4200, 4300, 4400, 4500, 4600, 4700, 4800, 4900, 5000
+    ]
+  }
+}

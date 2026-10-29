@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from pathlib import PurePosixPath
@@ -25,21 +24,21 @@ GENERATED_SUFFIXES = {
     ".pth",
     ".svg",
 }
-RUN_DIAGNOSTIC = re.compile(
-    r"^HONF_Proj/tools/diagnostics/(?:run_run\d|render_run\d|run_dense\d)[^/]*\.py$"
-)
+README_ASSET_ROOT = "docs/assets/readme/"
 
 
 def forbidden(path: str) -> bool:
-    if path.startswith("HONF_Proj/diagnostics/generated/"):
+    # The historical nested layout is also recognized when auditing old branches.
+    project_path = path.removeprefix("HONF_Proj/")
+    local_roots = ("docs/reports", "UpgradePlan", "diagnostics", "Trained_Results", "local_history", "tools/diagnostics")
+    if any(project_path == root or project_path.startswith(root + "/") for root in local_roots):
         return True
-    if path.startswith("HONF_Proj/docs/reports/run1503_v3_organizer_diagnostics/"):
-        return True
+    suffix = PurePosixPath(path).suffix.lower()
+    if project_path.startswith(README_ASSET_ROOT):
+        return suffix not in {".png", ".pdf"} and project_path != README_ASSET_ROOT + "README.md"
     if "/generated/" in path or "/figures/" in path:
         return True
-    if path.startswith("HONF_Proj/docs/reports/") and path.endswith(".json"):
-        return True
-    return bool(RUN_DIAGNOSTIC.fullmatch(path)) or PurePosixPath(path).suffix.lower() in GENERATED_SUFFIXES
+    return suffix in GENERATED_SUFFIXES | {".jpg", ".jpeg", ".gif", ".webp"}
 
 
 def outgoing_paths(local_oid: str, remote_oid: str) -> list[str]:

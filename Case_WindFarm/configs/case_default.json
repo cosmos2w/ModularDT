@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "profile_name": "windfarm_preprocessing_default",
+  "case_id": "WindFarm",
+  "workflow": "preprocessing_only",
+  "plugin": null,
+  "dataset": {
+    "manifest": "project://Case_WindFarm/Dataset/dataset_manifest.json",
+    "locations": "project://Case_WindFarm/Dataset/dataset_locations.local.json",
+    "compact_dataset_id": "wind_farm_tensor_v1",
+    "volume_dataset_id": "wind_farm_volume_v1",
+    "group_key": "layout_index",
+    "require_complete_volume_runs": true,
+    "memory_map_volume": true,
+    "allow_npz_metadata_fallback": true
+  },
+  "preprocessing": {
+    "check_required_keys": true,
+    "check_shapes_and_dtypes": true,
+    "check_finite_fields": true,
+    "check_offset_invariants": true,
+    "mask_padded_rasters": true,
+    "preserve_source_row_order": true,
+    "write_group_split_metadata": true,
+    "group_split": {
+      "strategy": "layout_grouped_holdout",
+      "seed": 42,
+      "train_fraction": 0.7,
+      "validation_fraction": 0.15,
+      "test_fraction": 0.15
+    }
+  },
+  "visualization": {
+    "fields": ["speed", "ux", "uy", "uz"],
+    "representative_cases": [
+      "gen_0055_wd300",
+      "gen_0044_wd285",
+      "gen_0178_wd270"
+    ],
+    "hub_height_m": 70.0,
+    "vertical_plane_y_m": [0.0, 400.0],
+    "streamwise_plane_y_m": 0.0,
+    "crosswind_plane_x_m": 0.0,
+    "camera": {
+      "elevation_deg": 25.0,
+      "azimuth_deg": -55.0
+    },
+    "hub_stride_xy": 3,
+    "vertical_stride_xz": 1,
+    "shared_colour_scale_for_comparisons": true
+  }
+}

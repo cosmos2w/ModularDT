@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "source": "existing physical_response_atlas_20260926",
+  "partition_label": "stored final_review families previously exposed in response evaluation; auxiliary paired inverse tasks",
+  "pair": ["baseline", "heat_transfer_plus"],
+  "selection": "all four existing final_review families at M3, M5, M7 and M10; same geometry, material, operating context and public total within each pair",
+  "stencils": [
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/final_review_generated_M3_seed20260929_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/final_review_generated_M5_seed20260931_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/final_review_generated_M7_seed20260933_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/final_review_generated_M10_seed20260936_responses.npz"
+  ]
+}

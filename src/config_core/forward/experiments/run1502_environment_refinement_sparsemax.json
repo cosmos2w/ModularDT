@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "_note": "Run 1502 candidate: change only the final environmental source refinement from entmax15 to masked sparsemax; retain Run 1501 proposal/module/query routing and all training/data settings.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "interface_model": {
+          "environment_refinement_normalizer": "sparsemax"
+        }
+      }
+    }
+  },
+  "case": {}
+}

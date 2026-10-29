@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "_note": "Strict Stage-7 K-scaling audit overlay: accepted fused dense legacy-kernel model with only K changed from 6 to 4; initial launch stops at epoch 500 while preserving 2500/5000 milestones for gated continuation.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "num_hyperedges": 4,
+        "pairwise_aggregation_mode": "fused_query_module",
+        "query_module_retained_mass_floor": 1.0,
+        "pairwise_kernel_mode": "legacy_mlp",
+        "routing_execution": "dense",
+        "query_module_limit": 0
+      }
+    },
+    "checkpointing": {
+      "save_epoch_milestones": [500, 2500, 5000]
+    }
+  }
+}

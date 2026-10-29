@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "_note": "Stage 6 frozen-screen winner S0: Run-1302 fixed K=6 softmax roles, descriptor-first scale 0.35, existing learned query geometry, no added query-locality prior, exact additive output, dense reference execution, and split optimizer.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "organizer_mode": "fixed_projection",
+        "num_hyperedges": 6,
+        "edge_capacity": 0,
+        "edge_selection_mode": "all",
+        "selection_start_epoch": -1,
+        "selection_transition_epochs": 0,
+        "selection_warmup_mode": "legacy",
+        "module_assignment_normalizer": "softmax",
+        "environment_assignment_normalizer": "softmax",
+        "query_assignment_normalizer": "softmax",
+        "module_sparsity_start_epoch": -1,
+        "module_sparsity_transition_epochs": 0,
+        "environment_sparsity_start_epoch": -1,
+        "environment_sparsity_transition_epochs": 0,
+        "query_sparsity_start_epoch": -1,
+        "query_sparsity_transition_epochs": 0,
+        "environment_locality_mode": "none",
+        "query_locality_mode": "none",
+        "query_locality_strength": null,
+        "mechanism_state_mode": "descriptor_first",
+        "mechanism_latent_residual_scale": 0.35,
+        "field_assembly_mode": "edge_additive",
+        "additive_background_mode": "dense_query_attention",
+        "routing_execution": "dense",
+        "query_edge_limit": 0,
+        "query_module_limit": 0
+      }
+    },
+    "training": {
+      "learning_rate": 0.0003,
+      "organizer_learning_rate": 0.0001
+    },
+    "checkpointing": {
+      "save_epoch_milestones": [250, 500, 1000, 1500, 2500]
+    }
+  },
+  "case": {}
+}

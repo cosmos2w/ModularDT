@@ -1,0 +1,63 @@
+# Configuration composition
+
+One core launch profile references one case profile. The core profile owns the
+workflow, model family, logical dataset selection, HONF architecture, generic
+optimizer/runtime settings, checkpoint policy, and run identity. The case
+profile owns resource loading, physical parameters, local dependencies, losses,
+evaluation defaults, and local-module specifications.
+
+Composition is deterministic: the two source objects are deep-copied into an
+effective compatibility payload, an optional strict experiment overlay and
+explicit CLI overrides are applied, and a canonical SHA-256 hash is
+calculated. Source profiles, the overlay, resolved payload, and overrides are
+stored in the run. Top-level unknown sections and a case ID mismatch fail
+before a directory is reserved.
+
+An overlay is passed with `--experiment-overlay`. It has separate `core` and
+`case` namespaces and may modify only keys already declared by the selected
+source profiles; it cannot create fields or cross ownership boundaries. The
+archived ablations under `src/config_core/forward/experiments/` demonstrate the
+format. The run stores `experiment_overlay.json` plus its source hash.
+
+Paths use explicit anchors:
+
+- `project://...` is relative to the repository root;
+- `config://...` is relative to the configuration containing it;
+- an absolute path remains absolute;
+- a plain relative CLI path is resolved by the runtime's documented path rule.
+
+The dataset selected by a core profile is a logical ID, never an HDF5 path.
+The case manifest defines its identity/schema and the ignored local map defines
+its machine-specific location. CLI `--dataset` is an explicit evaluation-only
+override.
+
+Training is confirmation-gated. `--dry-run` performs validation and prints the
+exact proposed run without writes; `--yes` is required for unattended use.
+Run IDs are normalized to four digits and cannot collide within a result
+family.
+
+An empty validation split is an error. Reusing training samples for validation
+requires `allow_train_as_validation: true` in the applicable case dataset or
+local-module namespace and is announced as a warning.
+
+## Case-adaptive residual candidate
+
+`src/config_core/forward/case_adaptive_residual_context.json` is a complete
+research candidate and is intentionally not the recommended profile. Its
+`organizer_mode="case_adaptive_residual"` setting uses `num_hyperedges=0` to
+make clear that there is no global scientific K. Runtime mechanism tensors are
+packed to the largest active module count in a batch; hard K is selected per
+case at evaluation, while differentiable survival weights are used during
+training. The profile keeps context fusion, dense fused query-module routing,
+the legacy pairwise kernel, and disabled organizer count regularization.
+
+The Phase-2 tensor candidate is
+`src/config_core/forward/case_adaptive_tensor_residual_context.json`. It is a
+separate complete profile (`organizer_mode="case_adaptive_tensor_residual"`)
+with 32-dimensional residual interaction vectors, a 1.5 K/cap multiplier,
+one refinement step, and a 500-epoch research run (`1701`). Its full
+`residual_interaction_tensor` is emitted only when evaluation is explicitly
+requested with `--tensor-diagnostics`; otherwise the forward output remains
+compact. The candidate adds rank, support-gap, content-factor, and K-by-M
+diagnostics without changing the recommended profile or the Run-1700/Run-1401
+configs.

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "thermalchannel_native_response_control_staged",
+  "architecture": "checkpoint_native_dense_or_sparse",
+  "initialization_mode": "native_checkpoint",
+  "historical_value_replay": "one converged packed train case per response update in both arms",
+  "max_optimizer_updates": 2000,
+  "max_epochs": 500,
+  "formal_arm_update_ceiling": 20000,
+  "checkpoint_every_updates": 25,
+  "review_updates": [100, 300, 1000, 2000],
+  "random_seed": 2317,
+  "stages": [
+    {"name": "value_warmup", "start_update": 0, "stop_update": 20, "active_terms": ["value"]},
+    {"name": "finite_response", "start_update": 20, "stop_update": 100, "active_terms": ["value", "finite"]},
+    {"name": "finite_response_and_constraints", "start_update": 100, "stop_update": 300, "active_terms": ["value", "finite", "decision", "constraint"]},
+    {"name": "response_and_constraints_mixed_unknown", "start_update": 300, "stop_update": 2000, "active_terms": ["value", "finite", "decision", "constraint"]}
+  ],
+  "mixed_response_policy": "unknown numerical floor; no mixed target in this bounded fit"
+}

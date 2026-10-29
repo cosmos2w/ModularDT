@@ -1,0 +1,42 @@
+"""Generic HONF evaluation data contracts."""
+
+from .error_attribution import SquaredErrorAttribution, weighted_squared_error_attribution
+from .hypergraph_plan import (
+    extract_hypergraph_plan,
+    load_hypergraph_plan,
+    save_hypergraph_plan,
+    summarize_hypergraph_plan,
+    validate_hypergraph_plan,
+)
+from .topology_signature import (
+    canonicalize_topology_signature,
+    compare_topology_signatures,
+    evaluate_structure_relations,
+    extract_topology_signature,
+    load_topology_signature,
+    reconstruct_environment_module_influence,
+    reconstruct_module_affinity,
+    save_topology_signature,
+    summarize_topology_signature,
+    validate_topology_signature,
+)
+
+__all__ = [
+    "SquaredErrorAttribution",
+    "canonicalize_topology_signature",
+    "compare_topology_signatures",
+    "evaluate_structure_relations",
+    "extract_hypergraph_plan",
+    "extract_topology_signature",
+    "load_hypergraph_plan",
+    "load_topology_signature",
+    "reconstruct_environment_module_influence",
+    "reconstruct_module_affinity",
+    "save_hypergraph_plan",
+    "save_topology_signature",
+    "summarize_hypergraph_plan",
+    "summarize_topology_signature",
+    "validate_hypergraph_plan",
+    "validate_topology_signature",
+    "weighted_squared_error_attribution",
+]

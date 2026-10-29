@@ -1,118 +1,65 @@
-# Python/runtime caches
+# Python, packaging and editor state
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
-# Local agent/editor state
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+node_modules/
 .codex/
-.codex
+.agents/
 .vscode/
 .idea/
 
-# Local notes not needed for running the demo
-Notes.txt
-MODEL_EXPLAIN.txt
-0_Demo_MultiCylinder/MODEL_EXPLAIN.txt
-INVERSE_CODING.md
-Creat_Proj.md
-HONF_Proj/HONF_Forward_Upgrade_Codex_Goal_Plan.md
+# Local research archives and machine bindings
+/diagnostics
+/Trained_Results
+/UpgradePlan
+/docs/reports
+/local_history
+/.tmp_anchored_tests
+/HONF_Proj
+**/dataset_locations.local.json
+/Case_*/Dataset/links/*
+!/Case_*/Dataset/links/.gitkeep
+/Case_*/diagnostics/
+/Case_*/artifacts/*
+!/Case_*/artifacts/README.md
+/Case_WindFarm/Dataset/derived/
 
-# Frontend dependency/build output
-node_modules/
-0_Demo_MultiCylinder/web_demo/frontend/dist/
-0_Demo_MultiCylinder/web_demo/frontend/.vite/
-
-# Web demo generated inference cache
-0_Demo_MultiCylinder/web_demo/storage/cache/
-
-# Large datasets, training outputs, and generated visualizations
+# Training and numerical outputs
 Data_Saved/
-0_Demo_MultiCylinder/Data_Saved/
-0_Demo_MultiCylinder/Saved_Model/
-0_Demo_MultiCylinder/Saved_Model_Gen/
-0_Demo_MultiCylinder/Saved_Model_Inverse/
-0_Demo_MultiCylinder/Domain_shape/
-1_Demo_ChannelThermal/Data_Saved/
-1_Demo_ChannelThermal/Saved_Model/
-1_Demo_ChannelThermal/Saved_Model_Gen/
-1_Demo_ChannelThermal/Saved_Model_Inverse/
-1_Demo_ChannelThermal/Saved_Model_NewHONF/
-1_Demo_ChannelThermal/Domain_shape/
-1_Demo_ChannelThermal/Saved_Model_Prior/
-1_Demo_ChannelThermal/Saved_Model_HONF_CL/
-Unified_Forward_Model_0/results/*
-!Unified_Forward_Model_0/results/.gitkeep
-
-# Per-run generated config backups; keep active configs and templates tracked.
-0_Demo_MultiCylinder/Configs/Config_bk/
-0_Demo_MultiCylinder/Config_Train/Configs_bk/
-0_Demo_MultiCylinder/Config_Train/Configs_gen_bk/
-0_Demo_MultiCylinder/Config_Train/Configs_inverse_bk/
-1_Demo_ChannelThermal/Configs/Config_bk/
-1_Demo_ChannelThermal/Config_Train/Configs_bk/
-1_Demo_ChannelThermal/Config_Train/Configs_gen_bk/
-1_Demo_ChannelThermal/Config_Train/Configs_inverse_bk/
-
-# Heavy/intermediate artifacts
+Saved_Model_LocalModule/
+cache/
+evaluations/
+Evaluation*/
 *.pt
 *.pth
 *.h5
 *.hdf5
 *.npz
 *.npy
-*.tar
-*.zip
-*.log
-*.codex
-*.gif
-*.png
 *.csv
-*.txt
-!HONF_Proj/requirements.txt
-
-# Python packaging and local environments
-*.egg-info/
-build/
-dist/
-.venv/
-venv/
-
-# HONF_Proj machine-local resource mappings and generated convenience links
-HONF_Proj/Case_ThermalChannel/Dataset/dataset_locations.local.json
-HONF_Proj/Case_ThermalChannel/Dataset/links/*
-!HONF_Proj/Case_ThermalChannel/Dataset/links/.gitkeep
-HONF_Proj/Case_ThermalChannel/artifacts/*
-!HONF_Proj/Case_ThermalChannel/artifacts/README.md
-
-# HONF_Proj generated runs and post-processing; retain only contracts/markers
-HONF_Proj/Trained_Results/**/Run_*/
-HONF_Proj/Trained_Results/**/Eval_*/
-HONF_Proj/Trained_Results/**/CompareModels/
-
-# HONF hierarchical-inverse runtime artifacts. These directories contain
-# generated HDF5/NPZ datasets, copied forward checkpoints, training checkpoints,
-# per-run configs/metrics, audit reports, plots, and manifests. Keep the inverse
-# source, schemas, request examples, and reusable templates tracked instead.
-HONF_Proj/Trained_Results/ThermalChannel/Inverse_Dataset_Builds/
-HONF_Proj/Trained_Results/ThermalChannel/Inverse_Resources/
-HONF_Proj/Trained_Results/ThermalChannel/HONF_Inverse_Runs/
-
-# One-off inverse smoke/diagnostic launch profiles reference local run IDs and
-# immutable snapshots. Reusable templates and non-diagnostic data configs remain
-# visible to Git.
-HONF_Proj/src/config_core/inverse/*diagnostic*.json
-HONF_Proj/src/config_core/inverse/thermalchannel_inverse_data_snapshot_v1.json
-
-# Generated reports/plots/history files from runs
-loss_history.csv
+*.parquet
+*.feather
+*.log
+*.zip
+*.tar
+*.tar.gz
+*.png
+*.pdf
+*.svg
+*.gif
+*.jpg
+*.jpeg
+*.webp
 loss_history.json
-loss_curve.png
-evaluations/
-Evaluation*/
-
-# Any smoke tests
-Saved_Model_LocalModule/
-cache/
 cache_index.json
+
+# User-approved, curated README figures; no numerical data in this directory.
+!/docs/assets/readme/*.png
+!/docs/assets/readme/*.pdf

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "case": {
+    "loss": {
+      "case_group_budget_weight": 0.005783974924700852
+    }
+  },
+  "_note": "Reuses the first Run 1409 one-time two-batch calibration unchanged so the rescue isolates the optimization path; see diagnostics/generated/run1409_budgeted_group_control/calibration.json."
+}

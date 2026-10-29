@@ -1,0 +1,881 @@
+"""Opt-in source-response ThermalChannel adapter with native grid extraction.
+
+The response context contains geometry and prescribed coefficients only.
+Heating is supplied to the prepared operator separately, in physical units.
+No Stage-A, reference generator or retained thermal wrapper is executed here.
+"""
+
+import copy
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from torch import nn
+
+from honf_forward_core.interface_fields.interaction_core import DependencySpec, _parameter_signature
+from honf_forward_core.interface_fields.source_response_operator import SourceResponseOperator
+
+from .native_observations import (
+    NativeStencil,
+    interpolate_native,
+    merge_native_grid_receiver_union,
+    native_cell_center_stencil,
+    thermal_context_tensors,
+)
+
+SOURCE_RESPONSE_ID = "thermal_source_response_v1"
+SOURCE_RESPONSE_CAPABILITY = "channelthermal_shared_grid_affine_source_v1"
+SOURCE_WIDTH, CONTEXT_WIDTH, ENVIRONMENT_WIDTH = 8, 14, 8
+FIELD_ORDER = ("u", "v", "p", "omega", "temperature")
+FORMAL_RESPONSE_PROFILE_NAMES = frozenset({
+    "thermal_source_response_r_direct_full5000_v1",
+    "thermal_source_response_r_direct_full5000_v1_retained_milestones",
+})
+FORMAL_FLOW_PROFILE_NAMES = frozenset({
+    "thermal_source_response_d_sep_full5000_v1",
+    "thermal_source_response_d_sep_full5000_v1_retained_milestones",
+})
+CONTEXT_KEYS = (
+    "module_centers",
+    "module_present",
+    "material_params",
+    "re",
+    "u_in",
+    "domain_length_x",
+    "domain_length_y",
+    "module_source_ids",
+    "t_in",
+    "t_wall",
+)
+THERMAL_INTERACTION_CONTROL_UNITS = {
+    "heat": "packed_dataset_native_heating_rate",
+}
+
+
+def _thermal_interaction_dependency(*, environment_flow_context):
+    edges = [("heat", "temperature")]
+    if environment_flow_context:
+        edges.append(("predicted_flow", "thermal_context"))
+    return DependencySpec(
+        dataset="ThermalChannel",
+        output_law="affine",
+        configuration_inputs=(
+            "prescribed_geometry_and_source_ids",
+            "material_coefficients",
+            "domain_geometry",
+            "Reynolds_and_inlet_boundary_context",
+            "inlet_and_wall_temperature_boundary_context",
+        ),
+        applicable_controls=("heat",),
+        output_roles=("temperature",),
+        units=("packed_dataset_native_temperature",),
+        edges=tuple(edges),
+        prepared_nodes=("flow_context", "thermal_context"),
+    )
+
+
+@dataclass
+class PreparedNativeResponse:
+    response: Any
+    context: Any
+    owner: int
+    structure: dict
+    input_snapshot: dict
+    stencils: dict[str, NativeStencil]
+    grid_indices: torch.Tensor
+    role_shapes: dict[str, tuple]
+    source_present: torch.Tensor
+    theta: torch.Tensor
+    delta: torch.Tensor
+    interface_conductivity: torch.Tensor
+    receiver_snapshots: tuple
+    parameter_signature: tuple = ()
+
+
+class ThermalSourceResponse(nn.Module):
+    """One common grid-temperature operator and physical role extraction.
+
+    The zero offset is source-qualified for the active zero inlet/wall and
+    zero initial temperature benchmark. A nonzero boundary capability requires
+    another explicit adapter, not a changed normalized mean.
+    """
+
+    def __init__(
+        self,
+        core_config=None,
+        *,
+        nx=128,
+        ny=64,
+        environment_nx=24,
+        environment_ny=8,
+        forcing_scale=1.0,
+        h_effective_eps=1.0e-3,
+        h_effective_max=1.0e4,
+        environment_flow_context=False,
+    ):
+        super().__init__()
+        if nx < 2 or ny < 2 or not np.isfinite(forcing_scale) or forcing_scale <= 0:
+            raise ValueError("Native grid and frozen forcing scale must be positive.")
+        config = dict(core_config or {})
+        if "forcing_scale" in config and float(config["forcing_scale"]) != float(forcing_scale):
+            raise ValueError("Core and adapter frozen forcing scales differ; physical heat units must agree.")
+        for name, width in (
+            ("source_width", SOURCE_WIDTH),
+            ("context_width", CONTEXT_WIDTH),
+            ("environment_width", ENVIRONMENT_WIDTH),
+        ):
+            if name in config and config[name] != width:
+                raise ValueError(f"Thermal adapter requires {name}={width}.")
+            config[name] = width
+        if config.get("spatial_dim", 2) != 2 or config.get("output_width", 1) != 1:
+            raise ValueError("Thermal response is a 2-D shared scalar-temperature kernel.")
+        if not config.get("zero_offset", True):
+            raise ValueError("Active zero-boundary thermal capability requires zero offset.")
+        config.update(spatial_dim=2, output_width=1, zero_offset=True, forcing_scale=float(forcing_scale))
+        self.core = SourceResponseOperator(**config)
+        self.core_config = dict(self.core.config)
+        self.environment_flow_context = bool(environment_flow_context)
+        self.environment_flow_projection = None
+        if self.environment_flow_context:
+            # This adapter-owned edge consumes only standardized predicted u/v
+            # and a fluid-validity bit. Appending it preserves the old parameter
+            # order and gives exact parent recovery at update zero.
+            self.environment_flow_projection = nn.Linear(3, self.core.hidden, bias=False)
+            nn.init.zeros_(self.environment_flow_projection.weight)
+        self.nx, self.ny = int(nx), int(ny)
+        self.environment_nx, self.environment_ny = int(environment_nx), int(environment_ny)
+        self.forcing_scale = float(forcing_scale)
+        self.h_effective_eps, self.h_effective_max = float(h_effective_eps), float(h_effective_max)
+
+    def adapter_config(self):
+        result = {
+            "nx": self.nx,
+            "ny": self.ny,
+            "environment_nx": self.environment_nx,
+            "environment_ny": self.environment_ny,
+            "forcing_scale": self.forcing_scale,
+            "h_effective_eps": self.h_effective_eps,
+            "h_effective_max": self.h_effective_max,
+        }
+        if self.environment_flow_context:
+            result["environment_flow_context"] = True
+        return result
+
+    @staticmethod
+    def _column(structure, name, like, fallback):
+        value = structure.get(name)
+        return (
+            like.new_full((like.shape[0], 1), fallback) if value is None else value.reshape(like.shape[0], 1).to(like)
+        )
+
+    def context_tensors(self, structure):
+        """Build the actual input whitelist; never inspect a heat/target tensor."""
+        tensors = thermal_context_tensors(
+            structure,
+            environment_nx=self.environment_nx,
+            environment_ny=self.environment_ny,
+            preserve_dtype=False,
+        )
+        # Preserve the historical response adapter's typed-ID boundary. The
+        # new content-hypergraph adapter uses auto-generated/masked tensor IDs;
+        # the reusable geometry transform must not change old wrapper metadata.
+        source_ids = structure.get("module_source_ids")
+        if source_ids is None:
+            tensors["source_ids"] = None
+        elif not torch.is_tensor(source_ids):
+            if len(source_ids) != tensors["centers"].shape[1]:
+                raise ValueError("Source ID catalogue does not match active/padded slots.")
+            tensors["source_ids"] = torch.arange(
+                tensors["centers"].shape[1], device=tensors["centers"].device
+            )[None].expand(tensors["centers"].shape[0], -1)
+        else:
+            tensors["source_ids"] = source_ids
+        return tensors
+
+    def prepare_context(self, structure, *, environment_flow_features=None,
+                        routing_trace=False, native_route_intervention=None):
+        tensors = self.context_tensors(structure)
+        return self._prepare_context_tensors(
+            tensors, environment_flow_features,
+            routing_trace=routing_trace,
+            native_route_intervention=native_route_intervention,
+        )
+
+    def _prepare_context_tensors(self, tensors, environment_flow_features, *,
+                                 routing_trace=False, native_route_intervention=None):
+        dependency = _thermal_interaction_dependency(
+            environment_flow_context=self.environment_flow_context,
+        )
+        if self.core.output_law != dependency.output_law:
+            raise ValueError("Thermal prepared-context capability disagrees with the core output law.")
+        if self.environment_flow_projection is None:
+            if environment_flow_features is not None:
+                raise ValueError("Geometry-only Thermal response does not accept environment flow features.")
+            prepared = self.core.prepare_context(
+                **tensors,
+                routing_trace=routing_trace,
+                native_route_intervention=native_route_intervention,
+            )
+            prepared.dependency = dependency
+            return prepared
+        if environment_flow_features is None:
+            raise ValueError("Predicted environment flow features are required by this Thermal response child.")
+        features = torch.as_tensor(environment_flow_features, device=tensors["centers"].device,
+            dtype=tensors["centers"].dtype)
+        expected = (*tensors["environment_coords"].shape[:2], 3)
+        if tuple(features.shape) != expected or not bool(torch.isfinite(features).all()):
+            raise ValueError(f"Predicted environment flow features must be finite with shape {expected}.")
+        # Keep the original environment records and quadrature measures. Solid
+        # donors carry a zeroed standardized u/v pair and an explicit invalid bit.
+        environment_embedding = self.environment_flow_projection(features)
+        prepared = self.core.prepare_context(
+            **tensors,
+            environment_embedding=environment_embedding,
+            routing_trace=routing_trace,
+            native_route_intervention=native_route_intervention,
+        )
+        prepared.dependency = dependency
+        return prepared
+
+    def native_stencil(self, xy, lengths):
+        """Geometry-only equivalent of the generator's cell-center bilinear_sample."""
+        if not bool(torch.isfinite(xy).all()):
+            raise ValueError("Native receivers must be finite physical coordinates.")
+        return native_cell_center_stencil(xy, lengths, nx=self.nx, ny=self.ny)
+
+    def prepare_native(self, structure, fluid_xy, *, local_query_points=None, ntheta=64, chunk_size=512,
+                       environment_flow_features=None, receiver_read_options=None,
+                       routing_trace=False, native_route_intervention=None):
+        tensors = self.context_tensors(structure)
+        context = self._prepare_context_tensors(
+            tensors, environment_flow_features,
+            routing_trace=routing_trace,
+            native_route_intervention=native_route_intervention,
+        )
+        centers, present, lengths = tensors["centers"], tensors["present"], tensors["lengths"]
+        radius = tensors["source_lengths"][:, :1]
+        delta = torch.minimum((lengths / lengths.new_tensor([self.nx, self.ny])).amin(-1, keepdim=True), 0.15 * radius)
+        theta = torch.arange(int(ntheta), device=centers.device, dtype=centers.dtype) * (2 * torch.pi / int(ntheta))
+        normals = torch.stack((theta.cos(), theta.sin()), -1)
+        roles = {
+            "fluid": fluid_xy.to(centers),
+            "surface": centers[:, :, None] + radius[:, None, :, None] * normals[None, None],
+            "outside": centers[:, :, None] + (radius + delta)[:, None, :, None] * normals[None, None],
+        }
+        if local_query_points is not None:
+            local = local_query_points.to(centers)
+            if local.ndim == 3:
+                local = local[:, None].expand(-1, centers.shape[1], -1, -1)
+            if local.ndim != 4 or local.shape[:2] != centers.shape[:2]:
+                raise ValueError("Material queries must be [B,Ql,2] or [B,M,Ql,2].")
+            roles["material"] = centers[:, :, None] + radius[:, None, :, None] * local
+        stencils = {name: self.native_stencil(xy, lengths) for name, xy in roles.items()}
+        # Deduplicate within each case, not across unrelated minibatch layouts.
+        # Zero-weight neighbours are unnecessary for ordinary training, but
+        # remain necessary when interpolation-weight derivatives are live.
+        # Keeping all four in that scope preserves receiver/geometry VJPs.
+        union = merge_native_grid_receiver_union(
+            stencils,
+            roles,
+            present,
+            lengths,
+            nx=self.nx,
+            ny=self.ny,
+        )
+        stencils = union.stencils
+        grid_receivers = union.grid_coordinates
+        read_options = {} if receiver_read_options is None else dict(receiver_read_options)
+        if {'receiver_ids', 'chunk_size'} & read_options.keys():
+            raise ValueError('Native receiver identities and chunking cannot be overridden by read options.')
+        response = self.core.prepare_receivers(
+            context, grid_receivers, receiver_ids=union.grid_indices, chunk_size=chunk_size, **read_options)
+        material = structure["material_params"].to(centers)
+        if material.ndim == 1:
+            material = material[None].expand(centers.shape[0], -1)
+        conductivity = (
+            2 * material[:, 3:4] * material[:, 4:5] / (material[:, 3:4] + material[:, 4:5]).clamp_min(1.0e-12)
+        )
+        snapshot = {
+            k: (v.detach().clone() if torch.is_tensor(v) else copy.deepcopy(v))
+            for k, v in structure.items()
+            if k in CONTEXT_KEYS
+        }
+        prepared = PreparedNativeResponse(
+            response,
+            context,
+            id(self),
+            structure,
+            snapshot,
+            stencils,
+            union.grid_indices,
+            {k: v.shape[1:-1] for k, v in roles.items()},
+            present,
+            theta,
+            delta,
+            conductivity,
+            tuple((v, v.detach().clone()) for v in (fluid_xy, local_query_points) if torch.is_tensor(v)),
+        )
+        prepared.parameter_signature = _parameter_signature(self)
+        return prepared
+
+    @staticmethod
+    def _interpolate(values, stencil):
+        return interpolate_native(values, stencil)
+
+    def validate_prepared(self, prepared, structure=None):
+        if not isinstance(prepared, PreparedNativeResponse) or prepared.owner != id(self):
+            raise ValueError("Native response preparation belongs to another adapter/request.")
+        if _parameter_signature(self) != prepared.parameter_signature:
+            raise ValueError("Prepared Thermal adapter weights changed; rebuild the response operator.")
+        if any(not torch.equal(value, snapshot) for value, snapshot in prepared.receiver_snapshots):
+            raise ValueError("Native receiver catalogue changed; rebuild the response operator.")
+        structure = prepared.structure if structure is None else structure
+        current = {k: v for k, v in structure.items() if k in CONTEXT_KEYS}
+        equal = lambda a, b: (
+            torch.is_tensor(a) and torch.is_tensor(b) and torch.equal(a, b)
+            if torch.is_tensor(a) or torch.is_tensor(b)
+            else a == b
+        )
+        if set(current) != set(prepared.input_snapshot) or any(
+            not equal(current[k], v) for k, v in prepared.input_snapshot.items()
+        ):
+            raise ValueError("Geometry/context changed; rebuild the response operator.")
+
+    def apply_native(self, prepared, physical_heat, *, increment=False, compression=None, accumulation_dtype=None):
+        self.validate_prepared(prepared)
+        if accumulation_dtype is not None:
+            if accumulation_dtype not in (torch.float32, torch.float64):
+                raise ValueError('Native accumulation dtype must be float32 or float64.')
+            if compression is not None:
+                raise ValueError('Precise native application retains every physical source.')
+            heat = physical_heat.to(device=prepared.source_present.device, dtype=accumulation_dtype)
+            if heat.shape != prepared.source_present.shape or not bool(torch.isfinite(heat).all()):
+                raise ValueError('Physical heat must be finite [B,M] in original source order.')
+            kernels = self.export_native_kernels(prepared, accumulation_dtype=accumulation_dtype)
+            role = {key: torch.einsum('b...mo,bm->b...o', value, heat)
+                    for key, value in kernels.items()}
+            surface = role['surface'] * prepared.source_present[:, :, None, None]
+            outside = role['outside'] * prepared.source_present[:, :, None, None]
+            q = role['q_normal'] * prepared.source_present[:, :, None, None]
+        else:
+            role, surface, outside, q = self._apply_native_fp32(prepared, physical_heat, increment, compression)
+        if increment:
+            # Ratios and maxima are nonlinear endpoint reductions, not increments.
+            output = {'fluid_temperature': role['fluid'], 'pred_interface': torch.cat((surface, q), -1),
+                      'outside_temperature': outside,
+                      'initial_port_status': 'not_applicable_no_port_refinement_trajectory',
+                      'native_neural_receiver_rows': int(prepared.grid_indices.numel())}
+            if 'material' in role:
+                output['pred_internal_temperature'] = role['material'] * prepared.source_present[:, :, None, None]
+            return output
+        return self._native_endpoint_outputs(prepared, role, surface, outside, q)
+
+    def _apply_native_fp32(self, prepared, physical_heat, increment, compression):
+        fn = self.core.apply_increment if increment else self.core.apply_forcing
+        grid_values = fn(
+            prepared.response,
+            physical_heat.to(prepared.source_present),
+            **({"compression": compression} if increment else {}),
+        )
+        role = {
+            k: self._interpolate(grid_values, s).reshape(grid_values.shape[0], *prepared.role_shapes[k], -1)
+            for k, s in prepared.stencils.items()
+        }
+        surface = role["surface"] * prepared.source_present[:, :, None, None]
+        outside = role["outside"] * prepared.source_present[:, :, None, None]
+        q = -prepared.interface_conductivity[:, None, :, None] / prepared.delta[:, None, :, None] * (outside - surface)
+        return role, surface, outside, q
+
+    def _native_endpoint_outputs(self, prepared, role, surface, outside, q):
+        jump = surface - outside
+        sign = torch.where(jump < 0, -torch.ones_like(jump), torch.ones_like(jump))
+        denom = torch.where(jump.abs() < self.h_effective_eps, sign * self.h_effective_eps, jump)
+        raw_h = q / denom
+        h = torch.nan_to_num(raw_h, nan=0.0, posinf=self.h_effective_max, neginf=0.0).clamp(0, self.h_effective_max)
+        valid = (
+            (jump.abs() >= self.h_effective_eps)
+            & torch.isfinite(q)
+            & torch.isfinite(raw_h)
+            & (raw_h >= 0)
+            & (raw_h <= self.h_effective_max)
+        )
+        theta = prepared.theta
+        angular = torch.stack((theta, theta.cos(), theta.sin()), -1)[None, None].expand(
+            surface.shape[0], surface.shape[1], -1, -1
+        )
+        output = {
+            "fluid_temperature": role["fluid"],
+            "pred_interface": torch.cat((surface, q), -1),
+            "pred_port_condition": torch.cat((angular, outside, h), -1) * prepared.source_present[:, :, None, None],
+            "h_proxy": q.abs() / (jump.abs() + 1.0e-6),
+            "h_effective_valid_mask": valid[..., 0] & prepared.source_present[:, :, None].bool(),
+            "initial_port_status": "not_applicable_no_port_refinement_trajectory",
+            "native_neural_receiver_rows": int(prepared.grid_indices.numel()),
+        }
+        if "material" in role:
+            output["pred_internal_temperature"] = role["material"] * prepared.source_present[:, :, None, None]
+            output["module_material_peak"] = output["pred_internal_temperature"][..., 0].amax(-1)
+        return output
+
+    def export_native_kernels(self, prepared, *, accumulation_dtype=None):
+        self.validate_prepared(prepared)
+        kernel = prepared.response.dense_kernel(accumulation_dtype=accumulation_dtype)
+        roles = {
+            k: self._interpolate(kernel, s).reshape(kernel.shape[0], *prepared.role_shapes[k], *kernel.shape[2:])
+            for k, s in prepared.stencils.items()
+        }
+        conductivity = prepared.interface_conductivity
+        if accumulation_dtype is not None:
+            material = prepared.structure['material_params'].to(kernel)
+            if material.ndim == 1:
+                material = material[None].expand(kernel.shape[0], -1)
+            conductivity = 2 * material[:, 3:4] * material[:, 4:5] / (material[:, 3:4] + material[:, 4:5])
+        roles["q_normal"] = (
+            -conductivity.to(kernel.dtype)[:, None, :, None, None]
+            / prepared.delta.to(kernel.dtype)[:, None, :, None, None]
+            * (roles["outside"] - roles["surface"])
+        )
+        return roles
+
+    def forward(self, structure, physical_heat, fluid_xy, **kwargs):
+        return self.apply_native(self.prepare_native(structure, fluid_xy, **kwargs), physical_heat)
+
+
+class SourceResponseThermalModel(nn.Module):
+    """New thermal response core plus exactly one frozen D-sep flow reader."""
+
+    def __init__(self, thermal, flow, normalization_stats):
+        super().__init__()
+        if flow.policy != "D-sep":
+            raise ValueError("New response composition requires the D-sep flow policy.")
+        self.thermal, self.flow = thermal, flow
+        self.flow.requires_grad_(False).eval()
+        self.normalization_stats = normalization_stats
+
+    @property
+    def interaction_dependency(self):
+        """Thermal-owned affine contract for prepared context and applied heat."""
+        return _thermal_interaction_dependency(
+            environment_flow_context=self.thermal.environment_flow_context,
+        )
+
+    @property
+    def interaction_control_units(self):
+        """Units for separately applicable controls, retained in dataset-native scales."""
+        return dict(THERMAL_INTERACTION_CONTROL_UNITS)
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.flow.eval()
+        return self
+
+    def predicted_environment_flow_features(self, structure, flow_prepared=None):
+        """Return TRAIN-standardized predicted physical u/v plus fluid validity.
+
+        The D-sep reader is queried at the adapter's existing environment
+        coordinates. No stored velocity or target-flow field is accessed.
+        """
+        if self.flow.policy != "D-sep":
+            raise ValueError("Thermal flow context requires the heat-independent D-sep reader.")
+        tensors = self.thermal.context_tensors(structure)
+        if flow_prepared is None:
+            flow_prepared = self.flow.prepare_flow(structure)
+        normalized = self.flow.read_flow(flow_prepared, tensors["environment_coords"])
+        means = torch.as_tensor(self.normalization_stats["field_mean_by_channel"],
+            device=normalized.device, dtype=normalized.dtype)[:2]
+        scales = torch.as_tensor(self.normalization_stats["field_std_by_channel"],
+            device=normalized.device, dtype=normalized.dtype)[:2]
+        if not bool(torch.isfinite(means).all()) or not bool(torch.isfinite(scales).all()) or not bool((scales > 0).all()):
+            raise ValueError("Predicted flow context requires finite TRAIN-only u/v normalization scales.")
+        physical_uv = normalized[..., :2] * scales + means
+        standardized_uv = (physical_uv - means) / scales
+
+        centers = tensors["centers"]
+        present = tensors["present"] > 0.5
+        material = structure["material_params"].to(centers)
+        if material.ndim == 1:
+            material = material[None].expand(centers.shape[0], -1)
+        radius = material[:, 5]
+        distance = torch.linalg.vector_norm(
+            tensors["environment_coords"][:, :, None, :] - centers[:, None, :, :], dim=-1
+        )
+        inside_solid = (distance <= radius[:, None, None]) & present[:, None, :]
+        valid = (~inside_solid.any(-1)).to(standardized_uv)
+        standardized_uv = torch.where(valid[..., None] > 0, standardized_uv,
+            torch.zeros_like(standardized_uv))
+        return torch.cat((standardized_uv, valid[..., None]), dim=-1)
+
+    def prepare_native(self, structure, fluid_xy, **kwargs):
+        flow_prepared = self.flow.prepare_flow(structure)
+        environment_flow_features = None
+        if self.thermal.environment_flow_context:
+            # Public composition always derives this edge from the live frozen
+            # flow state, so geometry VJPs remain connected and stale feature
+            # tensors cannot be paired with a changed scene.
+            environment_flow_features = self.predicted_environment_flow_features(structure, flow_prepared)
+        return {
+            "thermal": self.thermal.prepare_native(structure, fluid_xy,
+                environment_flow_features=environment_flow_features, **kwargs),
+            "flow": flow_prepared,
+            "flow_owner": id(self.flow),
+            "flow_parameter_signature": _parameter_signature(self.flow),
+            "normalization_signature": self._normalization_signature(),
+            "query_xy": fluid_xy,
+            "query_snapshot": fluid_xy.detach().clone(),
+        }
+
+    def _normalization_signature(self):
+        """Bind the physical flow transform used by context and output reads."""
+        return tuple(
+            (key, np.asarray(self.normalization_stats[key]).shape,
+             np.asarray(self.normalization_stats[key], dtype=np.float64).tobytes())
+            for key in ("field_mean_by_channel", "field_std_by_channel")
+        )
+
+    def validate_prepared(self, prepared):
+        if not torch.equal(prepared["query_xy"], prepared["query_snapshot"]):
+            raise ValueError("Receiver catalogue changed; rebuild the complete prepared response.")
+        if (prepared.get("flow_owner") != id(self.flow)
+                or prepared.get("flow_parameter_signature") != _parameter_signature(self.flow)):
+            raise ValueError("Prepared frozen flow weights changed; rebuild the complete response.")
+        try:
+            normalization_matches = prepared.get("normalization_signature") == self._normalization_signature()
+        except (KeyError, TypeError, ValueError):
+            normalization_matches = False
+        if not normalization_matches:
+            raise ValueError("Prepared TRAIN normalization changed; rebuild the complete response.")
+
+    def apply_native(self, prepared, physical_heat, *, accumulation_dtype=None):
+        self.validate_prepared(prepared)
+        output = self.thermal.apply_native(prepared["thermal"], physical_heat, accumulation_dtype=accumulation_dtype)
+        flow = self.flow.read_flow(prepared["flow"], prepared["query_xy"])
+        mean = flow.new_tensor(self.normalization_stats["field_mean_by_channel"])[:4]
+        std = flow.new_tensor(self.normalization_stats["field_std_by_channel"])[:4]
+        output["pred_field"] = torch.cat((flow * std + mean, output["fluid_temperature"]), -1)
+        return output
+
+    def predict_native_sample(self, sample, device=None):
+        """Physical raw sample in; physical numpy predictions out; no target read."""
+        device = torch.device(device) if device is not None else next(self.parameters()).device
+        structure = {
+            k: (
+                copy.deepcopy(v)
+                if k == "module_source_ids" and not torch.is_tensor(v) and not isinstance(v, np.ndarray)
+                else torch.as_tensor(v, device=device, dtype=torch.float32)[None]
+            )
+            for k, v in sample["structure"].items()
+            if k in CONTEXT_KEYS
+        }
+        xy = np.stack((np.asarray(sample["x_grid"]).reshape(-1), np.asarray(sample["y_grid"]).reshape(-1)), -1)
+        fluid = torch.as_tensor(xy, device=device, dtype=torch.float32)[None]
+        local = torch.as_tensor(sample["module_internal_query_points"], device=device, dtype=torch.float32)
+        if local.ndim == 2:
+            local = local[None]
+        ports = int(sample["interface_condition"].shape[-2])
+        heat = torch.as_tensor(sample["structure"]["heat_powers"], device=device, dtype=torch.float32)[None]
+        with torch.no_grad():
+            output = self.apply_native(
+                self.prepare_native(structure, fluid, local_query_points=local, ntheta=ports), heat
+            )
+        ny, nx = np.asarray(sample["x_grid"]).shape
+        prediction = {
+            "pred_field_grid": output["pred_field"][0].cpu().numpy().reshape(ny, nx, 5),
+            "pred_interface": output["pred_interface"][0].cpu().numpy(),
+            "pred_internal_temperature": output["pred_internal_temperature"][0, ..., 0].cpu().numpy(),
+            "pred_port_condition": output["pred_port_condition"][0].cpu().numpy(),
+            "initial_port_status": output["initial_port_status"],
+        }
+        return prediction
+
+    def prepare_record(self, record, device=None, *, chunk_size=512):
+        """Prepare exact typed receivers from input metadata, never role values."""
+        device = torch.device(device) if device is not None else next(self.parameters()).device
+        modules = record.design.modules
+        context = record.context.values
+        tensor = lambda value: torch.as_tensor(value, device=device, dtype=torch.float32)
+        centers = tensor([module.position_xy for module in modules])[None]
+        present = tensor([float(module.active) for module in modules])[None]
+        material = tensor(
+            [context[k] for k in ("nu", "solid_alpha", "fluid_alpha", "solid_k", "fluid_k", "module_radius")]
+        )[None]
+        structure = {
+            "module_centers": centers,
+            "module_present": present,
+            "material_params": material,
+            "module_source_ids": tuple(module.module_id for module in modules),
+        }
+        for key in ("re", "u_in", "domain_length_x", "domain_length_y"):
+            structure[key] = tensor([context[key]])[None]
+        roles = record.output.roles
+        fluid = tensor(roles["fluid_fields"].query_features[:, :2])[None]
+        ids = tuple(module.module_id for module in modules)
+        interface_rows = [np.flatnonzero(np.asarray(roles["interface"].receiver_module_ids) == mid) for mid in ids]
+        material_rows = [
+            np.flatnonzero(np.asarray(roles["solid_temperature"].receiver_module_ids) == mid) for mid in ids
+        ]
+        if len({len(x) for x in interface_rows}) != 1 or len({len(x) for x in material_rows}) != 1:
+            raise ValueError("Native typed roles require equal per-module receiver counts.")
+        ntheta = len(interface_rows[0])
+        expected = np.arange(ntheta) * 2 * np.pi / ntheta
+        for rows in interface_rows:
+            query = np.asarray(roles["interface"].query_features)[rows]
+            if not np.allclose(query[:, 0], expected, rtol=0, atol=2.0e-6):
+                raise ValueError("Native port receivers must use original uniform angular ordering.")
+        local = tensor(
+            np.stack([np.asarray(roles["solid_temperature"].query_features)[rows, :2] for rows in material_rows])
+        )[None]
+        prepared = self.prepare_native(structure, fluid, local_query_points=local, ntheta=ntheta, chunk_size=chunk_size)
+        prepared.update(
+            record_source_ids=ids,
+            interface_rows=interface_rows,
+            material_rows=material_rows,
+            interface_row_count=len(roles["interface"].query_features),
+            material_row_count=len(roles["solid_temperature"].query_features),
+            module_physical_heat=tensor([module.heating for module in modules])[None],
+        )
+        return prepared
+
+    def apply_record(self, prepared, physical_heat=None, *, accumulation_dtype=None):
+        heat = prepared["module_physical_heat"] if physical_heat is None else physical_heat
+        heat = torch.as_tensor(
+            heat, device=prepared["thermal"].source_present.device,
+            dtype=accumulation_dtype or prepared["thermal"].source_present.dtype
+        )
+        if heat.ndim == 1:
+            heat = heat[None]
+        output = self.apply_native(prepared, heat, accumulation_dtype=accumulation_dtype)
+        interface = output["pred_interface"].new_empty(prepared["interface_row_count"], 2)
+        material = output["pred_internal_temperature"].new_empty(prepared["material_row_count"], 1)
+        for index, rows in enumerate(prepared["interface_rows"]):
+            interface[torch.as_tensor(rows, device=interface.device)] = output["pred_interface"][0, index]
+        for index, rows in enumerate(prepared["material_rows"]):
+            material[torch.as_tensor(rows, device=material.device)] = output["pred_internal_temperature"][0, index]
+        return {"fluid_fields": output["pred_field"][0], "interface": interface, "solid_temperature": material}
+
+    def apply_record_increment(self, prepared, delta_heat, *, compression=None, accumulation_dtype=None):
+        self.validate_prepared(prepared)
+        delta_heat = torch.as_tensor(
+            delta_heat, device=prepared["thermal"].source_present.device,
+            dtype=accumulation_dtype or prepared["thermal"].source_present.dtype
+        )
+        if delta_heat.ndim == 1:
+            delta_heat = delta_heat[None]
+        output = self.thermal.apply_native(prepared["thermal"], delta_heat, increment=True,
+                                          compression=compression, accumulation_dtype=accumulation_dtype)
+        interface = output["pred_interface"].new_empty(prepared["interface_row_count"], 2)
+        material = output["pred_internal_temperature"].new_empty(prepared["material_row_count"], 1)
+        for index, rows in enumerate(prepared["interface_rows"]):
+            interface[torch.as_tensor(rows, device=interface.device)] = output["pred_interface"][0, index]
+        for index, rows in enumerate(prepared["material_rows"]):
+            material[torch.as_tensor(rows, device=material.device)] = output["pred_internal_temperature"][0, index]
+        temperature = output["fluid_temperature"][0]
+        # The flow input signature omits heating; its exact increment is zero.
+        fluid = torch.cat((temperature.new_zeros(temperature.shape[0], 4), temperature), -1)
+        return {"fluid_fields": fluid, "interface": interface, "solid_temperature": material}
+
+    def predict_record(self, record, device=None):
+        with torch.no_grad():
+            output = self.apply_record(self.prepare_record(record, device))
+        return {k: v.cpu().numpy() for k, v in output.items()}
+
+
+def load_source_response_model(path, device="cpu", checkpoint=None):
+    """Distinct identity; load one learned flow state and never a thermal parent."""
+    from channelthermal.dependency_flow import ThermalFlowReader
+    from channelthermal.training.checkpoints import _file_sha256
+    from honf_runtime.checkpoints import validate_checkpoint_identity
+    from honf_runtime.compat import load_trusted_checkpoint
+
+    saved = checkpoint if checkpoint is not None else load_trusted_checkpoint(path, map_location="cpu")
+    validate_checkpoint_identity(saved, case_id="ThermalChannel", model_family="honf_forward", workflow="forward")
+    if (
+        saved.get("source_response_identity") != SOURCE_RESPONSE_ID
+        or saved.get("case_capability") != SOURCE_RESPONSE_CAPABILITY
+    ):
+        raise ValueError("Checkpoint does not declare the native affine source-response capability.")
+    if saved.get("channel_order") != list(FIELD_ORDER):
+        raise ValueError("Source-response checkpoint field order differs.")
+    formal_scope = saved.get("formal_workflow_scope")
+    if formal_scope is not None and formal_scope != "formal_full_train_v1":
+        raise ValueError("Source-response checkpoint declares an unsupported explicit workflow scope.")
+    config = saved["source_response_config"]
+    if "fit_identity" in saved:
+        identity = saved["fit_identity"]
+        mode, recipe = identity.get("mode"), identity.get("recipe", {})
+        if (
+            mode not in ("direct", "group")
+            or config["core"].get("mode") != mode
+            or recipe.get("core_configs", {}).get(mode) != config["core"]
+            or recipe.get("adapter_config") != config.get("adapter", {})
+        ):
+            raise ValueError("Source-response core/adapter/mode differ from the sealed fit identity recipe.")
+    flow_path = Path(saved["flow_checkpoint"])
+    if _file_sha256(flow_path) != saved["flow_checkpoint_sha256"]:
+        raise ValueError("Frozen flow checkpoint identity changed.")
+    flow_saved = load_trusted_checkpoint(flow_path, map_location="cpu")
+    from channelthermal.dependency_flow import CASE_CAPABILITY, DEPENDENCY_ID
+
+    if (
+        flow_saved.get("dependency_policy") != "D-sep"
+        or flow_saved.get("dependency_identity") != DEPENDENCY_ID
+        or flow_saved.get("case_capability") != CASE_CAPABILITY
+    ):
+        raise ValueError("Frozen flow partner must declare the audited D-sep dependency identity/capability.")
+    if saved.get("formal_workflow_scope") == "formal_full_train_v1":
+        recipe = saved.get("fit_identity", {}).get("recipe", {})
+        flow_identity = flow_saved.get("fit_identity", {})
+        response_profile = recipe.get("profile", {})
+        flow_profile = flow_saved.get("formal_profile", {})
+        formal_binding_keys = ("formal_dataset_binding", "formal_normalization_binding", "formal_validation_binding")
+        if (recipe.get("workflow_scope") != "formal_full_train_v1"
+                or recipe.get("identity") != "thermal_source_response_r_direct_formal5000_v1"
+                or recipe.get("mode") != "direct"
+                or recipe.get("preferred_response_family") != "R-direct"
+                or response_profile.get("profile_name") not in FORMAL_RESPONSE_PROFILE_NAMES
+                or config["core"].get("mode") != "direct"):
+            raise ValueError("Full-TRAIN loading supports only the sealed R-direct research identity.")
+        if flow_saved.get("formal_workflow_scope") != "formal_full_train_v1":
+            raise ValueError("A formal thermal component requires a formal full-TRAIN flow partner.")
+        if (flow_profile.get("profile_name") not in FORMAL_FLOW_PROFILE_NAMES
+                or flow_profile != flow_identity.get("profile")
+                or int(flow_profile.get("schedule", {}).get("horizon_epochs", 0)) != 5000):
+            raise ValueError("Formal R-direct requires the maintained full5000 ordinary D-sep flow profile.")
+        if any(saved.get(key) != recipe.get(key) or flow_saved.get(key) != recipe.get(key)
+               for key in formal_binding_keys):
+            raise ValueError("Formal thermal and flow checkpoint data/normalization/validation bindings differ.")
+        if any(flow_identity.get(key) != flow_saved.get(key) for key in formal_binding_keys):
+            raise ValueError("Formal flow fit identity omits or changes a declared full-TRAIN binding.")
+        startup = bool(saved.get("startup_benchmark"))
+        if startup != bool(flow_saved.get("startup_benchmark")) or startup != bool(recipe.get("startup_benchmark")):
+            raise ValueError("Formal startup checkpoints can compose only with the same disposable startup scope.")
+        if startup:
+            thermal_identity = recipe.get("run_identity", "")
+            flow_run_identity = flow_identity.get("run_identity", "")
+            if (not thermal_identity.startswith("startup_thermal_")
+                    or not flow_run_identity.startswith("startup_flow_")
+                    or not 1 <= int(saved.get("epoch", 0)) <= 3
+                    or not 1 <= int(flow_saved.get("epoch", 0)) <= 3):
+                raise ValueError("Disposable formal startup composition is limited to distinct, bounded e1-e3 stages.")
+        else:
+            horizon = int(response_profile.get("schedule", {}).get("horizon_epochs", 0))
+            if (horizon != 5000 or not 1 <= int(saved.get("epoch", 0)) <= horizon
+                    or int(flow_saved.get("epoch", 0)) != horizon
+                    or recipe.get("run_identity", "").startswith("startup_")):
+                raise ValueError("Formal composition requires a monitored thermal age and exact e5000 flow endpoint.")
+        dataset = saved.get("train_config", {}).get("dataset", {})
+        flow_dataset = flow_saved.get("train_config", {}).get("dataset", {})
+        for key in formal_binding_keys:
+            if dataset.get(key) != saved.get(key) or flow_dataset.get(key) != flow_saved.get(key):
+                raise ValueError("Formal component train_config omits or changes its top-level binding.")
+        if dataset.get("formal_dataset_binding") != flow_dataset.get("formal_dataset_binding"):
+            raise ValueError("Formal thermal and flow train_config data identities differ.")
+        if dataset.get("formal_normalization_binding") != flow_dataset.get("formal_normalization_binding"):
+            raise ValueError("Formal thermal and flow train_config normalization identities differ.")
+        if dataset.get("formal_validation_binding") != flow_dataset.get("formal_validation_binding"):
+            raise ValueError("Formal thermal and flow train_config validation panel identities differ.")
+        if dataset.get("packed_h5_path") != flow_dataset.get("packed_h5_path"):
+            raise ValueError("Formal thermal and flow components refer to different packed datasets.")
+        def _json_hash(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                allow_nan=False).encode("utf-8")).hexdigest()
+        data_binding = saved["formal_dataset_binding"]
+        profile_data = recipe["profile"].get("data", {})
+        train_ids = data_binding.get("training_case_ids")
+        if (data_binding.get("schema_version") != 1 or data_binding.get("scope") != "all_original_train"
+                or data_binding.get("training_split") != "train"
+                or not isinstance(train_ids, list) or not all(isinstance(value, str) for value in train_ids)
+                or len(train_ids) != len(set(train_ids))
+                or int(profile_data.get("expected_train_case_count", -1)) != 600
+                or len(train_ids) != int(profile_data.get("expected_train_case_count", -1))
+                or len(train_ids) != int(data_binding.get("training_case_count", -2))
+                or data_binding.get("training_case_ids_sha256") != _json_hash(train_ids)):
+            raise ValueError("Formal checkpoint TRAIN membership does not satisfy its declared full-TRAIN profile.")
+        if profile_data.get("training_split") != "train" or profile_data.get("normalization_source") != "all_original_train_only":
+            raise ValueError("Formal profile does not declare all-TRAIN-only normalization and training.")
+        norm_binding = saved["formal_normalization_binding"]
+        if (norm_binding.get("identity") != "global_h5_original_train_only_v1"
+                or norm_binding.get("fit_split") != "train"
+                or norm_binding.get("training_case_ids_sha256") != data_binding["training_case_ids_sha256"]
+                or int(norm_binding.get("training_case_count", -1)) != len(train_ids)):
+            raise ValueError("Formal checkpoint normalizer is not fitted on the complete bound TRAIN membership.")
+        validation_binding = saved["formal_validation_binding"]
+        profile_panel = profile_data.get("formal_validation", {})
+        primary_ids = validation_binding.get("primary_case_ids")
+        compatibility_ids = validation_binding.get("compatibility_case_ids")
+        duplicate_id = profile_panel.get("excluded_training_duplicate_case_id")
+        if (validation_binding.get("source_metadata_sha256") != data_binding.get("source_metadata_sha256")
+                or validation_binding.get("primary_scope") != "original_test_excluding_train_duplicate"
+                or validation_binding.get("compatibility_scope") != "original_test_all_rows"
+                or profile_panel.get("primary_scope") != validation_binding.get("primary_scope")
+                or profile_panel.get("compatibility_scope") != validation_binding.get("compatibility_scope")
+                or int(validation_binding.get("primary_case_count", -1)) != int(profile_panel.get("expected_primary_case_count", -2))
+                or int(validation_binding.get("compatibility_case_count", -1)) != int(profile_panel.get("expected_compatibility_case_count", -2))
+                or not isinstance(primary_ids, list) or not isinstance(compatibility_ids, list)
+                or len(primary_ids or []) != 89 or len(compatibility_ids or []) != 90
+                or duplicate_id != validation_binding.get("excluded_training_duplicate_case_id")
+                or duplicate_id not in compatibility_ids or duplicate_id in primary_ids
+                or primary_ids != [case_id for case_id in compatibility_ids if case_id != duplicate_id]
+                or validation_binding.get("primary_case_ids_sha256") != _json_hash(primary_ids)
+                or validation_binding.get("compatibility_case_ids_sha256") != _json_hash(compatibility_ids)):
+            raise ValueError("Formal validation metadata must declare the exact canonical89/original90 memberships.")
+        startup_panel = profile_data.get("startup_validation", {})
+        if (startup_panel.get("scope") != "fixed25_v1_DEV22_exposed"
+                or int(startup_panel.get("expected_case_count", -1)) != 22
+                or int(startup_panel.get("maximum_new_epochs", -1)) != 3):
+            raise ValueError("Formal profile must declare the bounded fixed25_v1 DEV22 startup panel.")
+        def _stats_hash(stats):
+            return hashlib.sha256(json.dumps({key: np.asarray(value, dtype=np.float32).tolist()
+                for key, value in sorted(stats.items())}, sort_keys=True, separators=(",", ":"),
+                allow_nan=False).encode("utf-8")).hexdigest()
+        stats_hash = _stats_hash(saved["global_normalization_stats"])
+        flow_stats_hash = _stats_hash(flow_saved["global_normalization_stats"])
+        stat_values = [np.asarray(value) for value in saved["global_normalization_stats"].values()]
+        if (not stat_values or not all(np.isfinite(value).all() for value in stat_values)
+                or "field_mean_by_channel" not in saved["global_normalization_stats"]
+                or "field_std_by_channel" not in saved["global_normalization_stats"]
+                or np.asarray(saved["global_normalization_stats"]["field_mean_by_channel"]).shape != (5,)
+                or np.asarray(saved["global_normalization_stats"]["field_std_by_channel"]).shape != (5,)
+                or np.any(np.asarray(saved["global_normalization_stats"]["field_std_by_channel"]) <= 0)
+                or sorted(saved["global_normalization_stats"]) != norm_binding.get("stat_names")):
+            raise ValueError("Formal checkpoint normalization statistics must be finite with positive field scales.")
+        if (stats_hash != flow_stats_hash or stats_hash != norm_binding.get("stats_sha256")
+                or stats_hash != flow_saved.get("formal_normalization_binding", {}).get("stats_sha256")):
+            raise ValueError("Formal source-response components do not carry the declared full-TRAIN normalizer.")
+        flow = ThermalFlowReader("D-sep", flow_saved["flow_reader_config"])
+        flow.load_state_dict(flow_saved["flow_state_dict"], strict=True)
+        thermal = ThermalSourceResponse(config["core"], **config.get("adapter", {}))
+        thermal.load_state_dict(saved["thermal_state_dict"], strict=True)
+        model = SourceResponseThermalModel(thermal, flow, saved["global_normalization_stats"]).to(device).eval()
+        return model, saved
+    if set(saved["global_normalization_stats"]) != set(flow_saved["global_normalization_stats"]):
+        raise ValueError("Thermal/flow TRAIN normalization key sets differ.")
+    for key, value in saved["global_normalization_stats"].items():
+        if not np.array_equal(np.asarray(value), np.asarray(flow_saved["global_normalization_stats"][key])):
+            raise ValueError("Thermal/flow TRAIN normalization metadata differs.")
+    left = saved["train_config"]["dataset"]
+    right = flow_saved["train_config"]["dataset"]
+    expected_manifest = "933b0138ba2f8447a1ecadfe31fd0bb2cb4a05607d3ac3d9f0dc79419f196044"
+    for dataset in (left, right):
+        subset = dataset.get("development_subset", {})
+        if (
+            dataset.get("development_manifest_sha256") != expected_manifest
+            or subset.get("manifest_sha256") != expected_manifest
+        ):
+            raise ValueError("Source response requires the literal fixed25_v1 primary development membership.")
+        for split, count in (("train", 150), ("test", 22)):
+            ids = subset.get("partitions", {}).get(split, {}).get("case_ids", ())
+            if len(ids) != count or len(set(ids)) != count:
+                raise ValueError("Source response requires bound fixed25_v1 150/22 primary case IDs.")
+    for key in ("development_manifest", "development_manifest_sha256", "development_subset", "dataset_fingerprint"):
+        if left.get(key) != right.get(key):
+            raise ValueError("Thermal/flow primary development membership differs.")
+    flow = ThermalFlowReader("D-sep", flow_saved["flow_reader_config"])
+    flow.load_state_dict(flow_saved["flow_state_dict"], strict=True)
+    thermal = ThermalSourceResponse(config["core"], **config.get("adapter", {}))
+    thermal.load_state_dict(saved["thermal_state_dict"], strict=True)
+    model = SourceResponseThermalModel(thermal, flow, saved["global_normalization_stats"]).to(device).eval()
+    return model, saved

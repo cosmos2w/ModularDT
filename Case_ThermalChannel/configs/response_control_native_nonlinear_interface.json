@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "name": "native_nonlinear_interface",
+  "architecture": "checkpoint_native_dense_or_sparse",
+  "initialization_mode": "native_checkpoint",
+  "source_checkpoint_contract": "Run1804_epoch_4738_intact_native_checkpoint",
+  "native_trainable_scope": "native_nonlinear_interface",
+  "trainable_blocks": [
+    "core.common.field_head.all_layers",
+    "local_coupling.port_head.all_layers",
+    "local_coupling.port_refinement_head.all_layers"
+  ],
+  "frozen_modules": [
+    "encoders",
+    "fine_transport_kernels",
+    "coarse_context_builders",
+    "local_context_builders",
+    "local_surrogate",
+    "all_other_tensors_and_buffers"
+  ],
+  "deterministic_model_mode": "eval_for_both_absolute_states_and_all_updates",
+  "deterministic_algorithms": true,
+  "historical_value_replay": "one converged packed train case per response update in both arms",
+  "fixed_heat_control_panel": "diagnostics/generated/native_recovery_20260926/fixed_heat_train0001",
+  "fixed_heat_control_family_id": "duplicate_family:0001+0273",
+  "fixed_heat_control_policy": "exact train-only heat-allocation null for u/v/p and maintained pressure drop; preserve measured thermal role and per-module peak changes",
+  "max_optimizer_updates": 1000,
+  "max_epochs": 125,
+  "formal_arm_update_ceiling": 1000,
+  "checkpoint_every_updates": 50,
+  "review_updates": [200, 500, 1000],
+  "random_seed": 2317,
+  "deterministic_eval_mode": true,
+  "project_response_gradient_blockwise": true,
+  "response_ramp_start_update": 10,
+  "response_ramp_end_update": 50,
+  "response_ramp_terms": ["finite", "finite_peak", "pressure_value", "pressure_response", "fixed_heat_null", "fixed_heat_thermal"],
+  "required_response_terms": ["finite", "finite_peak", "pressure_value", "pressure_response"],
+  "required_control_terms": ["fixed_heat_null", "fixed_heat_thermal"],
+  "include_feasibility_bce": false,
+  "stages": [
+    {
+      "name": "value_warmup",
+      "start_update": 0,
+      "stop_update": 10,
+      "active_terms": ["value"]
+    },
+    {
+      "name": "balanced_response_ramp",
+      "start_update": 10,
+      "stop_update": 50,
+      "active_terms": ["value", "finite", "finite_peak", "pressure_value", "pressure_response", "fixed_heat_null", "fixed_heat_thermal"]
+    },
+    {
+      "name": "decision_response_and_continuous_pressure",
+      "start_update": 50,
+      "stop_update": 1000,
+      "active_terms": ["value", "finite", "finite_peak", "pressure_value", "pressure_response", "fixed_heat_null", "fixed_heat_thermal"]
+    }
+  ],
+  "mixed_response_policy": "unknown numerical floor; no mixed-response loss in this bounded fit",
+  "projection_policy": "project only an adverse first-order response-gradient component against the combined value gradient, independently within field, initial-port, and port-refinement parameter blocks"
+}

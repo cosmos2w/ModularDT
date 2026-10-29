@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "profile_name": "windfarm_joint_forward_maturation",
+  "workflow": "forward",
+  "model_family": "honf_forward",
+  "case": {
+    "id": "WindFarm",
+    "config": "project://Case_WindFarm/configs/forward_velocity_b16_q8192.json",
+    "dataset_id": "wind_farm_volume_v1"
+  },
+  "model": {
+    "core_honf": {
+      "forward_architecture": "dense_pairwise_field",
+      "interface_model": {
+        "message_hidden_dim": 128,
+        "attention_heads": 4,
+        "coarse_latent_count": 8,
+        "coarse_blocks": 1,
+        "main_latent_count": 16,
+        "main_latent_blocks": 2,
+        "local_radius_factor": 2.5,
+        "relative_fourier_frequencies": 4,
+        "receiver_chunk_size": 512,
+        "activation_checkpointing": true
+      },
+      "field_dim": 3,
+      "spatial_dim": 3,
+      "coordinate_scale": [50.0, 38.0, 6.25],
+      "periodic_axes": [],
+      "local_context_scale": 0.5,
+      "num_env_tokens_x": 16,
+      "num_env_tokens_y": 8,
+      "hidden_dim": 256,
+      "dropout": 0.0,
+      "use_layer_norm": true,
+      "geometry_mode": "nonperiodic",
+      "query_time_mode": "none",
+      "query_fourier_frequencies": 4,
+      "boundary_feature_mode": "none",
+      "position_fourier_frequencies": 4,
+      "use_position_fourier_for_modules": true,
+      "use_position_fourier_for_env": true,
+      "module_radius": 0.5
+    }
+  },
+  "training": {
+    "seed": 2103,
+    "device": "cuda:0",
+    "epochs": 500,
+    "learning_rate": 0.00003,
+    "weight_decay": 0.00001,
+    "amp": false,
+    "gradient_clip_norm": 1.0,
+    "plot_every_epochs": 50,
+    "joint_forward": {
+      "source_checkpoint_path": "project://Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/checkpoints/best_field.pt",
+      "typed_search_dir": "project://Case_WindFarm/diagnostics/generated/native_cover_organizer/run2103_e2475/typed_incremental_search_merged_corrected01",
+      "max_updates": 1500,
+      "preflight_only": false,
+      "max_wall_seconds": 68400,
+      "max_attempted_optimizer_calls": 18000,
+      "early_stop_budget_failure_max_ratio": 1.25,
+      "early_stop_budget_failure_min_relative_improvement": 0.05,
+      "early_stop_budget_failure_min_update": 1500,
+      "early_stop_disconnected_organizer_review_update": 1500,
+      "sample_seed": 2103,
+      "preflight_row": 12,
+      "baseline_layout_count": 8,
+      "role_query_counts": {
+        "volume": 4096,
+        "hub_slab": 1024,
+        "downstream_envelope": 1024,
+        "near_turbine": 1024,
+        "background": 1024
+      },
+      "audit_query_counts": {
+        "volume": 1024,
+        "hub_slab": 256,
+        "downstream_envelope": 256,
+        "near_turbine": 256,
+        "background": 256
+      },
+      "organizer_hidden_dim": 32,
+      "organizer_learning_rate": 0.0001,
+      "organizer_weight_decay": 0.0001,
+      "role_budget_delta": 0.1,
+      "role_budget_floor_mps": 0.00001,
+      "risk_dual_learning_rate": 0.01,
+      "risk_dual_max": 10.0,
+      "risk_ema_rate": 0.05,
+      "work_proxy_weight": 0.001,
+      "full_replay_interval": 5,
+      "review_updates": [150, 500, 1500],
+      "full_grid_review_updates": [500, 1500],
+      "fixed_g2_full_grid_review_updates": [500],
+      "fixed_g2_grid_minimum_remaining_wall_seconds": 1800,
+      "full_grid_chunk_size": 8192,
+      "receiver_chunk_size": 512,
+      "role_catalogue_cache_max_bytes": 68719476736,
+      "anchor_measure_variant": "raw",
+      "minimum_nonzero_reviews_to_restore_work": 2,
+      "minimum_soft_qe_permission": 1e-30
+    }
+  },
+  "checkpointing": {
+    "save_best": false,
+    "save_best_field_mse": false,
+    "save_best_temperature_mse": false,
+    "save_best_predicted": false,
+    "save_latest": true,
+    "save_latest_every_epochs": 1,
+    "save_epoch_milestones": []
+  },
+  "run": {
+    "id": "2110",
+    "name": "windfarm_joint_forward_maturation",
+    "output_root": "project://Trained_Results"
+  },
+  "_note": "Matched Run2103 initialization; native role sampling, physical-unit budgets, staged G2 then hard-value/soft-organizer training. Requires CUDA_VISIBLE_DEVICES=2 and an explicit GPU2 run grant."
+}

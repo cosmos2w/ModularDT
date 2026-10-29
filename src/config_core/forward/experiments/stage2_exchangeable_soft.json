@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "_note": "Phase 2 bridge: exchangeable six-slot organizer with every candidate selected, dense soft routing, descriptor-first mechanisms, and exact additive field assembly.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "organizer_mode": "exchangeable_slots",
+        "edge_capacity": 6,
+        "initial_active_edges": 6,
+        "minimum_active_edges": 1,
+        "slot_refinement_steps": 2,
+        "edge_selection_mode": "all",
+        "module_assignment_normalizer": "softmax",
+        "environment_assignment_normalizer": "softmax",
+        "query_assignment_normalizer": "softmax",
+        "environment_locality_mode": "none",
+        "mechanism_state_mode": "descriptor_first",
+        "field_assembly_mode": "edge_additive",
+        "routing_execution": "dense",
+        "query_edge_limit": 0,
+        "query_module_limit": 0
+      }
+    },
+    "training": {
+      "learning_rate": 0.0001
+    }
+  },
+  "case": {}
+}

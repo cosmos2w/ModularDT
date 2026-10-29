@@ -1,0 +1,49 @@
+{
+  "schema": "content_hypergraph_recipe_v2",
+  "dataset": "thermal",
+  "model_family": "honf_content_hypergraph",
+  "adapter_schema": "thermal_content_hypergraph_adapter_v2",
+  "architecture": "A2-D",
+  "protocol": "formal_d_full_train_v1",
+  "seed": 0,
+  "sampling_seed": 0,
+  "primary_queries": 1024,
+  "microbatch_size": 24,
+  "effective_batch_size": 48,
+  "total_epochs": 5000,
+  "approved_stop_after": 5000,
+  "precision": "fp32",
+  "edge_access": "full",
+  "optimizer_bias_norm_exclusion": false,
+  "optimizer": {
+    "name": "AdamW",
+    "weight_decay": 0.00001,
+    "bias_and_norm_weight_decay": 0.00001,
+    "lr": 0.0003,
+    "betas": [0.9, 0.999],
+    "eps": 1e-8
+  },
+  "execution": {
+    "monitor_every": 10,
+    "latest_every": 10,
+    "curve_every": 10,
+    "checkpoint_epochs": [10, 50, 100, 250, 500, 1000, 2500, 5000],
+    "field_metric": "field_score"
+  },
+  "model": {
+    "module_input_dim": 8,
+    "environment_input_dim": 8,
+    "coordinate_dim": 2,
+    "query_input_dim": 0,
+    "operating_input_dim": 14,
+    "output_dim": 3,
+    "context_dim": 128,
+    "num_heads": 4,
+    "context_depth": 2,
+    "num_hyperedges": 6,
+    "thermal_response_rank": 4,
+    "local_hidden_dim": 128,
+    "dropout": 0.0,
+    "init_seed": 0
+  }
+}

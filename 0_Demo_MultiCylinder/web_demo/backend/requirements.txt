@@ -1,7 +1,0 @@
-fastapi
-uvicorn[standard]
-pydantic
-numpy
-matplotlib
-pillow
-torch

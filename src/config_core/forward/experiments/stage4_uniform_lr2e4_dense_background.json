@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "_note": "Stage 4 control: uniform AdamW learning rate 2e-4 with the legacy dense additive background.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "additive_background_mode": "dense_query_attention"
+      }
+    },
+    "training": {
+      "learning_rate": 0.0002,
+      "organizer_learning_rate": null
+    }
+  },
+  "case": {}
+}

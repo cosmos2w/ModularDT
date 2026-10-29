@@ -1,0 +1,1292 @@
+"""Train the coupled ChannelThermal hypergraph operator neural field.
+
+This case-owned implementation is dispatched by the project-level ``train.py``
+after core and case configurations have been composed and confirmed.
+
+A run writes resolved settings, CSV metrics, selected checkpoints, diagnostic
+loss curves, and a compact summary.
+
+The tensor path is documented in ``README.md``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import csv
+import hashlib
+import json
+import math
+import random
+import time
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional
+
+import numpy as np
+import torch
+from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
+from honf_forward_core.training.diagnostics import (
+    HONF_DIAGNOSTIC_KEYS,
+    compute_honf_diagnostics,
+    organizer_regularization_loss,
+)
+from honf_forward_core.training.hypergraph_shadow import (
+    hard_value_soft_hypergraph_forward,
+)
+from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_runtime.compat import (
+    autocast_context,
+    count_parameters,
+    current_timestamp,
+    ensure_dir,
+    load_trusted_checkpoint,
+    make_grad_scaler,
+    read_json,
+    recursive_to_device,
+    resolve_demo_path,
+    select_device,
+    set_seed,
+    strip_module_prefix,
+    write_json,
+)
+from honf_runtime.run_layout import RunLayout
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+from channelthermal.config import ChannelThermalHONFConfig
+from channelthermal.data.collation import (
+    ChannelThermalBatchCollator,
+    ModuleCountBucketBatchSampler,
+)
+from channelthermal.data.datasets import (
+    GlobalChannelThermalDataset,
+    fit_global_normalizer,
+)
+from channelthermal.model import ChannelThermalHONFModel
+from channelthermal.training.campaign import (
+    HYPERGRAPH_ARCHITECTURES,
+    NATIVE_CONTEXT_ARCHITECTURES,
+    CampaignMicrobatchLoader,
+    amend_structural_calibration,
+    canonical_initialization_config,
+    copy_matched_native_context_initial_state,
+    copy_matched_physical_initial_state,
+    gpu_contention_sample,
+    validate_campaign,
+    validate_campaign_resume,
+)
+from channelthermal.training.campaign_response import NativeCampaignResponse
+from channelthermal.training.checkpoints import (
+    _file_sha256,
+    _partial_initialize_model,
+    _restore_rng_state,
+    _validate_initialization_checkpoint,
+    _validate_resume_checkpoint,
+    save_checkpoint,
+)
+from channelthermal.training.epoch import (
+    GRADIENT_DIAGNOSTIC_KEYS,
+    INTERFACE_DIAGNOSTIC_KEYS,
+    _case_group_budget_settings,
+    effective_local_loss_weights,
+    effective_port_condition_settings,
+    effective_port_global_weight,
+    interface_loss,
+    internal_loss,
+    make_model_inputs,
+    organizer_regularization,
+    pack_scalar_metrics,
+    port_condition_loss,
+    port_cyclic_smoothness_loss,
+    port_global_consistency_loss,
+    predicted_consistency_weight_for_epoch,
+    run_epoch,
+)
+from channelthermal.training.native_denominators import native_denominators_enabled
+from channelthermal.training.optimizer import (
+    _optimizer_group_record,
+    _optimizer_inventory_digest,
+    _print_optimizer_group_inventory,
+    _validate_optimizer_resume_compatibility,
+    build_forward_optimizer,
+    refresh_optimizer_group_inventory,
+)
+from channelthermal.training.reporting import (
+    best_metrics_payload,
+    repair_metrics_csv_for_append,
+    save_global_loss_plots,
+    write_metrics_row,
+)
+from channelthermal.training.stop_request import acknowledge_stop, stop_requested
+from channelthermal.training_tools.losses import channelthermal_field_mse
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse and validate command-line options for this workflow."""
+
+    parser = argparse.ArgumentParser(description="Train the standalone global-field ChannelThermal HONF model.")
+    parser.add_argument("--config", type=str, required=True, help="Resolved legacy-format JSON; prefer the project train.py.")
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--max-train-batches", type=int, default=None)
+    parser.add_argument("--max-val-batches", type=int, default=None)
+    parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--Run_ID", dest="run_id", type=str, default=None)
+    checkpoint_mode = parser.add_mutually_exclusive_group()
+    checkpoint_mode.add_argument("--resume-checkpoint", type=str, default=None, help="Resume training from a saved HONF-CL checkpoint.")
+    checkpoint_mode.add_argument(
+        "--initialize-checkpoint",
+        type=str,
+        default=None,
+        help="Initialize a new run from compatible name-and-shape matched checkpoint weights.",
+    )
+    return parser.parse_args()
+
+
+def normalize_run_id(value: Any, fallback: str = "0001") -> str:
+    """Normalize run id."""
+
+    raw = str(value or fallback).strip()
+    if not raw.isdigit():
+        raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
+    return f"{int(raw):04d}"
+
+
+def reuses_primary_validation_for_predicted_mode(local_port_condition_mode: str) -> bool:
+    """Return whether the primary validation pass already uses predicted ports."""
+
+    return str(local_port_condition_mode).lower() == "predicted"
+
+
+def should_save_latest_checkpoint(
+    epoch: int,
+    total_epochs: int,
+    checkpoint_config: Dict[str, Any],
+) -> bool:
+    """Apply the optional latest-checkpoint cadence while always saving the final epoch."""
+
+    if not bool(checkpoint_config.get("save_latest", True)):
+        return False
+    cadence = max(int(checkpoint_config.get("save_latest_every_epochs", 1)), 1)
+    return int(epoch) % cadence == 0 or int(epoch) == int(total_epochs)
+
+
+def should_save_milestone_checkpoint(
+    epoch: int,
+    checkpoint_config: Dict[str, Any],
+) -> bool:
+    """Return whether this exact epoch is an explicitly retained milestone."""
+
+    return int(epoch) in {
+        int(value) for value in checkpoint_config.get("save_epoch_milestones", [])
+    }
+
+
+def should_save_best_checkpoint(epoch: int, total_epochs: int, checkpoint_config: dict[str, Any]) -> bool:
+    """Select best aliases only at retained review boundaries, or at the stop."""
+
+    cadence = int(checkpoint_config.get("save_best_every_epochs", 1))
+    if cadence < 1:
+        raise ValueError("save_best_every_epochs must be positive.")
+    return epoch % cadence == 0 or epoch == total_epochs
+
+
+def resolve_development_training(config: dict[str, Any], *, max_train_batches=None, max_val_batches=None,
+                                 effective_epochs=None):
+    """Bind the fixed subset before normalization; historical full runs are unchanged."""
+
+    from channelthermal.data.development_split import resolve_development_manifest
+
+    dataset_config = config["dataset"]
+    manifest = resolve_development_manifest(dataset_config,
+        dataset_config.get("packed_h5_path", "./Case_ThermalChannel/Dataset/links/thermal_channel_global_v1.h5"))
+    if manifest is None:
+        if dataset_config.get("development_subset") is not None:
+            raise ValueError("Saved development membership requires its explicit manifest binding.")
+        return None
+    training = config["training"]
+    campaign = training.get("campaign") or {}
+    if campaign.get("require_full_epoch") is not True or campaign.get("schedule_total_epochs") != 1000:
+        raise ValueError("Development requires complete selected epochs and its explicit horizon1000.")
+    if any(value is not None for value in (max_train_batches, max_val_batches,
+            training.get("max_train_batches_per_epoch"), training.get("max_val_batches"))):
+        raise ValueError("Development subset epochs cannot use train or validation batch caps.")
+    if dataset_config.get("allow_train_as_validation"):
+        raise ValueError("Development requires its disjoint selected validation partition.")
+    if dataset_config.get("train_split", "train") != "train" or dataset_config.get("val_split", "test") not in ("test", "val"):
+        raise ValueError("Development requires original train and disjoint test/val splits.")
+    if training.get("init_checkpoint_path"):
+        raise ValueError("Development requires fresh initialization; checkpoint transfer is a separate protocol.")
+    stop = int(training["epochs"] if effective_epochs is None else effective_epochs)
+    paths = campaign.get("response_stencils", [])
+    if campaign.get("forward_refinement"):
+        from channelthermal.training.response_refinement import (
+            validate_response_addendum,
+        )
+        validate_response_addendum(campaign, {**dataset_config, "development_subset": manifest})
+    elif len(paths) > 4 or (stop > 100 and not paths):
+        raise ValueError("Development after epoch100 requires one to four selected-train response stencils.")
+    checkpointing = config.setdefault("checkpointing", {})
+    for key, expected in {"save_best": False, "save_best_field_mse": True,
+                          "save_best_temperature_mse": False, "save_best_predicted": False,
+                          "save_latest": True}.items():
+        if checkpointing.setdefault(key, expected) is not expected:
+            raise ValueError("Development retains only field-best and latest checkpoint aliases.")
+    for key in ("save_latest_every_epochs", "save_best_every_epochs"):
+        if checkpointing.setdefault(key, 100) != 100:
+            raise ValueError("Development checkpoint and best-alias cadence must be 100 epochs.")
+    milestones = checkpointing.setdefault("save_epoch_milestones", list(range(100, int(training["epochs"]) + 1, 100)))
+    if (not isinstance(milestones, list)
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 100 or value % 100 for value in milestones)
+            or len(set(milestones)) != len(milestones)):
+        raise ValueError("Development retained milestones must be multiples of 100; no inherited25 saves.")
+    if training.setdefault("plot_every_epochs", 100) != 100:
+        raise ValueError("Development plot cadence must be 100 epochs.")
+    dataset_config["development_subset"] = copy.deepcopy(manifest)
+    return manifest
+
+
+def validate_development_resume(checkpoint: dict[str, Any], dataset_config: dict[str, Any], *, normalizer=None) -> None:
+    """Prevent full/development or changed-membership resumes before applying state."""
+
+    saved = (checkpoint.get("train_config") or {}).get("dataset") or {}
+    current_binding = dataset_config.get("development_subset")
+    saved_binding = saved.get("development_subset")
+    if dataset_config.get("development_manifest") and current_binding is None:
+        raise ValueError("Development resume is missing validated current membership.")
+    if saved.get("development_manifest") and saved_binding is None:
+        raise ValueError("Development checkpoint is missing saved membership.")
+    if current_binding is None and saved_binding is None:
+        return
+    if not isinstance(current_binding, dict) or not isinstance(saved_binding, dict) or current_binding != saved_binding:
+        raise ValueError("Resume development manifest identity or selected membership changed.")
+    for source, binding in ((dataset_config, current_binding), (saved, saved_binding)):
+        digest = source.get("development_manifest_sha256")
+        if (not source.get("development_manifest") or not isinstance(digest, str) or len(digest) != 64
+                or binding.get("manifest_sha256") != digest):
+            raise ValueError("Development resume requires explicit consistent manifest/digest metadata.")
+    if any(saved.get(key) != dataset_config.get(key) for key in
+           ("development_manifest_sha256", "dataset_id", "dataset_schema", "dataset_fingerprint")):
+        raise ValueError("Resume development manifest/dataset identity changed.")
+    if normalizer is not None:
+        stats = checkpoint.get("global_normalization_stats")
+        if not isinstance(stats, dict) or set(stats) != set(normalizer.stats):
+            raise ValueError("Development resume normalization inventory is incomplete or changed.")
+
+
+def build_training_datasets(config: dict[str, Any], development=None):
+    """Share training transforms; development always fits its selected train IDs.
+
+    Full-data loading keeps historical packed statistics unless train_only is
+    explicit. That opt-in fits the original training view before validation.
+    """
+
+    from channelthermal.data.development_split import development_case_ids
+
+    dataset_cfg, training_cfg = config["dataset"], config["training"]
+    train_split, val_split = dataset_cfg.get("train_split", "train"), dataset_cfg.get("val_split", "test")
+    normalization_policy = dataset_cfg.get("normalization_policy", "packed")
+    if normalization_policy not in ("packed", "train_only"):
+        raise ValueError("Dataset normalization_policy must be 'packed' or 'train_only'.")
+    if normalization_policy == "train_only" and train_split != "train":
+        raise ValueError("train_only normalization requires the original train split.")
+    if development is not None and val_split == "val":
+        val_split = "test"
+    train_selection = {"case_ids": development_case_ids(development, train_split)} if development is not None else {}
+    val_selection = {"case_ids": development_case_ids(development, val_split)} if development is not None else {}
+    common = {"normalize_inputs": bool(dataset_cfg.get("normalize_inputs", False)),
+              "normalize_targets": bool(dataset_cfg.get("normalize_targets", False)),
+              "require_converged": bool(dataset_cfg.get("require_converged", False))}
+    dataset_path = dataset_cfg.get("packed_h5_path", "./Case_ThermalChannel/Dataset/links/thermal_channel_global_v1.h5")
+    train_dataset = GlobalChannelThermalDataset(dataset_path, split=train_split,
+        points_per_case=dataset_cfg.get("points_per_case", 4096),
+        random_point_sampling=bool(dataset_cfg.get("random_point_sampling", True)),
+        seed=int(training_cfg.get("seed", 42)), **common, **train_selection)
+    if normalization_policy == "train_only" and development is None:
+        train_dataset.normalizer = fit_global_normalizer(dataset_path, train_dataset.selected_case_ids)
+        dataset_cfg["normalization_fit_case_ids"] = list(train_dataset.selected_case_ids)
+    val_dataset = GlobalChannelThermalDataset(dataset_path, split=val_split,
+        points_per_case=dataset_cfg.get("val_points_per_case", dataset_cfg.get("points_per_case", 4096)),
+        random_point_sampling=False, seed=int(training_cfg.get("seed", 42)) + 1000,
+        normalizer=train_dataset.normalizer, **common, **val_selection)
+    return train_dataset, val_dataset
+
+
+def resolve_run_id(args_value: Any, cfg: Dict[str, Any], training_cfg: Dict[str, Any]) -> str:
+    """Resolve Run_ID with CLI override first, then template settings.
+
+    Some templates carry both top-level `Run_ID` and `training.Run_ID`.
+    `training.Run_ID` is the operational training setting, so it wins when no
+    `--Run_ID` override is provided. The resolved value is mirrored back into
+    both places before saving `config_resolved.json`.
+    """
+
+    top_level = cfg.get("Run_ID")
+    training_value = training_cfg.get("Run_ID")
+    if args_value is not None:
+        return normalize_run_id(args_value, "0001")
+    if top_level is not None and training_value is not None:
+        normalized_top = normalize_run_id(top_level, "0001")
+        normalized_training = normalize_run_id(training_value, "0001")
+        if normalized_top != normalized_training:
+            print(
+                "[warning] Conflicting Run_ID values in config: "
+                f"top-level Run_ID={normalized_top}, training.Run_ID={normalized_training}; "
+                "using training.Run_ID. Pass --Run_ID to override both."
+            )
+        return normalized_training
+    return normalize_run_id(training_value if training_value is not None else top_level, "0001")
+
+
+def sanitize_run_suffix(value: Any) -> str:
+    """Perform the sanitize run suffix operation used by this module."""
+
+    raw = str(value or "").strip()
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw).strip("_")
+
+
+def resolve_config_path(path_like: str) -> Path:
+    """Resolve config path."""
+
+    path = Path(path_like).expanduser()
+    if path.is_absolute() or path.exists():
+        return path.resolve()
+    return resolve_demo_path(path)
+
+
+def _auto_int(value: Any, fallback: int) -> int:
+    """Perform the auto int operation used by this module."""
+
+    if value is None or (isinstance(value, str) and value.lower() == "auto"):
+        return int(fallback)
+    return int(value)
+
+
+def _auto_float(value: Any, fallback: float) -> float:
+    """Perform the auto float operation used by this module."""
+
+    if value is None or (isinstance(value, str) and value.lower() == "auto"):
+        return float(fallback)
+    return float(value)
+
+
+def _first_domain_and_radius(dataset: GlobalChannelThermalDataset) -> tuple[float, float, float]:
+    """Perform the first domain and radius operation used by this module."""
+
+    if len(dataset) == 0:
+        return 12.0, 4.0, 0.45
+    sample = dataset[0]
+    structure = sample["structure"]
+    lx = float(structure["domain_length_x"][0])
+    ly = float(structure["domain_length_y"][0])
+    material = structure["material_params"]
+    radius = float(material[5]) if material.shape[0] > 5 and float(material[5]) > 0.0 else 0.45
+    return lx, ly, radius
+
+
+LOCAL_COUPLING_KEYS = {
+    "use_local_surrogate",
+    "local_surrogate_checkpoint_path",
+    "freeze_local_surrogate",
+    "local_surrogate_latent_dim",
+    "local_module_params_from_used_ports",
+    "default_num_interface_points",
+}
+
+PHYSICAL_CORRECTION_KEYS = {
+    "local_surrogate_flux_mode",
+    "local_surrogate_flux_blend_alpha",
+    "interaction_refinement_steps",
+    "port_global_consistency_radius_offset",
+    "port_global_consistency_num_points",
+}
+
+CHANNELTHERMAL_KEYS = {
+    "field_names",
+    "material_param_dim",
+    "heat_scale",
+    "global_feature_schema",
+    "fixed_heat_scale",
+    "legacy_active_fraction_reference_slots",
+    "internal_prediction_mode",
+    "fallback_internal_query_dim",
+    "fallback_interface_dim",
+    "fallback_hidden_dim",
+    "fallback_fourier_frequencies",
+}
+
+
+def _merge_authoritative(
+    channel_payload: Dict[str, Any],
+    section_payload: Dict[str, Any],
+    keys: set[str],
+    *,
+    section_name: str,
+) -> None:
+    """Perform the merge authoritative operation used by this module."""
+
+    for key in keys:
+        if key not in section_payload:
+            continue
+        if key in channel_payload and channel_payload[key] != section_payload[key]:
+            print(
+                f"[warning] Conflicting model.channelthermal.{key}={channel_payload[key]!r}; "
+                f"using authoritative model.{section_name}.{key}={section_payload[key]!r}."
+            )
+        channel_payload[key] = section_payload[key]
+
+
+def build_model_config(payload: Dict[str, Any], dataset: GlobalChannelThermalDataset) -> ChannelThermalHONFConfig:
+    """Build model config."""
+
+    model_payload = dict(payload.get("model", {}))
+    core_payload = dict(model_payload.get("core_honf", {}))
+    channel_payload = dict(model_payload.get("channelthermal", {}))
+    local_payload = dict(model_payload.get("local_coupling", {}))
+    physical_payload = dict(model_payload.get("physical_correction", {}))
+    if "enable_fallback_heads" in channel_payload:
+        print("[warning] model.channelthermal.enable_fallback_heads is ignored; use internal_prediction_mode instead.")
+        channel_payload.pop("enable_fallback_heads", None)
+    _merge_authoritative(channel_payload, local_payload, LOCAL_COUPLING_KEYS, section_name="local_coupling")
+    _merge_authoritative(channel_payload, physical_payload, PHYSICAL_CORRECTION_KEYS, section_name="physical_correction")
+    lx, ly, radius = _first_domain_and_radius(dataset)
+    core_payload["field_dim"] = _auto_int(core_payload.get("field_dim"), dataset.field_dim)
+    core_payload["domain_length_x"] = _auto_float(core_payload.get("domain_length_x"), lx)
+    core_payload["domain_length_y"] = _auto_float(core_payload.get("domain_length_y"), ly)
+    core_payload["module_radius"] = _auto_float(core_payload.get("module_radius"), radius)
+    channel_payload["material_param_dim"] = _auto_int(channel_payload.get("material_param_dim"), dataset.material_param_dim)
+    channel_payload["default_num_interface_points"] = _auto_int(
+        channel_payload.get("default_num_interface_points"),
+        dataset.n_interface_points or 64,
+    )
+    if channel_payload.get("global_feature_schema") == "source_local_v3":
+        from channelthermal.input_adapter import fit_source_local_heat_scale
+
+        fitted_scale = fit_source_local_heat_scale(
+            dataset.path, dataset.selected_case_ids,
+            normalizer=dataset.normalizer if dataset.normalize_inputs else None,
+        ) * float(channel_payload.get("heat_scale", 1.0))
+        declared_scale = channel_payload.get("fixed_heat_scale")
+        if declared_scale is not None and not np.isclose(float(declared_scale), fitted_scale, rtol=1e-6, atol=1e-8):
+            raise ValueError("Source-local heat scale differs from its selected-training fit.")
+        channel_payload["fixed_heat_scale"] = fitted_scale
+    return ChannelThermalHONFConfig.from_dict({"core_honf": core_payload, "channelthermal": channel_payload})
+
+
+def resolved_config_payload(
+    cfg: Dict[str, Any],
+    model_config: ChannelThermalHONFConfig,
+    dataset_cfg: Dict[str, Any],
+    local_checkpoint_provenance: Optional[str],
+) -> Dict[str, Any]:
+    """Write a concrete config with no auto-valued model fields."""
+
+    resolved = dict(cfg)
+    channel = model_config.channelthermal.to_dict()
+    resolved["model"] = {
+        "core_honf": model_config.core_honf.to_dict(),
+        "channelthermal": {key: channel[key] for key in CHANNELTHERMAL_KEYS if key in channel},
+        "local_coupling": {key: channel[key] for key in LOCAL_COUPLING_KEYS if key in channel},
+        "physical_correction": {key: channel[key] for key in PHYSICAL_CORRECTION_KEYS if key in channel},
+        "effective_model_config": model_config.to_dict(),
+    }
+    resolved["dataset"] = dict(dataset_cfg)
+    resolved["dataset"]["normalize_inputs"] = bool(dataset_cfg.get("normalize_inputs", False))
+    resolved["dataset"]["normalize_targets"] = bool(dataset_cfg.get("normalize_targets", False))
+    resolved["local_checkpoint_provenance"] = local_checkpoint_provenance
+    return resolved
+
+
+def resolve_auto_internal_mode(model_config: ChannelThermalHONFConfig, model: ChannelThermalHONFModel) -> None:
+    """Resolve auto internal mode."""
+
+    if str(model_config.channelthermal.internal_prediction_mode) != "auto":
+        return
+    model_config.channelthermal.internal_prediction_mode = (
+        "local_surrogate" if model.local_surrogate_attached else "global_head"
+    )
+
+
+def _resolve_training_loss_config(
+    loss_config: Dict[str, Any],
+    training_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply training-profile objective overrides to the physical loss config."""
+
+    resolved = dict(loss_config)
+    if "functional_detail_complexity_weight" in training_config:
+        resolved["functional_detail_complexity_weight"] = float(
+            training_config["functional_detail_complexity_weight"]
+        )
+    return resolved
+
+
+def run_from_config(
+    config: Dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    run_dir_override: Optional[Path] = None,
+) -> int:
+    """Run coupled training from an already composed configuration.
+
+    The generic project entry point performs source-profile validation,
+    resource resolution, launch confirmation, and run reservation before this
+    case-specific workflow is entered.  A deep copy keeps automatic resolution
+    and compatibility normalization local to this run.
+    """
+
+    cfg = copy.deepcopy(config)
+    dataset_cfg = cfg.get("dataset", {})
+    training_cfg = cfg.get("training", {})
+    loss_cfg = _resolve_training_loss_config(cfg.get("loss", {}), training_cfg)
+    development = resolve_development_training(cfg, max_train_batches=getattr(args, "max_train_batches", None),
+                                               max_val_batches=getattr(args, "max_val_batches", None),
+                                               effective_epochs=args.epochs or training_cfg.get("epochs"))
+    checkpoint_cfg = cfg.get("checkpointing", {})
+    if development is not None and getattr(args, "initialize_checkpoint", None):
+        raise ValueError("Development requires fresh initialization; checkpoint transfer is a separate protocol.")
+    campaign = validate_campaign(cfg, max_train_batches=getattr(args, "max_train_batches", None))
+    if (campaign.get("structural_measure_policy_version") == 2 and not getattr(args, "resume_checkpoint", None)
+            and cfg.get("model", {}).get("core_honf", {}).get("forward_architecture") != "native_context_tree_honf"):
+        raise ValueError("Reviewed structural measure policy 2 requires a saved continuation checkpoint; it cannot start fresh.")
+    schedule_total_epochs = int(campaign.get("schedule_total_epochs", args.epochs or training_cfg.get("epochs", 200)))
+    interface_fit = bool(campaign.get("interface_fit"))
+    forward_refinement = bool(campaign.get("forward_refinement"))
+    physical_epoch_offset = int(campaign.get("interface_fit", {}).get("backbone_epoch", 0))
+    if forward_refinement:
+        declaration = campaign["forward_refinement"]
+        physical_epoch_offset = int(declaration["backbone_epoch"]) + int(declaration["interface_prefit_epoch"])
+    if campaign.get("matched_fresh_initialization") and getattr(args, "initialize_checkpoint", None):
+        raise ValueError("The primary fresh campaign cannot initialize from a trained checkpoint.")
+    ignored_organizer_keys = [
+        key
+        for key in loss_cfg
+        if key.startswith("organizer_") and key not in {"organizer_regularization"}
+        and float(loss_cfg.get(key, 0.0) or 0.0) != 0.0
+    ]
+    if ignored_organizer_keys:
+        print(
+            "[warning] Deprecated/legacy organizer losses are ignored; use "
+            f"loss.organizer_regularization instead: {ignored_organizer_keys}"
+        )
+    set_seed(int(training_cfg.get("seed", 42)))
+    device = select_device(args.device or training_cfg.get("device"))
+    development_checkpoint = None
+    if development is not None and args.resume_checkpoint:
+        development_checkpoint = load_trusted_checkpoint(resolve_demo_path(args.resume_checkpoint), map_location=device)
+        validate_development_resume(development_checkpoint, dataset_cfg)
+
+    train_dataset, val_dataset = build_training_datasets(cfg, development)
+    if len(val_dataset) == 0:
+        if bool(dataset_cfg.get("allow_train_as_validation", False)):
+            print("[warning] validation split is empty; explicitly reusing training data.")
+            val_dataset = train_dataset
+        else:
+            raise RuntimeError(
+                "Validation split is empty. Select a non-empty split or set "
+                "case.dataset.allow_train_as_validation=true explicitly."
+            )
+    model_config = build_model_config(cfg, train_dataset)
+    model = ChannelThermalHONFModel(model_config).to(device)
+    if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
+        initial_epochs = getattr(args, "epochs", None)
+        if initial_epochs is None:
+            initial_epochs = training_cfg.get("epochs", 200)
+        # v5 requires explicit schedule state even for its no-grad materialize
+        # pass used by --initialize-checkpoint. Epoch zero takes the exact
+        # parent path and consumes no controller or gate RNG.
+        model.set_training_progress(epoch=0, total_epochs=int(initial_epochs))
+    model.set_global_target_normalization(train_dataset.normalizer.stats, normalize_targets=bool(dataset_cfg.get("normalize_targets", False)))
+    resolve_auto_internal_mode(model_config, model)
+    cfg = resolved_config_payload(
+        cfg,
+        model_config,
+        dataset_cfg,
+        model.local_coupling.local_surrogate_checkpoint_path or model_config.channelthermal.local_surrogate_checkpoint_path,
+    )
+
+    batch_size = int(dataset_cfg.get("batch_size", training_cfg.get("batch_size", 4)))
+    val_batch_size = int(dataset_cfg.get("val_batch_size", batch_size))
+    num_workers = int(dataset_cfg.get("num_workers", 0))
+    max_modules_per_batch = dataset_cfg.get("max_modules_per_batch")
+    collator = ChannelThermalBatchCollator(
+        dynamic_module_padding=bool(dataset_cfg.get("dynamic_module_padding", True)),
+        max_modules_per_batch=None if max_modules_per_batch is None else int(max_modules_per_batch),
+    )
+    if bool(dataset_cfg.get("bucket_by_module_count", True)):
+        train_batch_sampler = ModuleCountBucketBatchSampler(
+            train_dataset.selected_module_counts,
+            batch_size=batch_size,
+            bucket_size_multiplier=int(dataset_cfg.get("module_count_bucket_size_multiplier", 8)),
+            seed=int(training_cfg.get("seed", 42)),
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_batch_sampler,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+            collate_fn=collator,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+            collate_fn=collator,
+        )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=val_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        collate_fn=collator,
+    )
+
+    # Materialization and canonical copying occur before optimizer construction.
+    # The fork isolates constructor/materialization RNG from later training.
+    if campaign.get("matched_fresh_initialization") and not args.resume_checkpoint:
+        materialization_loader = CampaignMicrobatchLoader(train_loader, int(campaign.get("microbatch_size", batch_size)))
+        materialization_batch = next(iter(materialization_loader))
+        for key in ("_optimizer_start", "_optimizer_boundary", "_accumulation_weight", "_auxiliary_due"):
+            materialization_batch.pop(key, None)
+        materialization_batch = recursive_to_device(materialization_batch, device)
+        native_context = model_config.core_honf.forward_architecture in NATIVE_CONTEXT_ARCHITECTURES
+        materialization_batches = [materialization_batch]
+        materialization_cases = []
+        if native_context:
+            counts = train_dataset.selected_module_counts
+            indices = list(dict.fromkeys((min(range(len(counts)), key=counts.__getitem__),
+                                         max(range(len(counts)), key=counts.__getitem__))))
+            materialization_batches = [recursive_to_device(collator([train_dataset[index]]), device) for index in indices]
+            materialization_cases = [{"case_id": train_dataset.selected_case_ids[index], "module_count": int(counts[index])}
+                                     for index in indices]
+        rng_devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=rng_devices):
+            model.eval()
+            with torch.no_grad():
+                for batch in materialization_batches:
+                    model(**make_model_inputs(batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
+                                              return_predicted_port_outputs=False, return_port_global_consistency=False))
+            if model_config.core_honf.forward_architecture != "dense_pairwise_field":
+                canonical_config = canonical_initialization_config(model_config)
+                torch.manual_seed(0)
+                canonical = ChannelThermalHONFModel(canonical_config).to(device)
+                canonical.set_global_target_normalization(train_dataset.normalizer.stats, normalize_targets=bool(dataset_cfg.get("normalize_targets", False)))
+                canonical.eval()
+                with torch.no_grad():
+                    for batch in materialization_batches:
+                        canonical(**make_model_inputs(batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
+                                                      return_predicted_port_outputs=False, return_port_global_consistency=False))
+                if native_context:
+                    matched_initialization = copy_matched_native_context_initial_state(model, canonical)
+                    comparisons = []
+                    with torch.no_grad():
+                        for panel, batch in zip(materialization_cases, materialization_batches):
+                            inputs = make_model_inputs(batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
+                                                       return_predicted_port_outputs=False, return_port_global_consistency=False)
+                            output, reference = model(**inputs), canonical(**inputs)
+                            differences = {}
+                            for name in ("pred_field", "pred_interface", "pred_internal_temperature", "pred_port_condition"):
+                                if name not in output or name not in reference:
+                                    raise ValueError(f"Initial native wrapper identity lacks physical output {name}.")
+                                left, right = output[name], reference[name]
+                                if left.shape != right.shape or not torch.isfinite(left).all() or not torch.isfinite(right).all():
+                                    raise ValueError(f"Initial native wrapper identity has invalid physical output {name}.")
+                                differences[name] = float((left - right).abs().max()) if left.numel() else 0.0
+                                torch.testing.assert_close(left, right, rtol=1e-5, atol=1e-6)
+                            comparisons.append({**panel, "max_absolute_output_difference": differences})
+                    matched_initialization.update(materialization_panels=comparisons, optimizer_constructed_after_materialization=True)
+                else:
+                    matched_initialization = copy_matched_physical_initial_state(model, canonical)
+                del canonical
+            else:
+                matched_initialization = {"source": "fresh_native_Dense_seed0", "epoch": 0}
+        if native_context:
+            # Different organizer constructors consume different random draws.
+            # Common tensors are copied above; training starts from the same RNG.
+            set_seed(0)
+            matched_initialization["training_rng_seed_after_materialization"] = 0
+        model.train()
+    else:
+        matched_initialization = None
+
+    if forward_refinement:
+        from channelthermal.training.refinement_policy import apply_refinement_policy
+        apply_refinement_policy(model)
+    optimizer, optimizer_group_inventory = build_forward_optimizer(model, training_cfg)
+    scaler = make_grad_scaler(device, bool(training_cfg.get("amp", False)))
+    epochs = int(args.epochs if args.epochs is not None else training_cfg.get("epochs", 200))
+    if campaign and epochs > schedule_total_epochs:
+        raise ValueError("Requested campaign stop exceeds its unchanged absolute schedule horizon.")
+    max_train_batches = args.max_train_batches if args.max_train_batches is not None else training_cfg.get("max_train_batches_per_epoch")
+    max_val_batches = args.max_val_batches if args.max_val_batches is not None else training_cfg.get("max_val_batches")
+    resume_checkpoint = resolve_demo_path(args.resume_checkpoint) if args.resume_checkpoint else None
+    initialize_arg = getattr(args, "initialize_checkpoint", None)
+    initialize_checkpoint = resolve_demo_path(initialize_arg) if initialize_arg else None
+    if resume_checkpoint is not None and initialize_checkpoint is not None:
+        raise ValueError("--resume-checkpoint and --initialize-checkpoint are mutually exclusive.")
+
+    paths_cfg = cfg.get("paths", {})
+    saved_root = ensure_dir(resolve_demo_path(paths_cfg.get("saved_model_dir", "./Trained_Results/ThermalChannel/HONF_Forward_Runs")))
+    run_id = resolve_run_id(args.run_id, cfg, training_cfg)
+    cfg["Run_ID"] = run_id
+    cfg.setdefault("training", {})["Run_ID"] = run_id
+    if run_dir_override is not None and resume_checkpoint is None:
+        run_dir = ensure_dir(Path(run_dir_override).resolve())
+    elif resume_checkpoint is None:
+        suffix = sanitize_run_suffix(args.run_name or training_cfg.get("run_name"))
+        stamp = current_timestamp()
+        run_name = f"Run_{run_id}_{stamp}_{suffix}" if suffix else f"Run_{run_id}_{stamp}"
+        run_dir = ensure_dir(saved_root / run_name)
+    else:
+        run_dir = ensure_dir(
+            resume_checkpoint.parent.parent
+            if resume_checkpoint.parent.name == "checkpoints"
+            else resume_checkpoint.parent
+        )
+    layout = RunLayout(run_dir)
+    layout.ensure()
+    write_json(layout.write_path("configs/config_resolved.json"), cfg)
+    optimizer_inventory_path = layout.write_path("configs/optimizer_group_inventory.json")
+    write_json(optimizer_inventory_path, optimizer_group_inventory)
+    if matched_initialization is not None:
+        write_json(layout.write_path("configs/initialization_inventory.json"), matched_initialization)
+    optimizer_inventory_announced = all(
+        bool(group["scalar_count_complete"])
+        for group in optimizer_group_inventory["groups"]
+    )
+    if optimizer_inventory_announced:
+        _print_optimizer_group_inventory(optimizer_group_inventory)
+    metrics_path = layout.write_path("metrics/metrics.csv")
+    fieldnames = [
+        "epoch",
+        "loss_total",
+        "loss_field",
+        "loss_internal_temperature",
+        "loss_interface",
+        "loss_port_condition",
+        "loss_port_smoothness",
+        "loss_port_global_consistency",
+        "loss_predicted_consistency",
+        "loss_predicted_consistency_internal",
+        "loss_predicted_consistency_interface",
+        "loss_organizer",
+        "effective_port_global_consistency_weight",
+        "effective_predicted_consistency_weight",
+        "effective_internal_temperature_weight",
+        "effective_interface_weight",
+        "field_mse",
+        "temperature_mse",
+        *INTERFACE_DIAGNOSTIC_KEYS,
+        *HONF_DIAGNOSTIC_KEYS,
+        *GRADIENT_DIAGNOSTIC_KEYS,
+        "train_wall_seconds",
+        "val_wall_seconds",
+        "peak_cuda_memory_mb",
+        "val_loss_total",
+        "val_loss_field",
+        "val_loss_internal_temperature",
+        "val_loss_interface",
+        "val_loss_port_condition",
+        "val_loss_port_smoothness",
+        "val_loss_port_global_consistency",
+        "val_loss_predicted_consistency",
+        "val_loss_predicted_consistency_internal",
+        "val_loss_predicted_consistency_interface",
+        "val_loss_organizer",
+        "val_effective_port_global_consistency_weight",
+        "val_effective_predicted_consistency_weight",
+        "val_effective_internal_temperature_weight",
+        "val_effective_interface_weight",
+        "val_field_mse",
+        "val_temperature_mse",
+        *[f"val_{key}" for key in INTERFACE_DIAGNOSTIC_KEYS],
+        *[f"val_{key}" for key in HONF_DIAGNOSTIC_KEYS],
+        "val_predicted_loss_total",
+        "val_predicted_field_mse",
+        "val_predicted_temperature_mse",
+    ]
+    if campaign:
+        coverage_keys = ("epoch_cases_seen", "epoch_unique_cases", "epoch_batches", "epoch_native_batches", "epoch_optimizer_steps", "epoch_primary_field_queries", "epoch_full_case_pass")
+        fieldnames.extend(coverage_keys)
+        fieldnames.extend(f"val_{key}" for key in coverage_keys)
+        fieldnames.extend(("train_cases_per_second", "train_primary_field_queries_per_second", "schedule_total_epochs", "learning_rate"))
+        fieldnames.extend(("campaign_structural_cost", "campaign_structural_weight", "campaign_shadow_calls"))
+        fieldnames.extend(("response_loss", "response_coefficient", "response_examples", "response_wrapper_calls", "response_queries", "response_seconds"))
+        if campaign.get("heat_null_response") is not None:
+            fieldnames.extend(("heat_null_loss", "heat_null_coefficient", "heat_null_seconds",
+                "heat_null_eligible_train_cases", "heat_null_wrapper_calls",
+                "heat_null_primary_fluid_queries", "heat_null_role_queries"))
+        if interface_fit:
+            fieldnames.extend(("fit_epoch", "frozen_backbone_epoch", "physical_objective_epoch"))
+        if forward_refinement:
+            fieldnames.extend(("refinement_epoch", "interface_prefit_epoch", "physical_objective_epoch",
+                               "auxiliary_absolute_loss", "thermal_response_loss", "q_proxy_response_loss",
+                               "null_step_fraction", "null_step_heat", "null_case_id",
+                               "response_thermal_loss", "response_q_proxy_loss", "response_auxiliary_absolute_loss",
+                               "response_auxiliary_absolute_weight", "heat_null_loss", "heat_null_coefficient",
+                               "heat_null_wrapper_calls", "heat_null_primary_fluid_queries", "heat_null_role_queries",
+                               "heat_null_seconds", "refinement_auxiliary_seconds", "refinement_total_wrapper_calls"))
+    if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
+        detail_metric_keys = (
+            "loss_functional_detail_complexity",
+            "functional_detail_complexity_weight",
+            "functional_detail_configured_complexity_weight",
+            "functional_detail_ramp_weight",
+            "functional_detail_expected_R",
+            "functional_detail_stochastic_fraction",
+            *(
+                f"functional_detail_{phase}_{suffix}"
+                for phase in ("p0", "p1", "p2")
+                for suffix in ("expected_complexity", "expected_R", "actual_R")
+            ),
+        )
+        fieldnames.extend(detail_metric_keys)
+        fieldnames.extend(f"val_{key}" for key in detail_metric_keys)
+    interface_settings = getattr(model_config.core_honf, "interface_model", None)
+    routing_settings = getattr(interface_settings, "routing", None)
+    paircost_enabled = bool(
+        routing_settings is not None
+        and getattr(getattr(routing_settings, "sparsification", None), "enabled", False)
+    )
+    budget_enabled, _budget_weight = _case_group_budget_settings(model, loss_cfg)
+    if budget_enabled:
+        # The budget term is a live expected optional-group count. Keep it in
+        # the ordinary CSV so it is visible beside the physical objective;
+        # validation rows receive the same fields below.
+        fieldnames.insert(fieldnames.index("loss_field"), "loss_group_budget")
+        fieldnames.insert(fieldnames.index("loss_field"), "loss_physical")
+        fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_group_budget")
+        if "val_loss_physical" not in fieldnames:
+            fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_physical")
+        fieldnames.extend(
+            [
+                "case_group_budget_weight",
+                "case_group_budget_final_weight",
+                "case_group_budget_routing_strength",
+                "case_group_budget_continuation",
+                "case_group_budget_expected_optional_count",
+                "val_case_group_budget_weight",
+                "val_case_group_budget_final_weight",
+                "val_case_group_budget_routing_strength",
+                "val_case_group_budget_continuation",
+                "val_case_group_budget_expected_optional_count",
+            ]
+        )
+    if paircost_enabled:
+        # Keep historical metrics.csv schemas unchanged.  The science profile
+        # opts into the two additional physical-objective columns explicitly.
+        fieldnames.insert(fieldnames.index("loss_field"), "loss_paircost")
+        if "loss_physical" not in fieldnames:
+            fieldnames.insert(fieldnames.index("loss_field"), "loss_physical")
+        fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_paircost")
+        if "val_loss_physical" not in fieldnames:
+            fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_physical")
+        fieldnames.extend(
+            [
+                "temperature_" + name.removeprefix("log_temperature_")
+                for name in ROUTING_TYPED_TEMPERATURE_NAMES
+            ]
+            + [
+                "val_temperature_" + name.removeprefix("log_temperature_")
+                for name in ROUTING_TYPED_TEMPERATURE_NAMES
+            ]
+        )
+
+    print(f"[setup] device={device}, train_cases={len(train_dataset)}, val_cases={len(val_dataset)}, params={count_parameters(model):,}")
+    best_total = math.inf
+    best_field = math.inf
+    best_temperature = math.inf
+    best_predicted = math.inf
+    start_epoch = 1
+    if initialize_checkpoint is not None:
+        checkpoint = load_trusted_checkpoint(initialize_checkpoint, map_location=device)
+        source_config = _validate_initialization_checkpoint(
+            checkpoint,
+            model=model,
+            dataset=train_dataset,
+            dataset_config=dataset_cfg,
+        )
+        # Materialize every lazy adapter/core parameter from the current data
+        # schema before exact shape comparison. This is a no-grad inference
+        # pass and does not restore or advance any checkpoint training state.
+        materialization_batch = recursive_to_device(next(iter(train_loader)), device)
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            model(
+                **make_model_inputs(
+                    materialization_batch,
+                    local_port_condition_mode="predicted",
+                    mixed_teacher_ratio=0.0,
+                    return_predicted_port_outputs=False,
+                    return_port_global_consistency=False,
+                )
+            )
+        model.train(was_training)
+        initialization_inventory = _partial_initialize_model(
+            model,
+            checkpoint,
+            source_config=source_config,
+        )
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(optimizer_inventory_path, optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
+        initialization_inventory.update(
+            {
+                "checkpoint_path": str(initialize_checkpoint),
+                "checkpoint_sha256": _file_sha256(initialize_checkpoint),
+                "source_field_assembly_mode": source_config.core_honf.field_assembly_mode,
+                "target_field_assembly_mode": model_config.core_honf.field_assembly_mode,
+                "source_organizer_mode": source_config.core_honf.organizer_mode,
+                "target_organizer_mode": model_config.core_honf.organizer_mode,
+            }
+        )
+        initialization_inventory_path = layout.write_path("configs/initialization_inventory.json")
+        write_json(initialization_inventory_path, initialization_inventory)
+        cfg["initialization"] = {
+            "checkpoint_path": str(initialize_checkpoint),
+            "checkpoint_sha256": initialization_inventory["checkpoint_sha256"],
+            "inventory_path": str(initialization_inventory_path),
+        }
+        write_json(layout.write_path("configs/config_resolved.json"), cfg)
+        print(
+            f"[initialize] loaded {len(initialization_inventory['loaded'])} parameters from "
+                f"{initialize_checkpoint}; skipped={len(initialization_inventory['skipped'])}, "
+                f"missing={len(initialization_inventory['missing'])}, "
+                f"unexpected={len(initialization_inventory['unexpected'])}, "
+                f"initialized_zero={len(initialization_inventory.get('initialized', []))}"
+            )
+    if resume_checkpoint is not None:
+        checkpoint = (development_checkpoint if development_checkpoint is not None else
+                      load_trusted_checkpoint(resume_checkpoint, map_location=device))
+        validate_development_resume(checkpoint, dataset_cfg, normalizer=train_dataset.normalizer)
+        campaign_resume_amendment = validate_campaign_resume(checkpoint, cfg)
+        _validate_resume_checkpoint(
+            checkpoint,
+            model=model,
+            model_config=model_config,
+            dataset=train_dataset,
+            dataset_config=dataset_cfg,
+            campaign_amendment=campaign_resume_amendment,
+        )
+        _validate_optimizer_resume_compatibility(checkpoint, optimizer_group_inventory)
+        if interface_fit:
+            from channelthermal.training.interface_fit import (
+                validate_interface_fit_resume,
+            )
+            validate_interface_fit_resume(checkpoint, model, campaign)
+        model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
+        if forward_refinement:
+            from channelthermal.training.refinement_policy import (
+                validate_refinement_resume,
+            )
+            validate_refinement_resume(checkpoint, model, campaign, config=cfg)
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(optimizer_inventory_path, optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
+        optimizer_state = checkpoint.get("optimizer_state_dict")
+        if optimizer_state:
+            optimizer.load_state_dict(optimizer_state)
+        scaler_state = checkpoint.get("scaler_state_dict")
+        if scaler_state and scaler is not None:
+            scaler.load_state_dict(scaler_state)
+        checkpoint_epoch = int(checkpoint.get("epoch", checkpoint.get("current_epoch", 0)) or 0)
+        best_payload = dict(checkpoint.get("best_metrics") or {})
+        best_total = float(best_payload.get("best_val_loss_total", checkpoint.get("best_metric", math.inf)))
+        best_field = float(best_payload.get("best_val_field_mse", math.inf))
+        best_temperature = float(best_payload.get("best_val_temperature_mse", math.inf))
+        best_predicted = float(best_payload.get("best_val_predicted_loss_total", math.inf))
+        start_epoch = checkpoint_epoch + 1
+        _restore_rng_state(checkpoint)
+        model.campaign_training_state = copy.deepcopy(checkpoint.get("campaign_training_state") or {})
+        amend_structural_calibration(model.campaign_training_state, campaign_resume_amendment)
+        if campaign_resume_amendment is not None:
+            policy_change = campaign_resume_amendment.get("organizer_gradient_policy")
+            if policy_change is not None:
+                model.campaign_training_state["organizer_gradient_policy_amendment"] = {
+                    **policy_change, "source_checkpoint": str(resume_checkpoint),
+                }
+            physical_change = {key: value for key, value in campaign_resume_amendment.items()
+                               if key != "organizer_gradient_policy"}
+            if physical_change:
+                model.campaign_training_state["physical_loss_policy_amendment"] = {
+                    **physical_change, "source_checkpoint": str(resume_checkpoint),
+                }
+        saved_selection = checkpoint.get("selection_state")
+        if isinstance(saved_selection, dict) and saved_selection.get("epoch") is not None:
+            selection_epoch = int(saved_selection["epoch"])
+            selection_total = saved_selection.get("total_epochs", epochs)
+        else:
+            selection_epoch = checkpoint_epoch
+            selection_total = epochs
+        model.set_training_progress(
+            epoch=selection_epoch,
+            total_epochs=None if selection_total is None else int(selection_total),
+        )
+        fieldnames = repair_metrics_csv_for_append(metrics_path, fieldnames)
+        print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
+
+    if development is not None:
+        write_json(layout.write_path("metrics/development_subset.json"), development)
+    total_train_seconds = 0.0
+    if forward_refinement:
+        from channelthermal.training.response_refinement import NativeResponseRefinement
+        response_callback = NativeResponseRefinement(model, train_dataset, dataset_cfg, campaign)
+    else:
+        response_callback = NativeCampaignResponse(model, train_dataset, dataset_cfg, campaign) if campaign and epochs + physical_epoch_offset > 100 else None
+    total_val_seconds = 0.0
+    peak_cuda_memory_mb = 0.0
+    refinement_frozen_state = None
+    if forward_refinement:
+        from channelthermal.training.refinement_policy import (
+            capture_refinement_frozen_state,
+        )
+        refinement_frozen_state = capture_refinement_frozen_state(model)
+    last_completed_epoch = start_epoch - 1
+    stopped_resumable = False
+    for epoch in range(start_epoch, epochs + 1):
+        physical_epoch = epoch + physical_epoch_offset
+        model.set_training_progress(epoch=epoch, total_epochs=schedule_total_epochs)
+        if interface_fit:
+            model.campaign_training_state["interface_fit_attachment"]["fit_epoch"] = epoch
+        if forward_refinement:
+            model.campaign_training_state["forward_refinement_attachment"]["refinement_epoch"] = epoch
+        train_dataset.set_epoch(epoch)
+        if hasattr(train_loader.batch_sampler, "set_epoch"):
+            train_loader.batch_sampler.set_epoch(epoch)
+        effective_mode, effective_ratio = effective_port_condition_settings(physical_epoch, training_cfg)
+        eff_internal, eff_interface = effective_local_loss_weights(loss_cfg, effective_mode, effective_ratio)
+        pred_consistency_weight = predicted_consistency_weight_for_epoch(physical_epoch, loss_cfg)
+        gradient_clip_norm = float(training_cfg.get("gradient_clip_norm", 0.0) or 0.0)
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        train_started = time.perf_counter()
+        gpu_before = gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None
+        train_metrics = run_epoch(
+            model,
+            CampaignMicrobatchLoader(train_loader, int(campaign["microbatch_size"]),
+                native_loss_denominators=native_denominators_enabled(campaign, physical_epoch)) if campaign.get("microbatch_size") else train_loader,
+            device,
+            loss_cfg,
+            optimizer=optimizer,
+            scaler=scaler,
+            amp=bool(training_cfg.get("amp", False)),
+            max_batches=None if max_train_batches is None else int(max_train_batches),
+            local_port_condition_mode=effective_mode,
+            mixed_teacher_ratio=effective_ratio,
+            effective_internal_temperature_weight=eff_internal,
+            effective_interface_weight=eff_interface,
+            predicted_consistency_weight=pred_consistency_weight,
+            gradient_clip_norm=gradient_clip_norm,
+            record_gradient_diagnostics=(epoch in {1, 2, 5, 10, 20} or epoch % 50 == 0
+                or (getattr(model, "campaign_training_state", {}).get("matched_continuation_attachment")
+                    and epoch - 500 in {1, 2, 5, 10, 20})),
+            require_full_case_pass=bool(campaign.get("require_full_epoch", False)),
+            case_weighted_metrics=bool(campaign),
+            forward_function=(lambda **inputs: hard_value_soft_hypergraph_forward(model, gradient_policy=campaign.get("organizer_gradient_policy", "whole_wrapper_shadow_v1"), **inputs)) if campaign and model_config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else None,
+            campaign_config=campaign,
+            absolute_epoch=physical_epoch,
+            response_callback=response_callback,
+            response_epoch=epoch if forward_refinement else None,
+        )
+        train_wall_seconds = time.perf_counter() - train_started
+        if campaign:
+            train_metrics.update(
+                train_cases_per_second=train_metrics["epoch_cases_seen"] / max(train_wall_seconds, 1e-12),
+                train_primary_field_queries_per_second=train_metrics["epoch_primary_field_queries"] / max(train_wall_seconds, 1e-12),
+                schedule_total_epochs=float(schedule_total_epochs),
+                learning_rate=float(optimizer.param_groups[0]["lr"]),
+            )
+            if interface_fit:
+                train_metrics.update(fit_epoch=epoch, frozen_backbone_epoch=physical_epoch_offset,
+                                     physical_objective_epoch=physical_epoch)
+            if forward_refinement:
+                train_metrics.update(refinement_epoch=epoch, interface_prefit_epoch=100,
+                                     physical_objective_epoch=physical_epoch)
+            with layout.write_path("logs/epoch_telemetry.jsonl").open("a", encoding="utf-8") as telemetry:
+                telemetry.write(json.dumps({"epoch": epoch, "arm": campaign.get("arm"), "lineage": campaign,
+                                            "train_seconds": train_wall_seconds, "coverage": {key: train_metrics[key] for key in coverage_keys},
+                                            "gpu_before": gpu_before, "gpu_after": gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None,
+                                            "response": getattr(model, "campaign_last_response_metrics", None),
+                                            "forward_work": getattr(model, "campaign_last_forward_work", None),
+                                            "active_physical_loss_policy": 2 if native_denominators_enabled(campaign, physical_epoch) else 1,
+                                            "calibration_state": copy.deepcopy(getattr(model, "campaign_training_state", {})),
+                                            "development_subset": ({"manifest_sha256": development["manifest_sha256"],
+                                                                    "train_cases": len(train_dataset),
+                                                                    "validation_cases": len(val_dataset)}
+                                                                   if development is not None else None),
+                                            "query_scope": "primary sampled fluid field only; P0/P1/P2 auxiliary reads are additional work"}) + "\n")
+        total_train_seconds += train_wall_seconds
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(optimizer_inventory_path, optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
+        val_started = time.perf_counter()
+        val_metrics = run_epoch(
+            model,
+            val_loader,
+            device,
+            loss_cfg,
+            optimizer=None,
+            scaler=None,
+            amp=bool(training_cfg.get("amp", False)),
+            max_batches=None if max_val_batches is None else int(max_val_batches),
+            local_port_condition_mode=effective_mode,
+            mixed_teacher_ratio=effective_ratio,
+            effective_internal_temperature_weight=eff_internal,
+            effective_interface_weight=eff_interface,
+            predicted_consistency_weight=pred_consistency_weight,
+            gradient_clip_norm=gradient_clip_norm,
+            case_weighted_metrics=bool(campaign),
+            require_full_case_pass=development is not None,
+        )
+        if reuses_primary_validation_for_predicted_mode(effective_mode):
+            predicted_val_metrics = val_metrics
+        else:
+            predicted_val_metrics = run_epoch(
+                model,
+                val_loader,
+                device,
+                loss_cfg,
+                optimizer=None,
+                scaler=None,
+                amp=bool(training_cfg.get("amp", False)),
+                max_batches=None if max_val_batches is None else int(max_val_batches),
+                local_port_condition_mode="predicted",
+                mixed_teacher_ratio=0.0,
+                effective_internal_temperature_weight=float(loss_cfg.get("internal_temperature_weight", 1.0)),
+                effective_interface_weight=float(loss_cfg.get("interface_weight", 0.2)),
+                predicted_consistency_weight=0.0,
+                gradient_clip_norm=gradient_clip_norm,
+            )
+        val_wall_seconds = time.perf_counter() - val_started
+        total_val_seconds += val_wall_seconds
+        epoch_peak_memory_mb = (
+            float(torch.cuda.max_memory_allocated(device)) / (1024.0 * 1024.0)
+            if device.type == "cuda"
+            else 0.0
+        )
+        peak_cuda_memory_mb = max(peak_cuda_memory_mb, epoch_peak_memory_mb)
+        row = {
+            "epoch": epoch,
+            **train_metrics,
+            **{f"val_{key}": value for key, value in val_metrics.items()},
+            "val_predicted_loss_total": predicted_val_metrics.get("loss_total", math.nan),
+            "val_predicted_field_mse": predicted_val_metrics.get("field_mse", math.nan),
+            "val_predicted_temperature_mse": predicted_val_metrics.get("temperature_mse", math.nan),
+            "train_wall_seconds": train_wall_seconds,
+            "val_wall_seconds": val_wall_seconds,
+            "peak_cuda_memory_mb": epoch_peak_memory_mb,
+        }
+        if not campaign:
+            # Retain historical CSV schemas for ordinary native runs.
+            row = {key: value for key, value in row.items() if not key.startswith(("epoch_", "val_epoch_"))}
+        routing_keys = [key for key in row if key.startswith(("routing_", "val_routing_"))]
+        if routing_keys:
+            routing_row = {"epoch": epoch, **{key: row.pop(key) for key in sorted(routing_keys)}}
+            write_metrics_row(layout.write_path("metrics/routing_metrics.csv"), routing_row.keys(), routing_row)
+        write_metrics_row(metrics_path, fieldnames, row)
+        total_metric = float(row["val_loss_total"])
+        field_metric = float(row["val_field_mse"])
+        temp_metric = float(row["val_temperature_mse"])
+        retain_best = should_save_best_checkpoint(epoch, epochs, checkpoint_cfg)
+        if refinement_frozen_state is not None and (retain_best or stop_requested(run_dir)):
+            from channelthermal.training.refinement_policy import (
+                assert_refinement_frozen_state,
+            )
+            assert_refinement_frozen_state(model, refinement_frozen_state)
+        if retain_best and math.isfinite(total_metric) and total_metric < best_total:
+            best_total = total_metric
+            if bool(checkpoint_cfg.get("save_best", True)):
+                save_checkpoint(layout.write_path("best_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        if retain_best and math.isfinite(field_metric) and field_metric < best_field:
+            best_field = field_metric
+            if bool(checkpoint_cfg.get("save_best_field_mse", True)):
+                save_checkpoint(layout.write_path("best_by_field_mse_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        if retain_best and math.isfinite(temp_metric) and temp_metric < best_temperature:
+            best_temperature = temp_metric
+            if bool(checkpoint_cfg.get("save_best_temperature_mse", True)):
+                save_checkpoint(layout.write_path("best_by_temperature_mse_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        predicted_metric = float(row["val_predicted_loss_total"])
+        if retain_best and math.isfinite(predicted_metric) and predicted_metric < best_predicted:
+            best_predicted = predicted_metric
+            if bool(checkpoint_cfg.get("save_best_predicted", True)):
+                save_checkpoint(layout.write_path("best_predicted_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        stop_at_boundary = stop_requested(run_dir)
+        if stop_at_boundary or should_save_latest_checkpoint(epoch, epochs, checkpoint_cfg):
+            save_checkpoint(layout.write_path("latest_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        if should_save_milestone_checkpoint(epoch, checkpoint_cfg):
+            save_checkpoint(layout.write_path(f"epoch_{epoch:04d}_model.pt"), model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        plot_every = max(int(training_cfg.get("plot_every_epochs", 10)), 1)
+        if epoch % plot_every == 0 or epoch == epochs:
+            save_global_loss_plots(metrics_path, run_dir)
+        print(
+            f"[epoch {epoch:04d}] loss={row['loss_total']:.4e} field={row['field_mse']:.4e} "
+            f"internal={row['loss_internal_temperature']:.4e} interface={row['loss_interface']:.4e} "
+            f"port={row['loss_port_condition']:.4e} port_global={row['loss_port_global_consistency']:.4e} "
+            f"pred_cons={row['loss_predicted_consistency']:.4e} mode={effective_mode} ratio={effective_ratio:.3f} "
+            f"val={row['val_loss_total']:.4e} val_field={row['val_field_mse']:.4e} "
+            f"val_temp={row['val_temperature_mse']:.4e} val_pred={row['val_predicted_loss_total']:.4e}"
+        )
+        last_completed_epoch = epoch
+        if stop_at_boundary:
+            acknowledge_stop(run_dir, epoch=epoch)
+            stopped_resumable = True
+            print(f"[stopped] latest checkpoint saved at completed epoch {epoch}; resumable stop requested")
+            break
+
+    write_json(
+        layout.write_path("metrics/summary.json"),
+        {
+            "stage": "channelthermal_prompt3_honf_physical_coupling",
+            "run_dir": str(run_dir),
+            "best_val_loss_total": best_total,
+            "best_val_field_mse": best_field,
+            "best_val_temperature_mse": best_temperature,
+            "best_val_predicted_loss_total": best_predicted,
+            "epochs": last_completed_epoch,
+            "requested_epochs": epochs,
+            "status": "stopped_resumable" if stopped_resumable else "completed",
+            "train_cases": len(train_dataset),
+            "val_cases": len(val_dataset),
+            "model_config": model_config.to_dict(),
+            "optimizer_group_inventory": optimizer_group_inventory,
+            "trainable_parameter_count": count_parameters(model),
+            "actual_train_wall_seconds": total_train_seconds,
+            "actual_validation_wall_seconds": total_val_seconds,
+            "actual_total_epoch_wall_seconds": total_train_seconds + total_val_seconds,
+            "peak_cuda_memory_mb": peak_cuda_memory_mb,
+        },
+    )
+    print(f"[done] saved global HONF-CL physical-coupling run: {run_dir}")
+    return 0
+
+
+def main() -> int:
+    """Run the legacy direct CLI using one combined JSON configuration."""
+
+    args = parse_args()
+    cfg = read_json(resolve_config_path(args.config))
+    return run_from_config(cfg, args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

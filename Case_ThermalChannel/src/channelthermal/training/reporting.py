@@ -1,0 +1,556 @@
+"""Metrics CSV lifecycle and behavior-neutral training plots."""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import math
+from collections.abc import Iterable
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any
+
+from honf_forward_core.training.diagnostics import HONF_DIAGNOSTIC_KEYS
+from honf_runtime.compat import read_json
+from honf_runtime.run_layout import RunLayout
+
+
+def write_metrics_row(path: Path, fieldnames: Iterable[str], row: dict[str, Any]) -> None:
+    """Write metrics row."""
+
+    exists = path.exists() and path.stat().st_size > 0
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(fieldnames))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def repair_metrics_csv_for_append(path: Path, fieldnames: Iterable[str] | None = None) -> list[str] | None:
+    """Repair append framing and extend a declared resume schema losslessly.
+
+    Preserve the historical column order and every stored cell. New objective
+    columns are blank for old epochs, and the original file is backed up before
+    an atomic schema replacement. Undeclared row fields still fail on append.
+    """
+
+    requested = list(fieldnames) if fieldnames is not None else None
+    if not path.exists():
+        return requested
+    raw = path.read_bytes()
+    repaired = raw.replace(b"\x00", b"")
+    if repaired and not repaired.endswith(b"\n"):
+        repaired += b"\n"
+    if requested is not None and repaired:
+        rows = list(csv.reader(io.StringIO(repaired.decode("utf-8"))))
+        original = rows[0]
+        additions = [name for name in requested if name not in original]
+        actual = original + additions
+        if additions:
+            if len(set(original)) != len(original) or any(len(row) != len(original) for row in rows[1:]):
+                raise ValueError("Cannot extend malformed metrics CSV; preserve and inspect its historical rows.")
+            backup = path.with_name(path.name + ".before_schema_extension")
+            if not backup.exists():
+                backup.write_bytes(raw)
+            with NamedTemporaryFile("w", newline="", encoding="utf-8", dir=path.parent,
+                                    prefix=path.name + ".", delete=False) as stream:
+                temporary = Path(stream.name)
+                writer = csv.writer(stream)
+                writer.writerow(actual)
+                writer.writerows(row + [""] * len(additions) for row in rows[1:])
+            temporary.replace(path)
+            return actual
+        requested = actual
+    if repaired != raw:
+        path.write_bytes(repaired)
+    return requested
+
+
+def best_metrics_payload(row: dict[str, Any], best_total: float, best_field: float, best_temperature: float, best_predicted: float) -> dict[str, float]:
+    """Perform the best metrics payload operation used by this module."""
+
+    payload = {
+        "best_val_loss_total": float(best_total),
+        "best_val_field_mse": float(best_field),
+        "best_val_temperature_mse": float(best_temperature),
+        "best_val_predicted_loss_total": float(best_predicted),
+    }
+    for key in HONF_DIAGNOSTIC_KEYS:
+        val_key = f"val_{key}"
+        if val_key in row:
+            payload[val_key] = float(row[val_key])
+    return payload
+
+
+def _read_metric_history(metrics_path: Path) -> dict[str, list[float]]:
+    """Read numeric metric columns from `metrics.csv` for compact plotting."""
+
+    if not metrics_path.exists():
+        return {}
+    columns: dict[str, list[float]] = {}
+    with metrics_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = tuple(reader.fieldnames or ())
+        for row in reader:
+            for key in fieldnames:
+                value = row.get(key)
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    parsed = math.nan
+                # Preserve row alignment.  In particular, a resumed run may
+                # begin recording a newly supported diagnostic after earlier
+                # epochs stored NaN; dropping those NaNs would shift the new
+                # values back to epoch 1 in the plot.
+                columns.setdefault(key, []).append(parsed)
+    # Read-only aliases keep plots usable for historical metrics.csv files.
+    aliases = {
+        "selected_edge_count": "active_edge_count",
+        "functional_edge_count": "active_edge_count",
+        "soft_functional_edge_count": "soft_active_edge_count",
+    }
+    for new_name, old_name in aliases.items():
+        for prefix in ("", "val_"):
+            new_key = prefix + new_name
+            old_key = prefix + old_name
+            new_values = columns.get(new_key, ())
+            old_values = columns.get(old_key, ())
+            if not any(math.isfinite(value) for value in new_values) and any(
+                math.isfinite(value) for value in old_values
+            ):
+                columns[new_key] = list(columns[old_key])
+    return columns
+
+
+def _plot_metric_group(
+    ax: Any,
+    history: dict[str, list[float]],
+    keys: tuple[str, ...],
+    *,
+    title: str,
+    ylabel: str = "value",
+    log_scale: bool = True,
+    y_min_zero: bool = False,
+    reference_lines: tuple[tuple[float, str], ...] = (),
+    validation_label: str = "Validation",
+) -> None:
+    """Perform the plot metric group operation used by this module."""
+
+    epochs = history.get("epoch", [])
+    for key in keys:
+        values = history.get(key)
+        if not values or not any(math.isfinite(value) for value in values):
+            continue
+        is_validation = key.startswith("val_")
+        base_key = key.removeprefix("val_")
+        metric_label = {
+            "loss_total": "total loss",
+            "loss_field": "field prediction loss",
+            "field_mse": "field MSE",
+            "loss_internal_temperature": "internal temperature prediction loss",
+            "loss_interface": "module boundary matching loss",
+            "loss_port_condition": "port boundary-condition loss",
+            "loss_port_global_consistency": "cross-module port consistency loss",
+            "loss_predicted_consistency": "predicted-port agreement loss",
+            "temperature_mse": "temperature MSE",
+            "predicted_loss_total": "predicted-port total objective",
+            "selected_edge_count": "selected H-edges",
+            "functional_edge_count": "functional H-edges",
+            "soft_functional_edge_count": "soft functional H-edges",
+            "interaction_module_group_incidence_count": "module->group incidences",
+            "interaction_environment_group_incidence_count": "environment->group incidences",
+            "interaction_group_read_degree_mean": "query->group degree",
+        }.get(base_key, base_key.removeprefix("loss_"))
+        phase = validation_label if is_validation else "Train"
+        if base_key == "loss_total" and "predicted" in key:
+            phase = f"{validation_label} (predicted ports)"
+        label = f"{phase}: {metric_label}"
+        ax.plot(epochs[: len(values)], values, label=label)
+    if epochs:
+        for index, (reference_y, reference_label) in enumerate(reference_lines):
+            ax.axhline(
+                float(reference_y),
+                color="black" if index == 0 else "#666666",
+                linestyle="--" if index == 0 else ":",
+                linewidth=1.0,
+                alpha=0.60,
+                label=reference_label,
+            )
+    ax.set_title(title)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel(ylabel)
+    if log_scale:
+        ax.set_yscale("log")
+    if y_min_zero:
+        _, top = ax.get_ylim()
+        reference_max = max((value for value, _ in reference_lines), default=0.0)
+        ax.set_ylim(bottom=0.0, top=max(float(top), float(reference_max) * 1.10, 1.0))
+    ax.grid(True, alpha=0.25)
+    if ax.lines:
+        ax.legend(fontsize=8)
+
+
+def _resolved_active_edge_references(run_dir: Path) -> tuple[tuple[float, str], ...]:
+    """Return configured candidate/selection references for activity plots."""
+
+    config_path = RunLayout(run_dir).read_path("configs/config_resolved.json")
+    if not config_path.exists():
+        return ()
+    try:
+        payload = read_json(config_path)
+        core = payload.get("model", {}).get("core_honf", {})
+        if core.get("organizer_mode", "fixed_projection") == "exchangeable_slots":
+            references = []
+            for key in ("edge_capacity", "initial_active_edges"):
+                value = core.get(key)
+                if value is not None:
+                    references.append((float(value), f"{key}={int(value)}"))
+            return tuple(references)
+        value = core.get("num_hyperedges")
+        return () if value is None else ((float(value), f"num_hyperedges={int(value)}"),)
+    except (OSError, TypeError, ValueError):
+        return ()
+
+
+def _resolved_forward_architecture(run_dir: Path) -> str:
+    """Return the managed run's architecture for plot-panel selection."""
+
+    config_path = RunLayout(run_dir).read_path("configs/config_resolved.json")
+    if not config_path.exists():
+        return ""
+    try:
+        payload = read_json(config_path)
+    except (OSError, TypeError, ValueError):
+        return ""
+    return str(
+        payload.get("model", {})
+        .get("core_honf", {})
+        .get("forward_architecture", "")
+    )
+
+
+def _save_organizer_health_plot(history: dict[str, list[float]], diagnostics_dir: Path) -> None:
+    """Write one compact case-adaptive residual-organizer health figure.
+
+    The figure is intentionally separate from the loss overview: its panels
+    show the hard/soft mechanism support, residual progress, and stop/cap
+    outcomes without duplicating any prediction or physical-loss curves.
+    Historical fixed-organizer metrics do not contain these columns, so no
+    empty/not-applicable image is emitted for those runs.
+    """
+
+    health_keys = (
+        "case_adaptive_edge_count_mean",
+        "case_adaptive_soft_edge_count_mean",
+        "residual_fraction_final_mean",
+        "case_adaptive_stop_reached_fraction",
+        "case_adaptive_cap_hit_fraction",
+    )
+    if not any(
+        any(abs(float(value)) > 0.0 for value in history.get(key, []))
+        or any(abs(float(value)) > 0.0 for value in history.get(f"val_{key}", []))
+        for key in health_keys
+    ):
+        return
+
+    import matplotlib.pyplot as plt
+
+    panels = [
+        (
+            "Hard mechanism count",
+            ("case_adaptive_edge_count_mean", "val_case_adaptive_edge_count_mean"),
+            "count",
+            False,
+            True,
+        ),
+        (
+            "Soft effective mechanism count",
+            ("case_adaptive_soft_edge_count_mean", "val_case_adaptive_soft_edge_count_mean"),
+            "count",
+            False,
+            True,
+        ),
+        (
+            "Final residual fraction",
+            ("residual_fraction_final_mean", "val_residual_fraction_final_mean"),
+            "fraction",
+            True,
+            False,
+        ),
+        (
+            "Stop reached / cap hit",
+            (
+                "case_adaptive_stop_reached_fraction",
+                "val_case_adaptive_stop_reached_fraction",
+                "case_adaptive_cap_hit_fraction",
+                "val_case_adaptive_cap_hit_fraction",
+            ),
+            "fraction",
+            False,
+            True,
+        ),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(10.0, 6.8), constrained_layout=True)
+    for ax, (title, keys, ylabel, log_scale, y_min_zero) in zip(axes.reshape(-1), panels):
+        _plot_metric_group(
+            ax,
+            history,
+            keys,
+            title=title,
+            ylabel=ylabel,
+            log_scale=log_scale,
+            y_min_zero=y_min_zero,
+        )
+    fig.suptitle("Case-Adaptive Organizer Health", fontsize=13)
+    fig.savefig(str(diagnostics_dir / "honf_organizer_health_curve.png"), dpi=160)
+    plt.close(fig)
+
+
+def _read_common_csv_history(metrics_path: Path, *, expanded_predicted_1804: bool = False) -> dict[str, list[float]]:
+    """Discard validation fields in 1804 rows with an expanded unknown schema."""
+    history = _read_metric_history(metrics_path)
+    if not expanded_predicted_1804:
+        return history
+    with metrics_path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.reader(stream)
+        header = next(reader, [])
+        for index, values in enumerate(reader):
+            if len(values) == len(header):
+                continue
+            if len(values) != len(header) + 38 or header[-3:] != [
+                    "val_predicted_loss_total", "val_predicted_field_mse", "val_predicted_temperature_mse"]:
+                raise ValueError("Unrecognized expanded 1804 metrics schema; validation columns cannot be mapped safely.")
+            for key in history:
+                if key.startswith("val_"):
+                    history[key][index] = math.nan
+    return history
+
+
+def _save_common_csv_loss_plot(history: dict[str, list[float]], output: Path, *, run_name: str,
+                               validation_label: str = "Validation") -> None:
+    """Show saved legacy measurements using the common loss-monitor layout."""
+    import matplotlib.pyplot as plt
+
+    panels = [
+        ("Weighted objective (reductions may differ)", (("loss_total", "TRAIN"), ("val_loss_total", validation_label),
+                                ("val_predicted_loss_total", validation_label + " predicted ports"))),
+        ("Validation field error", (("val_field_mse", validation_label),)),
+        ("Field prediction loss", (("loss_field", "TRAIN"), ("val_loss_field", validation_label))),
+        ("Temperature error", (("temperature_mse", "TRAIN"), ("val_temperature_mse", validation_label))),
+        ("Physical losses", (("loss_internal_temperature", "TRAIN internal temperature"),
+                             ("val_loss_internal_temperature", validation_label + " internal temperature"),
+                             ("loss_interface", "TRAIN interface"), ("val_loss_interface", validation_label + " interface"))),
+        ("Boundary losses", (("loss_port_condition", "TRAIN boundary"),
+                             ("val_loss_port_condition", validation_label + " boundary"),
+                             ("loss_port_global_consistency", "TRAIN consistency"),
+                             ("val_loss_port_global_consistency", validation_label + " consistency"))),
+    ]
+    panels = [(title, [(key, label) for key, label in series
+                       if any(math.isfinite(value) and value > 0 for value in history.get(key, ()))])
+              for title, series in panels]
+    panels = [(title, series) for title, series in panels if series]
+    if not panels:
+        return
+    columns = min(2, len(panels))
+    fig, axes = plt.subplots(math.ceil(len(panels) / columns), columns,
+                             figsize=(14, 3.7 * math.ceil(len(panels) / columns)),
+                             squeeze=False, constrained_layout=True)
+    epochs = history["epoch"]
+    masked = 0
+    for ax, (title, series) in zip(axes.flat, panels):
+        for key, label in series:
+            values = history[key]
+            points = [(x, y) for x, y in zip(epochs, values) if math.isfinite(x) and math.isfinite(y) and y > 0]
+            masked += sum(math.isfinite(x) and math.isfinite(y) and y <= 0 for x, y in zip(epochs, values))
+            if points:
+                ax.plot([p[0] for p in points], [p[1] for p in points], label=label,
+                        linestyle="--" if key.startswith("val_") else "-", linewidth=1.3)
+        ax.set_title(title)
+        finite_x = [x for x in epochs if math.isfinite(x)]
+        if len(finite_x) > 1 and min(finite_x) < max(finite_x):
+            ax.set_xlim(min(finite_x), max(finite_x))
+        if run_name.startswith("Run_1804_") and title == "Validation field error":
+            ax.text(.98, .98, "Expanded-row validation omitted", ha="right", va="top", transform=ax.transAxes, fontsize=8)
+        ax.set_xlabel("Completed epoch")
+        ax.set_ylabel("Recorded value")
+        ax.set_yscale("log")
+        ax.grid(alpha=.25, which="both")
+        if ax.lines:
+            ax.legend(fontsize=8, frameon=False)
+    for ax in list(axes.flat)[len(panels):]:
+        fig.delaxes(ax)
+    finite_epochs = [int(epoch) for epoch in epochs if math.isfinite(epoch)]
+    fig.suptitle(f"{run_name} | epoch {max(finite_epochs)}" if finite_epochs else run_name)
+    output.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output / "loss_curve.pdf")
+    fig.savefig(output / "loss_curve.png", dpi=140)
+    plt.close(fig)
+    (output / "loss_curve_metadata.json").write_text(json.dumps({
+        "source": "legacy metrics.csv",
+        "panels": {title: [key for key, _ in series] for title, series in panels},
+        "training": "Saved sampled training metrics; see the historical run configuration for reductions and weights.",
+        "validation": f"{validation_label}; saved values only, with the historical run's reductions and prediction path.",
+        "comparison": "Training and validation may use different reductions or prediction paths; no equality is assumed.",
+        "missing_validation_losses": "A missing historical measurement cannot be reconstructed from this plot.",
+        "legacy_1804_expanded_rows": ("Shifted validation columns in expanded rows omitted as ambiguous."
+                                      if run_name.startswith("Run_1804_") else None),
+        "masked_nonpositive_values": masked,
+    }, indent=2) + "\n", encoding="utf-8")
+
+
+def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
+    """Save readable grouped plots instead of one overcrowded metric figure."""
+
+    history = _read_metric_history(metrics_path)
+    if not history or not history.get("epoch"):
+        return
+    import os
+
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal-honf_cl")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # Managed runs write directly to the canonical tree.  The legacy fallback
+    # keeps direct case-workflow invocations compatible without mirroring one
+    # plot into both ``diagnostic_plots`` and ``plots/diagnostics``.
+    layout = RunLayout(run_dir)
+    layout.ensure()
+    training_plot = layout.read_path("plots/training/loss_curve.png")
+    if not training_plot.is_file():
+        training_plot = layout.write_path("plots/training/loss_curve.png")
+    diagnostics_plot = layout.read_path("plots/diagnostics/loss_total_curve.png")
+    if not diagnostics_plot.is_file():
+        diagnostics_plot = layout.write_path("plots/diagnostics/loss_total_curve.png")
+    training_dir = training_plot.parent
+    diagnostics_dir = diagnostics_plot.parent
+    training_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    active_edge_references = _resolved_active_edge_references(run_dir)
+    validation_label = "Validation"
+    config_path = layout.read_path("configs/config_resolved.json")
+    if config_path.is_file():
+        try:
+            split = str(read_json(config_path).get("dataset", {}).get("val_split", "validation")).lower()
+            validation_label = "Validation (source test split)" if split == "test" else "Validation (source validation split)"
+        except (OSError, TypeError, ValueError):
+            pass
+    common_history = _read_common_csv_history(metrics_path, expanded_predicted_1804=run_dir.name.startswith("Run_1804_"))
+    _save_common_csv_loss_plot(common_history, training_dir, run_name=run_dir.name, validation_label=validation_label)
+
+    focused = {
+        "loss_total_curve.png": ("Total Loss", ("loss_total", "val_loss_total", "val_predicted_loss_total"), "loss", True, False),
+        "loss_field_curve.png": ("Field Loss and MSE", ("loss_field", "val_loss_field", "field_mse", "val_field_mse"), "loss / mse", True, False),
+        "loss_local_coupling_curve.png": (
+            "Internal Temperature and Interface Loss",
+            ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface"),
+            "loss",
+            True,
+            False,
+        ),
+        "loss_port_condition_curve.png": (
+            "Port and Consistency Loss",
+            (
+                "loss_port_condition",
+                "val_loss_port_condition",
+                "loss_port_global_consistency",
+                "val_loss_port_global_consistency",
+                "loss_predicted_consistency",
+                "val_loss_predicted_consistency",
+            ),
+            "loss",
+            True,
+            False,
+        ),
+        "honf_entropy_activity_curve.png": (
+            "HONF Entropy and Selected H-Edge Count",
+            (
+                "A_mh_entropy",
+                "val_A_mh_entropy",
+                "A_eh_entropy",
+                "val_A_eh_entropy",
+                "selected_edge_count",
+                "val_selected_edge_count",
+                "functional_edge_count",
+                "val_functional_edge_count",
+            ),
+            "value",
+            False,
+            True,
+        ),
+        "honf_candidate_mass_purity_curve.png": (
+            "Candidate Mass Fractions and Purities",
+            (
+                "candidate_module_mass_fraction_min",
+                "val_candidate_module_mass_fraction_min",
+                "candidate_environment_mass_fraction_min",
+                "val_candidate_environment_mass_fraction_min",
+                "candidate_module_purity_mean",
+                "val_candidate_module_purity_mean",
+                "candidate_environment_purity_mean",
+                "val_candidate_environment_purity_mean",
+            ),
+            "fraction",
+            False,
+            True,
+        ),
+        "honf_candidate_scale_curve.png": (
+            "Candidate Source and Region Scales",
+            (
+                "candidate_source_scale_mean",
+                "val_candidate_source_scale_mean",
+                "candidate_region_scale_mean",
+                "val_candidate_region_scale_mean",
+            ),
+            "scale",
+            False,
+            True,
+        ),
+        "honf_edge_contribution_fraction_curve.png": (
+            "Additive Edge Contribution Fractions",
+            (
+                "edge_contribution_fraction_min",
+                "val_edge_contribution_fraction_min",
+                "edge_contribution_fraction_max",
+                "val_edge_contribution_fraction_max",
+            ),
+            "fraction",
+            False,
+            True,
+        ),
+        "honf_context_curve.png": (
+            "HONF Context Norms and Pairwise Gate",
+            (
+                "pairwise_kernel_gate",
+                "val_pairwise_kernel_gate",
+                "pairwise_context_norm",
+                "val_pairwise_context_norm",
+                "total_hyper_context_norm",
+                "val_total_hyper_context_norm",
+                "nonhyper_context_norm",
+                "val_nonhyper_context_norm",
+            ),
+            "value",
+            True,
+            False,
+        ),
+    }
+    for filename, (title, keys, ylabel, log_scale, y_min_zero) in focused.items():
+        fig, ax = plt.subplots(figsize=(7.4, 4.4), constrained_layout=True)
+        _plot_metric_group(
+            ax,
+            history,
+            keys,
+            title=title,
+            ylabel=ylabel,
+            log_scale=log_scale,
+            y_min_zero=y_min_zero,
+            reference_lines=active_edge_references if y_min_zero else (),
+            validation_label=validation_label,
+        )
+        fig.savefig(str(diagnostics_dir / filename), dpi=160)
+        plt.close(fig)
+
+    _save_organizer_health_plot(history, diagnostics_dir)

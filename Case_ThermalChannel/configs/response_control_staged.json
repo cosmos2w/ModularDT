@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "name": "thermalchannel_response_control_staged",
+  "architecture": "three_term_full_access_honf",
+  "paired_arms": {
+    "B_value": {
+      "objective_terms": [
+        "value"
+      ]
+    },
+    "B_response": {
+      "objective_terms": [
+        "value",
+        "finite",
+        "decision",
+        "constraint"
+      ]
+    },
+    "same_initialization": true,
+    "same_value_sample_schedule": true,
+    "same_optimizer_update_budget": true,
+    "paired_reference_forward_calls_counted_separately": true
+  },
+  "max_optimizer_updates": 2000,
+  "max_epochs": 500,
+  "formal_arm_update_ceiling": 20000,
+  "checkpoint_every_updates": 25,
+  "review_updates": [
+    100,
+    300,
+    1000,
+    2000
+  ],
+  "random_seed": 2317,
+  "loss_weight_calibration": {
+    "source_split": "train",
+    "method": "gradient_rms_relative_to_value",
+    "freeze_after_calibration": true,
+    "per_case_target_normalization": false
+  },
+  "single_class_feasibility_bce_policy": "omit_feasibility_bce_when_a_stencil_has_only_one_reference_feasibility_class; retain_continuous_absolute_and_finite_pressure_losses",
+  "receiver_sampling": {
+    "max_fluid_queries": 3072,
+    "protected_fluid_support": [
+      "maintained_8_percent_inlet_and_outlet_pressure_bands",
+      "union_of_valid_rows_within_0.25_of_any_module_surface_across_all_stencil_states"
+    ],
+    "protected_support_may_exceed_budget": true,
+    "family_shared_query_rows": true,
+    "inverse_probability_weighting_for_unprotected_rows": true,
+    "solid_material_peak_queries_protected": true,
+    "interface_ports_retained_in_full": true
+  },
+  "recipe_calibration_policy": {
+    "freeze_numeric_loss_scales_and_response_multipliers_across_sampler_amendment": true,
+    "recalibrate_after_sampler_change": false,
+    "record_source_paths_and_sha256_in_run_manifest": true
+  },
+  "sampler_amendment": {
+    "reason": "The u100 full-grid review found that the prior audit counted sampled near-interface rows as though they were full-grid rows; training did not cover the complete declared near-interface support.",
+    "recipe_1_budget": 2048,
+    "recipe_2_budget": 3072,
+    "recipe_2_fixed_across_families_and_paired_arms": true,
+    "frozen_before_recipe_2_launch": true
+  },
+  "stages": [
+    {
+      "name": "value_warmup",
+      "start_update": 0,
+      "stop_update": 20,
+      "active_terms": [
+        "value"
+      ]
+    },
+    {
+      "name": "finite_response",
+      "start_update": 20,
+      "stop_update": 100,
+      "active_terms": [
+        "value",
+        "finite"
+      ]
+    },
+    {
+      "name": "finite_response_and_constraints",
+      "start_update": 100,
+      "stop_update": 300,
+      "active_terms": [
+        "value",
+        "finite",
+        "decision",
+        "constraint"
+      ]
+    },
+    {
+      "name": "response_and_constraints_mixed_unknown",
+      "start_update": 300,
+      "stop_update": 2000,
+      "active_terms": [
+        "value",
+        "finite",
+        "decision",
+        "constraint"
+      ]
+    }
+  ],
+  "schedule_amendment": {
+    "reason": "The pre-run 100-update review must include a finite-response contrast after a short value-only warmup.",
+    "effective_stages": "B_response uses value at updates 1-20 and value plus finite response at updates 21-100; later stages add decision and pressure-constraint objectives.",
+    "mixed_response_policy": "Mixed labels remain unknown and are excluded because current train stencils have no measured per-role noise floors; only add this objective after a train-split floor is established.",
+    "approval_boundary": "This schedule amendment was frozen before the paired Stage A u100 fit was launched."
+  },
+  "pressure_limit_source": "per_family_1.05x_original_baseline_study_benchmark_not_an_engineering_limit",
+  "pressure_margin_allowance_source": "local_response_study_allowance_only_not_validated_for_engineering_feasibility",
+  "promotion_order": [
+    "feasibility_and_critical_response",
+    "decision",
+    "role_separated_receiver_error",
+    "complete_cost"
+  ],
+  "held_final_review_for_checkpoint_selection": false
+}

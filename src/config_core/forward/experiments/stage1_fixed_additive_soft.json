@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "_note": "Stage 1 bridge: fixed organizer and dense soft routing with descriptor-first mechanisms and exact additive field assembly.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "organizer_mode": "fixed_projection",
+        "num_hyperedges": 6,
+        "mechanism_state_mode": "descriptor_first",
+        "field_assembly_mode": "edge_additive",
+        "module_assignment_normalizer": "softmax",
+        "environment_assignment_normalizer": "softmax",
+        "query_assignment_normalizer": "softmax",
+        "environment_locality_mode": "none",
+        "routing_execution": "dense",
+        "query_edge_limit": 0,
+        "query_module_limit": 0,
+        "edge_selection_mode": "all"
+      }
+    },
+    "training": {
+      "learning_rate": 0.0001
+    }
+  },
+  "case": {}
+}
