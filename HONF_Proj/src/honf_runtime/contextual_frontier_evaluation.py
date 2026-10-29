@@ -173,10 +173,12 @@ def _contextual_checkpoint_parts(
                 or core_config.get("score_calibration") not in ("inherited", "bounded_tanh")
                 or not isinstance(recipe_model, Mapping)
                 or recipe_model.get("score_calibration") != core_config.get("score_calibration")
-                or core_config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one")
+                or core_config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one", "active_domain")
                 or recipe_model.get("access_measure", "inventory_unit_total") != core_config.get("access_measure", "inventory_unit_total")
                 or core_config.get("ee_incidence_aggregation", "pre_gate") not in ("pre_gate", "post_gate")
                 or recipe_model.get("ee_incidence_aggregation", "pre_gate") != core_config.get("ee_incidence_aggregation", "pre_gate")
+                or recipe_model.get("ee_gate_mode", "legacy") != core_config.get("ee_gate_mode", "legacy")
+                or recipe_model.get("ee_initial_tau") != core_config.get("ee_initial_tau")
                 or recipe_section.get("arm") != arm
                 or provider_identity.get("member_routing_schema") != "interaction_reused_e_anchored_member_routing_v1"):
             raise ValueError("R13-8 adapter, core locator, access law and provider identities must agree.")
