@@ -15,11 +15,11 @@ The profile registry recommends `src/config_core/forward/stage7_structured_conte
 
 Stage-1–6 exchangeable, adaptive, entmax, additive, and gathered modes remain loadable for compatibility and research, but they are not the default scientific platform.
 
-The opt-in [unified training and source-preserving refinement family](docs/guides/Unified_Interaction_Training_and_Refinement.md) uses one real training engine and shared context/base/organizer code for Thermal and Wind, with separate weights and dataset-owned affine/nonlinear laws. Every source retains a cheap read while receiver-specific gates select fine corrections. Its development identities, exact-resume requirements, compiled packet path and physical-evidence boundaries are separate from the historical default profiles.
+The opt-in [unified training and source-preserving refinement family](docs/guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/Unified_Interaction_Training_and_Refinement.md) uses one real training engine and shared context/base/organizer code for Thermal and Wind, with separate weights and dataset-owned affine/nonlinear laws. Every source retains a cheap read while receiver-specific gates select fine corrections. Its development identities, exact-resume requirements, compiled packet path and physical-evidence boundaries are separate from the historical default profiles.
 
 Joint and unified Wind training reuse [persistent geometry-verified native role catalogues](docs/guides/Wind_Native_Catalogue_Cache.md) across launches. The CPU preparation tool covers either full TRAIN/VALID or the fixed segmented subset, shares geometry entries between both scopes, and leaves targets and query sampling uncached.
 
-The opt-in [Thermal source-response interface](docs/guides/Thermal_Source_Response.md)
+The opt-in [Thermal source-response interface](docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/Thermal_Source_Response.md)
 prepares geometry-dependent temperature kernels and applies heating separately,
 with a frozen heat-independent flow reader. Its independently trained direct
 and grouped readouts, native role extraction and measured limitations are
@@ -28,6 +28,8 @@ documented in the [consolidation and maturation report](docs/reports/_bk/2026100
 ## Electro-thermal shared-data case
 
 `Case_ElectroThermal` provides a standalone HDF5 reader, dimensionless physical reference generator, and portable field-training interface for **Six-hyperedge organization controlling contextualized member reads**, **Dense MM/ME/EM interaction and direct field reads**, and **A2-D**. All three predict the same five fields jointly, with prescribed contact voltage and material records entering before interaction. Start with [the coworker handoff](Case_ElectroThermal/docs/COWORKER_HANDOFF.md) and [dataset introduction report](Case_ElectroThermal/HETMF_DATASET_AND_TRAINING_READINESS_REPORT.md). The shared epoch trainer is `honf_runtime.field_training`; case-owned features, normalization, and physical metrics are in `hetmf.training`. These commands use `python -m hetmf`, independently of the historical Thermal launcher and local-surrogate checkpoints. Shared data and generated report figures remain outside Git.
+
+For the current R13 research workflow, start with the [current guide index](docs/guides/README.md). The profile-registry defaults and earlier family descriptions in this README retain their historical compatibility scope; they are not a replacement for the current round's model design or training authorization.
 
 ## 1. Quick start
 

@@ -12,7 +12,7 @@ This index belongs to the geometry/content study specified in [the Round2 execut
 | Native Wind | `Case_WindFarm/src/windfarm/content_hypergraph.py`, `training/content_hypergraph_task.py`; corrected physical residual law and native role catalogue |
 | Training and strict loading | `src/honf_runtime/unified_training.py`, `src/honf_runtime/content_hypergraph.py`, `tools/content_hypergraph_train.py` |
 | Full-run qualification | `src/honf_runtime/content_hypergraph_qualification.py`; measured native fields, content use, numerical checks, complete costs, B8 feasibility, partition/source binding and resource reserve |
-| Recipes and usage | `src/config_core/forward/content_hypergraph/*a2-*.json`, [Round2 guide](../../../guides/Content_Hypergraph_Round2.md) |
+| Recipes and usage | `src/config_core/forward/content_hypergraph/*a2-*.json`, [Round2 guide](../../../guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/Content_Hypergraph_Round2.md) |
 | Input/resource seals | Local `authorization.json`, `receipts/input_seal.json`, `receipts/pre_outcome_criteria_seal.json`, `receipts/storage_peak_forecast_v2.json` |
 
 Thermal uses fixed25 TRAIN150/exposed DEV22, manifest `933b0138ba2f8447a1ecadfe31fd0bb2cb4a05607d3ac3d9f0dc79419f196044`. Wind uses fixed24 TRAIN72/exposed DEV24, manifest `b223e174d7262682a7e1ac1977cb38f721993e14c0340b2dc0f5fb5f95bfa715`. Wind's exact DEV Q8192 panel SHA256 is `594681b0f270eb82ed271adf5d962c00be0b1885f9e99b157662c5b2c3f028ed`, with four roles of1640 rows and background1632. This corrects the obsolete820-row metadata from the first-round copied summary; the actual arrays and metrics are not rewritten.

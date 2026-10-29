@@ -694,7 +694,7 @@ A convincing outcome is a better dense baseline plus at least one sparse operati
 ### Repository/report basis (all code reviewed at7274b7dc494243a524c732276aa944f6642801cc)
 
 - **[R1]** `HONF_Proj/docs/reports/HONF_Attention_Round2_Report.md`, complete original study and October15 formal-D extension; attached copy read in full. Its reported GPU timings and native accuracy are source-derived, not independently rerun during this review.
-- **[R2]** `HONF_Proj/docs/guides/Content_Hypergraph_Formal_D.md`, including successful-formal sampler/objective distinctions and output-only continuation.
+- **[R2]** `HONF_Proj/docs/guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/Content_Hypergraph_Formal_D.md`, including successful-formal sampler/objective distinctions and output-only continuation.
 - **[R3]** `HONF_Proj/docs/reports/HONF_Attention_Round2_Evidence_Index.md`, inspected scientific contract/reference mappings and endpoint identities; local ignored arrays were not accessed by this review.
 - **[C1]** `HONF_Proj/src/honf_forward_core/content_hypergraph/readers_v2.py`, especially `DirectSourceReaderV2`, `LocalDetailReaderV2`, `QueryEncoderV2`, `FieldHeadV2`.
 - **[C2]** `.../spatial_features_v2.py`, `query_source_features`, `relative_gamma`, `pair_score_features`.

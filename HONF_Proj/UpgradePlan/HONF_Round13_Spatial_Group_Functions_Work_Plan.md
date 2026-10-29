@@ -488,7 +488,7 @@ The full-TRAIN handoff includes one recommended model and its matched control, a
 - [Native/response task integration](https://github.com/cosmos2w/ModularDT/blob/75f7af9/HONF_Proj/Case_ThermalChannel/src/channelthermal/training/interaction_group_task.py)
 - [Case adapter](https://github.com/cosmos2w/ModularDT/blob/75f7af9/HONF_Proj/Case_ThermalChannel/src/channelthermal/interaction_groups.py)
 - [Existing evaluator](https://github.com/cosmos2w/ModularDT/blob/75f7af9/HONF_Proj/src/honf_runtime/interaction_group_evaluation.py)
-- [Existing recipe guide](https://github.com/cosmos2w/ModularDT/blob/75f7af9/HONF_Proj/docs/guides/Thermal_Interaction_Group_Reuse_Recipe.md)
+- [Existing recipe guide](https://github.com/cosmos2w/ModularDT/blob/75f7af9/HONF_Proj/docs/guides/_bk/20261029_Guide_Consolidation/03_R12_R13_Predecessor_Recipes/Thermal_Interaction_Group_Reuse_Recipe.md)
 
 ### Relevant external precedents, not validation of this proposal
 

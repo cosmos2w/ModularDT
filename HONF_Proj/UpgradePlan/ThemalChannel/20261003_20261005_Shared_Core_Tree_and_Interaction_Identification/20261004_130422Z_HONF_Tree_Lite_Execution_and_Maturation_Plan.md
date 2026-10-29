@@ -443,7 +443,7 @@ Commit and push reusable code, tests, configuration and report on the non-defaul
 - `src/honf_forward_core/interface_fields/core.py`
 - `src/honf_forward_core/interface_fields/three_term_context.py`
 - `src/honf_forward_core/training/hypergraph_shadow.py`
-- `docs/guides/Thermal_Tree_Faithfulness_Development.md`
+- `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/Thermal_Tree_Faithfulness_Development.md`
 - `AGENTS.md` and the fixed-quarter development protocol.
 
 **External implementation references:** official PyTorch profiler and checkpoint documentation. Use the installed environment's supported APIs; do not upgrade to the web documentation version. Profiling with shape/memory tracing can itself add overhead. Checkpointed backward must replay the same explicit function/parameter state, not a changed global mode.

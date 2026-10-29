@@ -172,7 +172,7 @@ On the fresh Thermal P e2500 host,12 FP64 `export_native_kernels` snapshots brac
 | Classic replacement | Not qualified; Thermal mature board quarantined, mature Wind gaps remain separate |
 | Inverse readiness | Not qualified; dense derivative default, no independent geometry/design truth, no new solver allowance |
 
-A subsequent compression question would have to test whether a differently learned representation admits useful omission under a newly authorized matched dense continuation. The negative current frontiers do not authorize forcing a smaller K, co-adapting physical weights, freezing D-sep or adding more views/groups. The maintained [usage guide](../../../guides/Active_Final_Source_Reads.md) documents the real read-plan interfaces, dense defaults and source-sealed exact-resume handoff.
+A subsequent compression question would have to test whether a differently learned representation admits useful omission under a newly authorized matched dense continuation. The negative current frontiers do not authorize forcing a smaller K, co-adapting physical weights, freezing D-sep or adding more views/groups. The maintained [usage guide](../../../guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/Active_Final_Source_Reads.md) documents the real read-plan interfaces, dense defaults and source-sealed exact-resume handoff.
 
 ## Compact figure and evidence index
 

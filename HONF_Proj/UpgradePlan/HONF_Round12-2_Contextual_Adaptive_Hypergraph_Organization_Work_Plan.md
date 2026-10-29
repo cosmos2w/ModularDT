@@ -576,7 +576,7 @@ Fixed illustrative cases retain their original meanings: TRAIN0003/0048/0138/022
 
 [R12]: ../docs/reports/HONF_Round12_Consolidated_Scientific_Report.md
 [UH]: ../docs/reports/_bk/20261021_20261023_Round11_Thermal/20261022_135002Z_HONF_Round11_Thermal_Development_Report.md
-[V2]: ../docs/guides/Thermal_Compact_SoftOnly_Scratch1000_Recipe.md
+[V2]: ../docs/guides/_bk/20261029_Guide_Consolidation/03_R12_R13_Predecessor_Recipes/Thermal_Compact_SoftOnly_Scratch1000_Recipe.md
 [DEV]: ../docs/guides/Thermal_Model_Development_Protocol.md
 [V2-800]: ../diagnostics/round12_soft_v2_analysis_20261024T143931Z/bounded_intervention_probe.json
 

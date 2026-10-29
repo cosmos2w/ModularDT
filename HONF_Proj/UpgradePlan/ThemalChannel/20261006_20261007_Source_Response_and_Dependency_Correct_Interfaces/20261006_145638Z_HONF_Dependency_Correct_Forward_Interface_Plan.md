@@ -475,7 +475,7 @@ Finish by committing and pushing durable code/tests/guide/report on the non-defa
 
 [R1] `docs/reports/HONF_Response_Competent_Forward_Refinement_Report.md`, reviewed source9448df3. Authoritative field, response, null, cost and trainable-scope results for3801/3802.
 
-[R2] `docs/guides/Thermal_Response_Refinement.md`, same source. Actual parent mapping, optimizer scope, data addendum and CLI behavior.
+[R2] `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/Thermal_Response_Refinement.md`, same source. Actual parent mapping, optimizer scope, data addendum and CLI behavior.
 
 [R3] `Case_ThermalChannel/src/channelthermal/input_adapter.py`; `model.py`; `interface_field_coupling.py`; `response_control/native.py`, same source. Heat normalization, per-source features, prepared physical phases and public response assembly.
 

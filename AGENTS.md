@@ -45,6 +45,8 @@
 
 # HONF organization visualization
 
+For current development navigation, start with `HONF_Proj/docs/guides/README.md`. Guides under `_bk` document predecessor architectures or dated experiments; their launch permissions and specialized model choices are historical.
+
 - Follow `HONF_Proj/docs/guides/Global_Hypergraph_Organization_Visualization.md` and use `HONF_Proj/tools/plot_honf_organization.py` for saved-evidence organization figures. Keep three primary views: whole-layout access regions with joint M/E participation; original-member service maps; native overlapping hyperedges. Query views supplement the prepared global organization rather than replace it.
 - Keep figure interiors concise: main/panel titles, physical coordinates, original IDs, direction, necessary legends and colorbars. Omit redundant subtitles, pale-gray secondary explanations, methodological footers and warning paragraphs. Put scene/checkpoint/partition, thresholds, sorting, stage provenance, retained mass and interpretation in readable captions and numerical evidence.
 - Distinguish actual contextual gates/coefficients, prepared directory weights/support and final query contributions. For M receivers combine MM+ME; for E receivers combine EM+EE, with explicit receiver←donor meaning and sequential-stage provenance. Never invent M directory rows or infer an executed reverse exchange by transposing an index.

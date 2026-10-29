@@ -505,7 +505,7 @@ Retain the completed G-EE/G-F comparison and the existing24-hour initial/36-hour
 | [Round12-2 plan][P122], especially Sections3.1/19/20 | Joint fields, source identities, executed departures and the negative first100 promotion decision |
 | [Round12-2 measured development report][R122] | Actual root collapse, original-source expansion, gradient competition, source laws and scientific timing evidence |
 | [U-H soft-merge design](20261022_HONF_UH_Soft_Merged_Hyperedge_Upgrade_Design.md) | Original record/control/value distinction and why pooling requires functional validation |
-| [Soft-only v2 recipe](../docs/guides/Thermal_Compact_SoftOnly_Scratch1000_Recipe.md) | Bank calibration and bounded geometry supervision, without claiming actual compaction |
+| [Soft-only v2 recipe](../docs/guides/_bk/20261029_Guide_Consolidation/03_R12_R13_Predecessor_Recipes/Thermal_Compact_SoftOnly_Scratch1000_Recipe.md) | Bank calibration and bounded geometry supervision, without claiming actual compaction |
 | [Thermal development protocol][DEV] | Exact fixed25 membership, TRAIN normalization, exposed validation and absent M1/M2 DEV coverage |
 | [J-D recipe](../configs/research/thermal_contextual_frontier_jd_dev_v1.json), [J-H recipe](../configs/research/thermal_contextual_frontier_jh_dev_v1.json) | Previous actual seed/sampler/budget/optimizer/source-law identities; reference only, not new recipes |
 | [Round12-2 numerical evidence][E122] | Existing native, response, organizer, regional, derivative and cost arrays, including saved family module counts |

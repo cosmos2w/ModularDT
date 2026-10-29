@@ -6,7 +6,7 @@ The ignored round root is `$ROUND=/data/wanglz/ModularDT/diagnostics/content_hyp
 
 Implementation commits through `69f5bb71176fb407ce4e31b3c570918cea2cb517` were pushed and verified on `agent/honf-core-next`. This index and the narrative report form the final documentation change; the final publication tip, complete outgoing-file audit, hook result and remote/local verification are retained in `$ROUND/receipts/repository_closeout_final_v1.json`.
 
-The campaign contract is `$ROUND/source/HONF_Redesign_Oct13.md` and `$ROUND/source/HONF_Redesign_Implementation_and_Evaluation_Oct13.md`; the maintained architecture and execution guide is [Content_Hypergraph_Family.md](../../../guides/Content_Hypergraph_Family.md).
+The campaign contract is `$ROUND/source/HONF_Redesign_Oct13.md` and `$ROUND/source/HONF_Redesign_Implementation_and_Evaluation_Oct13.md`; the maintained architecture and execution guide is [Content_Hypergraph_Family.md](../../../guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/Content_Hypergraph_Family.md).
 
 ## Run and dataset identities
 

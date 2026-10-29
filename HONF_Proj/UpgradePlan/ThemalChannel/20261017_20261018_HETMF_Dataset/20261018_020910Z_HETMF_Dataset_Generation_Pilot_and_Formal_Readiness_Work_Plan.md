@@ -1179,7 +1179,7 @@ The user selected the electro-thermal contact-array scenario and requested GPU2 
 - `HONF_Proj/Case_ThermalChannel/Dataset/README.md`: external raw datasets, a logical registry, and machine-local locations; browsing links are optional.
 - `HONF_Proj/Case_WindFarm/Dataset/dataset_manifest.json`: explicit schemas, units, native shapes, and layout-level grouping.
 - `HONF_Proj/tools/link_datasets.py`: ThermalChannel-specific destination; not a generic HET-MF link helper.
-- `HONF_Proj/docs/guides/Joint_Native_Hypergraph.md`: active Round9 is a separate workflow and the current device/horizon boundary is versioned. No GPU availability was inferred from that document.
+- `HONF_Proj/docs/guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/Joint_Native_Hypergraph.md`: active Round9 is a separate workflow and the current device/horizon boundary is versioned. No GPU availability was inferred from that document.
 
 Pinned repository base: https://github.com/cosmos2w/ModularDT/tree/53cba42bc73661306e469c7905be9422b235d672/HONF_Proj
 

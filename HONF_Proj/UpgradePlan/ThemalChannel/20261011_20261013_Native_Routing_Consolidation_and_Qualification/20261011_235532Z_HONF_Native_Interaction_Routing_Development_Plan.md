@@ -11,7 +11,7 @@ Read the following before editing:
 
 - `docs/reports/_bk/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md`;
 - its companion `docs/reports/_bk/20261011_224701Z_HONF_Reference_Anchored_Evidence_Index_20261011.md`;
-- `docs/guides/HONF_Reference_Anchored_Development.md`;
+- `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/HONF_Reference_Anchored_Development.md`;
 - the main and appendix of `HONF_Interaction_Preserving_Recovery_20261010`;
 - the prior reference-anchored work plan, the current repository `AGENTS.md`, and applicable dataset development protocols.
 
@@ -425,7 +425,7 @@ Required durable outputs:
 5. A compact report with separate Predictor, Organizer, Execution and Interface conclusions; one evidence index and small machine-readable physical/cost tables.
 6. A decision on whether the next user-controlled formal run is supported, and exactly which warm/fresh recipe evidence exists. An inert command check is not a completed formal experiment.
 
-Suggested report name: `docs/reports/_bk/20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md`. Suggested guide: `docs/guides/HONF_Native_Interaction_Routing.md`. These are proposed names. Preserve all prior reports except the explicit additive caption/provenance corrections.
+Suggested report name: `docs/reports/_bk/20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md`. Suggested guide: `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/HONF_Native_Interaction_Routing.md`. These are proposed names. Preserve all prior reports except the explicit additive caption/provenance corrections.
 
 Use at most four main figure families:
 

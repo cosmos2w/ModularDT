@@ -482,7 +482,7 @@ Follow AGENTS.md: unwrapped prose paragraphs in Markdown, local ignored numerica
 
 - **[R1]** `HONF_Proj/docs/reports/HONF_Content_Hypergraph_Oct13_Report.md`, sections on implementation, native accuracy, organization, complete costs, conditional full-TRAIN, correctness and closeout.
 - **[R2]** `HONF_Proj/docs/reports/HONF_Content_Hypergraph_Oct13_Evidence_Index.md`, completed run/checkpoint identities, corrected physical adapters, native boards and saved numerical source amendments.
-- **[R3]** `HONF_Proj/docs/guides/Content_Hypergraph_Family.md`; shared package `attention.py`, `model.py`, `organization.py`, `decoding.py`; Thermal/Wind `content_hypergraph.py`; `tools/content_hypergraph_train.py`, all at commit `852f995403a91d8feb0e5df94f3022c7b1f3467b`.
+- **[R3]** `HONF_Proj/docs/guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/Content_Hypergraph_Family.md`; shared package `attention.py`, `model.py`, `organization.py`, `decoding.py`; Thermal/Wind `content_hypergraph.py`; `tools/content_hypergraph_train.py`, all at commit `852f995403a91d8feb0e5df94f3022c7b1f3467b`.
 - **[R4]** `HONF_Redesign_Oct13.md` and `HONF_Redesign_Implementation_and_Evaluation_Oct13.md`, first-round motivation and choices. This round's changed attention/pooling/response equations are explicit amendments, not silent compatibility edits.
 
 **External method context.** The proposed combination is a HONF hypothesis, not a published architecture with guaranteed results on these datasets. These sources motivate individual design principles only.

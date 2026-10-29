@@ -8,7 +8,7 @@ This round turns the existing Run2202 direct-to-P bridge into a self-contained m
 
 **Inverse:** No inverse campaign, new solver call, or candidate design validation was performed. The solver ledger remains a protected reference at 326/326, and the WindTEST targets remain locked. Saved response evidence retains its original excitation and physical-reference limits. Stored analytic and shared-grid targets do not establish CFD certification.
 
-The [evidence index](20261011_224701Z_HONF_Reference_Anchored_Evidence_Index_20261011.md) links the native receipts, compact machine-readable tables, PDF masters and resource/protection audit. The [development guide](../../../guides/HONF_Reference_Anchored_Development.md) documents the reusable migration, executor and TrainingEngine diagnosis APIs. Figures are local ignored evidence, with small raster companions for this Markdown report.
+The [evidence index](20261011_224701Z_HONF_Reference_Anchored_Evidence_Index_20261011.md) links the native receipts, compact machine-readable tables, PDF masters and resource/protection audit. The [development guide](../../../guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/HONF_Reference_Anchored_Development.md) documents the reusable migration, executor and TrainingEngine diagnosis APIs. Figures are local ignored evidence, with small raster companions for this Markdown report.
 
 ## Reference identity and maturity
 

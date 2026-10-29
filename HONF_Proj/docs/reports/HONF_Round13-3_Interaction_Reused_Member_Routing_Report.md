@@ -321,7 +321,7 @@ python tools/honf_research.py resume-member-routing --run /data2/wanglz/ModularD
 python tools/honf_research.py resume-member-routing --run /data2/wanglz/ModularDT/round13_3_20261025/route --device cuda:1 --devices cuda:1 --stop-after-epoch AUTHORIZED_EPOCH --extend-horizon
 ```
 
-The narrow extension changes only the maintained engine endpoint/milestone inventory; it preserves provider membership, normalization, constant optimizer schedule and named optimizer/RNG state. Ordinary identity/recovery tests reject unrelated provider or schedule changes. No new hash/freeze/admission service was added. Launch and evaluator interfaces are documented in [the maintained guide](../guides/Interaction_Reused_Member_Routing.md).
+The narrow extension changes only the maintained engine endpoint/milestone inventory; it preserves provider membership, normalization, constant optimizer schedule and named optimizer/RNG state. Ordinary identity/recovery tests reject unrelated provider or schedule changes. No new hash/freeze/admission service was added. Launch and evaluator interfaces are documented in [the maintained guide](../guides/_bk/20261029_Guide_Consolidation/03_R12_R13_Predecessor_Recipes/Interaction_Reused_Member_Routing.md).
 
 ## Storage, preservation and closeout
 

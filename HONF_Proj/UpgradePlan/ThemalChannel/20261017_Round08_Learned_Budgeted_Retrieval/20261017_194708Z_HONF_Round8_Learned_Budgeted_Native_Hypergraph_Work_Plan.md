@@ -62,7 +62,7 @@ Paths are relative to `HONF_Proj/` unless stated otherwise. Function names ident
 | `src/honf_forward_core/content_hypergraph/decoding.py` | Local pack stores an input-derived compact window before the separate measure multiplier | Preserve local branch. Identify direct-value protected IDs separately from local-branch weighted contribution |
 | `src/honf_runtime/native_retrieval_protocol.py` | Exact e500 source contract, fixed thresholds, original case/query/optimizer state | Reuse source identity; new Round8 schema owns budgets and learning schedules, not a modified Round7 schema |
 | `tools/native_retrieval_train.py` | Positive Round7 cost receipt is required even to start scientific fitting | Add a new research-admission entrypoint. Retain old CLI behavior and negative receipt rejection |
-| `docs/guides/Native_Token_Retrieval.md` | Correctly separates M-value consumption from E metadata | Preserve this distinction in every new guide and report |
+| `docs/guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/Native_Token_Retrieval.md` | Correctly separates M-value consumption from E metadata | Preserve this distinction in every new guide and report |
 
 The required architecture remains a single jointly trainable A2-D-derived field model per dataset. Do not reintroduce a frozen D-sep, Stage-A, second full predictor, H6 bank, moments, learned value prototype, inverse generator, utility MLP or rank-r completion.
 

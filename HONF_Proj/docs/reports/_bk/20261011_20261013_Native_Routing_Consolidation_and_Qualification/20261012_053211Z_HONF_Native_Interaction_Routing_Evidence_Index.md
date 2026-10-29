@@ -1,6 +1,6 @@
 # Native interaction routing evidence index
 
-The [development report](20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md) interprets the measured results; the [guide](../../../guides/HONF_Native_Interaction_Routing.md) describes the durable API and numerical contracts. Local scientific artifacts live under `diagnostics/generated/native_routing_20261012`, which resolves to `/data/wanglz/ModularDT/diagnostics/native_routing_20261012`. Checkpoints, numerical arrays, generated figures and one-time runners remain ignored and are not uploaded.
+The [development report](20261012_053211Z_HONF_Native_Interaction_Routing_Development_Report.md) interprets the measured results; the [guide](../../../guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/HONF_Native_Interaction_Routing.md) describes the durable API and numerical contracts. Local scientific artifacts live under `diagnostics/generated/native_routing_20261012`, which resolves to `/data/wanglz/ModularDT/diagnostics/native_routing_20261012`. Checkpoints, numerical arrays, generated figures and one-time runners remain ignored and are not uploaded.
 
 ## Frozen experiment and primary fitting
 

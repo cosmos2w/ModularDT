@@ -383,7 +383,7 @@ The planning review read the attached main report, fetched the companion evidenc
 - **S3:** `src/honf_forward_core/interface_fields/native_interaction_routing.py` at a6e898d: scalar/two-view initialization, score law, density normalization and interventions.
 - **S4:** `src/honf_forward_core/interface_fields/interaction_core.py` at a6e898d: native gather/prepare, selected-pair features, nonlinear final reader, finite checks and prepared ownership.
 - **S5:** `src/honf_forward_core/interface_fields/interaction_preserving_joint.py` at a6e898d: direct dispatch, separate affine-source head, receiver preparation, forcing/increment application.
-- **S6:** `tools/diagnostics/multiview_native_evidence.py`, `docs/guides/HONF_Fresh_Matched_Multiview_Comparison.md`, and the relevant Thermal/Wind joint training providers at a6e898d.
+- **S6:** `tools/diagnostics/multiview_native_evidence.py`, `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/HONF_Fresh_Matched_Multiview_Comparison.md`, and the relevant Thermal/Wind joint training providers at a6e898d.
 - **S7:** `docs/reports/_bk/20261010_154719Z_HONF_Joint_Formal_Comparison_20261010.md` and `docs/reports/_bk/20261008_004514Z_HONF_Unified_Training_and_Adaptive_Interaction_Refinement_Report.md`: historical mature checkpoint identities, native output definitions and canonical89/fullVALID comparison tables. Their scope is historical context until the current Thermal reference discrepancy is reconciled.
 - **S8:** `AGENTS.md` at a6e898d: development membership, reporting, artifact storage, cleanup and upload rules.
 

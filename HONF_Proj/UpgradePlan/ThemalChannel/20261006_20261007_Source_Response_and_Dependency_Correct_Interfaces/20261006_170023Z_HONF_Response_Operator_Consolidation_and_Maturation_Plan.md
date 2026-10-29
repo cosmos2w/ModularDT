@@ -581,6 +581,6 @@ All empirical statements above come from these project sources. Proposed archite
 - **[C2]** `tools/thermal_dependency_flow_fit.py`, sampler, `case_losses`, cosine scheduler, identity checks and checkpoint loop, at25e2899.
 - **[C3]** `Case_ThermalChannel/src/channelthermal/dependency_flow.py`, input whitelist, actual composition and heat-batch guards, at25e2899.
 - **[C4]** `src/honf_forward_core/interface_fields/tensor_query_interaction.py`, `components` and access preparation, at25e2899.
-- **[C5]** `docs/guides/Thermal_Dependency_Flow.md`, `docs/guides/Thermal_Model_Development_Protocol.md`, and root `AGENTS.md`.
+- **[C5]** `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/Thermal_Dependency_Flow.md`, `docs/guides/Thermal_Model_Development_Protocol.md`, and root `AGENTS.md`.
 
 **Planning-review boundary:** report and relevant committed source were inspected; checkpoints, local raw arrays, and the physical generator were not rerun. The new family remains a testable design, not a promised successful model.

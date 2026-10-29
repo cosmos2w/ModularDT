@@ -443,7 +443,7 @@ All measured baseline facts come from the following project sources; all new obj
 - **C3:** `HONF_Proj/Case_ThermalChannel/src/channelthermal/training/campaign_response.py`, read at197a682: selected-anchor guard, family/variant callback, field-scale response loss and inherited coefficient calibration.
 - **C4:** `HONF_Proj/Case_ThermalChannel/src/channelthermal/workflows/train_forward.py`, read at197a682: physical/fit ages, native callback and telemetry.
 - **C5:** `HONF_Proj/src/honf_forward_core/interface_fields/dense_pairwise.py` and `typed_hypergraph_field.py`, read at197a682: named fine physical components, dense executor and ordinary task gradients.
-- **G1:** `HONF_Proj/docs/guides/Thermal_Receiver_Interface_Fitting.md`, current frozen-fit workflow, not a refinement authorization.
+- **G1:** `HONF_Proj/docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/Thermal_Receiver_Interface_Fitting.md`, current frozen-fit workflow, not a refinement authorization.
 - **G2:** `HONF_Proj/docs/guides/Thermal_Model_Development_Protocol.md` and `AGENTS.md`: development/formal separation and durable-delivery rules. Re-read current versions before implementation.
 
 **Completion means:** actual bounded learning and a clear scientific verdict, with any unmet targets stated. It does not mean that HONF, inverse readiness, or formal promotion is automatically solved.

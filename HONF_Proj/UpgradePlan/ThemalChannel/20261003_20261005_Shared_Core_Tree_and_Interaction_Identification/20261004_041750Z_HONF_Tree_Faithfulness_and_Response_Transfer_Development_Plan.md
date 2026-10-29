@@ -533,7 +533,7 @@ All paths are relative to `HONF_Proj/` unless stated otherwise; inspected at378d
 - Root `AGENTS.md`: fixed-development and reporting obligations.
 - `docs/guides/Thermal_Model_Development_Protocol.md`:150/22 membership, cadence,1000 horizon,0348-only response overlap.
 - `docs/reports/HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md`: matched500 results, utility, atom-splitting failure, inverse readiness.
-- `docs/guides/Shared_Core_Thermal_Wind_Architecture_Map.md`: shared core versus domain assembly and information-path differences.
+- `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/Shared_Core_Thermal_Wind_Architecture_Map.md`: shared core versus domain assembly and information-path differences.
 - `src/honf_forward_core/interface_fields/adaptive_receiver_hypergraph.py`: source/receiver pooling, node features, dual-type control summaries and typed export.
 - `src/honf_forward_core/interface_fields/adaptive_interaction_cover.py`: receiver tree construction and legacy split convention.
 - `src/honf_forward_core/interface_fields/receiver_tree_access.py`: unweighted child boundary calculation and live batched access.

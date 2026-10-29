@@ -33,7 +33,7 @@ Primary sources, relative to `HONF_Proj/`:
 
 - `docs/reports/_bk/20261010_195650Z_HONF_Interaction_Preserving_Recovery_20261010.md`
 - `docs/reports/_bk/20261010_214021Z_HONF_Interaction_Preserving_Recovery_20261010_Appendix.md`
-- `docs/guides/Interaction_Preserving_Joint_Recovery.md`
+- `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/Interaction_Preserving_Joint_Recovery.md`
 
 Use the recent formal comparison and unified-refinement reports only to reconstruct named historical reference points. Do not rerun the entire historical research archive.
 
@@ -371,7 +371,7 @@ Codex may autonomously fix a directly demonstrated bug, improve the factored exe
 - Explicit short diagnostic configurations and exact exposure/optimizer conventions for whichever pairs actually ran.
 - A compact main report, small machine-readable comparison tables, and one evidence index pointing to existing/native receipts. Generated checkpoints, arrays, figures and one-time renderers stay ignored.
 
-Suggested new documentation names are `docs/reports/_bk/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md` and `docs/guides/HONF_Reference_Anchored_Development.md`. These are proposed output names, not existing files. Do not overwrite the previous recovery reports.
+Suggested new documentation names are `docs/reports/_bk/20261011_224701Z_HONF_Reference_Anchored_Consolidation_20261011.md` and `docs/guides/_bk/20261029_Guide_Consolidation/01_Legacy_Field_and_Response_Interfaces/HONF_Reference_Anchored_Development.md`. These are proposed output names, not existing files. Do not overwrite the previous recovery reports.
 
 ### Four decisions, not one opaque pass/fail
 

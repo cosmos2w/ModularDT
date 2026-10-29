@@ -471,7 +471,7 @@ Prefer targeted changes over a full refactor:
 | `configs/research/thermal_*.json` | Short H/control only if needed, full-TRAIN H/D/S user-launchable presets. |
 | Existing core/runtime tests | Add small targeted numerical, resume and native-adapter tests; reuse existing relevant tests. |
 | `docs/reports/HONF_Round11_Thermal_Development_Report.md` | Approximately 2–4 pages of findings plus small tables/figures; no audit inventory dump. |
-| `docs/guides/HONF_Thermal_Formal_Runs.md` | Commands, choices, initial full-data horizon and how to resume on another device. |
+| `docs/guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/HONF_Thermal_Formal_Runs.md` | Commands, choices, initial full-data horizon and how to resume on another device. |
 
 All generated checkpoints, predictions, plots, temporary probes and processed outputs belong under the existing `/data2` storage arrangement, e.g. `/data2/wanglz/ModularDT/diagnostics/thermal_honf_round11_<run_id>/`, browsable from an ignored project symlink. Use existing dataset locations; do not copy datasets or change HET-MF links.
 
@@ -501,7 +501,7 @@ At the review commit identified at the top:
 - `HONF_Proj/tools/continuous_joint_train.py`.
 - `HONF_Proj/Case_ThermalChannel/src/channelthermal/local_records.py`.
 - `HONF_Proj/Case_ThermalChannel/Dataset/dataset_manifest.json`.
-- `HONF_Proj/docs/guides/HONF_Round10_Reusable_Core_Guide.md`.
+- `HONF_Proj/docs/guides/_bk/20261029_Guide_Consolidation/02_Attention_and_Unified_Routing_Lineages/HONF_Round10_Reusable_Core_Guide.md`.
 
 The full user-supplied Round10 report is the basis for the empirical findings. The review did not execute private checkpoints, measure current GPU occupancy or inspect uncommitted U progress. The new user instruction supersedes the report's historical U deferral; it does not supply measurements of U results.
 
