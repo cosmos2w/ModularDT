@@ -502,6 +502,9 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         "query_anchor_value_reduction_pairs_M", "query_anchor_value_reduction_pairs_E",
         "query_M_member_query_affine_rows", "query_E_member_query_affine_rows",
         "query_joint_field_head_rows",
+        "mediated_source_eligible_alternatives", "mediated_conditioned_anchor_M_rows",
+        "mediated_conditioned_positive_ME_edges", "mediated_expanded_ME_edge_rows",
+        "mediated_source_prefix_sort_entries", "mediated_E_prefix_sort_entries",
     )
     _additional_decode_count_keys = tuple(getattr(
         InteractionReusedMemberRoutingCore, "_additional_decode_count_keys", (),
@@ -682,6 +685,15 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
     def prepare(self, scene, **options):
         """Prepare the shared encoder and only member scorer key terms."""
         prepared = InteractionReusedMemberRoutingCore.prepare(self, scene, **options)
+        if self.mediated_mode != "none":
+            from .mediated import prepare_scene
+            prepare_scene(self, prepared)
+            cache = prepared._mediated_scene_cache
+            prepared.work_counts.update({
+                "mediated_prepared_direct_entries": int(cache["direct"].numel()),
+                "mediated_prepared_module_mass_entries": int(cache["module_mass"].numel()),
+                "mediated_prepared_positive_ME_edges": int(cache["edge_mass"].numel()),
+            })
         prepared._anchored_normalized_member_keys_M = self._routing_features(prepared.member_keys_M)
         prepared._anchored_normalized_member_keys_E = self._routing_features(prepared.member_keys_E)
         width = self.context_dim
@@ -971,6 +983,10 @@ class AnchoredMemberRoutingCore(SingleDistributionMemberRoutingCore):
         counts = {}
         for role, use in (("M", module), ("E", ~module)):
             positions = use.nonzero(as_tuple=False).flatten()
+            if query_terms is not None and positions.numel() == 0:
+                counts[f"query_unique_union_raw_score_pairs_{role}"] = 0
+                counts[f"query_{role}_member_query_affine_rows"] = query.batch_size * query.num_queries
+                continue
             rb, rq, rm = b[positions], q[positions], member[positions]
             if role == "E":
                 rm = rm - prepared.scene.num_modules

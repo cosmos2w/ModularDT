@@ -89,6 +89,8 @@ def test_no_m_selected_and_empty_me_still_reads_own():
     model.source_retained_mass = 0.000001
     prepared = model.prepare(scene)
     prepared.mediated_applied_ME = torch.zeros_like(prepared.mediated_applied_ME)
+    from honf_forward_core.interaction_reused_member_routing.mediated import prepare_scene
+    prepare_scene(model, prepared)
     result = model.decode(prepared, query, intervention={'read_mode': 'restricted'}, return_trace=True)
     t = result.trace
     assert torch.isfinite(result.joint_fields).all()
@@ -189,6 +191,8 @@ def test_native_fp32_high_contrast_own_access(mode):
     # Explicitly exercise a legal learned-EE-empty row with extremely weak
     # positive structural own mass and much larger active module priors.
     prepared.anchored_applied_EE = torch.zeros_like(prepared.anchored_applied_EE)
+    from honf_forward_core.interaction_reused_member_routing.mediated import prepare_scene
+    prepare_scene(model, prepared)
     output,_ = model._decode_tile(prepared,query,('full','restricted'),return_trace=True)
     for fields, trace, _ in output.values():
         assert torch.isfinite(fields).all()
@@ -215,9 +219,24 @@ def test_standalone_restricted_omits_unselected_me_conditioning():
     model.source_retained_mass=0.01
     prepared=model.prepare(scene)
     prepared.anchored_applied_EM=prepared.anchored_applied_EM*1e-8
+    from honf_forward_core.interaction_reused_member_routing.mediated import prepare_scene
+    prepare_scene(model, prepared)
     output,_=model._decode_tile(prepared,query,('restricted',),return_trace=True)
     trace=output['restricted'][1]
     assert not trace['mediated_source_selected'][:,1:].any()
     assert trace['mediated_conditioned_anchor_module_rows'].numel()==0
     assert torch.count_nonzero(trace['context_M'])==0
     assert torch.isfinite(output['restricted'][0]).all()
+
+
+def test_shared_planning_and_per_mode_work_counts():
+    model, scene, query = model_fixture('G')
+    full, restricted, shared = model.decode_paired(model.prepare(scene), query)
+    assert shared['mediated_source_eligible_alternatives'] > query.num_queries
+    assert shared['mediated_conditioned_anchor_M_rows'] > 0
+    assert shared['mediated_conditioned_positive_ME_edges'] > 0
+    assert shared['mediated_expanded_ME_edge_rows'] >= shared['mediated_conditioned_positive_ME_edges']
+    assert full.work_counts['mediated_source_prefix_sort_entries'] == 0
+    assert full.work_counts['mediated_E_prefix_sort_entries'] == 0
+    assert restricted.work_counts['mediated_source_prefix_sort_entries'] == query.batch_size * query.num_queries * (scene.num_modules + 1)
+    assert restricted.work_counts['mediated_E_prefix_sort_entries'] == query.batch_size * query.num_queries * scene.num_environment_tokens

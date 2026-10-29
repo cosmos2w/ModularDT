@@ -12,6 +12,35 @@ def _prefix(weights, coverage):
     return torch.zeros_like(selected).scatter(-1, order, selected)
 
 
+
+def prepare_scene(core, prepared):
+    """Cache live, query-invariant E and actual ME directory tensors once."""
+    scene = prepared.scene
+    m, e = scene.num_modules, scene.num_environment_tokens
+    measure = build_e_access_measure(scene.module_mask, scene.environment_mask, scene.environment_measure,
+                                     dtype=prepared.anchored_applied_EM.dtype, access_measure=core.access_measure)
+    mm = measure[:, :m] * scene.module_mask.to(measure)
+    em = measure[:, m:] * scene.environment_mask.to(measure)
+    direct_mass = prepared.anchored_applied_EE * em[:, None, :]
+    own = torch.arange(e, device=em.device)[None, :, None].expand(scene.batch_size, -1, -1)
+    direct_mass = direct_mass.scatter_add(2, own, em[:, :, None])
+    direct_total = direct_mass.sum(-1, keepdim=True)
+    tiny = torch.nextafter(direct_mass.new_zeros(()), direct_mass.new_ones(()))
+    direct = direct_mass / direct_total.clamp_min(tiny)
+    module_mass = prepared.anchored_applied_EM * mm[:, None, :]
+    me_mass = prepared.mediated_applied_ME * em[:, None, :]
+    eb, ei, ej = (me_mass > 0).nonzero(as_tuple=True)
+    edge_row = eb * m + ei
+    edge_mass = me_mass[eb, ei, ej]
+    row_counts = torch.bincount(edge_row, minlength=scene.batch_size * m)
+    row_offsets = torch.cat((row_counts.new_zeros(1), row_counts.cumsum(0)))
+    raw_row_mass = me_mass.sum(-1).reshape(-1)
+    prepared._mediated_scene_cache = dict(direct=direct, direct_total=direct_total,
+        module_mass=module_mass, edge_destination=ej, edge_mass=edge_mass,
+        row_counts=row_counts, row_offsets=row_offsets, raw_row_mass=raw_row_mass,
+        p_conditional=edge_mass / raw_row_mass[edge_row] if core.mediated_mode == "P" else None)
+
+
 def decode_tile(core, prepared, query, modes, *, return_trace=False, intervention=None):
     controls = {} if intervention is None else dict(intervention)
     if set(controls) - {'read_mode', 'remove_module_mediated_environment', 'suppress_module_values', 'exclude_environment_ids'}:
@@ -29,16 +58,10 @@ def decode_tile(core, prepared, query, modes, *, return_trace=False, interventio
         zero = qstates.new_zeros(query.batch_size, query.num_queries, core.output_dim)
         return {mode: (zero, None, {}) for mode in modes}, {}
     tiny = torch.nextafter(qstates.new_zeros(()), qstates.new_ones(()))
-    measure = build_e_access_measure(scene.module_mask, scene.environment_mask, scene.environment_measure,
-                                     dtype=qstates.dtype, access_measure=core.access_measure)
-    mm, em = measure[:, :m], measure[:, m:]
-    em = em * scene.environment_mask.to(em)
-    mm = mm * scene.module_mask.to(mm)
-    direct_mass = prepared.anchored_applied_EE[b, a] * em[b]
-    direct_mass = direct_mass.scatter_add(1, a[:, None], em[b, a, None])
-    d = direct_mass.sum(-1, keepdim=True)
-    direct = direct_mass / d.clamp_min(tiny)
-    module_mass = prepared.anchored_applied_EM[b, a] * mm[b]
+    cache = prepared._mediated_scene_cache
+    direct = cache['direct'][b, a]
+    d = cache['direct_total'][b, a]
+    module_mass = cache['module_mass'][b, a]
     source_prior = torch.cat((d, module_mass), -1)
     valid_source = source_prior > 0
     sr, ss = valid_source.nonzero(as_tuple=True)
@@ -58,15 +81,13 @@ def decode_tile(core, prepared, query, modes, *, return_trace=False, interventio
     alpha = torch.where(valid_source, alpha.clamp_min(tiny), torch.zeros_like(alpha))
     alpha = alpha / alpha.sum(-1, keepdim=True)
 
-    # Build the actual positive ME edge directory once per tile. Its row IDs
-    # encode (batch, M); expansion below includes only selected query sources.
-    me_mass = prepared.mediated_applied_ME * em[:, None, :]
-    eb, ei, ej = (me_mass > 0).nonzero(as_tuple=True)
-    edge_row = eb * m + ei
-    edge_mass = me_mass[eb, ei, ej]
-    row_counts = torch.bincount(edge_row, minlength=scene.batch_size * m)
-    row_offsets = torch.cat((row_counts.new_zeros(1), row_counts.cumsum(0)))
-    raw_row_mass = me_mass.sum(-1).reshape(-1)
+    # Scene-level actual ME support and measure weighting are prepared once;
+    # query-dependent source selection and anchor conditioning remain live.
+    ej = cache['edge_destination']
+    edge_mass = cache['edge_mass']
+    row_counts = cache['row_counts']
+    row_offsets = cache['row_offsets']
+    raw_row_mass = cache['raw_row_mass']
     # Condition each actual (scene, anchor, M) row once, shared across
     # queries and both paired modes. Only positive native ME edges are packed.
     source_selections = {}
@@ -95,7 +116,7 @@ def decode_tile(core, prepared, query, modes, *, return_trace=False, interventio
         denominator = torch.segment_reduce(numerator, 'sum', lengths=unique_lengths)
         unique_conditional = numerator / denominator[unique_owner]
     elif core.mediated_mode == 'P':
-        unique_conditional = edge_mass[unique_edge] / raw_row_mass[unique_row[unique_owner]]
+        unique_conditional = cache['p_conditional'][unique_edge]
     else:
         unique_conditional = edge_mass[unique_edge]
     # Reorder the much smaller unique-anchor edge directory by destination
@@ -121,6 +142,10 @@ def decode_tile(core, prepared, query, modes, *, return_trace=False, interventio
     conditional = ordered_conditional[edge_index]
     destination_key = edge_r * e + destination
     unique_key, lengths_by_key = torch.unique_consecutive(destination_key, return_counts=True)
+    counts.update(mediated_source_eligible_alternatives=source_member.numel(),
+                  mediated_conditioned_anchor_M_rows=unique_address.numel(),
+                  mediated_conditioned_positive_ME_edges=unique_edge.numel(),
+                  mediated_expanded_ME_edge_rows=edge_index.numel())
     packed, debug = {}, {}
     all_keys = [source_union]
     for mode in modes:
@@ -166,14 +191,20 @@ def decode_tile(core, prepared, query, modes, *, return_trace=False, interventio
         if return_trace:
             debug[mode] = (selected, environment, edge_r, edge_m, destination, conditional, raw_row_mass.reshape(scene.batch_size, m))
     union = torch.unique(torch.cat(all_keys), sorted=True)
-    new_keys = union[~torch.isin(union, source_union)]
+    source_positions = torch.searchsorted(union, source_union)
+    needs_score = torch.ones_like(union, dtype=torch.bool).scatter(0, source_positions, False)
+    new_positions = needs_score.nonzero(as_tuple=False).flatten()
+    new_keys = union[new_positions]
     new_raw, _, new_counts = core._raw_union_scores(prepared, query, qstates, new_keys, query_terms=query_terms)
-    raw_union = torch.cat((source_raw, new_raw))[torch.argsort(torch.cat((source_union, new_keys)))]
+    raw_union = source_raw.new_zeros(union.shape).index_copy(0, source_positions, source_raw)
+    raw_union = raw_union.index_copy(0, new_positions, new_raw)
     for key in counts:
         counts[key] += new_counts[key] if 'raw_score_pairs' in key else 0
     outputs = {}
     for mode in modes:
         fields, trace, local_counts = core._read_packed(prepared, query, qstates, qnorm, packed[mode], union, raw_union, return_trace=return_trace)
+        local_counts["mediated_source_prefix_sort_entries"] = r * (m + 1) if mode in ("restricted", "source95_all") else 0
+        local_counts["mediated_E_prefix_sort_entries"] = r * e if mode in ("restricted", "all_e95") else 0
         if trace is not None:
             selected, environment, edge_r, edge_m, destination, conditional, row_mass = debug[mode]
             # Small explicit inspection panel only; no persistent scene-wide E×M×E tensor.
