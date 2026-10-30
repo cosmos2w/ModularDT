@@ -1,6 +1,6 @@
 # Global hypergraph organization: visual guide and working protocol
 
-HONF organization should first be shown as the reusable information interface prepared for an entire physical system. Use three primary expressions: **whole-layout access regions for spatial intuition; original-member service maps for weights; overlapping native hyperedges for sharing and intersection**. A query figure then explains one invocation of that interface. This guide defines their meanings, illustrates them with saved relation-anchored evidence, and provides a reusable CPU plotting command and an agent execution procedure.
+This document is the working specification for future HONF organization figures. Its definitions, drawing methods and presentation requirements apply across models and physical cases. The checkpoint examples illustrate the rules; their particular geometry, member count and measured memberships are not defaults to impose on another scene. HONF organization should first be shown as the reusable information interface prepared for an entire physical system. Use three primary expressions: **whole-layout access regions for spatial intuition; original-member service maps for weights; overlapping native hyperedges for sharing and intersection**. Physical/sorted incidence and actual contextual neighborhoods provide complementary quantitative views; a captured query trace explains one invocation of the prepared interface.
 
 The figures must explain the model that actually ran. They do not require a new architecture, a forced number of groups, geometric-neighbor constraints, or replacing original records with pooled features. M/E remain input-object roles. A region labeled by an E supplier can jointly use several M members, and a remote contextualized E record can serve a regional collection of addresses.
 
@@ -8,13 +8,37 @@ The figures must explain the model that actually ran. They do not require a new 
 
 | Need | Read or run |
 | --- | --- |
-| Understand the three views | Sections 1–4 and the packaged README examples. |
+| Understand the required meanings and drawing logic | Sections 1–4, with current-checkpoint examples beside each method. |
 | Generate a matched comparison | Section 6: `tools/plot_honf_organization.py`. |
 | Export or adapt scene evidence | Section 5: array schema and actual-relation sources. |
 | Review a figure or delegate to an agent | Sections 7–8: presentation rules and execution sequence. |
 | Trace a numerical claim | The generated `evidence.json`, containing original IDs, permutations, member weights and exact intersections. |
 
 The maintained implementation is [honf_viz](../../src/honf_viz/organization_data.py); the entry point is [plot_honf_organization.py](../../tools/plot_honf_organization.py). It reads saved NPZ/JSON evidence without loading a checkpoint, a model, torch, training targets or query arrays. Plotting dependencies are the optional `visualization` extra in [pyproject.toml](../../pyproject.toml): NumPy, Matplotlib and SciPy. Use the existing project environment; do not install or copy datasets just to redraw figures.
+
+### Required conventions
+
+Every organization figure must retain the original member identities and the quantity represented. Display transformations must operate on copies, with an original-ID crosswalk and enough saved numerical evidence to reconstruct the displayed values. Colors, ordering, representative rows and abstract ellipse geometry are drawing choices; they must not alter the model's memberships, invent relations or establish physical group counts. A complete organization presentation includes all three primary views, not only a native-set diagram.
+
+| View | Required construction | Required numerical check |
+| --- | --- | --- |
+| Whole-layout regions and joint M/E participation | Nonself directory winners plus each original M's soft service fractions over those same regions. | Unassigned zero rows stay neutral; each positive M service-fraction row sums to one. |
+| Physical/similarity incidence | The same native matrix in physical order and an explicitly recorded similarity permutation. | Sorting preserves every displayed value, nonzero and original ID; M/E row roles remain identifiable. |
+| Original-member service | A fixed original donor's directory column, with actual M-receiver gates separately encoded when available. | Values and original receiver IDs match the saved C column after the declared own-E display omission and the actual G column; C and G keep separate scales. |
+| Actual contextual neighborhood | A fixed receiver's MM+ME or EM+EE rows, preserving each route's cycle and stage. | Every positive original donor in the chosen rows remains recorded; arrows follow actual donor→receiver direction. |
+| Native overlapping hyperedges | One to four selected actual native rows, exact original-member intersections and a sparse measured connection overlay. | Every ellipse inside/outside pattern matches displayed membership; omissions, retained mass and selected G coefficients are recoverable. |
+
+All reference figures below use the **Detail-preserving relation-anchored neural field**, run `thermal_r14_detail_train600_v1`, from one captured latest checkpoint at **epoch 589**, on exposed canonical VAL89 cases **0278/M3** and **0293/M7**. Physical coordinates retain Thermal native coordinate units. These fixed examples use no prediction-error selection. The [complete two-case reference](../reports/Report_R14/organization_reference/latest/README.md) embeds every exported view and links the separate numerical evidence. Future figures must state their own source, partition, checkpoint, units and controls rather than inheriting these example identities.
+
+### Reference figure index
+
+| Figures | Construction illustrated | Case |
+| --- | --- | --- |
+| 1–2 | Whole-layout access regions and joint M/E participation | 0278/M3 and 0293/M7 |
+| 3 | Physical and similarity order of native incidence | 0293/M7 |
+| 4–5 | Original M and E donor service fields, with distinct actual G overlays | 0293/M7 |
+| 6–7 | Actual incoming M and E receiver neighborhoods | 0293/M7 |
+| 8–9 | Adaptive native hyperedges, selective MM connections and physical-layout locators | 0278/M3 and 0293/M7 |
 
 ## 1. The global object and the quantities that must stay separate
 
@@ -30,7 +54,7 @@ This object depends on the prescribed physical inputs, including layout, materia
 | Query coefficient `β(q,i)` | How did one query actually use permitted members? | Native read trace including locator, type strength and within-role preference. |
 | Field/design response | What happens to a physical objective when inputs change? | Field evaluation, perturbation or sensitivity, not graph degree alone. |
 
-The hypergraph-routed interface had six explicitly parameterized shared hyperedges. The current anchored interface has a fine-grained library of E-address rows. Both admit a global view; the latter does not automatically contain a small learned group-assignment variable. Display colors, similarity ordering and representative selection summarize the library without claiming that the model merged it.
+A shared-slot interface can have an explicitly parameterized finite slot inventory. An anchored interface has a fine-grained library of E-address rows. Both admit a global view; an E-address library does not automatically contain a small learned group-assignment variable. Display colors, similarity ordering and representative selection summarize the library without claiming that the model merged it.
 
 ## 2. Whole-layout access regions and joint M/E participation
 
@@ -38,30 +62,71 @@ Color each E coverage cell by its leading retained nonself member: `g(a) = argma
 
 Show how every original M participates in those regions using `W[m,g] = Σ_(a:g(a)=g) C[a,m] / Σ_a C[a,m]`. A module's ring sectors and table row encode the same fractions; a positive-service row sums to one, while a module with no service has a zero row. This is a descriptive joint incidence view, not a hard assignment of a module to its geometric neighborhood. It does not renormalize C itself.
 
+For a nonself display copy $\overline C$ with actual own-E entries removed, the construction is
+
+$$
+g(a)=\underset{i\ne\mathrm{own}(a)}{\arg\max}\;\overline C_{ai},\qquad
+W_{mg}=\frac{\sum_{a:g(a)=g}C_{am}}{\sum_a C_{am}}.
+$$
+
+Use original member order to resolve exact ties. Define $g(a)$ only when its row has positive nonself weight, and define a zero $W$ row when its denominator is zero. A categorical region map must use a discrete member palette and a matching legend; use a separate sequential 0–1 scale for $W$. Draw original module footprints at their actual positions, with ring sectors colored by the same region-member identities. Never use an argmax label as a replacement for the underlying soft directory.
+
+![Whole-layout access regions and joint module participation for current case 0278](../reports/Report_R14/organization_reference/latest/case_0278/figures/01_global_joint_ME_regions.png)
+
+Figure 1. Case 0278/M3, epoch 589, exposed VAL89. Three original M donors lead the displayed regions; ring sectors and the table retain each module's distributed soft service across those same regions. The map and table encode different quantities with separate categorical and 0–1 scales. [PDF master](../reports/Report_R14/organization_reference/latest/case_0278/figures/01_global_joint_ME_regions.pdf).
+
+![Whole-layout access regions and joint module participation for current case 0293](../reports/Report_R14/organization_reference/latest/case_0293/figures/01_global_joint_ME_regions.png)
+
+Figure 2. Case 0293/M7, same checkpoint and partition. All seven M members appear as leading donors somewhere, while several modules serve multiple displayed regions. Region colors summarize leading nonself preferences; they do not partition original memberships into seven disjoint hyperedges. [PDF master](../reports/Report_R14/organization_reference/latest/case_0293/figures/01_global_joint_ME_regions.pdf).
+
 
 Add a full incidence view in both physical order and shared similarity order. Physical columns follow y/x coordinate order. Similarity ordering uses average-linkage cosine clustering with optimal leaf ordering on equal-normalized model profiles; keep M/E member bands identifiable, preserve every displayed value and nonzero, and retain the permutation to original IDs. Apply the same ordering to matched models. Do not cut the hierarchy at a desired group count or rearrange values to manufacture blocks.
 
 
 A shared resource legitimately spans several regions. A clean block diagonal is one possible pattern, not a success requirement. The spatial map explains where source preferences change; the matrix explains how memberships overlap.
 
+![Physical and similarity orderings of the current case 0293 native incidence](../reports/Report_R14/organization_reference/latest/case_0293/figures/02_directory_physical_vs_sorted.png)
+
+Figure 3. Case 0293/M7, epoch 589, exposed VAL89. Both panels contain the same nonself restricted-directory values and support, with original M/E bands separated by the red line. White denotes exact zero; a shared absolute logarithmic color scale makes small positive weights visible. Only the recorded row/column order changes. [PDF master](../reports/Report_R14/organization_reference/latest/case_0293/figures/02_directory_physical_vs_sorted.pdf).
+
 ## 3. Original-member service and actual contextual neighborhoods
 
 A donor service field is `S_i(a) = C[a,i]`: where the original member `i` is available to E addresses and at what directory weight. Show all addresses, including zero entries, on one absolute scale across compared models. Use a clearly labeled marker for the supplier's actual location. Source position and service region can differ because contextual records already contain exchanged information.
+
+The standard nonself service display uses $\overline C$ instead of $C$ only to hide the supplier's actual own-E entry. Retain that omitted coefficient in the saved original C matrix, keep zero cells visibly distinct from positive service, and use unchanged native C for membership analysis. For donor $i$, an actual M-receiver overlay uses a G **column**, $G_{mi}$, and arrows point from donor $i$ to receiver $m$. Use separate C and G colorbars; their coefficients belong to different operations and must not be added or placed on an unlabeled common scale.
 
 Select a small common donor panel independently within M and E roles, using pooled scene-wide nonself directory mass across compared models. Selection uses the entire directory, not attractive query examples or model errors. The reusable command defaults to two M and two E suppliers. A role with zero shared service can still be displayed as an explicitly zero-service example; do not invent access to make a panel interesting.
 
 The directory has E receiver rows only. To show additional M receivers, overlay actual contextual `MM[:,m]` for an M donor or `ME[:,e]` for an E donor. Use M squares and dashed donor→receiver arrows, with a separate G colorbar and explicit direction. Do not pretend these are M-receiver rows of C. Every positive M gate is drawn; no extra connectivity threshold is applied to these arrows.
 
+![Current case 0293 original M supplier service maps with actual MM overlays](../reports/Report_R14/organization_reference/latest/case_0293/figures/03_directory_services_01.png)
+
+Figure 4. Case 0293/M7, epoch 589, exposed VAL89. M1 and M0 are selected by total nonself directory service. E cells show their C columns on a shared scale within this figure; orange receiver squares and donor→receiver arrows show actual cycle-1 MM gates on the separate 0–1 G scale. Red rings locate the original suppliers. [PDF master](../reports/Report_R14/organization_reference/latest/case_0293/figures/03_directory_services_01.pdf).
+
+![Current case 0293 original E supplier service maps with actual ME overlays](../reports/Report_R14/organization_reference/latest/case_0293/figures/03_directory_services_02.png)
+
+Figure 5. Same case and checkpoint. Two original E suppliers are chosen independently within the E role using the same whole-directory selection rule. Their nonself C services and actual M←E contextual gates retain distinct scales and original coordinates. The supplier's own-E directory entry is omitted only in the display. [PDF master](../reports/Report_R14/organization_reference/latest/case_0293/figures/03_directory_services_02.pdf).
+
 
 
 For a receiver-centered interpretation, combine actual incoming gate rows rather than directory columns: an M receiver gets `[MM[m,:], ME[m,:]]`, and an E receiver gets `[EM[a,:], EE[a,:]]`. This exposes all four exchange routes in a consistent quantity. E-cell color marks incoming E gates; highlighted M symbols and arrows mark incoming M gates. A red receiver symbol has a different meaning from a donor marker and must be identified in the legend.
+
+Use the same absolute 0–1 G scale for both donor roles, keep route/cycle provenance in numerical evidence, and draw arrows toward the marked receiver. The two routes can have sequential stages; do not describe their combined display as a simultaneously executed symmetric graph. Split M and E receivers into separate horizontal pages when this makes original IDs and route labels clearer. Module labels must avoid donor/receiver markers without moving the physical vertices.
+
+![Current case 0293 actual incoming neighborhoods for original M receivers](../reports/Report_R14/organization_reference/latest/case_0293/figures/05_four_route_context_neighborhoods_M.png)
+
+Figure 6. Case 0293/M7, epoch 589, exposed VAL89. M receivers combine their actual cycle-1 MM and ME rows. M donor arrows point toward the red receiver marker, E cells show its ME coefficients, and all values use the same G scale. This view contains actual contextual rows rather than fictitious M rows of the E directory. [PDF master](../reports/Report_R14/organization_reference/latest/case_0293/figures/05_four_route_context_neighborhoods_M.pdf).
+
+![Current case 0293 actual incoming neighborhoods for original E receivers](../reports/Report_R14/organization_reference/latest/case_0293/figures/05_four_route_context_neighborhoods_E.png)
+
+Figure 7. Same case, checkpoint and G scale. E receivers combine actual EM and EE rows. Their marked physical locations, original M donors and E-cell weights reveal a different receiver-centered view of the same prepared scene. [PDF master](../reports/Report_R14/organization_reference/latest/case_0293/figures/05_four_route_context_neighborhoods_E.pdf).
 
 
 ## 4. Native overlapping hyperedges and selective connectivity
 
 A native hyperedge is a stored organization row together with its original M/E members. The relation-anchored models use actual restricted E-address rows $C_{ai}$; Unified hypergraph uses its native M/E seed incidence $B_{si}$; a shared-slot model uses its actual slot memberships. Keep these row definitions and coefficient normalizations explicit. The diagram retains original members as vertices, prominent labeled M squares, E circles, and native rows as colored set boundaries.
 
-The earlier three-ellipse example below used a manually fixed display count. Three was a plotting choice, not a group count inferred by the organizer. The standard compact view now selects **one to four representative native rows on a single 16:9 page**, and overlays a small number of measured module connections. The complete incidence view remains the scene-wide account of the organization. A compact diagram explains a few actual memberships and interactions without expanding into a large collection of circles.
+The standard compact view selects **one to four representative native rows on a single 16:9 page**, and overlays a small number of measured module connections. The count must follow the declared common selection rule; do not hardcode three ellipses or interpret a display count as a learned physical group count. The complete incidence view remains the scene-wide account of the organization. A compact diagram explains a few actual memberships and interactions without expanding into a large collection of circles.
 
 ### 4.1 Select a compact, data-dependent number of native rows
 
@@ -117,14 +182,13 @@ Retain a small physical-layout locator with the adapter-owned domain bounds, ori
 
 An E display threshold may simplify a dense native row. Preserve every actual positive M membership and actual positive own-member entry, including a positive own E below the threshold. Never add a zero-weight own member. Record omitted original IDs and weights, and compute each row’s displayed fraction $\eta_a=\sum_{i\,\mathrm{shown}}C_{ai}/\sum_i C_{ai}$. Keep this fraction separate from profile coverage $\kappa$, connectivity mass and physical prediction fidelity. Do not renormalize shown weights. If vertex labels crowd, first revise geometry and label placement, then consider a separately disclosed E threshold; keep the row-selection rule and measured connections intact.
 
-![Historical three-edge S/X native hyperedge reference](../../diagnostics/global_organization_reference_v1/figures/06_native_overlapping_hyperedges.png)
-Figure 6. The historical manual three-row example uses h(E50), h(E81) and h(E140), formal S/X epoch 1600, case VAL0678/M10. Positive M and own-E entries are preserved; E threshold 0.02 omits no positive member in these rows, so displayed mass is 100%. It illustrates exact set intersections. The number three is the historical display request. [PDF master](../../diagnostics/global_organization_reference_v1/figures/06_native_overlapping_hyperedges.pdf).
+![One native hyperedge with actual module connectivity and physical layout in current case 0278](../reports/Report_R14/organization_reference/latest/case_0278/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.png)
 
-![One representative native hyperedge with measured module arrows in latest-checkpoint case 0278](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/case_0278/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.png)
-Figure 7. Detail-preserving relation-anchored neural field, captured latest checkpoint epoch 567, exposed VAL89 case 0278/M3. The common automatic rule selects one actual native E-address row; lines use recorded cycle-1 MM gates and the three fixed coefficient bins. Abstract membership geometry and directed module exchange are shown together. The [local example gallery](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/README.md) records selected IDs, profile coverage, displayed row mass and omitted connections. [PDF master](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/case_0278/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.pdf).
+Figure 8. Case 0278/M3, epoch 589, exposed VAL89. The common automatic rule selects actual native row h(E39), covering 93.8% of shared row profiles within distance 0.5. At E threshold 0.02, displayed row mass is 95.0%; all positive M and actual positive own-E memberships remain. Three recorded cycle-1 MM arrows use fixed coefficient-width bins. The locator preserves real module footprints and anchor coordinates. [PDF master](../reports/Report_R14/organization_reference/latest/case_0278/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.pdf).
 
-![Four representative native hyperedges with measured module arrows in latest-checkpoint case 0293](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/case_0293/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.png)
-Figure 8. Same model and captured epoch, exposed VAL89 case 0293/M7. The same selection rule produces four representative native rows on one page. Positive M and own-E memberships are preserved; the caption and saved evidence disclose the E threshold, exact intersections, coefficient bins and display omissions. These four rows are native examples rather than four learned physical groups. The gallery also shows naturally selected two- and three-row cases. [PDF master](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/case_0293/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.pdf).
+![Four native hyperedges with actual module connectivity and physical layout in current case 0293](../reports/Report_R14/organization_reference/latest/case_0293/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.png)
+
+Figure 9. Case 0293/M7, same checkpoint and partition. The same rule reaches the four-row display budget with h(E170), h(E18), h(E162) and h(E179); profile coverage is 85.4%. Displayed row masses are 52.6%, 66.1%, 72.6% and 67.0%, respectively, at the same E threshold. Exact intersections preserve original identities, seven arrows use actual cycle-1 MM coefficients, and the wide layout leaves a separate physical locator and readable legends. The selected count is a display summary. [PDF master](../reports/Report_R14/organization_reference/latest/case_0293/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.pdf).
 
 A dual service-set picture remains optional: E-address hyperedges become vertices, and one original member becomes the hyperedge of addresses it serves. Label the changed definitions explicitly. Keep original-member hyperedges, actual contextual exchange and query invocation separate throughout the evidence.
 
@@ -152,18 +216,18 @@ Adapter-owned polygons take precedence. Otherwise a complete Cartesian coordinat
 
 ## 6. Reproduce the reference and use the API
 
-Run the plotter on saved scene evidence using explicit local input/output paths. This reads arrays only; it does not fit or load a model. Supply one or two aligned scenes with their sidecars. Verify the DATA2 binding and output budget before writing. This example uses the captured epoch-567 source; the four-row limit and sparse arrow defaults preserve a single compact page:
+Run the plotter on saved scene evidence using explicit local input/output paths. This reads arrays only; it does not fit or load a model. Supply one or two aligned scenes with their sidecars. Different physical layouts must be rendered separately; matched-model comparisons require the same geometry and original IDs. Verify the DATA2 binding and output budget before writing. This concrete example uses the current epoch-589 source; replace the source path and model name for another study:
 
 ```bash
 CUDA_VISIBLE_DEVICES='' python tools/plot_honf_organization.py \
-  --scene 'Detail-preserving relation-anchored neural field=/data2/wanglz/ModularDT/r14_20261029/evaluations/latest_hyperedge_connectivity/organization_0293.npz' \
+  --scene 'Detail-preserving relation-anchored neural field=/data2/wanglz/ModularDT/r14_20261029/evaluations/organization_reference_latest/organization_0293.npz' \
   --output HONF_Proj/diagnostics/compact_hyperedge_example \
   --edges auto --max-edges 4 --edges-per-page 4 \
   --edge-resolution 0.5 --edge-coverage 0.9 \
   --connection-incoming 1 --connection-limit 8 --e-display-threshold 0.02
 ```
 
-The [packaged README examples](../../README.md#relation-anchored-organization) show the three standard views from a frozen relation-anchored checkpoint at epoch 2813 on exposed VAL0678. Their [image index](../assets/readme/README.md) states original IDs, units, source age, thresholds and limitations. Other comparison galleries and full numerical evidence remain local; they are not silently relabeled as these examples.
+The command produces a complete saved-scene gallery, including the primary views, incidence and available contextual neighborhoods. Its default neighborhood figure combines M/E receivers; the Python API below can separate the two receiver roles into horizontal pages. For a report, keep curated PNG/PDF pairs and Markdown in the existing common directory under `docs/reports`, and store source arrays and numerical exports separately in the ignored evidence location. The [current full reference](../reports/Report_R14/organization_reference/latest/README.md) follows that separation.
 
 The Python entry points support composition in another report generator. Use the installed editable package or add `src` to the import path, with the project visualization dependencies:
 
@@ -180,6 +244,9 @@ output = Path("/data2/path/to/budgeted-visualization")
 overview = render_overview(scenes, output)
 incidence = render_incidence(scenes, output)
 services = render_donor_services(scenes, output, per_role=2)
+# Only when all four actual gate blocks were captured:
+m_receivers = render_incoming_neighborhoods(scenes, output, per_role=2, receiver_role="M")
+e_receivers = render_incoming_neighborhoods(scenes, output, per_role=2, receiver_role="E")
 hyperedges = render_connectivity_hyperedges(
     scenes, output, e_threshold=0.02, edges="auto", max_edges=4,
     per_page=4, max_incoming=1, max_connections=8)
@@ -190,13 +257,19 @@ hyperedges = render_connectivity_hyperedges(
 
 ## 7. Presentation rules
 
+Use a shared presentation system for every new figure type. A single-scene page uses a fixed **16 × 9 inch** canvas; retain that full canvas in both PDF and 2400 × 1350 PNG exports rather than cropping it with a tight bounding box. Keep physical axes at their true aspect ratio; adjust whitespace or panel placement rather than stretching the geometry. Use one font family, a white background and dark high-contrast text. Use a 24 pt main title, approximately 18 pt panel titles, 12–15 pt axis/tick/legend text, and readable original-member labels. A compact physical locator can use smaller labels when its original IDs remain legible in the exported page. Split dense topics into complete horizontal pages before shrinking text.
+
 Keep figure interiors clean. Retain only a main title, useful panel titles, physical axes/units when known, original IDs, a necessary symbol/direction legend and quantitative colorbars. Do not place redundant subtitles, pale-gray secondary explanation, checkpoint paragraphs, method notes, threshold warnings or a block of caveats around the panels. Put those details in readable prose captions. Do not shrink many tiny labels to force a large graph onto a page; select a declared illustrative panel and retain the full global matrix and numerical evidence.
+
+Use categorical colors only for member or native-row identity. Use sequential colors for nonnegative C, G and service fractions, with exact zeros distinct from positive values. State logarithmic scaling through quantitative ticks and the caption, and retain the color floor in evidence. Compared models on a matched layout share member colors, original IDs, selection, ordering and absolute quantitative limits. Distinct-layout illustrations may use per-figure C limits only when every colorbar shows its actual values and the captions state that scope; G uses its declared common 0–1 scale. Never normalize each panel independently and present the result as an absolute-weight comparison.
 
 Use shared member colors and absolute quantitative scales within each comparison. A color is not a model group unless such a group actually exists. Keep exact zero distinct from small positive values; a logarithmic color floor is a color choice, not a support threshold. Label supplier, receiver and query markers distinctly. An actual contextual arrow must state its donor→receiver direction; a derived membership association uses a separately labeled undirected dashed line. Use two separate scales when C and G share a panel. Keep M/E input roles separate from predicted physical channels.
 
 Every caption states source layout/case, partition, epoch, directory or contextual quantity, full/restricted mode, coordinate units/projection, example-selection rule, relevant self handling, any threshold/omission and the one main conclusion. For native ellipse diagrams, include retained mass and state that abstract geometry is illustrative. For sorting, state that values and support are preserved. Keep contextual stages distinct and never infer physical causality from a service field.
 
 Retain PDF masters. Embed PNG companions with relative paths and meaningful alt text, and link the PDF separately. Include a short figure index. Each prose paragraph and caption occupies one continuous Markdown source line. Render and inspect actual PDFs, PNGs and the full report after the final regeneration; verify decoded images, relative links, IDs, scale consistency and exact diagram memberships. Do not stop at file existence or numerical logs.
+
+The final figure review must confirm numerical and visual requirements together: original-ID mapping, unchanged matrix values and support, correct receiver/donor axes, original-coordinate module/anchor locations, per-M participation sums, exact native intersections, disclosed thresholds and omitted mass, shared comparison scales, readable labels, distinct supplier/receiver markers and unambiguous arrows. An absent relation trace remains absent; a physical interpretation requires physical measurements beyond these organization figures. These are drawing and interpretation requirements, not permission to change model organization to improve a picture.
 
 ## 8. Agent execution sequence
 

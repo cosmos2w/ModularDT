@@ -131,8 +131,22 @@ def test_incidence_render_retains_all_addresses_and_records_same_order_for_model
     assert len(result.evidence["address_permutation"]) == scene.n_e
     for model in (scene.name, other.name):
         assert result.evidence["models"][model]["reordering_preserves_exact_values"]
+    assert result.evidence["color_scale"]["normalization"] == "log"
+    assert result.evidence["color_scale"]["vmax"] == float(scene.shared.max())
+    assert result.evidence["color_scale"]["zero_color"] == "white"
     np.testing.assert_array_equal(scene.C, original)
     assert memory_figures
+
+
+def test_receiver_role_pages_preserve_complete_directed_gate_evidence(scene, memory_figures):
+    combined = services.render_incoming_neighborhoods([scene], Path("not-written"), per_role=2)
+    for role in ("M", "E"):
+        separate = services.render_incoming_neighborhoods(
+            [scene], Path("not-written"), per_role=2, receiver_role=role)
+        expected = [panel for panel in combined.evidence["panels"] if panel["receiver"].startswith(role)]
+        assert separate.evidence["panels"] == expected
+        assert len(expected) == 2
+        assert separate.stem.endswith("_" + role)
 
 
 def test_abstract_ellipses_encode_every_requested_membership_exactly():

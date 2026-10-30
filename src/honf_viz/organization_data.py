@@ -166,8 +166,8 @@ def save_figure(fig, output: Path, stem: str, title: str, caption: str,
     import matplotlib.pyplot as plt
     folder = Path(output) / "figures"
     folder.mkdir(parents=True, exist_ok=True)
-    fig.savefig(folder / f"{stem}.pdf", bbox_inches="tight")
-    fig.savefig(folder / f"{stem}.png", dpi=175, bbox_inches="tight")
+    fig.savefig(folder / f"{stem}.pdf")
+    fig.savefig(folder / f"{stem}.png", dpi=150)
     plt.close(fig)
     return FigureArtifact(stem, title, caption, evidence)
 

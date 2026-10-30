@@ -63,11 +63,22 @@ def _plot_module_gate_receivers(ax, scene, gates, source_xy, cmap, norm):
                    linewidths=.7, zorder=6)
 
 
-def _label_modules(ax, scene):
+def _label_modules(ax, scene, *, fontsize=8, avoid_xy=None):
     offset = (scene.bounds[3] - scene.bounds[2]) * .045
     for label, xy in zip(scene.m_ids, scene.module_xy):
-        ax.text(xy[0], xy[1] + offset, label, ha="center", va="bottom",
-                fontsize=8, color="#23343F", zorder=10,
+        label_y = xy[1] + offset
+        alignment = "bottom"
+        if avoid_xy is not None:
+            label_pixel = ax.transData.transform((xy[0], label_y))
+            marker_pixel = ax.transData.transform(avoid_xy)
+            # Account for the marker radius and label height in display space.
+            margin = ax.figure.dpi / 72
+            if (abs(label_pixel[0] - marker_pixel[0]) < (fontsize * len(label) * .4 + 10) * margin
+                    and abs(label_pixel[1] - marker_pixel[1]) < (fontsize + 10) * margin):
+                label_y = xy[1] - offset
+                alignment = "top"
+        ax.text(xy[0], label_y, label, ha="center", va=alignment,
+                fontsize=fontsize, color="#23343F", zorder=10,
                 bbox={"facecolor": "white", "edgecolor": "none", "alpha": .85, "pad": .3})
 
 
@@ -100,13 +111,14 @@ def render_donor_services(scenes: list[OrganizationScene], output: Path, *,
         if not members:
             continue
         c_norm = _color_scale([s.shared[:, m["column_index"]] for s in scenes for m in members])
+        single = len(scenes) == 1
         fig, axes = plt.subplots(len(scenes), len(members),
-                                 figsize=(5.2 * len(members), 3.5 * len(scenes) + 1.55),
+                                 figsize=(16, 9) if single else (5.2 * len(members), 3.5 * len(scenes) + 1.55),
                                  squeeze=False)
-        fig.subplots_adjust(left=.055, right=.98, bottom=.16, top=.85,
-                            wspace=.18, hspace=.25)
+        fig.subplots_adjust(left=.055, right=.98, bottom=.20 if single else .16,
+                            top=.80 if single else .85, wspace=.18, hspace=.25)
         title = f"{role}-member services"
-        fig.suptitle(title, fontsize=21, fontweight="bold", y=.975)
+        fig.suptitle(title, fontsize=24 if single else 21, fontweight="bold", y=.975)
         panel_evidence = []
         present_routes = set()
         for row, scene in enumerate(scenes):
@@ -124,15 +136,19 @@ def render_donor_services(scenes: list[OrganizationScene], output: Path, *,
                 if gates is not None:
                     present_routes.add(route)
                     _plot_module_gate_receivers(ax, scene, gates, source_xy, g_cmap, g_norm)
-                _label_modules(ax, scene)
+                _label_modules(ax, scene, fontsize=13 if single else 8, avoid_xy=source_xy)
                 ax.scatter(*source_xy, s=190, marker="o", facecolors="none",
                            edgecolors="#CE2736", linewidths=2, zorder=11)
                 if role == "E":
                     ax.annotate(member["id"], source_xy, xytext=(5, 7), textcoords="offset points",
-                                fontsize=9, color="#CE2736", zorder=12,
+                                fontsize=13 if single else 9, color="#CE2736", zorder=12,
                                 bbox={"facecolor": "white", "edgecolor": "none", "alpha": .9, "pad": .3})
-                ax.set_title(f'{scene.name} · {member["id"]}', fontsize=13, pad=9)
-                ax.tick_params(labelsize=9)
+                panel_title = member["id"] if single else f'{scene.name} · {member["id"]}'
+                ax.set_title(panel_title, fontsize=20 if single else 13, pad=9)
+                ax.tick_params(labelsize=13 if single else 9)
+                if single:
+                    ax.xaxis.label.set_size(14)
+                    ax.yaxis.label.set_size(14)
                 panel_evidence.append({
                     "model": scene.name, "supplier": member["id"], "role": role,
                     "C_values_to_E_addresses": values.tolist(),
@@ -152,14 +168,16 @@ def render_donor_services(scenes: list[OrganizationScene], output: Path, *,
                 Line2D([], [], color=g_cmap(.8), linestyle="--", label="Supplier → M receiver"),
             ])
         fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(.5, .935),
-                   ncol=len(handles), frameon=False, fontsize=10)
+                   ncol=len(handles), frameon=False, fontsize=14 if single else 10)
         cax = fig.add_axes([.12, .075, .36, .018])
         cb = fig.colorbar(plt.cm.ScalarMappable(norm=c_norm, cmap=c_cmap), cax=cax, orientation="horizontal")
-        cb.set_label("Prepared directory C · E services", fontsize=10)
+        cb.set_label("Prepared directory C · E services", fontsize=14 if single else 10)
+        cb.ax.tick_params(labelsize=12 if single else 10)
         if present_routes:
             gax = fig.add_axes([.61, .075, .27, .018])
             gb = fig.colorbar(plt.cm.ScalarMappable(norm=g_norm, cmap=g_cmap), cax=gax, orientation="horizontal")
-            gb.set_label("Actual contextual gate G · M receivers", fontsize=10)
+            gb.set_label("Actual contextual gate G · M receivers", fontsize=14 if single else 10)
+            gb.ax.tick_params(labelsize=12 if single else 10)
         caption = (
             f"Matched {role} suppliers are selected by pooled nonself directory mass across all supplied models, "
             "independently within M and E roles. Each E cell shows the prepared directory weight C for accessing "
@@ -180,35 +198,50 @@ def render_donor_services(scenes: list[OrganizationScene], output: Path, *,
 
 
 def render_incoming_neighborhoods(scenes: list[OrganizationScene], output: Path, *,
-                                  per_role: int = 2) -> FigureArtifact:
-    """Show actual MM+ME and EM+EE donor neighborhoods of matched receivers."""
+                                  per_role: int = 2, receiver_role: str | None = None) -> FigureArtifact:
+    """Show actual neighborhoods, optionally for only M or E receivers."""
     import matplotlib.pyplot as plt
     from matplotlib.colors import Normalize
     from matplotlib.lines import Line2D
     from matplotlib.patches import FancyArrowPatch
 
     selection = select_service_members(scenes, per_role=per_role)
+    if receiver_role not in (None, "M", "E"):
+        raise ValueError("receiver_role must be M, E, or None.")
+    if receiver_role is not None:
+        selection = [member for member in selection if member["role"] == receiver_role]
+        if not selection:
+            raise ValueError(f"No {receiver_role} receivers are available.")
     if any(set(scene.gates) < {"mm", "em", "ee", "me"} for scene in scenes):
         raise ValueError("Four-route neighborhoods require saved actual MM, EM, EE and ME gates for every model.")
     apply_style()
     cmap = plt.get_cmap("viridis").copy()
     cmap.set_bad("white")
     norm = Normalize(0, 1)
-    fig, axes = plt.subplots(len(scenes), len(selection),
-                             figsize=(4.7 * len(selection), 3.45 * len(scenes) + 1.4), squeeze=False)
-    fig.subplots_adjust(left=.04, right=.985, bottom=.15, top=.84, wspace=.17, hspace=.25)
-    title = "Actual M / E information neighborhoods"
-    fig.suptitle(title, fontsize=21, fontweight="bold", y=.975)
+    single = len(scenes) == 1
+    if single:
+        columns = min(2, len(selection))
+        rows = (len(selection) + columns - 1) // columns
+        fig, axes = plt.subplots(rows, columns, figsize=(16, 9), squeeze=False)
+        for unused in axes.flat[len(selection):]:
+            unused.set_visible(False)
+        fig.subplots_adjust(left=.05, right=.98, bottom=.16, top=.80, wspace=.20, hspace=.45)
+    else:
+        fig, axes = plt.subplots(len(scenes), len(selection),
+                                 figsize=(4.7 * len(selection), 3.45 * len(scenes) + 1.4), squeeze=False)
+        fig.subplots_adjust(left=.04, right=.985, bottom=.15, top=.84, wspace=.17, hspace=.25)
+    title = f"Actual {receiver_role} receiver neighborhoods" if receiver_role else "Actual M / E information neighborhoods"
+    fig.suptitle(title, fontsize=24 if single else 21, fontweight="bold", y=.975)
     panels = []
     for row, scene in enumerate(scenes):
         for col, member in enumerate(selection):
-            ax = axes[row, col]
-            role, index = member["role"], member["role_index"]
-            m_route, e_route = ("mm", "me") if role == "M" else ("em", "ee")
+            ax = axes.flat[col] if single else axes[row, col]
+            member_role, index = member["role"], member["role_index"]
+            m_route, e_route = ("mm", "me") if member_role == "M" else ("em", "ee")
             mg, eg = scene.gates[m_route][index], scene.gates[e_route][index]
             plot_cells(ax, scene, np.where(eg > 0, eg, np.nan), cmap=cmap, norm=norm)
             decorate_domain(ax, scene)
-            xy = (scene.module_xy if role == "M" else scene.environment_xy)[index]
+            xy = (scene.module_xy if member_role == "M" else scene.environment_xy)[index]
             for donor in np.flatnonzero(mg > 0):
                 weight = float(mg[donor])
                 dxy = scene.module_xy[donor]
@@ -220,13 +253,18 @@ def render_incoming_neighborhoods(scenes: list[OrganizationScene], output: Path,
                     ))
                 ax.scatter(*dxy, s=70, marker="s", c=[cmap(norm(weight))],
                            edgecolors="#263743", linewidths=.7, zorder=6)
-            _label_modules(ax, scene)
+            _label_modules(ax, scene, fontsize=12 if single else 8, avoid_xy=xy)
             ax.scatter(*xy, s=190, marker="s", facecolors="none", edgecolors="#CE2736",
                        linewidths=2, zorder=11)
             ax.scatter(*xy, s=55, marker="x", c="#CE2736", linewidths=1.7, zorder=12)
-            ax.set_title(f'{scene.name} · {member["id"]} ← M, E\n{m_route.upper()} + {e_route.upper()}',
-                         fontsize=11.5, pad=9)
-            ax.tick_params(labelsize=8)
+            panel_title = f'{member["id"]} · {m_route.upper()} + {e_route.upper()}'
+            if not single:
+                panel_title = f'{scene.name} · {panel_title}'
+            ax.set_title(panel_title, fontsize=19 if single else 11.5, pad=9)
+            ax.tick_params(labelsize=12 if single else 8)
+            if single:
+                ax.xaxis.label.set_size(13)
+                ax.yaxis.label.set_size(13)
             panels.append({"model": scene.name, "receiver": member["id"],
                            "M_route": m_route, "E_route": e_route,
                            "M_stage": scene.provenance[m_route], "E_stage": scene.provenance[e_route],
@@ -239,10 +277,11 @@ def render_incoming_neighborhoods(scenes: list[OrganizationScene], output: Path,
                       linestyle="none", markersize=8, label="M donor"),
                Line2D([], [], color="#263743", linestyle="--", label="M donor → receiver")]
     fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(.5, .93),
-               ncol=3, frameon=False, fontsize=10)
+               ncol=3, frameon=False, fontsize=14 if single else 10)
     cax = fig.add_axes([.30, .07, .40, .018])
     cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation="horizontal")
-    cb.set_label("Actual contextual relation gate G", fontsize=10)
+    cb.set_label("Actual contextual relation gate G", fontsize=14 if single else 10)
+    cb.ax.tick_params(labelsize=12 if single else 10)
     caption = (
         "The same original receivers are displayed for all models, selected by pooled nonself directory service "
         "mass independently within M and E roles. For an M receiver, E cells show its ME (M←E) gate row and M "
@@ -253,6 +292,7 @@ def render_incoming_neighborhoods(scenes: list[OrganizationScene], output: Path,
         "Red squares identify original M/E receivers, not queries. These are actual interaction gates, not "
         "prepared directory C or executed query weights."
     )
-    return save_figure(fig, output, "05_four_route_context_neighborhoods", title, caption,
+    stem = "05_four_route_context_neighborhoods" + (f"_{receiver_role}" if receiver_role else "")
+    return save_figure(fig, output, stem, title, caption,
                        {"weight": "actual applied contextual G", "selection": selection,
                         "panels": panels, "scale": [0, 1]})
