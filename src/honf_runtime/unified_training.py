@@ -802,21 +802,21 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         str(row.get("arm", "")).startswith(joint_member_routing_arm_prefixes) for row in history
     )
     anchored_member_routing_run = any(
-        row.get("arm") in ("R13-8-A-EAnchor", "R13-8-L-LocalECover") for row in history
+        row.get("arm") in ("R13-8-A-EAnchor", "R13-8-L-LocalECover", "R14-Detail-LocalECover") for row in history
     )
     paired_member_routing_run = joint_member_routing_run or anchored_member_routing_run
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
                                       "R13-4-Full", "R13-4-Guide"}
         or str(row.get("arm", "")).startswith(joint_member_routing_arm_prefixes)
-        or row.get("arm") in ("R13-8-A-EAnchor", "R13-8-L-LocalECover") for row in history
+        or row.get("arm") in ("R13-8-A-EAnchor", "R13-8-L-LocalECover", "R14-Detail-LocalECover") for row in history
     )
     canonical_val89_joint = any(
         (isinstance(row.get("validation"), Mapping)
          and (row["validation"].get("scope") == "canonical_VAL89_exposed"
               or row["validation"].get("case_count") == 89))
         or (str(row.get("arm", "")).startswith(
-                ("R13-3-", "R13-4-", "R13-8-", *joint_member_routing_arm_prefixes))
+                ("R13-3-", "R13-4-", "R13-8-", "R14-", *joint_member_routing_arm_prefixes))
             and row.get("case_visits") == 600)
         for row in history
     )

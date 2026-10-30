@@ -35,6 +35,28 @@ R13_8_E_ANCHORED_WORKFLOW = "interaction_reused_e_anchored_member_routing_traini
 R13_8_E_ANCHORED_PROVIDER_SCHEMA = "thermal_r13_8_e_anchored_member_routing_provider_v1"
 R13_8_E_ANCHORED_MANIFEST_SCHEMA = "honf_r13_8_e_anchored_member_routing_run_manifest_v1"
 R13_8_E_ANCHORED_SOURCE_KIND = "scratch_r13_8_e_anchored_member_routing"
+R14_ARM = "R14-Detail-LocalECover"
+R14_CONFIG_SCHEMA = "thermal_r14_detail_anchored_member_routing_v1"
+R14_CORE_SCHEMA = "interaction_reused_detail_anchored_member_routing_v1"
+R14_SOURCE_KIND = "scratch_r14_detail_anchored_member_routing"
+R14_WORKFLOW = "interaction_reused_detail_anchored_member_routing_training_v1"
+R14_MANIFEST_SCHEMA = "honf_r14_detail_anchored_member_routing_run_manifest_v1"
+
+
+def _valid_variant(section):
+    if not isinstance(section, Mapping):
+        return False
+    variant = (section.get("schema"), _member_routing_core_schema(section), section.get("arm"))
+    return variant in {(R13_8_E_ANCHORED_CONFIG_SCHEMA, R13_8_E_ANCHORED_CORE_SCHEMA, arm)
+                       for arm in R13_8_E_ANCHORED_ARMS} | {(R14_CONFIG_SCHEMA, R14_CORE_SCHEMA, R14_ARM)}
+
+
+def _source_kind(arm):
+    return R14_SOURCE_KIND if arm == R14_ARM else R13_8_E_ANCHORED_SOURCE_KIND
+
+
+def _manifest_schema(arm):
+    return R14_MANIFEST_SCHEMA if arm == R14_ARM else R13_8_E_ANCHORED_MANIFEST_SCHEMA
 
 
 def _member_routing_seed(training, model):
@@ -53,7 +75,7 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
                      (1000, 200, 1000, list(range(100, 1001, 100)), "fixed25_train150_stats"))
         if arm == R13_8_L_ARM:
             schedules += ((20, 20, 20, [20], "fixed25_train150_stats"),)
-    elif membership == "full_train600" and initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND:
+    elif membership == "full_train600" and initialization.get("source_kind") == _source_kind(arm):
         schedules = ((100, 100, 500, [100], "scratch_train600_stats"),
                      (500, 100, 500, R13_8_SUBSET_CHECKPOINT_EPOCHS, "scratch_train600_stats"),
                      (1000, 100, 1000, list(range(100, 1001, 100)), "scratch_train600_stats"),
@@ -61,7 +83,7 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
                      (5000, 200, 5000, list(range(100, 5001, 100)), "scratch_train600_stats"))
     else:
         schedules = ()
-    locators = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover"}
+    locators = {R13_8_A_ARM: "e_anchor", R13_8_L_ARM: "local_e_cover", R14_ARM: "local_e_cover"}
     locator = locators.get(arm)
     valid_model = (model.get("architecture") == arm and locator is not None
         and model.get("locator_mode") == locator and model.get("retained_mass") == 0.95
@@ -70,6 +92,9 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
         and model.get("access_measure", "inventory_unit_total") in ("inventory_unit_total", "mean_one", "active_domain")
         and model.get("ee_incidence_aggregation", "pre_gate") in ("pre_gate", "post_gate"))
     valid_model = valid_model and model.get("mediated_mode") in (None, "none")
+    if arm == R14_ARM:
+        valid_model = valid_model and model.get("score_calibration") == "inherited"
+        schedules = tuple(item for item in schedules if item[:3] == (1000, 100, 1000))
     return actual in schedules and training.get("curve_every") == 10, valid_model
 def _model_section(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
     return "member_routing", config["member_routing"]
@@ -113,9 +138,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
             raise TypeError(f"{section} must be a JSON object.")
     frontier = config[section_name]
     if (section_name != "member_routing" or not isinstance(frontier, Mapping)
-            or frontier.get("schema") != R13_8_E_ANCHORED_CONFIG_SCHEMA
-            or _member_routing_core_schema(frontier) != R13_8_E_ANCHORED_CORE_SCHEMA
-            or frontier.get("arm") not in R13_8_E_ANCHORED_ARMS):
+            or not _valid_variant(frontier)):
         raise ValueError("Only anchored member-routing configurations are supported.")
     arm = frontier.get("arm")
     if section_name == "member_routing":
@@ -130,7 +153,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
         optimizer = config["optimizer"]
         objective = config["objective"]
         valid_source = (
-            initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND
+            initialization.get("source_kind") == _source_kind(arm)
             and initialization.get("source_checkpoint") is None
             and initialization.get("pretrained_weights") is False
             and initialization.get("source_parent_age") == 0
@@ -283,8 +306,7 @@ def _ensure_workspace_storage_bindings(project: Path | None = None) -> dict[str,
 
 def _member_routing_task_factory(config: Mapping[str, Any] | None = None) -> Callable[..., tuple[torch.nn.Module, Any]]:
     if (config is None or "member_routing" not in config
-            or _member_routing_core_schema(config["member_routing"]) != R13_8_E_ANCHORED_CORE_SCHEMA
-            or config["member_routing"].get("arm") not in R13_8_E_ANCHORED_ARMS):
+            or not _valid_variant(config["member_routing"])):
         raise ValueError("Only anchored member-routing tasks are supported.")
     from channelthermal.training.r13_8_anchored_task import build_thermal_r13_8_anchored_member_routing_task
     return build_thermal_r13_8_anchored_member_routing_task
@@ -329,8 +351,8 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
     section_name, section = _model_section(config)
     frontier = copy.deepcopy(dict(section))
     return {
-        "schema": "honf_r13_8_e_anchored_member_routing_training_v1",
-        "workflow": R13_8_E_ANCHORED_WORKFLOW,
+        "schema": ("honf_r14_detail_anchored_member_routing_training_v1" if _arm(config) == R14_ARM else "honf_r13_8_e_anchored_member_routing_training_v1"),
+        "workflow": R14_WORKFLOW if _arm(config) == R14_ARM else R13_8_E_ANCHORED_WORKFLOW,
         "model_family": "e_anchored_joint_field_member_routing_v1",
         "dataset": "thermal",
         "config_name": config["name"],
@@ -400,7 +422,7 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
     layout = RunLayout(output)
     layout.ensure()
     section_name, section = _model_section(config)
-    manifest_schema = R13_8_E_ANCHORED_MANIFEST_SCHEMA
+    manifest_schema = _manifest_schema(arm)
     if not resumed:
         research._atomic_json(layout.write_path("resolved_config.json"), dict(config))
         research._atomic_json(layout.write_path("run_manifest.json"), {
@@ -546,7 +568,7 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     layout = RunLayout(run)
     manifest_path = layout.read_path("run_manifest.json")
     manifest = _read_json(manifest_path)
-    if (manifest.get("schema") != R13_8_E_ANCHORED_MANIFEST_SCHEMA
+    if (manifest.get("schema") not in (R13_8_E_ANCHORED_MANIFEST_SCHEMA, R14_MANIFEST_SCHEMA)
             or manifest.get("artifact_layout_version") != 1):
         raise ValueError("Run is missing the anchored member-routing manifest.")
     config = copy.deepcopy(manifest.get("config"))
@@ -556,7 +578,7 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         arm = _arm(config)
     except (KeyError, TypeError):
         arm = ""
-    if manifest.get("arm") != arm:
+    if manifest.get("arm") != arm or manifest.get("schema") != _manifest_schema(arm):
         raise ValueError("Saved run arm differs from its versioned config.")
     # Revalidate the stored config with a temporary on-disk-free structural pass.
     _validate_loaded_contextual_config(config)
@@ -634,9 +656,7 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
                     "interaction_groups" if "interaction_groups" in config else "contextual_frontier")
     frontier = config.get(section_name, {})
     if (section_name != "member_routing" or not isinstance(frontier, Mapping)
-            or frontier.get("schema") != R13_8_E_ANCHORED_CONFIG_SCHEMA
-            or _member_routing_core_schema(frontier) != R13_8_E_ANCHORED_CORE_SCHEMA
-            or frontier.get("arm") not in R13_8_E_ANCHORED_ARMS):
+            or not _valid_variant(frontier)):
         raise ValueError("Saved config is not a supported anchored member-routing model.")
     if config.get("schema") != research.RESEARCH_SCHEMA:
         raise ValueError("Saved anchored model config has an invalid research schema.")
@@ -655,7 +675,7 @@ def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
         core_schema = _member_routing_core_schema(frontier)
         valid_schedule, valid_model = _anchored_schedule_and_model(training, initialization, model, arm)
         valid_source = (
-            initialization.get("source_kind") == R13_8_E_ANCHORED_SOURCE_KIND
+            initialization.get("source_kind") == _source_kind(arm)
             and initialization.get("source_checkpoint") is None
             and initialization.get("pretrained_weights") is False
             and initialization.get("source_parent_age") == 0

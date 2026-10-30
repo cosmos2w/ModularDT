@@ -12,7 +12,7 @@ import torch
 
 from honf_runtime.unified_training import SamplingKey
 from ..e_anchor_locator import attach_thermal_e_anchor_query
-from ..member_routing import ThermalAnchoredMemberRoutingAdapter
+from ..member_routing import ThermalAnchoredMemberRoutingAdapter, ThermalDetailAnchoredMemberRoutingAdapter
 from .content_hypergraph_task import ThermalContentPredictions
 from .joint_member_routing_task import _finite_scalar
 from .member_routing_task import ThermalInteractionReusedMemberRoutingTask
@@ -28,6 +28,13 @@ PROVIDER_SCHEMA = "thermal_r13_8_e_anchored_member_routing_provider_v1"
 TRAINING_STATE_SCHEMA = "thermal_r13_8_e_anchored_member_routing_training_state_v1"
 ARM_A = "R13-8-A-EAnchor"
 ARM_L = "R13-8-L-LocalECover"
+ARM_DETAIL = "R14-Detail-LocalECover"
+DETAIL_CORE_SCHEMA = "interaction_reused_detail_anchored_member_routing_v1"
+DETAIL_CONFIG_SCHEMA = "thermal_r14_detail_anchored_member_routing_v1"
+DETAIL_SOURCE_KIND = "scratch_r14_detail_anchored_member_routing"
+DETAIL_WORKFLOW = "interaction_reused_detail_anchored_member_routing_training_v1"
+DETAIL_PROVIDER_SCHEMA = "thermal_r14_detail_anchored_member_routing_provider_v1"
+DETAIL_STATE_SCHEMA = "thermal_r14_detail_anchored_member_routing_training_state_v1"
 
 _VARIANTS = {
     CORE_SCHEMA: {
@@ -37,6 +44,14 @@ _VARIANTS = {
         "workflow": WORKFLOW,
         "provider_schema": PROVIDER_SCHEMA,
         "training_state_schema": TRAINING_STATE_SCHEMA,
+    },
+    DETAIL_CORE_SCHEMA: {
+        "adapter": ThermalDetailAnchoredMemberRoutingAdapter,
+        "arm": ARM_DETAIL,
+        "workflow": DETAIL_WORKFLOW,
+        "provider_schema": DETAIL_PROVIDER_SCHEMA,
+        "training_state_schema": DETAIL_STATE_SCHEMA,
+        "candidate": "Detail",
     },
 }
 
@@ -177,6 +192,11 @@ class AnchoredMemberRoutingHealth:
             "applied_relation_EM": model.core.applied_incidence.routes.em,
             "applied_relation_EE": model.core.applied_incidence.routes.ee,
         }
+        if model.CORE_SCHEMA == DETAIL_CORE_SCHEMA:
+            scorer_modules.update({
+                "query_relative_values_M": model.core.relative_value["M"],
+                "query_relative_values_E": model.core.relative_value["E"],
+            })
         named_targets = [(name, value) for name, value in target_specs
                          if torch.is_tensor(value) and value.requires_grad]
         missing = [name for name, value in target_specs
@@ -500,21 +520,21 @@ class ThermalR138AnchoredMemberRoutingTask(_AnchoredPairedMemberRoutingTask):
         # not describe the compiled E directory.
         ThermalInteractionReusedMemberRoutingTask.__init__(self, **kwargs)
         variant = _VARIANTS.get(self.model.CORE_SCHEMA)
-        if variant is None or self.model.architecture not in ThermalAnchoredMemberRoutingAdapter.ARCHITECTURES:
+        if variant is None or self.model.architecture not in variant["adapter"].ARCHITECTURES:
             raise ValueError("R13-8 task requires an A/L anchored adapter.")
         self._member_routing_variant = variant
         self.arm = str(self.model.architecture)
-        self.candidate = (self.arm.split("-")[2] if self.arm.startswith("R13-12-")
-                          else "A" if self.arm == ARM_A else "L")
-        self.workflow = WORKFLOW
-        self.provider_schema = PROVIDER_SCHEMA
-        self.training_state_schema = TRAINING_STATE_SCHEMA
+        self.candidate = "A" if self.arm == ARM_A else "L" if self.arm == ARM_L else variant["candidate"]
+        self.workflow = variant["workflow"]
+        self.provider_schema = variant["provider_schema"]
+        self.training_state_schema = variant["training_state_schema"]
         initialization = self.recipe["initialization"]
         if getattr(self.model.core, "mediated_mode", "none") in ("P", "G"):
             self.seed = int(initialization["seed"])
         self.source_kind = str(initialization["source_kind"])
         self.source_parent_age = int(initialization.get("source_parent_age", 0))
-        if (self.source_kind != SOURCE_KIND or self.source_parent_age != 0
+        expected_source = DETAIL_SOURCE_KIND if self.arm == ARM_DETAIL else SOURCE_KIND
+        if (self.source_kind != expected_source or self.source_parent_age != 0
                 or initialization.get("source_checkpoint") is not None
                 or initialization.get("pretrained_weights") is not False
                 or initialization.get("source_arm") != f"scratch_common_seed{self.seed}"):
@@ -530,7 +550,7 @@ class ThermalR138AnchoredMemberRoutingTask(_AnchoredPairedMemberRoutingTask):
                 self._member_routing_health = AnchoredMemberRoutingHealth(self, health_config)
 
     def anchored_organization_trace(self, model, prediction, query_indices, *, read_mode="restricted"):
-        if model is not self.model or model.core.schema != CORE_SCHEMA:
+        if model is not self.model or model.core.schema != self.model.CORE_SCHEMA:
             raise ValueError("Anchored trace must use the provider's R13-8 model.")
         if read_mode not in ("full", "restricted"):
             raise ValueError("R13-8 trace read_mode must be 'full' or 'restricted'.")
@@ -873,13 +893,15 @@ class ThermalR138AnchoredMemberRoutingTask(_AnchoredPairedMemberRoutingTask):
 
 def build_thermal_r13_8_anchored_member_routing_task(config, *, arm=None, device="cpu"):
     """Build the strict A/L adapter and maintained native TRAIN/VAL provider."""
+    detail = arm == ARM_DETAIL
+    schema = DETAIL_CORE_SCHEMA if detail else CORE_SCHEMA
     return _build_thermal_member_routing_task(
         config, arm=arm, device=device,
         task_type=ThermalR138AnchoredMemberRoutingTask,
-        variants={CORE_SCHEMA: {**_VARIANTS[CORE_SCHEMA], "arm": str(arm)}},
-        section_schema=CONFIG_SECTION_SCHEMA,
-        source_kind=SOURCE_KIND,
-        lineage="R13-8 A/L",
+        variants={schema: {**_VARIANTS[schema], "arm": str(arm)}},
+        section_schema=DETAIL_CONFIG_SCHEMA if detail else CONFIG_SECTION_SCHEMA,
+        source_kind=DETAIL_SOURCE_KIND if detail else SOURCE_KIND,
+        lineage="R14 detail" if detail else "R13-8 A/L",
         required_address_mode=None,
     )
 

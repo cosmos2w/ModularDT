@@ -22,8 +22,12 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
         if core is None:
             if not isinstance(core_config, Mapping):
                 raise TypeError("InteractionReusedMemberRoutingCore requires a saved model configuration.")
-            from honf_forward_core.interaction_reused_member_routing.anchored import AnchoredMemberRoutingCore
-            core_type = AnchoredMemberRoutingCore
+            if self.CORE_SCHEMA == "interaction_reused_detail_anchored_member_routing_v1":
+                from honf_forward_core.interaction_reused_member_routing.r14 import DetailAnchoredMemberRoutingCore
+                core_type = DetailAnchoredMemberRoutingCore
+            else:
+                from honf_forward_core.interaction_reused_member_routing.anchored import AnchoredMemberRoutingCore
+                core_type = AnchoredMemberRoutingCore
             core = core_type.from_config(dict(core_config))
         if getattr(core, "schema", None) != self.CORE_SCHEMA:
             raise ValueError(f"Thermal member-routing adapter requires {self.CORE_SCHEMA}.")
@@ -104,4 +108,12 @@ class ThermalAnchoredMemberRoutingAdapter(ThermalInteractionReusedMemberRoutingA
     ARCHITECTURES = ("R13-8-A-EAnchor", "R13-8-L-LocalECover")
 
 
-__all__ = ["ThermalAnchoredMemberRoutingAdapter", "ThermalInteractionReusedMemberRoutingAdapter"]
+class ThermalDetailAnchoredMemberRoutingAdapter(ThermalAnchoredMemberRoutingAdapter):
+    """R14 joint reader with query-relative original-member values."""
+
+    SCHEMA = "thermal_interaction_reused_detail_anchored_member_routing_adapter_v1"
+    CORE_SCHEMA = "interaction_reused_detail_anchored_member_routing_v1"
+    ARCHITECTURES = ("R14-Detail-LocalECover",)
+
+
+__all__ = ["ThermalAnchoredMemberRoutingAdapter", "ThermalDetailAnchoredMemberRoutingAdapter", "ThermalInteractionReusedMemberRoutingAdapter"]

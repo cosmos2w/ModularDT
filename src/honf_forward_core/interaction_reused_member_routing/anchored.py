@@ -985,6 +985,11 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             counts[f"query_{role}_member_query_affine_rows"] = query.batch_size * query.num_queries
         return raw, qnorm, counts
 
+    def _selected_member_values(self, prepared, query, qstates, role, batch, query_index, slot):
+        """Return values only for the selected original query/member pairs."""
+        values = prepared.member_values_M if role == "M" else prepared.member_values_E
+        return values[batch, slot], {}
+
     def _read_packed(self, prepared, query, qstates, qnorm, packed, union_keys, raw, *, return_trace):
         """Calibrate and normalize each located row/role, then coalesce values."""
         reads, rid = packed["reads"], packed["read_id"]
@@ -1052,8 +1057,9 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             selected = selected & (coalesced > 0)
             positions = selected.nonzero(as_tuple=False).flatten()
             slot = um[positions] - (prepared.scene.num_modules if role == "E" else 0)
-            values = prepared.member_values_M if role == "M" else prepared.member_values_E
-            contributions = values[ub[positions], slot] * coalesced[positions, None]
+            selected_values, value_counts = self._selected_member_values(
+                prepared, query, qstates, role, ub[positions], uq[positions].remainder(query.num_queries), slot)
+            contributions = selected_values * coalesced[positions, None]
             context = self._segment_sum(contributions, uq[positions], query.batch_size * query.num_queries)
             contexts[role] = context.reshape(query.batch_size, query.num_queries, self.context_dim)
             memberships = packed["is_module"] if role == "M" else ~packed["is_module"]
@@ -1062,6 +1068,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             counts[f"query_anchor_typed_gate_rows_{role}"] = read_count
             counts[f"query_anchor_coalesced_value_pairs_{role}"] = positions.numel()
             counts[f"query_anchor_value_reduction_pairs_{role}"] = positions.numel()
+            counts.update(value_counts)
         fused = torch.cat((qstates, contexts["M"], contexts["E"]), -1)
         fields = self.member_router.joint_head(self.member_router.joint_trunk(fused))
         fields = fields * self._query_mask(query)[..., None].to(fields)

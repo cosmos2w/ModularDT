@@ -16,7 +16,7 @@ import torch
 from .compat import load_trusted_checkpoint
 
 
-_EVALUABLE_ARMS = ("R13-8-A-EAnchor", "R13-8-L-LocalECover")
+_EVALUABLE_ARMS = ("R13-8-A-EAnchor", "R13-8-L-LocalECover", "R14-Detail-LocalECover")
 _MAX_OUTPUT_BYTES = 256 * 1024**2
 _OBSERVABLES = (
     "u", "v", "p", "omega", "temperature_fluid", "temperature_surface",
@@ -28,10 +28,10 @@ def _contextual_checkpoint_parts(
     payload: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     identity = payload.get("experiment_identity")
-    if not isinstance(identity, Mapping) or identity.get("workflow") != "interaction_reused_e_anchored_member_routing_training_v1":
+    if not isinstance(identity, Mapping) or identity.get("workflow") not in ("interaction_reused_e_anchored_member_routing_training_v1", "interaction_reused_detail_anchored_member_routing_training_v1"):
         raise ValueError("Checkpoint is not an anchored member-routing training checkpoint.")
     provider_identity = identity.get("provider_identity")
-    if not isinstance(provider_identity, Mapping) or provider_identity.get("schema") != "thermal_r13_8_e_anchored_member_routing_provider_v1":
+    if not isinstance(provider_identity, Mapping) or provider_identity.get("schema") not in ("thermal_r13_8_e_anchored_member_routing_provider_v1", "thermal_r14_detail_anchored_member_routing_provider_v1"):
         raise ValueError("Checkpoint provider identity does not match its anchored workflow.")
     adapter_state = provider_identity.get("adapter_state")
     recipe = provider_identity.get("recipe")
@@ -41,13 +41,19 @@ def _contextual_checkpoint_parts(
     if arm not in _EVALUABLE_ARMS or provider_identity.get("architecture") != arm:
         raise ValueError("Checkpoint arm and provider architecture must agree with the anchored workflow.")
     core_config = adapter_state.get("core")
-    expected_locator = {"R13-8-A-EAnchor": "e_anchor", "R13-8-L-LocalECover": "local_e_cover"}.get(arm)
+    expected_locator = {"R13-8-A-EAnchor": "e_anchor", "R13-8-L-LocalECover": "local_e_cover", "R14-Detail-LocalECover": "local_e_cover"}.get(arm)
     expected_mediated = "none"
     recipe_section = recipe.get("member_routing")
     recipe_model = recipe_section.get("model") if isinstance(recipe_section, Mapping) else None
-    if (adapter_state.get("schema") != "thermal_interaction_reused_e_anchored_member_routing_adapter_v1"
+    detail = arm == "R14-Detail-LocalECover"
+    expected_adapter = ("thermal_interaction_reused_detail_anchored_member_routing_adapter_v1" if detail else "thermal_interaction_reused_e_anchored_member_routing_adapter_v1")
+    expected_core = ("interaction_reused_detail_anchored_member_routing_v1" if detail else "interaction_reused_e_anchored_member_routing_v1")
+    expected_workflow = ("interaction_reused_detail_anchored_member_routing_training_v1" if detail else "interaction_reused_e_anchored_member_routing_training_v1")
+    expected_provider = ("thermal_r14_detail_anchored_member_routing_provider_v1" if detail else "thermal_r13_8_e_anchored_member_routing_provider_v1")
+    if (identity.get("workflow") != expected_workflow or provider_identity.get("schema") != expected_provider
+            or adapter_state.get("schema") != expected_adapter
             or not isinstance(core_config, Mapping)
-            or core_config.get("schema") != "interaction_reused_e_anchored_member_routing_v1"
+            or core_config.get("schema") != expected_core
             or core_config.get("architecture") != arm
             or core_config.get("locator_mode") != expected_locator
             or core_config.get("retained_mass") != 0.95
@@ -69,7 +75,7 @@ def _contextual_checkpoint_parts(
             or any(recipe_model.get(name, .95) != core_config.get(name, .95)
                    for name in ("source_retained_mass", "environment_retained_mass"))
             or recipe_section.get("arm") != arm
-            or provider_identity.get("member_routing_schema") != "interaction_reused_e_anchored_member_routing_v1"):
+            or provider_identity.get("member_routing_schema") != expected_core):
         raise ValueError("R13-8 adapter, core locator, access law and provider identities must agree.")
     return identity, provider_identity, {"adapter_state": adapter_state, "recipe": recipe, "arm": arm}
 
@@ -106,7 +112,7 @@ def load_contextual_checkpoint(
     # Import through the maintained runner so model/provider reconstruction
     # uses the same task factory as training and resume.
     from .contextual_frontier_training import _build_task
-    from channelthermal.member_routing import ThermalAnchoredMemberRoutingAdapter as Adapter
+    from channelthermal.member_routing import ThermalAnchoredMemberRoutingAdapter, ThermalDetailAnchoredMemberRoutingAdapter
 
     evaluation_device = torch.device(device)
     recipe = dict(saved["recipe"])
@@ -116,7 +122,8 @@ def load_contextual_checkpoint(
     model_state = payload.get("model_state_dict")
     if not isinstance(model_state, Mapping):
         raise ValueError("Contextual-frontier checkpoint has no model_state_dict.")
-    model = Adapter.from_state_payload(saved["adapter_state"], device="cpu")
+    adapter = ThermalDetailAnchoredMemberRoutingAdapter if arm == "R14-Detail-LocalECover" else ThermalAnchoredMemberRoutingAdapter
+    model = adapter.from_state_payload(saved["adapter_state"], device="cpu")
     # assign=True preserves each checkpoint tensor's saved dtype instead of
     # silently copying it into the factory constructor's default float32.
     model.load_state_dict(model_state, strict=True, assign=True)

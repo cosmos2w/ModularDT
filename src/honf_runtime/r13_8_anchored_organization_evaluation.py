@@ -749,6 +749,10 @@ def _validate_checkpoint_population(model: Any, provider: Any, payload: Mapping[
         arm = "A" if architecture == "R13-8-A-EAnchor" else "L"
         if workflow != "interaction_reused_e_anchored_member_routing_training_v1":
             raise ValueError("The A/L evaluation checkpoint has an unexpected saved workflow identity.")
+    elif architecture == "R14-Detail-LocalECover":
+        arm = "Detail"
+        if workflow != "interaction_reused_detail_anchored_member_routing_training_v1":
+            raise ValueError("The R14 checkpoint has an unexpected saved workflow identity.")
     else:
         raise ValueError(f"Unsupported R13-8 comparison architecture: {architecture!r}.")
 
@@ -770,9 +774,9 @@ def _validate_checkpoint_population(model: Any, provider: Any, payload: Mapping[
         )
     if len(set(training_ids)) != len(training_ids) or len(set(validation_ids)) != len(validation_ids):
         raise ValueError("Anchored native evaluator provider case IDs must be unique.")
-    if arm in ("A", "L"):
+    if arm in ("A", "L", "Detail"):
         core = getattr(model, "core", None)
-        if getattr(core, "schema", None) != "interaction_reused_e_anchored_member_routing_v1":
+        if getattr(core, "schema", None) != ("interaction_reused_detail_anchored_member_routing_v1" if arm == "Detail" else "interaction_reused_e_anchored_member_routing_v1"):
             raise ValueError("A/L checkpoint does not contain the maintained E-anchored core schema.")
     return {
         "arm": arm,
@@ -884,7 +888,7 @@ def evaluate(
 
             work = {"validation": validation["executed_work_counts"],
                     "train_detail": train["executed_work_counts"]}
-            if identity["arm"] in ("A", "L"):
+            if identity["arm"] in ("A", "L", "Detail"):
                 validation["separated_anchored_work"] = require_complete_anchored_work_counts(
                     validation["executed_work_counts"]
                 )
@@ -914,7 +918,7 @@ def evaluate(
 
         anchored_diagnostics: dict[str, Any]
         diagnostics_started = time.perf_counter()
-        if identity["arm"] in ("A", "L"):
+        if identity["arm"] in ("A", "L", "Detail"):
             anchored_diagnostics = _collect_anchored_diagnostics(
                 model, provider, payload, representative_ids, device,
             )
