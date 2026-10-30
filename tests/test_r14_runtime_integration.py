@@ -84,7 +84,13 @@ def test_r14_real_native_batch_and_checkpoint_reload(tmp_path):
         for a, b in zip(original[:2], reloaded[:2]):
             torch.testing.assert_close(a.joint_fields, b.joint_fields, rtol=0, atol=0)
             assert torch.isfinite(a.joint_fields).all()
-            assert sum(a.work_counts[f'query_relative_value_pairs_{role}'] for role in ('M', 'E')) > 0
+            assert sum(a.work_counts[f'query_anchor_coalesced_value_pairs_{role}'] for role in ('M', 'E')) > 0
+        for role in ('M', 'E'):
+            physical = original[2][f'query_relative_value_pairs_{role}']
+            assert physical == reloaded[2][f'query_relative_value_pairs_{role}']
+            assert physical >= max(output.work_counts[f'query_anchor_coalesced_value_pairs_{role}']
+                                   for output in original[:2])
+        assert sum(original[2][f'query_relative_value_pairs_{role}'] for role in ('M', 'E')) > 0
     model.train()
     predictions, auxiliary = provider.predict_native(
         model, provider.make_scene(batch.scene_inputs), batch.receivers,

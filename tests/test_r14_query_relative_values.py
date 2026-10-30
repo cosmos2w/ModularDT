@@ -92,13 +92,14 @@ def test_schema_strict_roundtrip_masks_and_paired_counts():
     indices[0, 0] = -1
     query = replace(query, query_mask=mask, anchor_weights=weights, anchor_indices=indices)
     prepared = model.prepare(scene)
-    full, restricted, _ = model.decode_paired(prepared, query)
+    full, restricted, shared = model.decode_paired(prepared, query)
     for mode, output in (("full", full), ("restricted", restricted)):
         other = cloned.decode(cloned.prepare(scene), query, intervention={"read_mode": mode})
         torch.testing.assert_close(output.joint_fields, other.joint_fields, atol=0, rtol=0)
         assert output.joint_fields[0, 0].eq(0).all()
         for role in ("M", "E"):
-            assert output.work_counts[f"query_relative_value_pairs_{role}"] == output.work_counts[f"query_anchor_value_reduction_pairs_{role}"]
+            assert output.work_counts[f"query_relative_value_pairs_{role}"] == 0
+            assert shared[f"query_relative_value_pairs_{role}"] >= output.work_counts[f"query_anchor_value_reduction_pairs_{role}"]
 
 
 def test_continuity_as_a_cover_row_enters_and_original_id_is_removed():
@@ -162,3 +163,105 @@ def test_factored_query_projection_matches_literal_pair_outputs_and_gradients(mo
     for role in ("M", "E"):
         assert out.work_counts[f"query_value_projection_rows_{role}"] == query.batch_size * query.num_queries
         assert out.work_counts[f"query_relative_value_pairs_{role}"] == out.work_counts[f"query_anchor_value_reduction_pairs_{role}"]
+
+
+@pytest.mark.parametrize('measure', ['inventory_unit_total', 'active_domain'])
+@pytest.mark.parametrize('empty_module', [False, True])
+@pytest.mark.parametrize('tile_size', [2, 16])
+def test_paired_shared_values_match_unshared_outputs_and_all_gradients(measure, empty_module, tile_size):
+    model, scene, query = _model_scene_query(measure)
+    model.train()
+    model.query_tile_size = tile_size
+    reference = copy.deepcopy(model)
+    reference._share_paired_selected_values = False
+    if empty_module:
+        scene = replace(scene, module_mask=torch.zeros_like(scene.module_mask),
+                        module_measure=torch.zeros_like(scene.module_measure))
+    def query_copy():
+        coords = query.coordinates.detach().clone().requires_grad_(True)
+        w = coords[..., 0].sigmoid()
+        return replace(query, coordinates=coords, anchor_weights=torch.stack((w, 1-w), -1))
+    q1, q2 = query_copy(), query_copy()
+    actual = model.decode_paired(model.prepare(scene), q1)
+    expected = reference.decode_paired(reference.prepare(scene), q2)
+    for a, b in zip(actual[:2], expected[:2]):
+        torch.testing.assert_close(a.joint_fields, b.joint_fields, rtol=1e-11, atol=1e-12)
+    params, ref_params = dict(model.named_parameters()), dict(reference.named_parameters())
+    names = tuple(params)
+    loss = actual[0].joint_fields.square().sum() + 0.37 * actual[1].joint_fields.square().sum()
+    ref_loss = expected[0].joint_fields.square().sum() + 0.37 * expected[1].joint_fields.square().sum()
+    gradients = torch.autograd.grad(loss, [params[n] for n in names] + [q1.coordinates], allow_unused=True)
+    ref_gradients = torch.autograd.grad(ref_loss, [ref_params[n] for n in names] + [q2.coordinates], allow_unused=True)
+    for name, a, b in zip(names + ('query_coordinates',), gradients, ref_gradients):
+        assert (a is None) == (b is None), name
+        if a is not None:
+            torch.testing.assert_close(a, b, rtol=2e-8, atol=2e-9, msg=name)
+    for role in ('M', 'E'):
+        key = f'query_relative_value_pairs_{role}'
+        full_count = expected[0].work_counts[key]
+        restrict_count = expected[1].work_counts[key]
+        assert actual[2][key] <= full_count + restrict_count
+        assert actual[2][key] >= max(full_count, restrict_count)
+        assert actual[0].work_counts[key] == actual[1].work_counts[key] == 0
+        if empty_module and role == 'M': assert actual[2][key] == 0
+
+
+def test_paired_shared_values_keep_trace_and_single_read_work():
+    model, scene, query = _model_scene_query()
+    reference = copy.deepcopy(model)
+    reference._share_paired_selected_values = False
+    a = model.decode_paired(model.prepare(scene), query, return_trace=True)
+    b = reference.decode_paired(reference.prepare(scene), query, return_trace=True)
+    for left, right in zip(a[:2], b[:2]):
+        assert set(left.trace) == set(right.trace)
+        for key in left.trace:
+            if torch.is_tensor(left.trace[key]):
+                torch.testing.assert_close(left.trace[key], right.trace[key], rtol=0, atol=0, msg=key)
+    for role in ('M', 'E'):
+        keys = a[0].trace[f'member_score_union_indices_{role}']
+        active = ((a[0].trace[f'anchor_read_coalesced_member_coefficients_{role}'] > 0)
+                  | (a[1].trace[f'anchor_read_coalesced_member_coefficients_{role}'] > 0))
+        assert a[2][f'query_relative_value_pairs_{role}'] == int(active.sum())
+        assert len(keys) == len(active)
+        assert a[2][f'query_value_projection_rows_{role}'] == query.batch_size * query.num_queries
+    one = model.decode(model.prepare(scene), query, intervention={'read_mode':'restricted'})
+    for role in ('M', 'E'):
+        assert one.work_counts[f'query_relative_value_pairs_{role}'] == one.work_counts[f'query_anchor_value_reduction_pairs_{role}']
+
+
+@pytest.mark.parametrize('measure', ['inventory_unit_total', 'active_domain'])
+def test_paired_shared_values_preserve_spatial_derivative_loss_gradients(measure):
+    model, scene, query = _model_scene_query(measure)
+    model.train()
+    model.query_tile_size = 2
+    reference = copy.deepcopy(model)
+    reference._share_paired_selected_values = False
+
+    def fresh_query():
+        coordinates = query.coordinates.detach().clone().requires_grad_(True)
+        w = coordinates[..., 0].sigmoid()
+        return replace(query, coordinates=coordinates, anchor_weights=torch.stack((w, 1-w), -1))
+
+    def derivative_objective(net, q):
+        full, restricted, _ = net.decode_paired(net.prepare(scene), q)
+        loss = q.coordinates.new_zeros(())
+        for scale, output in ((1., full), (.37, restricted)):
+            derivatives = [torch.autograd.grad(output.joint_fields[..., channel].sum(), q.coordinates,
+                                               create_graph=True, retain_graph=True)[0]
+                           for channel in (0, 1, 3)]
+            curl = derivatives[1][..., 0] - derivatives[0][..., 1]
+            flux = derivatives[2].square().sum(-1)
+            loss = loss + scale * (curl.square().sum() + flux.sum())
+        return loss
+
+    q, qr = fresh_query(), fresh_query()
+    loss, expected = derivative_objective(model, q), derivative_objective(reference, qr)
+    torch.testing.assert_close(loss, expected, rtol=1e-10, atol=1e-11)
+    params, ref_params = dict(model.named_parameters()), dict(reference.named_parameters())
+    names = tuple(params)
+    grad = torch.autograd.grad(loss, [params[n] for n in names] + [q.coordinates], allow_unused=True)
+    ref_grad = torch.autograd.grad(expected, [ref_params[n] for n in names] + [qr.coordinates], allow_unused=True)
+    for name, actual, wanted in zip(names + ('query_coordinates',), grad, ref_grad):
+        assert (actual is None) == (wanted is None), name
+        if actual is not None:
+            torch.testing.assert_close(actual, wanted, rtol=5e-8, atol=5e-9, msg=name)

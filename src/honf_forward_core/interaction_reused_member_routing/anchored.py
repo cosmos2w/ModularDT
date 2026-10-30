@@ -990,7 +990,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         values = prepared.member_values_M if role == "M" else prepared.member_values_E
         return values[batch, slot], {}
 
-    def _read_packed(self, prepared, query, qstates, qnorm, packed, union_keys, raw, *, return_trace):
+    def _read_packed(self, prepared, query, qstates, qnorm, packed, union_keys, raw, *, return_trace,
+                     value_cache=None, physical_value_counts=None):
         """Calibrate and normalize each located row/role, then coalesce values."""
         reads, rid = packed["reads"], packed["read_id"]
         read_count, groups = len(reads), 2 * len(reads)
@@ -1057,8 +1058,35 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             selected = selected & (coalesced > 0)
             positions = selected.nonzero(as_tuple=False).flatten()
             slot = um[positions] - (prepared.scene.num_modules if role == "E" else 0)
-            selected_values, value_counts = self._selected_member_values(
-                prepared, query, qstates, role, ub[positions], uq[positions].remainder(query.num_queries), slot)
+            if value_cache is None:
+                selected_values, value_counts = self._selected_member_values(
+                    prepared, query, qstates, role, ub[positions], uq[positions].remainder(query.num_queries), slot)
+            else:
+                cached = value_cache.get(role)
+                if cached is None:
+                    selected_values, value_counts = self._selected_member_values(
+                        prepared, query, qstates, role, ub[positions], uq[positions].remainder(query.num_queries), slot)
+                    value_cache[role] = (positions, selected_values)
+                else:
+                    old_positions, old_values = cached
+                    lookup = torch.searchsorted(old_positions, positions)
+                    if old_positions.numel():
+                        safe = lookup.clamp_max(old_positions.numel() - 1)
+                        found = (lookup < old_positions.numel()) & (old_positions[safe] == positions)
+                        selected_values = old_values[safe]
+                    else:
+                        found = torch.zeros_like(positions, dtype=torch.bool)
+                        selected_values = qstates.new_zeros((positions.numel(), self.context_dim))
+                    missing = (~found).nonzero(as_tuple=False).flatten()
+                    value_counts = {}
+                    if missing.numel():
+                        missing_values, value_counts = self._selected_member_values(
+                            prepared, query, qstates, role, ub[positions[missing]],
+                            uq[positions[missing]].remainder(query.num_queries), slot[missing])
+                        selected_values = selected_values.index_copy(0, missing, missing_values)
+                for name, value in value_counts.items():
+                    physical_value_counts[name] = physical_value_counts.get(name, 0) + value
+                value_counts = {}
             contributions = selected_values * coalesced[positions, None]
             context = self._segment_sum(contributions, uq[positions], query.batch_size * query.num_queries)
             contexts[role] = context.reshape(query.batch_size, query.num_queries, self.context_dim)
@@ -1119,9 +1147,12 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         union_keys = torch.unique(torch.cat([row["pair_key"] for row in packed.values()]), sorted=True)
         raw, qnorm, shared = self._raw_union_scores(prepared, query, qstates, union_keys)
         outputs = {}
+        share_values = len(read_modes) > 1 and getattr(self, "_share_paired_selected_values", False)
+        value_cache = {} if share_values else None
         for mode in read_modes:
             fields, trace, counts = self._read_packed(prepared, query, qstates, qnorm, packed[mode],
-                                                     union_keys, raw, return_trace=return_trace)
+                                                     union_keys, raw, return_trace=return_trace,
+                                                     value_cache=value_cache, physical_value_counts=shared)
             outputs[mode] = (fields, trace, counts)
         return outputs, shared
 

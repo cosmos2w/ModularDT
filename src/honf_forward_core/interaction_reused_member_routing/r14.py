@@ -16,6 +16,7 @@ class DetailAnchoredMemberRoutingCore(AnchoredMemberRoutingCore):
     """Continuous E-row coverage and selected original-member value messages."""
 
     schema = "interaction_reused_detail_anchored_member_routing_v1"
+    _share_paired_selected_values = True
     _ANCHOR_COUNT_KEYS = AnchoredMemberRoutingCore._ANCHOR_COUNT_KEYS + (
         "query_relative_value_pairs_M", "query_relative_value_pairs_E",
         "query_value_projection_rows_M", "query_value_projection_rows_E",
