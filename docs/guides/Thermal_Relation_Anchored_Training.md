@@ -2,6 +2,8 @@
 
 The maintained `relation_anchored` and `relation_anchored_active` TRAIN600 recipes both use the detail-preserving joint-field reader. Their access measures are `inventory_unit_total` and `active_domain`, respectively. They use the existing full TRAIN600 membership, train-only normalization, canonical VAL89 and fixed input manifest. The first segment ends at 100 epochs; its 500-epoch optimizer schedule permits the selected candidate's authorized continuation after review. Health observations do not automatically pause the run.
 
+Set `member_routing.model.query_tile_size` in an explicit recipe before training to tune decoder throughput and memory for your inputs. It changes query chunking while retaining all sampled queries and the physical objective. Follow the [query-tiling guide](Query_Tiling.md) for a local forward/backward benchmark, numerical checks and the scope of changing an existing checkpoint's setting.
+
 Choose the public name directly. Set the physical GPU visibility and output path for the intended run before launching; an epoch covers the declared training membership once.
 
 ```bash

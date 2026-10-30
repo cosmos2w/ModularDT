@@ -116,6 +116,10 @@ fields = core.decode(prepared, queries).joint_fields
 
 Choose `"relation_anchored"` for inventory-normalized access. Save `core.get_config()` with the model state. For a trained case, reconstruct the saved model configuration and adapter normalization before loading its state.
 
+### Query tiling: speed and memory
+
+`query_tile_size` limits how many query positions per scene the decoder processes in one chunk; it evaluates all queries. Larger tiles usually reduce per-chunk launch and checkpoint bookkeeping overhead while increasing peak working memory. This execution setting preserves the model equations, query samples and physical objective; floating-point reduction order can change. Set it with `relation_anchored_config(..., query_tile_size=...)` or the model section of your recipe. Benchmark on your own dataset, GPU and batch size: compare warmed-up complete forward/backward updates, check output/gradient agreement, and include your largest expected inputs. Choose a tile near your best measured throughput with memory headroom. See the short [query-tiling guide](docs/guides/Query_Tiling.md) for a test procedure and checkpoint-resume scope.
+
 ### Thermal training and evaluation
 
 The maintained [inventory recipe](configs/research/thermal_relation_anchored_train600.json) and [active-domain recipe](configs/research/thermal_relation_anchored_active_train600.json) use the full training population and the same mechanism. Configure dataset paths and `storage.output_root` for your installation before launching. The dry run resolves the model/provider identity without creating a training run:

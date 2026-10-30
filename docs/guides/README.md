@@ -6,6 +6,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | --- | --- |
 | [Global organization visualization](Global_Hypergraph_Organization_Visualization.md) | Actual relation provenance, three standard views and saved-evidence plotting. |
 | [Run artifacts and monitoring](Run_Artifacts_and_Monitoring.md) | Complete histories, meaningful loss panels, selectors and old layouts. |
+| [Query tiling](Query_Tiling.md) | Decoder speed/memory tradeoffs, testing on your own inputs and explicit resume scope. |
 | [Thermal development protocol](Thermal_Model_Development_Protocol.md) | Input-only membership, TRAIN-only normalization and fair epoch budgets. |
 | [Thermal relation-anchored training](Thermal_Relation_Anchored_Training.md) | Current public model selection, recipes and continuation. |
 | [Wind native catalogue cache](Wind_Native_Catalogue_Cache.md) | Geometry/cache identity and native precision. |
