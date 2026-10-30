@@ -85,6 +85,7 @@ For current development navigation, start with `docs/guides/README.md`. Guides u
 # Training output and progress defaults
 
 - Always include a total TRAIN and total validation loss panel from the first saved loss curve, alongside component losses. Compute totals from the recorded objective definition, retaining its weights and full/restricted pairing, and label differing prediction paths or reductions. Keep the validation panel present before its first scheduled value and mark it pending; do not substitute a field-selection score, double-count diagnostics or invent a scalar objective for a method that does not define one.
+- Arrange loss-history panels in an equal-sized grid with consistent subplot proportions. Do not stretch selected panels across rows or columns to fill space; leave an unused cell when the panel count is odd. Use the historical Active-domain relation-anchored loss layout as the Thermal reference.
 - Refresh current loss curves every 10 epochs by default. Keep the protocol's validation cadence, full history, latest/best states and declared checkpoint milestones unchanged.
 - Keep every validation result in full history, but write separate validation files only at declared checkpoint milestones and the final or clean-stop review. Do not create a separate validation file for every ordinary review.
 - Enable tqdm progress by default, including redirected output and tmux runs. Preserve an explicit opt-out for unattended log consumers. Expose the live progress in the training terminal while retaining its log.

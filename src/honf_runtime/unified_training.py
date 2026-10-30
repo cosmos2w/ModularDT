@@ -1478,7 +1478,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     figure.suptitle(" | ".join(heading), fontsize=12)
     epochs = sorted({int(row["epoch"]) for row in history if type(row.get("epoch")) is int})
     if epochs:
-        limits = (epochs[0] - 0.5, epochs[-1] + 0.5) if len(epochs) == 1 else (epochs[0], epochs[-1])
+        margin = 0.5 if len(epochs) == 1 else max(0.5, (epochs[-1] - epochs[0]) * 0.015)
+        limits = (epochs[0] - margin, epochs[-1] + margin)
         for axis in axes:
             axis.set_xlim(*limits)
 
@@ -1505,7 +1506,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     # Concise labels keep definitions in the metadata sidecar. Work counters
     # remain in history/metadata rather than the default loss figure.
     total_axis.set_title("Weighted loss totals (different reductions)")
-    total_axis.set_ylabel("Weighted loss (dimensionless)")
+    total_axis.set_ylabel("Weighted loss")
+    selector_axis.set_ylabel("Normalized MSE" if field_metric == "field_score" else "Selector metric")
     native_axis.set_title("Flow losses" if flow_names and thermal_names and len(native_names) > 5 else "Prediction losses")
     if flow_names and thermal_names and len(native_names) > 5:
         thermal_axis.set_title("Thermal losses")
@@ -1513,6 +1515,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     physics_axis.set_title("Physics and response losses")
     routing_axis.set_title("Other objective losses")
     for axis in [native_axis, physics_axis, routing_axis] + ([thermal_axis] if flow_names and thermal_names and len(native_names) > 5 else []):
+        axis.set_ylabel("Weighted loss")
         handles, labels = axis.get_legend_handles_labels()
         by_name = {}
         for handle, label in zip(handles, labels):
@@ -1532,13 +1535,11 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 "Nonpositive/nonfinite values masked on log axes; history unchanged.",
                 ha="left", va="bottom", fontsize=8, transform=visible_axes[0].transAxes,
             )
-        remaining = visible_axes[1:]
-        rows = 1 + math.ceil(len(remaining) / 2)
+        rows = math.ceil(len(visible_axes) / 2)
         grid = figure.add_gridspec(rows, 2)
-        figure.set_size_inches(16, 9)
-        total_axis.set_subplotspec(grid[0, :])
-        for index, axis in enumerate(remaining):
-            axis.set_subplotspec(grid[1 + index // 2, :] if index == len(remaining) - 1 and len(remaining) % 2 else grid[1 + index // 2, index % 2])
+        figure.set_size_inches(14, max(4.6, 3.7 * rows))
+        for index, axis in enumerate(visible_axes):
+            axis.set_subplotspec(grid[index // 2, index % 2])
             if epochs:
                 axis.set_xlim(*limits)
     elif not history:

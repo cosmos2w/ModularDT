@@ -23,6 +23,9 @@ def _capture_figures(monkeypatch, output: Path) -> list[dict[str, object]]:
             "lines": [[line.get_ydata() for line in axis.lines] for axis in figure.axes],
             "epochs": [[line.get_xdata() for line in axis.lines] for axis in figure.axes],
             "size": tuple(figure.get_size_inches()),
+            "cells": [(axis.get_subplotspec().rowspan.start, axis.get_subplotspec().rowspan.stop,
+                       axis.get_subplotspec().colspan.start, axis.get_subplotspec().colspan.stop)
+                      for axis in figure.axes],
             "texts": [[text.get_text() for text in axis.texts] for axis in figure.axes],
             "title": figure._suptitle.get_text(),
         })
@@ -76,7 +79,8 @@ def test_loss_curves_group_terms_compare_matched_objective_and_write_both_aliase
             "TRAIN: shared-term subtotal", "VALIDATION: shared-term subtotal"]
         assert np.allclose(item["lines"][0][0], [2.22, 1.11])
         assert np.allclose(item["lines"][0][2], [2.0, 1.0])
-        assert item["size"] == (16, 9)
+        assert item["size"] == pytest.approx((14, 11.1))
+        assert all(r1 - r0 == 1 and c1 - c0 == 1 for r0, r1, c0, c1 in item["cells"])
         assert item["labels"][3] == ["HELD-OUT VALIDATION: Held-out field prediction error"]
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     assert "do not establish sparse executor savings" in metadata["panel_definitions"]["train_work"]
@@ -178,6 +182,7 @@ def test_total_panel_before_first_review_and_after_review(tmp_path, monkeypatch)
     assert panel["epochs"][0][0].tolist() == [1, 2]
     assert np.allclose(panel["lines"][0][0], [0.5, 1.0])
     assert "Validation: first review pending" in panel["texts"][0]
+    assert all(r1 - r0 == 1 and c1 - c0 == 1 for r0, r1, c0, c1 in panel["cells"])
     history[2]["validation_objective"] = _objective(
         {"flow/u": 0.4, "temperature/fluid": 0.6},
         ["flow/u", "temperature/fluid"], 1.5, 1.0)
@@ -216,6 +221,17 @@ def test_phase_changes_preserve_each_epochs_recorded_total(tmp_path, monkeypatch
     _render_loss_curves(history, tmp_path, "field_score")
     assert np.allclose(captured[0]["lines"][0][0], [1.0, 5.0])
     assert np.allclose(captured[0]["lines"][0][1], [0.5, 2.5])
+
+
+def test_three_panel_prevalidation_layout_uses_uniform_cells(tmp_path, monkeypatch):
+    names = ("flow/u", "flow/v", "flow/p", "flow/omega", "temperature/fluid", "temperature/material")
+    history = [{"epoch": 1, "arm": "R14-Detail-LocalECover", "train_losses": {name: 1.0 for name in names}}]
+    captured = _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history, tmp_path, "field_score")
+    cells = captured[0]["cells"]
+    assert len(cells) == 3
+    assert {(r0, c0) for r0, _, c0, _ in cells} == {(0, 0), (0, 1), (1, 0)}
+    assert all(r1 - r0 == 1 and c1 - c0 == 1 for r0, r1, c0, c1 in cells)
 
 
 def test_round13_member_routing_native_losses_and_zero_read_work_are_explicit(tmp_path, monkeypatch):
