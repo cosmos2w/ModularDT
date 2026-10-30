@@ -22,6 +22,8 @@ __all__ = [
     "VelocityNormalizer",
     "VerticalProfileBaseline",
     "WindFarmDataset",
+    "WindRelationAnchoredAdapter",
+    "attach_wind_e_cover",
     "WindFarmNativeDataset",
     "WindFarmNativeView",
     "case_batch",
@@ -37,3 +39,11 @@ __all__ = [
     "support_geometry",
     "write_profile_outputs",
 ]
+
+
+def __getattr__(name):
+    # The preprocessing package can be installed without Torch or the core.
+    if name in {"WindRelationAnchoredAdapter", "attach_wind_e_cover"}:
+        from . import relation_anchored
+        return getattr(relation_anchored, name)
+    raise AttributeError(name)

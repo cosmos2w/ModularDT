@@ -581,6 +581,7 @@ class ThermalContentHypergraphAdapter(nn.Module):
         scene_key: Any = None,
         forced_frontier: Mapping[int, Any] | None = None,
         context_message_removal: Mapping[str, Any] | None = None,
+        capture_context_trace: bool = False,
     ) -> PreparedThermalContentHypergraph:
         """Prepare one shared edge bank and union for all native output roles."""
         scene_batch = self.scene_batch(structure, scene_key=scene_key)
@@ -590,12 +591,14 @@ class ThermalContentHypergraphAdapter(nn.Module):
                     "interaction_reused_member_routing_v3", "interaction_reused_joint_member_routing_v1"}
                     or forced_frontier is not None):
                 raise ValueError("Context-message removal requires a maintained interaction-reused member-routing core.")
+            options = {"return_trace": True} if capture_context_trace else {}
             organization = self.core.prepare(
-                scene_batch, context_message_removal=dict(context_message_removal),
+                scene_batch, context_message_removal=dict(context_message_removal), **options,
             )
         else:
-            organization = (self.core.prepare(scene_batch) if forced_frontier is None else
-                            self.core.prepare(scene_batch, forced_frontier=forced_frontier))
+            options = {"return_trace": True} if capture_context_trace else {}
+            organization = (self.core.prepare(scene_batch, **options) if forced_frontier is None else
+                            self.core.prepare(scene_batch, forced_frontier=forced_frontier, **options))
         (query, union, stencils, solid_mask, curl_stencil, lengths, delta,
          conductivity, role_shapes) = self._query_union(scene_batch, fluid_xy, local_query_points, ntheta)
         if getattr(self.core, "locator_mode", None) is not None:

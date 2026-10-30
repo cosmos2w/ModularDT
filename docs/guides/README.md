@@ -9,6 +9,8 @@ The [project README](../../README.md) introduces the six model families, equatio
 | [Query tiling](Query_Tiling.md) | Decoder speed/memory tradeoffs, testing on your own inputs and explicit resume scope. |
 | [Thermal development protocol](Thermal_Model_Development_Protocol.md) | Input-only membership, TRAIN-only normalization and fair epoch budgets. |
 | [Thermal relation-anchored training](Thermal_Relation_Anchored_Training.md) | Current public model selection, recipes and continuation. |
+| [Thermal and Wind case inputs](Thermal_Wind_Case_Inputs.md) | Input ownership, native units, differentiable Wind integration and frozen Thermal local ports. |
+| [Case response evaluation](Case_Response_Evaluation.md) | Rebuilt-design measurements, existing reference coverage and later response-study definitions. |
 | [Wind native catalogue cache](Wind_Native_Catalogue_Cache.md) | Geometry/cache identity and native precision. |
 | [Root layout and compatibility](../Root_Layout_and_Compatibility.md) | Promoted paths, installation and old checkpoints. |
 
