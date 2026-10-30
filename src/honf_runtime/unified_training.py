@@ -1074,17 +1074,51 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             axis.text(0.5, 0.5, empty_message, ha="center", va="center",
                       transform=axis.transAxes)
 
-    # The objective subtotal compares exactly the terms recorded on both sides.
+    # Each row records that epoch's weighted contributions; term inventories
+    # can legitimately change between phases.
     total_axis = axes[0]
+
+    def recorded_sum(values: Any) -> float:
+        if not isinstance(values, Mapping) or not values:
+            return float("nan")
+        try:
+            numbers = [float(value) for value in values.values()]
+        except (TypeError, ValueError):
+            return float("nan")
+        return sum(numbers) if all(math.isfinite(value) for value in numbers) else float("nan")
+
+    train_rows = [row for row in history if type(row.get("epoch")) is int and row.get("train_losses")]
+    validation_rows = [row for row in history if type(row.get("epoch")) is int
+                       and (objective_at(row).get("terms") or "total" in objective_at(row))]
+    if train_rows:
+        masked_count_total += plot_series(
+            total_axis, [row["epoch"] for row in train_rows],
+            [recorded_sum(row["train_losses"]) for row in train_rows],
+            label="TRAIN: recorded weighted sum", color="C0", marker=".")
+    if validation_rows:
+        masked_count_total += plot_series(
+            total_axis, [row["epoch"] for row in validation_rows],
+            [recorded_sum({"total": objective_at(row)["total"]})
+             if "total" in objective_at(row) else recorded_sum(objective_at(row).get("terms"))
+             for row in validation_rows],
+            label="VALIDATION: recorded total", color="C1", linestyle="--", marker="o")
+    else:
+        pending = not any(isinstance(row.get("validation"), Mapping) and row["validation"] for row in history)
+        total_axis.text(0.02, 0.10, "Validation: first review pending" if pending else
+                        "Validation objective losses were not recorded.", transform=total_axis.transAxes, fontsize=8)
+
+    # Keep a separate shared-name subtotal only when it differs in coverage.
     comparable_rows = []
     for row in history:
         objective = objective_at(row)
-        if objective.get("matched_terms") and type(row.get("epoch")) is int:
+        matched = set(objective.get("matched_terms", ()))
+        if (matched and type(row.get("epoch")) is int
+                and (matched != set(row.get("train_losses", {})) or matched != set(objective.get("terms", {})))):
             comparable_rows.append((int(row["epoch"]), objective))
     if comparable_rows:
         for key, label, color, style, marker in (
-            ("training_matched_total", "TRAIN at review epochs", "C0", "-", "."),
-            ("validation_matched_total", "EXPOSED VALIDATION", "C1", "--", "o"),
+            ("training_matched_total", "TRAIN: shared-term subtotal", "C0", ":", "."),
+            ("validation_matched_total", "VALIDATION: shared-term subtotal", "C1", ":", "o"),
         ):
             points = [(epoch, objective.get(key)) for epoch, objective in comparable_rows
                       if objective.get(key) is not None]
@@ -1093,18 +1127,11 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                     total_axis, [point[0] for point in points], [point[1] for point in points],
                     label=label, color=color, linestyle=style, marker=marker,
                 )
-        if total_axis.lines:
-            total_axis.legend(fontsize=8, loc="best", frameon=False)
-    else:
+    if not total_axis.lines:
         total_axis.set_yscale("log")
         total_axis.set_ylim(1.0, 10.0)
-        no_validation_objective = all(not objective_at(row).get("terms") for row in history)
-        total_axis.text(
-            0.5, 0.5,
-            ("Held-out loss was not recorded in this history."
-             if no_validation_objective else "No shared held-out loss terms were saved."),
-            ha="center", va="center", transform=total_axis.transAxes,
-        )
+    if total_axis.lines:
+        total_axis.legend(fontsize=8, loc="best", frameon=False)
     adaptive_run = any(str(row.get("arm", "")) == "adaptive_detail" for row in history)
     train_validation_path_note = (
         "TRAIN: mean of per-update means\nEach native loss = 0.5 full + 0.5 joint95 restricted\n"
@@ -1473,11 +1500,11 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         set_panel_title(thermal_axis, "Thermal prediction losses", "Sampled TRAIN and held-out validation")
         thermal_axis.set_ylabel("Weighted loss contribution (dimensionless)")
         visible_axes.insert(3, thermal_axis)
-    data_present = {axis: any(not line.get_label().startswith("_") for line in axis.lines)
+    data_present = {axis: axis is total_axis or any(not line.get_label().startswith("_") for line in axis.lines)
                     for axis in visible_axes}
     # Concise labels keep definitions in the metadata sidecar. Work counters
     # remain in history/metadata rather than the default loss figure.
-    total_axis.set_title("Weighted loss (shared terms; different reductions)")
+    total_axis.set_title("Weighted loss totals (different reductions)")
     total_axis.set_ylabel("Weighted loss (dimensionless)")
     native_axis.set_title("Flow losses" if flow_names and thermal_names and len(native_names) > 5 else "Prediction losses")
     if flow_names and thermal_names and len(native_names) > 5:
@@ -1505,15 +1532,13 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 "Nonpositive/nonfinite values masked on log axes; history unchanged.",
                 ha="left", va="bottom", fontsize=8, transform=visible_axes[0].transAxes,
             )
-        if not comparable_rows and not any(objective_at(row).get("terms") for row in history):
-            visible_axes[0].text(0.02, 0.09, "Validation objective losses were not recorded.",
-                                 transform=visible_axes[0].transAxes, fontsize=8)
-        columns = min(2, len(visible_axes))
-        rows = math.ceil(len(visible_axes) / columns)
-        grid = figure.add_gridspec(rows, columns)
-        figure.set_size_inches(14, max(4.6, 3.7 * rows))
-        for index, axis in enumerate(visible_axes):
-            axis.set_subplotspec(grid[index // columns, :] if index == len(visible_axes) - 1 and len(visible_axes) % columns else grid[index // columns, index % columns])
+        remaining = visible_axes[1:]
+        rows = 1 + math.ceil(len(remaining) / 2)
+        grid = figure.add_gridspec(rows, 2)
+        figure.set_size_inches(16, 9)
+        total_axis.set_subplotspec(grid[0, :])
+        for index, axis in enumerate(remaining):
+            axis.set_subplotspec(grid[1 + index // 2, :] if index == len(remaining) - 1 and len(remaining) % 2 else grid[1 + index // 2, index % 2])
             if epochs:
                 axis.set_xlim(*limits)
     elif not history:
@@ -1533,6 +1558,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         "layout": "data-dependent loss panels; absent groups and work counts omitted",
         "missing_validation_losses": "Validation objectives cannot be recovered when absent from saved history.",
         "panel_definitions": {
+        "weighted_loss_totals": "Sum each epoch's recorded already-weighted TRAIN contributions. At review epochs use an explicit validation total if recorded, otherwise sum that review's recorded already-weighted validation objective terms. Nonfinite sums are masked. These are recorded sums; no scalar optimization objective is inferred for a non-scalar method. TRAIN and validation reductions and paths can differ.",
         "shared_name_loss_summary": "Sum same-named weighted loss terms recorded in both TRAIN and hard VALIDATION; this summary is not directly comparable because TRAIN uses a mean of macro-update means and validation pools valid elements. Adaptive TRAIN may include 25% fine-path loss replay; validation uses hard main-path loss only.",
             "native_prediction": "Visible note: prediction versus reference, scaled squared error. Validation uses the deployed hard-route main prediction and omits full-detail replay.",
             "physics": "Visible note: discrete heat-balance residual and response prediction losses. Thermal response and residual targets are TRAIN-only when absent from the exposed validation batch.",

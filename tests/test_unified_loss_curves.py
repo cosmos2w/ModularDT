@@ -21,6 +21,8 @@ def _capture_figures(monkeypatch, output: Path) -> list[dict[str, object]]:
             "titles": [axis.get_title() for axis in figure.axes],
             "labels": [[line.get_label() for line in axis.lines] for axis in figure.axes],
             "lines": [[line.get_ydata() for line in axis.lines] for axis in figure.axes],
+            "epochs": [[line.get_xdata() for line in axis.lines] for axis in figure.axes],
+            "size": tuple(figure.get_size_inches()),
             "texts": [[text.get_text() for text in axis.texts] for axis in figure.axes],
             "title": figure._suptitle.get_text(),
         })
@@ -61,7 +63,7 @@ def test_loss_curves_group_terms_compare_matched_objective_and_write_both_aliase
         assert len(item["yscales"]) == 5
         assert item["yscales"] == ["log"] * 5
         assert "adaptive_detail" in item["title"] and "600 TRAIN cases/epoch" in item["title"]
-        assert item["titles"] == ["Weighted loss (shared terms; different reductions)",
+        assert item["titles"] == ["Weighted loss totals (different reductions)",
                                   "Prediction losses", "Physics and response losses",
                                   "Exposed validation field error", "Other objective losses"]
         assert item["labels"][1] == [
@@ -70,7 +72,11 @@ def test_loss_curves_group_terms_compare_matched_objective_and_write_both_aliase
         ]
         assert item["labels"][2] == ["TRAIN: Response prediction loss"]
         assert item["labels"][0] == [
-            "TRAIN at review epochs", "EXPOSED VALIDATION"]
+            "TRAIN: recorded weighted sum", "VALIDATION: recorded total",
+            "TRAIN: shared-term subtotal", "VALIDATION: shared-term subtotal"]
+        assert np.allclose(item["lines"][0][0], [2.22, 1.11])
+        assert np.allclose(item["lines"][0][2], [2.0, 1.0])
+        assert item["size"] == (16, 9)
         assert item["labels"][3] == ["HELD-OUT VALIDATION: Held-out field prediction error"]
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     assert "do not establish sparse executor savings" in metadata["panel_definitions"]["train_work"]
@@ -146,7 +152,7 @@ def test_wind_role_losses_use_plain_names_with_definition(tmp_path, monkeypatch)
 
     _render_loss_curves(history, tmp_path, "field_score")
 
-    assert captured[0]["labels"][0] == [
+    assert captured[0]["labels"][1] == [
         "TRAIN: Downstream-region velocity loss",
         "TRAIN: Hub-height slab velocity loss",
         "TRAIN: Near-turbine hub-slab velocity loss",
@@ -158,6 +164,58 @@ def test_wind_role_losses_use_plain_names_with_definition(tmp_path, monkeypatch)
     assert "not a physical wake" in metadata["term_definitions"]["native_role/downstream_envelope"]["role_region"]
     assert "hub height" in metadata["term_definitions"]["native_role/hub_slab"]["role_region"]
     assert "D is the reference rotor diameter" in metadata["term_definitions"]["native_role/hub_slab"]["role_region"]
+
+
+def test_total_panel_before_first_review_and_after_review(tmp_path, monkeypatch):
+    history = [{"epoch": epoch, "arm": "R14-Detail-LocalECover", "phase": "joint",
+                "train_losses": {"flow/u": 0.2 * epoch, "temperature/fluid": 0.3 * epoch},
+                "paired_reader_native_losses": {"full": 1000.0}}
+               for epoch in (1, 2, 3)]
+    captured = _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history[:2], tmp_path, "field_score")
+    panel = captured[0]
+    assert panel["titles"][0] == "Weighted loss totals (different reductions)"
+    assert panel["epochs"][0][0].tolist() == [1, 2]
+    assert np.allclose(panel["lines"][0][0], [0.5, 1.0])
+    assert "Validation: first review pending" in panel["texts"][0]
+    history[2]["validation_objective"] = _objective(
+        {"flow/u": 0.4, "temperature/fluid": 0.6},
+        ["flow/u", "temperature/fluid"], 1.5, 1.0)
+    captured.clear()
+    _render_loss_curves(history, tmp_path, "field_score")
+    panel = captured[0]
+    assert panel["epochs"][0][0].tolist() == [1, 2, 3]
+    assert np.allclose(panel["lines"][0][0], [0.5, 1.0, 1.5])
+    assert panel["epochs"][0][1].tolist() == [3]
+    assert np.allclose(panel["lines"][0][1], [1.0])
+    assert len(panel["labels"][0]) == 2
+
+
+def test_nonfinite_total_is_masked_and_explicit_validation_total_is_used(tmp_path, monkeypatch):
+    history = [
+        {"epoch": 1, "train_losses": {"flow/u": 1.0, "flow/v": 2.0}},
+        {"epoch": 2, "train_losses": {"flow/u": float("nan")}},
+        {"epoch": 3, "train_losses": {"flow/u": 2.0, "flow/v": 3.0},
+         "validation_objective": {"total": 7.0}},
+    ]
+    captured = _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history, tmp_path, "field_score")
+    assert np.ma.getmaskarray(captured[0]["lines"][0][0]).tolist() == [False, True, False]
+    assert np.allclose(captured[0]["lines"][0][1], [7.0])
+
+
+def test_phase_changes_preserve_each_epochs_recorded_total(tmp_path, monkeypatch):
+    history = [
+        {"epoch": 1, "phase": "warmup", "train_losses": {"flow/u": 1.0},
+         "validation_objective": {"terms": {"flow/u": 0.5}}},
+        {"epoch": 2, "phase": "joint", "train_losses": {"flow/u": 2.0, "flow/v": 3.0},
+         "paired_reader_native_losses": {"full": 1000.0, "restricted": 1000.0},
+         "validation_objective": {"terms": {"flow/u": 1.0, "flow/v": 1.5}}},
+    ]
+    captured = _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history, tmp_path, "field_score")
+    assert np.allclose(captured[0]["lines"][0][0], [1.0, 5.0])
+    assert np.allclose(captured[0]["lines"][0][1], [0.5, 2.5])
 
 
 def test_round13_member_routing_native_losses_and_zero_read_work_are_explicit(tmp_path, monkeypatch):
