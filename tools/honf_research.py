@@ -37,7 +37,10 @@ def _parser() -> argparse.ArgumentParser:
         "train-member-routing",
         help="start one maintained Thermal member-routing run",
     )
-    train_member_routing.add_argument("--config", required=True)
+    model_source = train_member_routing.add_mutually_exclusive_group(required=True)
+    model_source.add_argument("--model", choices=("relation_anchored", "relation_anchored_active"),
+                              help="current Thermal TRAIN600 recipe for the selected public model")
+    model_source.add_argument("--config", help="explicit recipe, including historical configurations")
     train_member_routing.add_argument("--device", required=True)
     train_member_routing.add_argument("--devices", nargs="+")
     train_member_routing.add_argument("--epochs", type=int)
@@ -94,7 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--device", default="cpu")
     evaluate.add_argument("--checkpoint", default="latest")
 
-    anchored = commands.add_parser("evaluate-r13-8", aliases=["evaluate-member-routing"],
+    anchored = commands.add_parser("evaluate-member-routing", aliases=["evaluate-r13-8"],
                                    help="evaluate an anchored checkpoint")
     anchored.add_argument("--checkpoint", required=True)
     anchored.add_argument("--device", default="cpu")
@@ -125,8 +128,10 @@ def main(argv: list[str] | None = None) -> int:
         from honf_runtime.contextual_frontier_training import (
             _arm, _build_task, load_contextual_frontier_config, train_contextual_frontier,
         )
+        config_path = (PROJECT / "configs" / "research" / f"thermal_{args.model}_train600.json"
+                       if args.model else args.config)
         if args.dry_run:
-            config, config_path = load_contextual_frontier_config(args.config)
+            config, config_path = load_contextual_frontier_config(config_path)
             arm = _arm(config)
             model, provider = _build_task(config, arm, torch.device(args.device))
             result = {
@@ -142,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         else:
             result = train_contextual_frontier(
-                args.config, device=args.device, devices=args.devices,
+                config_path, device=args.device, devices=args.devices,
                 epochs=args.epochs, output=args.output, compact_history=args.compact_history,
             )
     elif args.command == "resume":

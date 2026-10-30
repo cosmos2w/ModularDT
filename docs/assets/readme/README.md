@@ -1,31 +1,39 @@
 # README figure collection
 
-Curated examples accompany the project homepage. Each image has a PNG preview and a single-page PDF master; links below open the detailed views. Use explicit display widths and retain aspect ratios when embedding them. This directory contains illustration assets, not datasets, trained weights or numerical exports.
+Four curated figures accompany the project homepage. Each has a PNG preview and a single-page PDF master. All use the relation-anchored shared detail-preserving mechanism with inventory-normalized access, from TRAIN600 run `thermal_r14_detail_train600_v1` at epoch 500. The two input-selected layouts belong to the exposed validation population. Coordinates and fields retain the packed ThermalChannel dataset's native units.
 
-| Figure | Preview and master | Source and meaning |
+| Figure | Preview and master | Source and content |
 | --- | --- | --- |
-| Opening showcase | [PNG](honf_showcase.png) · [PDF](honf_showcase.pdf) | Relation-anchored field reconstruction, spatial access regions and exact overlapping original-member sets, composed for an introductory overview. |
-| Hypergraph-routed fields | [PNG](hypergraph_routed_fields.png) · [PDF](hypergraph_routed_fields.pdf) | Thermal-channel checkpoint at epoch 5000, validation scene 0678; native reference, prediction and signed error for streamwise velocity and fluid temperature. |
-| Hypergraph-routed organization | [PNG](hypergraph_routed_organization.png) · [PDF](hypergraph_routed_organization.pdf) | Same checkpoint and scene; six shared slots with actual M/E assignments and original record IDs. |
-| Relation-anchored fields | [PNG](relation_anchored_fields.png) · [PDF](relation_anchored_fields.pdf) | Saved checkpoint at epoch 2813, validation scene 0678; restricted joint95 read and training-only normalization. |
-| Spatial access regions | [PNG](relation_anchored_regions.png) · [PDF](relation_anchored_regions.pdf) | Same relation-anchored scene; prepared directory service regions and original-module participation. |
-| Original-member service | [PNG](relation_anchored_member_services.png) · [PDF](relation_anchored_member_services.pdf) | Same scene; M2/M3 directory service and separately scaled contextual receiver maps. |
-| Overlapping hyperedges | [PNG](relation_anchored_hyperedges.png) · [PDF](relation_anchored_hyperedges.pdf) | Same scene; three exact native original-member intersections with the display rule described below. |
-| Hypergraph-routed training | [PNG](hypergraph_routed_loss.png) · [PDF](hypergraph_routed_loss.pdf) | Recorded sampled training terms and validation measurements through epoch 5000. |
-| Relation-anchored training | [PNG](relation_anchored_loss.png) · [PDF](relation_anchored_loss.pdf) | Saved history through epoch 2697; an earlier snapshot than the field example. |
+| Conceptual opening | [PNG](honf_showcase.png) · [PDF](honf_showcase.pdf) | Scene 0684/M10: original physical objects, selected native-set imagery, actual directed module gates, and velocity/temperature prediction textures. |
+| Prepared access regions | [PNG](relation_anchored_regions.png) · [PDF](relation_anchored_regions.pdf) | Scene 0684/M10: nonself directory winners and original-module participation ring sectors. |
+| Native overlapping hyperedges | [PNG](relation_anchored_hyperedges.png) · [PDF](relation_anchored_hyperedges.pdf) | Scene 0277/M3: exact original-member intersections, measured MM arrows and a physical-layout locator. |
+| Physical reconstruction | [PNG](relation_anchored_fields.png) · [PDF](relation_anchored_fields.pdf) | Scene 0684/M10: speed and fluid-temperature reference, prediction and signed error. |
 
-## Field displays
+## Opening illustration
 
-The opening showcase and both detailed field figures use the same 7,464 physical-fluid points. Geometry and fields retain the packed dataset's native units. Reference and prediction share their color scale within each field; signed errors use a separate symmetric scale. Temperature uses `coolwarm`, velocity uses `viridis`, and signed error uses the dark diverging `berlin` palette. The two complete field views retain reference coordinates; the showcase omits their repeated axes for readability.
+The opening image presents object-to-relation-to-field information flow. Its field textures use the saved prediction; the branch arrows are schematic workflow arrows. The central sets use four actual rows h(E126), h(E67), h(E188) and h(E5), selected with the common native-profile rule. Their abstract geometry preserves displayed membership; its area and distance have no physical scale. This is a conceptual introduction, so it carries no residuals, reconstruction metrics, quantitative colorbars or dense mathematical annotations.
 
-The error panels display RMSE computed from the plotted prediction and reference: hypergraph-routed velocity/temperature 0.01170/0.29471 and relation-anchored 0.01941/0.57633. These saved examples have different checkpoint ages, normalizers and physical prediction laws, so they do not provide a controlled model ranking. The showcase simplifies presentation without changing the numerical fields or filling the solid-object mask.
+## Organization figures
 
-## Organization displays
+Spatial cell colors identify the strongest positive nonself directory member. Each original M member's ring sectors show its normalized service over those same display regions. Own-E entries are omitted only for the region-label calculation; the saved directory remains unchanged.
 
-The showcase reuses the relation-anchored checkpoint and scene above. Its spatial map colors each of 192 environment addresses by the strongest nonself member in the prepared directory; the nine displayed leading members are all M objects. Module ring sectors show each original M member's service across those regions. The own-E entry is omitted only when assigning display regions. The participation table remains available in the detailed spatial-access figure.
+The detailed native-set figure selects h(E66), h(E166) and h(E11) automatically from all 192 address rows, using shared-profile resolution 0.5 and coverage quantile 0.9. These rows cover 99.0% of row profiles within that distance. With the visual E threshold 0.02, every actual positive M and own-E membership is retained; displayed row masses are 76.4%, 65.8% and 70.2%, respectively. Each set contains 3M+1E original members after the declared display simplification. Native rows remain overlapping memberships rather than three learned physical groups.
 
-The overlapping rows h(E120), h(E104) and h(E85) contain 5M+1E, 7M+2E and 10M+1E, respectively. An E display threshold of 0.02 retains all positive M and own-E entries; these three rows retain 100% of their directory mass. Vertices lie inside exactly their displayed member sets. Ellipse shape, area and abstract distance are illustrative; they carry no physical scale. These are representative directory rows, not three discovered physical groups. Learned organization describes model access rather than physical causality.
+Dark arrows use recorded cycle-1 MM gates with donor→receiver direction. The figure nominates the strongest positive incoming donor per M receiver and displays at most eight connections; positive nonself coefficients use fixed stroke bins below 1/3, from 1/3 to below 2/3, and from 2/3 through 1. The locator uses original coordinates and module footprints. Selection, original IDs, weights, omitted members and exact ellipse intersections follow the [global organization specification](../../guides/Global_Hypergraph_Organization_Visualization.md).
 
-## Updating these assets
+## Reconstruction figure
 
-Retain PNG previews, PDF masters, meaningful alternative text and the source/metric description when replacing figures. Every reconstruction plot must visibly show fieldwise L2 (identify relative L2) or RMSE computed on its stated physical mask and units. Place it on the error panel when present, otherwise on the reconstruction panel; if no reference exists, label the error unavailable. Numerical arrays, histories, checkpoints and one-time rendering scripts belong outside this image directory.
+Speed is $\sqrt{u^2+v^2}$; fluid temperature is the stored physical temperature channel. Metrics use the 7,474 receivers satisfying `fluid_valid AND fluid_target_weight > 0`. Reference and prediction share a scale within each field. Speed uses `viridis`, temperature `inferno`, and signed error uses the dark diverging `berlin` palette. Error limits are symmetric and include the full displayed residual range.
+
+| Observable | Native-unit RMSE | Relative L2 |
+| --- | ---: | ---: |
+| Speed | 0.02203846 | 3.2419% |
+| Fluid temperature | 0.55410568 | 4.3053% |
+
+Both errors are recomputed from the saved plotted prediction/reference and the stated mask; the corresponding values appear inside each error panel. Geometry holes remain white. The opening conceptual image is a separate presentation of prediction textures.
+
+## Source and updates
+
+The literal source checkpoint is `thermal_r14_detail_train600_v1/checkpoints/epoch_0500_model.pt`. Physical arrays and restricted-directory/contextual arrays were exported together for the source layouts, with the checkpoint's saved train-fitted normalization. The local R14 evidence retains those arrays, exact selection/connection mappings and `readme_asset_provenance.json`; numerical data, checkpoints and one-time renderers remain outside this curated directory.
+
+Retain only these selected PNG/PDF pairs here. Use relative links, meaningful alternative text, explicit display widths and preserved aspect ratios. Inspect PNGs, rasterized PDF masters and the rendered README after replacement. Detailed reconstruction figures carry their measured physical error; conceptual overview artwork follows its explicitly stated introductory purpose.

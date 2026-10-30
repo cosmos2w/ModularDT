@@ -94,7 +94,8 @@ def _anchored_schedule_and_model(training, initialization, model, arm):
     valid_model = valid_model and model.get("mediated_mode") in (None, "none")
     if arm == R14_ARM:
         valid_model = valid_model and model.get("score_calibration") == "inherited"
-        schedules = tuple(item for item in schedules if item[:3] == (1000, 100, 1000))
+        schedules = tuple(item for item in schedules if item[:3] == (1000, 100, 1000)
+                          or (membership == "full_train600" and item[:3] == (500, 100, 500)))
     return actual in schedules and training.get("curve_every") == 10, valid_model
 def _model_section(config: Mapping[str, Any]) -> tuple[str, Mapping[str, Any]]:
     return "member_routing", config["member_routing"]
@@ -202,9 +203,13 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
     for key in ("data_path", "manifest_path", "base_recipe_path"):
         if not isinstance(dataset.get(key), str) or not dataset[key]:
             raise ValueError(f"dataset.{key} must be an explicit path.")
-    base_recipe = Path(dataset["base_recipe_path"]).expanduser()
-    if not base_recipe.is_absolute():
-        base_recipe = config_path.parent / base_recipe
+    if dataset["base_recipe_path"].startswith("project://"):
+        from .paths import resolve_path
+        base_recipe = resolve_path(dataset["base_recipe_path"])
+    else:
+        base_recipe = Path(dataset["base_recipe_path"]).expanduser()
+        if not base_recipe.is_absolute():
+            base_recipe = config_path.parent / base_recipe
     dataset["base_recipe_path"] = str(base_recipe.resolve(strict=True))
     dataset["data_path"] = str(Path(dataset["data_path"]).expanduser().resolve(strict=False))
     dataset["manifest_path"] = str(Path(dataset["manifest_path"]).expanduser().resolve(strict=False))
@@ -302,6 +307,20 @@ def _ensure_workspace_storage_bindings(project: Path | None = None) -> dict[str,
             raise RuntimeError(f"Workspace DATA2 binding verification failed for {link}.")
         checked[str(link)] = str(resolved_target)
     return checked
+
+
+def _formal_forward_alias(output: Path, output_root: Path, *, project: Path | None = None) -> Path:
+    """Choose the discoverable alias for a new formal run, without replacing existing entries."""
+    if output.parent != output_root:
+        raise ValueError("Formal forward output must be a direct child of its configured output root.")
+    project = project or Path(__file__).resolve().parents[2]
+    directory = project / "Trained_Results/ThermalChannel/HONF_Forward_Runs"
+    if not directory.is_dir():
+        raise RuntimeError(f"Formal forward-run directory is missing: {directory}.")
+    alias = directory / output.name
+    if alias.exists() or alias.is_symlink():
+        raise FileExistsError(f"Formal forward-run alias already exists: {alias}.")
+    return alias
 
 
 def _member_routing_task_factory(config: Mapping[str, Any] | None = None) -> Callable[..., tuple[torch.nn.Module, Any]]:
@@ -526,6 +545,8 @@ def train_contextual_frontier(config_path: str | Path, *, device: str, output: s
     if not output_path.is_relative_to(root):
         raise ValueError(f"Run output must be inside configured DATA2 output root {root}.")
     binding_info = _ensure_workspace_storage_bindings() if verify_bindings else {}
+    alias = (_formal_forward_alias(output_path, root)
+             if config['storage'].get('formal_forward_run_alias') is True else None)
     research.verify_storage(config, output=output_path, estimated_bytes=0, peak_temporary_bytes=0)
     configured_devices = config["execution"].get("preferred_devices")
     permitted = research._permitted_order(device, devices or configured_devices)
@@ -538,6 +559,8 @@ def train_contextual_frontier(config_path: str | Path, *, device: str, output: s
     storage = _prepare_storage(config, output_path, estimated_bytes=estimated_bytes,
                                 peak_temporary_bytes=peak_temporary, bindings=binding_info)
     output_path.mkdir(parents=True, exist_ok=True)
+    if alias is not None:
+        alias.symlink_to(output_path, target_is_directory=True)
     _write_run_manifest(output_path, config, resolved_config_path, arm, storage, resumed=False)
     print(json.dumps({
         "event": "contextual_frontier_run_prepared",

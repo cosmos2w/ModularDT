@@ -317,6 +317,58 @@ def test_r13_8_workflow_clean_stops_at_100_and_resumes_exactly_to_101(tmp_path, 
     assert resumed_state["provider_training_state"]["batch_calls"] == 101
 
 
+@pytest.mark.parametrize("measure", ("inventory_unit_total", "active_domain"))
+def test_detail_workflow_engine_state_resumes_exactly(tmp_path, measure):
+    """Exercise the shared engine with R14 identity and a synthetic provider."""
+    from channelthermal.training.r13_8_anchored_task import (
+        ARM_DETAIL, DETAIL_CORE_SCHEMA, DETAIL_PROVIDER_SCHEMA, DETAIL_STATE_SCHEMA, DETAIL_WORKFLOW,
+    )
+
+    class DetailProvider(_SyntheticAnchoredProvider):
+        def identity_payload(self):
+            return {**super().identity_payload(), 'schema': DETAIL_PROVIDER_SCHEMA,
+                    'training_state_schema': DETAIL_STATE_SCHEMA, 'workflow': DETAIL_WORKFLOW,
+                    'member_routing_schema': DETAIL_CORE_SCHEMA}
+
+        def training_state_dict(self):
+            return {**super().training_state_dict(), 'schema': DETAIL_STATE_SCHEMA}
+
+        def load_training_state_dict(self, state):
+            if state.get('schema') != DETAIL_STATE_SCHEMA:
+                raise ValueError('Synthetic Detail provider state schema differs.')
+            super().load_training_state_dict({**state, 'schema': TRAINING_STATE_SCHEMA})
+
+    def start(clean_stop_at=None):
+        model, _ = _start(ARM_DETAIL)
+        provider = DetailProvider(ARM_DETAIL, clean_stop_at=clean_stop_at)
+        provider.recipe['model'] = {'schema': DETAIL_CORE_SCHEMA, 'architecture': ARM_DETAIL,
+                                    'access_measure': measure}
+        return model, provider
+
+    model, provider = start(clean_stop_at=1)
+    identity = {'workflow': DETAIL_WORKFLOW, 'architecture': ARM_DETAIL,
+                'member_routing_schema': DETAIL_CORE_SCHEMA, 'recipe': copy.deepcopy(provider.recipe),
+                'provider_schema': DETAIL_PROVIDER_SCHEMA, 'fixture_kind': 'synthetic_engine_resume'}
+    config = replace(_engine_config(), monitor_epochs=(1,), checkpoint_epochs=(1, 2, _EPOCH_HORIZON))
+    engine = TrainingEngine(config, device='cpu')
+    split_dir = tmp_path / 'split'
+    stopped = engine.fit(model, provider, split_dir, identity=identity, arm=ARM_DETAIL, stop_after=2)
+    assert stopped['status'] == 'clean_stopped' and stopped['completed_epoch'] == 1
+    model, provider = start()
+    resumed = engine.fit(model, provider, split_dir, identity=identity, arm=ARM_DETAIL, stop_after=2,
+                         resume_checkpoint=resolve_checkpoint(split_dir, 'latest'))
+    assert resumed['completed_epoch'] == 2
+    control_model, control_provider = start()
+    control_dir = tmp_path / 'control'
+    engine.fit(control_model, control_provider, control_dir, identity=identity, arm=ARM_DETAIL, stop_after=2)
+    resumed_state = torch.load(resolve_checkpoint(split_dir, 'latest'), map_location='cpu', weights_only=False)
+    control_state = torch.load(resolve_checkpoint(control_dir, 'latest'), map_location='cpu', weights_only=False)
+    for name in ('model_state_dict', 'optimizer_state_by_name', 'rng_state', 'sampler_state',
+                 'provider_training_state', 'optimizer_schedule_contract', 'experiment_identity'):
+        _assert_nested_exact(resumed_state[name], control_state[name], name)
+    assert resumed_state['epoch'] == control_state['epoch'] == 2
+
+
 @pytest.mark.parametrize("architecture", (ARM_A, ARM_L))
 def test_r13_8_completed_100_horizon_extends_to_500_with_exact_101_recovery(tmp_path, architecture):
     """Exercise the formal endpoint's changing execution horizon, not only a pause."""

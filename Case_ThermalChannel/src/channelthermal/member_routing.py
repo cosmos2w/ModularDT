@@ -22,13 +22,13 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
         if core is None:
             if not isinstance(core_config, Mapping):
                 raise TypeError("InteractionReusedMemberRoutingCore requires a saved model configuration.")
-            if self.CORE_SCHEMA == "interaction_reused_detail_anchored_member_routing_v1":
-                from honf_forward_core.interaction_reused_member_routing.r14 import DetailAnchoredMemberRoutingCore
-                core_type = DetailAnchoredMemberRoutingCore
+            from honf_forward_core.interaction_reused_member_routing import (
+                InteractionReusedMemberRoutingCore, anchored_core_from_config,
+            )
+            if core_config.get("schema") == InteractionReusedMemberRoutingCore.schema:
+                core = InteractionReusedMemberRoutingCore.from_config(dict(core_config))
             else:
-                from honf_forward_core.interaction_reused_member_routing.anchored import AnchoredMemberRoutingCore
-                core_type = AnchoredMemberRoutingCore
-            core = core_type.from_config(dict(core_config))
+                core = anchored_core_from_config(core_config)
         if getattr(core, "schema", None) != self.CORE_SCHEMA:
             raise ValueError(f"Thermal member-routing adapter requires {self.CORE_SCHEMA}.")
         super().__init__(normalization_stats, core=core, heat_scale=heat_scale, nx=nx, ny=ny,
