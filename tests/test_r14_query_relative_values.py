@@ -1,9 +1,12 @@
 """R14 selected-message and checkpoint contracts."""
 import copy
+import math
+import types
 from dataclasses import replace
 
 import pytest
 import torch
+from torch.nn import functional as F
 
 from honf_forward_core.interaction_reused_member_routing.anchored import anchored_row_read
 from honf_forward_core.interaction_reused_member_routing.r14 import DetailAnchoredMemberRoutingCore
@@ -122,3 +125,40 @@ def test_continuity_as_a_cover_row_enters_and_original_id_is_removed():
     roles = out.trace["anchor_read_is_module"]
     assert not ((ids == removed_id) & roles).any()
     assert out.work_counts["query_relative_value_pairs_M"] == out.work_counts["query_anchor_value_reduction_pairs_M"]
+
+
+@pytest.mark.parametrize("mode", ["full", "restricted"])
+def test_factored_query_projection_matches_literal_pair_outputs_and_gradients(mode):
+    model, scene, query = _model_scene_query()
+    reference = copy.deepcopy(model)
+
+    def literal_pair_values(self, prepared, query, qstates, role, batch, qi, slot):
+        values = prepared.member_values_M if role == "M" else prepared.member_values_E
+        geometry = self._pair_geometry(prepared.scene, query, role, torch.stack((batch, qi, slot), -1))
+        relative = geometry[:, :self.coordinate_dim]
+        gamma = [relative]
+        for frequency in (1., 2., 4.):
+            phase = 2 * math.pi * frequency * relative
+            gamma.extend((phase.sin(), phase.cos()))
+        message = F.silu(values[batch, slot] + self.query_value[role](qstates[batch, qi])
+                         + self.relative_value[role](torch.cat(gamma, -1))
+                         + self.local_value[role](geometry[:, -self.coordinate_dim:]))
+        return message, {}
+
+    reference._selected_member_values = types.MethodType(literal_pair_values, reference)
+    out = model.decode(model.prepare(scene), query, intervention={"read_mode": mode})
+    expected = reference.decode(reference.prepare(scene), query, intervention={"read_mode": mode})
+    torch.testing.assert_close(out.joint_fields, expected.joint_fields, rtol=1e-10, atol=1e-11)
+    names = tuple(dict(model.named_parameters()))
+    params, ref_params = dict(model.named_parameters()), dict(reference.named_parameters())
+    grads = torch.autograd.grad(out.joint_fields.square().sum(),
+                                [params[n] for n in names] + [query.coordinates], allow_unused=True, retain_graph=True)
+    expected_grads = torch.autograd.grad(expected.joint_fields.square().sum(),
+                                         [ref_params[n] for n in names] + [query.coordinates], allow_unused=True)
+    for name, actual, wanted in zip(names + ("coordinates",), grads, expected_grads):
+        assert (actual is None) == (wanted is None), name
+        if actual is not None:
+            torch.testing.assert_close(actual, wanted, rtol=2e-8, atol=2e-9, msg=name)
+    for role in ("M", "E"):
+        assert out.work_counts[f"query_value_projection_rows_{role}"] == query.batch_size * query.num_queries
+        assert out.work_counts[f"query_relative_value_pairs_{role}"] == out.work_counts[f"query_anchor_value_reduction_pairs_{role}"]

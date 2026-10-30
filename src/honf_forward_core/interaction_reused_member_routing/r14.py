@@ -18,9 +18,11 @@ class DetailAnchoredMemberRoutingCore(AnchoredMemberRoutingCore):
     schema = "interaction_reused_detail_anchored_member_routing_v1"
     _ANCHOR_COUNT_KEYS = AnchoredMemberRoutingCore._ANCHOR_COUNT_KEYS + (
         "query_relative_value_pairs_M", "query_relative_value_pairs_E",
+        "query_value_projection_rows_M", "query_value_projection_rows_E",
     )
     _additional_decode_count_keys = AnchoredMemberRoutingCore._additional_decode_count_keys + (
         "query_relative_value_pairs_M", "query_relative_value_pairs_E",
+        "query_value_projection_rows_M", "query_value_projection_rows_E",
     )
 
     def __init__(self, base_model_config: Mapping[str, Any], *, locator_mode: str = "local_e_cover", **kwargs):
@@ -57,10 +59,12 @@ class DetailAnchoredMemberRoutingCore(AnchoredMemberRoutingCore):
             phase = (2.0 * math.pi * frequency) * relative
             gamma.extend((phase.sin(), phase.cos()))
         local = geometry[:, -self.coordinate_dim:]
-        message = F.silu(values + self.query_value[role](qstates[batch, query_index])
+        query_value = self.query_value[role](qstates)
+        message = F.silu(values + query_value[batch, query_index]
                          + self.relative_value[role](torch.cat(gamma, dim=-1))
                          + self.local_value[role](local))
-        return message, {f"query_relative_value_pairs_{role}": slot.numel()}
+        return message, {f"query_relative_value_pairs_{role}": slot.numel(),
+                         f"query_value_projection_rows_{role}": query.batch_size * query.num_queries}
 
 
 __all__ = ["DetailAnchoredMemberRoutingCore"]
