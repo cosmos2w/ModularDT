@@ -12,7 +12,7 @@ import re
 import numpy as np
 
 from .organization_connectivity import select_connections, select_native_rows
-from .organization_data import FigureArtifact, OrganizationScene, require_matched
+from .organization_data import FigureArtifact, OrganizationScene, decorate_domain, require_matched
 from .organization_hyperedges import _ellipse_layout
 
 
@@ -34,6 +34,7 @@ class NativeHyperedgeView:
     connection_kind: str = "actual_mm"
     connection_provenance: str | None = None
     metadata: dict = field(default_factory=dict)
+    layout: OrganizationScene | None = None
 
 
 def view_from_scene(scene: OrganizationScene) -> NativeHyperedgeView:
@@ -42,6 +43,7 @@ def view_from_scene(scene: OrganizationScene) -> NativeHyperedgeView:
         own_columns=scene.own_columns, module_connections=scene.gates.get("mm"),
         connection_provenance=scene.provenance.get("mm"),
         metadata={**scene.identity(), "row_semantics": "native E-address restricted directory"},
+        layout=scene,
     )
 
 
@@ -67,6 +69,8 @@ def _validate_views(views: list[NativeHyperedgeView]) -> None:
             raise ValueError("Connections must be actual_mm or explicitly derived association.")
         if view.module_connections is not None and np.shape(view.module_connections) != (view.n_m, view.n_m):
             raise ValueError("Module connections must follow original active M IDs.")
+        if view.layout is not None and view.layout.member_labels != view.member_labels:
+            raise ValueError("The physical layout must preserve the view's original member IDs.")
 
 
 def _page_plan(view, rows, threshold, capacity):
@@ -160,6 +164,74 @@ def _verify_intersections(positions, geometry, expected):
         actual |= (((u/semi[0])**2+(v/semi[1])**2) < 1).astype(int) << edge
     if not np.array_equal(actual, expected):
         raise ValueError("Presentation geometry changed an original-member intersection.")
+
+
+def _render_layout_locator(fig, view, page, colors, *, wide):
+    """Locate real original members without assigning geometry to abstract sets."""
+    scene = view.layout
+    if scene is None:
+        return {"available": False}
+    rectangle = [.785, .035, .195, .17] if wide else [.775, .035, .205, .20]
+    ax = fig.add_axes(rectangle, label="physical_layout_locator")
+    ax.scatter(*scene.environment_xy.T, s=3, color="#BAC4CA", zorder=1)
+    decorate_domain(ax, scene)
+    module_labels = []
+    for label, xy in zip(scene.m_ids, scene.module_xy):
+        module_labels.append(ax.text(*xy, label, ha="center", va="center", fontsize=8.5,
+                                     weight="bold", color="#2A465C", zorder=4))
+    ax.set(xticks=[], yticks=[], xlabel="", ylabel="")
+    ax.set_title("Layout", fontsize=15, pad=5)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    occupied = [label.get_window_extent(renderer).expanded(1.12, 1.2) for label in module_labels]
+    anchors = []
+    if view.own_columns is not None:
+        member_xy = np.concatenate([scene.module_xy, scene.environment_xy])
+        for row in page:
+            column = int(view.own_columns[row])
+            xy = member_xy[column]
+            label = view.member_labels[column]
+            ax.scatter(*xy, s=35, color=colors[row], edgecolor="white", linewidth=.6, zorder=5)
+            # Keep labels toward the interior at domain edges.
+            right = xy[0] <= (scene.bounds[0] + scene.bounds[1]) / 2
+            above = xy[1] <= (scene.bounds[2] + scene.bounds[3]) / 2
+            annotation = ax.annotate(
+                label, xy, xytext=(4, 5), textcoords="offset points", fontsize=10.5,
+                color=colors[row], weight="bold", zorder=6,
+                bbox={"facecolor": "white", "edgecolor": "none", "pad": .2, "alpha": .9})
+            # Prefer the domain interior, then avoid actual module IDs and
+            # previously placed anchors using display-space text extents.
+            sx, sy = 1 if right else -1, 1 if above else -1
+            candidates = [(sx, sy), (sx, -sy), (-sx, sy), (-sx, -sy)]
+            def place(direction):
+                sx, sy = direction
+                annotation.set_position((4 * sx, 5 * sy))
+                annotation.set_ha("left" if sx > 0 else "right")
+                annotation.set_va("bottom" if sy > 0 else "top")
+                return annotation.get_window_extent(renderer)
+            def overlap(box, other):
+                return max(0., min(box.x1, other.x1) - max(box.x0, other.x0)) * max(
+                    0., min(box.y1, other.y1) - max(box.y0, other.y0))
+            scores = []
+            for direction in candidates:
+                box = place(direction)
+                outside = box.width * box.height - overlap(box, ax.bbox)
+                scores.append(4 * outside + sum(overlap(box, other) for other in occupied))
+            box = place(candidates[int(np.argmin(scores))])
+            occupied.append(box.expanded(1.05, 1.1))
+            anchors.append({"native_row": int(row), "native_label": view.row_labels[row],
+                            "original_member": label, "physical_xy": xy.tolist(),
+                            "label_offset_points": list(annotation.get_position()),
+                            "label_placement_score_px2": float(min(scores))})
+    for spine in ax.spines.values():
+        spine.set_color("#7B8790")
+        spine.set_linewidth(.8)
+    return {"available": True, "coordinate_units": scene.identity()["coordinate_units"],
+            "bounds": list(scene.bounds), "module_ids": list(scene.m_ids),
+            "module_xy": scene.module_xy.tolist(),
+            "module_radius": scene.module_radius.tolist() if scene.module_radius is not None else None,
+            "selected_anchors": anchors, "requested_figure_bounds": rectangle,
+            "interpretation": "Physical layout and original anchor coordinates; abstract set geometry is separate."}
 
 
 def render_native_connectivity(
@@ -267,17 +339,19 @@ def render_native_connectivity(
             glyphs = [Line2D([], [], marker="s", color="none", markerfacecolor="#2A465C", markersize=10, label="Original M"),
                       Line2D([], [], marker="o", color="none", markerfacecolor="white", markeredgecolor="#2A465C", markersize=8, label="Original E")]
             if wide:
+                has_layout = view.layout is not None
                 for rect, items, title, columns in (
-                        ([.035, .02, .31, .155], handles, "Native hyperedges", 2),
-                        ([.36, .02, .43, .155], lower if view.module_connections is not None else [], line_title, 3),
-                        ([.82, .02, .17, .155], glyphs, None, 1)):
+                        ([.025, .025, .23 if has_layout else .31, .155], handles, "Native hyperedges", 2),
+                        ([.42 if has_layout else .36, .025, .35 if has_layout else .43, .155], lower if view.module_connections is not None else [], line_title, 3),
+                        ([.265 if has_layout else .82, .025, .145 if has_layout else .17, .155], glyphs, None, 1)):
                     legend = fig.add_axes(rect); legend.axis("off")
                     if items:
                         legend.legend(handles=items, loc="center", title=title, ncol=columns,
-                                      fontsize=16, title_fontsize=17, frameon=False,
-                                      borderpad=0, columnspacing=1., handlelength=1.4)
+                                      fontsize=15 if has_layout else 16, title_fontsize=16 if has_layout else 17,
+                                      frameon=False, borderpad=0, columnspacing=.8, handlelength=1.2)
             else:
-                legend = fig.add_axes([.775, .14, .215, .69]); legend.axis("off")
+                legend = fig.add_axes([.775, .30, .215, .57] if view.layout is not None
+                                      else [.775, .14, .215, .69]); legend.axis("off")
                 upper = legend.legend(handles=handles, loc="upper left", title="Native hyperedges", fontsize=18,
                                       title_fontsize=19, frameon=False, borderpad=0, handlelength=1.4)
                 legend.add_artist(upper)
@@ -286,6 +360,7 @@ def render_native_connectivity(
                                                 fontsize=17, title_fontsize=18, frameon=False, borderpad=0)
                     legend.add_artist(line_legend)
                 legend.legend(handles=glyphs, loc="lower left", fontsize=17, frameon=False, borderpad=0)
+            locator = _render_layout_locator(fig, view, page, colors, wide=wide)
             case = view.metadata.get("case", view.metadata.get("case_id", ""))
             page_label = f" · page {page_index}/{len(pages)}" if len(pages) > 1 else ""
             edge_label = "hyperedge" if len(rows) == 1 else "hyperedges"
@@ -303,7 +378,7 @@ def render_native_connectivity(
                 f"{case}, {view.metadata.get('partition', 'saved scene')}, epoch {view.metadata.get('epoch', 'unspecified')}. "
                 f"{view.metadata.get('row_semantics', 'Native organization rows')}. "
                 f"{'Automatic profile selection' if edges == 'auto' else 'Explicit native-row selection'} uses resolution {resolution:g}, coverage quantile {coverage:g}; "
-                f"{len(rows)} actual native rows selected from {len(view.row_labels)}; "
+                f"{len(rows)} actual native {'row' if len(rows) == 1 else 'rows'} selected from {len(view.row_labels)}; "
                 f"{100*selection['covered_fraction']:.1f}% of native rows are within that profile distance; "
                 f"residual quantile {selection['quantile_distance']:.3g}. "
                 f"Displayed native rows: {', '.join(view.row_labels[i] for i in page)}. "
@@ -311,6 +386,8 @@ def render_native_connectivity(
                 f"Displayed row mass: {row_mass}. {line_meaning}; {len(displayed_connections)} lines shown, "
                 f"using the three fixed coefficient bins in the legend after strongest-incoming-{max_incoming} and global-{max_connections} display limits. "
                 "Original weights, omitted members/lines and cross-page incidence remain in numerical evidence. "
+                + ("The layout inset retains physical module footprints and the selected original anchor coordinates. "
+                   if locator["available"] else "") +
                 "Ellipses encode exact displayed membership; abstract area/distance and display assignments have no physical group-count meaning."
             )
             evidence = {
@@ -324,7 +401,9 @@ def render_native_connectivity(
                 "connections": connections, "displayed_connections": displayed_connections,
                 "displayed_connection_weight": line_sum,
                 "displayed_fraction_of_full_connection_mass": line_sum / positive_total if positive_total else None,
-                "query_arrays_used": False, "physical_geometry_encoded": False,
+                "query_arrays_used": False, "physical_geometry_encoded": locator["available"],
+                "abstract_panel_encodes_physical_geometry": False,
+                "layout_locator": locator,
             }
             artifacts.append(_save(fig, output, stem, "Native hyperedges with connectivity", caption, evidence))
     return artifacts

@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from honf_viz import organization_connected_hyperedges as drawing
+from honf_viz.organization_data import OrganizationScene
 from honf_viz.organization_hyperedges import _ellipse_layout
 
 
@@ -113,3 +114,33 @@ def test_wide_presentation_preserves_ellipse_quadratic_distances():
     np.testing.assert_allclose(quadratic(points, old), quadratic(mapped, new), rtol=1e-12, atol=1e-12)
     assert "presentation_affine_map" in new
     assert not np.array_equal(points, mapped)
+
+
+@pytest.mark.parametrize("count", [2, 4])
+def test_layout_locator_preserves_original_geometry_and_anchor_identity(capture, count):
+    native = view(count)
+    modules = np.array([[2., 3.], [9., 4.]])
+    environment = np.column_stack([np.arange(count) * 2. + 1., np.ones(count)])
+    if count == 4:
+        environment[-1] = [9.25, 4.875]  # Preferred lower label would cover M4.
+    scene = OrganizationScene(
+        native.name, Path("saved-scene.npz"), {"coordinate_units": "m"},
+        native.member_labels[:2], native.member_labels[2:], modules, environment,
+        native.weights, {}, {}, np.array([.4, .6]), None, (0., 12., 0., 6.), "C_restricted")
+    native = replace(native, own_columns=2 + np.arange(count), layout=scene)
+    result = drawing.render_native_connectivity([native], Path("memory"), edges=count)[0].evidence
+    locator = result["layout_locator"]
+    assert locator["available"] and locator["coordinate_units"] == "m"
+    assert locator["module_ids"] == ["M17", "M4"]
+    np.testing.assert_array_equal(locator["module_xy"], modules)
+    assert locator["module_radius"] == [.4, .6] and locator["bounds"] == [0., 12., 0., 6.]
+    for anchor in locator["selected_anchors"]:
+        row = anchor["native_row"]
+        assert anchor["original_member"] == f"E{row}"
+        np.testing.assert_array_equal(anchor["physical_xy"], environment[row])
+        if count == 4 and row == count - 1:
+            assert anchor["label_offset_points"][1] > 0
+            assert anchor["label_placement_score_px2"] == 0
+    assert result["physical_geometry_encoded"]
+    assert not result["abstract_panel_encodes_physical_geometry"]
+    np.testing.assert_array_equal(native.weights, scene.C)
