@@ -352,7 +352,8 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                 "interaction_reused_faithful_member_routing_training_v1",
                 "interaction_reused_typed_organization_member_routing_training_v1",
                 "interaction_reused_single_distribution_member_routing_training_v1",
-                "interaction_reused_e_anchored_member_routing_training_v1"}:
+                "interaction_reused_e_anchored_member_routing_training_v1",
+                "interaction_reused_detail_anchored_member_routing_training_v1"}:
             if allow_microbatch_change:
                 raise ValueError(message)
             saved, current = (json.loads(json.dumps(value)) for value in (saved, current))
@@ -365,9 +366,9 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             expected_previous = list(range(first_milestone, before + 1, 100)) if type(before) is int else None
             expected_proposed = list(range(first_milestone, after + 1, 100)) if type(after) is int else None
             guided = saved.get("workflow") == "interaction_reused_member_routing_joint_training_v3"
-            if guided:
-                # v3 continuation may explicitly change output cadence while
-                # extending execution. Keep every scientific identity field exact.
+            detail = saved.get("workflow") == "interaction_reused_detail_anchored_member_routing_training_v1"
+            if guided or detail:
+                # Explicit sparse milestone policies do not alter the scientific identity.
                 def valid_milestones(values, horizon):
                     return (type(horizon) is int and isinstance(values, list) and bool(values)
                             and all(type(value) is int and 0 < value <= horizon for value in values)
@@ -375,8 +376,8 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
 
                 if (not valid_milestones(declared_previous, before)
                         or not valid_milestones(declared_proposed, after)
-                        or type(current["engine_config"].get("curve_every", 10)) is not int
-                        or current["engine_config"].get("curve_every", 10) < 1):
+                        or (guided and (type(current["engine_config"].get("curve_every", 10)) is not int
+                                        or current["engine_config"].get("curve_every", 10) < 1))):
                     raise ValueError(message)
                 expected_previous, expected_proposed = declared_previous, declared_proposed
             if (type(before) is not int or type(after) is not int or before < 100 or after <= before
@@ -398,7 +399,7 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                 "optimizer_schedule_unchanged": True,
                 **({"output_policy": {"checkpoint_epochs": declared_proposed,
                                       "curve_every": current["engine_config"].get("curve_every", 10)}}
-                   if guided else {}),
+                   if guided or detail else {}),
                 "trajectory_note": "Native objective, constant AdamW rate, provider recipe, data, sampling, and all other run identity fields remain unchanged.",
             }
         # Checkpoints retain tuples while the identity sidecar is JSON.

@@ -369,6 +369,49 @@ def test_detail_workflow_engine_state_resumes_exactly(tmp_path, measure):
     assert resumed_state['epoch'] == control_state['epoch'] == 2
 
 
+def test_detail_horizon_extension_preserves_engine_resume_state(tmp_path):
+    from channelthermal.training.r13_8_anchored_task import ARM_DETAIL, DETAIL_WORKFLOW
+    from honf_runtime.unified_training import _resume_identity_amendment
+
+    identity = {**_identity(ARM_DETAIL), 'workflow': DETAIL_WORKFLOW}
+    initial = replace(_engine_config(), monitor_epochs=(1,), checkpoint_epochs=(100, 200, 300, 400, 500))
+    extended = replace(initial, total_epochs=5000, checkpoint_epochs=(500, 1000, 2500, 5000))
+    split = tmp_path / 'detail_extension'
+    model, provider = _start(ARM_DETAIL, clean_stop_at=1)
+    TrainingEngine(initial, device='cpu').fit(model, provider, split, identity=identity,
+                                             arm=ARM_DETAIL, stop_after=2)
+    source = torch.load(resolve_checkpoint(split, 'latest'), map_location='cpu', weights_only=False)
+    model, provider = _start(ARM_DETAIL)
+    result = TrainingEngine(extended, device='cpu').fit(
+        model, provider, split, identity=identity, arm=ARM_DETAIL, stop_after=2,
+        resume_checkpoint=resolve_checkpoint(split, 'latest'), allow_horizon_extension=True)
+    assert result['completed_epoch'] == 2
+    resumed = torch.load(resolve_checkpoint(split, 'latest'), map_location='cpu', weights_only=False)
+    model, provider = _start(ARM_DETAIL)
+    control_dir = tmp_path / 'detail_extension_control'
+    TrainingEngine(extended, device='cpu').fit(model, provider, control_dir, identity=identity,
+                                              arm=ARM_DETAIL, stop_after=2)
+    control = torch.load(resolve_checkpoint(control_dir, 'latest'), map_location='cpu', weights_only=False)
+    for key in ('model_state_dict', 'optimizer_state_by_name', 'rng_state', 'sampler_state',
+                'provider_training_state', 'optimizer_schedule_contract', 'experiment_identity'):
+        _assert_nested_exact(resumed[key], control[key], key)
+    amendment = resumed['resume_amendments'][-1]
+    assert amendment['output_policy']['checkpoint_epochs'] == [500, 1000, 2500, 5000]
+    assert amendment['optimizer_schedule_unchanged'] is True
+    saved, current = source['experiment_identity'], resumed['experiment_identity']
+    with pytest.raises(ValueError, match='identity'):
+        _resume_identity_amendment(saved, current)
+    for key, value in (('curve_every', 5), ('seed', 999), ('checkpoint_epochs', [500, 500])):
+        changed = copy.deepcopy(current)
+        changed['engine_config'][key] = value
+        with pytest.raises(ValueError, match='identity'):
+            _resume_identity_amendment(saved, changed, allow_horizon_extension=True)
+    changed = copy.deepcopy(current)
+    changed['recipe']['training']['optimizer_schedule_horizon'] = 5000
+    with pytest.raises(ValueError, match='identity'):
+        _resume_identity_amendment(saved, changed, allow_horizon_extension=True)
+
+
 @pytest.mark.parametrize("architecture", (ARM_A, ARM_L))
 def test_r13_8_completed_100_horizon_extends_to_500_with_exact_101_recovery(tmp_path, architecture):
     """Exercise the formal endpoint's changing execution horizon, not only a pause."""
