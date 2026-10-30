@@ -369,6 +369,68 @@ def test_detail_workflow_engine_state_resumes_exactly(tmp_path, measure):
     assert resumed_state['epoch'] == control_state['epoch'] == 2
 
 
+def test_detail_query_tile_change_preserves_resume_state(tmp_path):
+    from channelthermal.training.r13_8_anchored_task import ARM_DETAIL, DETAIL_WORKFLOW
+    from honf_runtime.unified_training import _resume_identity_amendment
+
+    class TileProvider(_SyntheticAnchoredProvider):
+        def __init__(self, tile):
+            super().__init__(ARM_DETAIL)
+            self.recipe['member_routing'] = {'model': {
+                'schema': 'interaction_reused_detail_anchored_member_routing_v1',
+                'architecture': ARM_DETAIL, 'query_tile_size': tile}}
+
+        def identity_payload(self):
+            return {**super().identity_payload(), 'adapter_state': {
+                'core': copy.deepcopy(self.recipe['member_routing']['model'])}}
+
+    def start(tile):
+        model, _ = _start(ARM_DETAIL)
+        provider = TileProvider(tile)
+        identity = {**_identity(ARM_DETAIL), 'workflow': DETAIL_WORKFLOW,
+                    'recipe': copy.deepcopy(provider.recipe)}
+        return model, provider, identity
+
+    config = replace(_engine_config(), checkpoint_epochs=(1, 2), monitor_epochs=(1,))
+    model, provider, identity = start(128)
+    run = tmp_path / 'tile_resume'
+    TrainingEngine(config, device='cpu').fit(model, provider, run, identity=identity,
+                                             arm=ARM_DETAIL, stop_after=1)
+    source = torch.load(resolve_checkpoint(run, 'latest'), map_location='cpu', weights_only=False)
+    model, provider, identity = start(512)
+    TrainingEngine(config, device='cpu').fit(model, provider, run, identity=identity,
+        arm=ARM_DETAIL, stop_after=2, resume_checkpoint=resolve_checkpoint(run, 'latest'),
+        allow_query_tile_change=True)
+    resumed = torch.load(resolve_checkpoint(run, 'latest'), map_location='cpu', weights_only=False)
+    model, provider, identity = start(512)
+    control_dir = tmp_path / 'tile_control'
+    TrainingEngine(config, device='cpu').fit(model, provider, control_dir, identity=identity,
+                                             arm=ARM_DETAIL, stop_after=2)
+    control = torch.load(resolve_checkpoint(control_dir, 'latest'), map_location='cpu', weights_only=False)
+    for key in ('model_state_dict', 'optimizer_state_by_name', 'rng_state', 'sampler_state',
+                'provider_training_state', 'optimizer_schedule_contract', 'experiment_identity'):
+        _assert_nested_exact(resumed[key], control[key], key)
+    amendment = resumed['resume_amendments'][-1]
+    assert amendment['kind'] == 'explicit_query_tile_continuation'
+    assert amendment['query_tile_size_before'] == 128 and amendment['query_tile_size'] == 512
+    saved, current = source['experiment_identity'], resumed['experiment_identity']
+    with pytest.raises(ValueError, match='identity'):
+        _resume_identity_amendment(saved, current)
+    for path, value in ((('engine_config', 'seed'), 99),
+                        (('engine_config', 'total_epochs'), 5000),
+                        (('provider_identity', 'adapter_state', 'core', 'query_tile_size'), 256),
+                        (('provider_identity', 'adapter_state', 'core', 'query_tile_size'), True),
+                        (('provider_identity', 'recipe', 'training', 'optimizer_schedule_horizon'), 5000),
+                        (('recipe', 'member_routing', 'model', 'architecture'), 'other')):
+        changed = copy.deepcopy(current)
+        target = changed
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        with pytest.raises(ValueError, match='identity'):
+            _resume_identity_amendment(saved, changed, allow_query_tile_change=True)
+
+
 def test_detail_horizon_extension_preserves_engine_resume_state(tmp_path):
     from channelthermal.training.r13_8_anchored_task import ARM_DETAIL, DETAIL_WORKFLOW
     from honf_runtime.unified_training import _resume_identity_amendment

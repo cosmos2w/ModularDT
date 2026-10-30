@@ -333,11 +333,44 @@ def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
 
 def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, Any],
                                *, allow_microbatch_change: bool = False,
-                               allow_horizon_extension: bool = False) -> dict[str, Any] | None:
-    """Permit explicit packing or execution-horizon changes; keep scientific schedules sealed."""
+                               allow_horizon_extension: bool = False,
+                               allow_query_tile_change: bool = False) -> dict[str, Any] | None:
+    """Permit explicit packing, query tiling or horizon changes; preserve scientific schedules."""
     if saved == current:
         return None
     message = "Checkpoint identity, engine config, selection or optimizer schedule differs."
+    if allow_query_tile_change:
+        if (allow_microbatch_change or saved.get("workflow") !=
+                "interaction_reused_detail_anchored_member_routing_training_v1"):
+            raise ValueError(message)
+        before, after = (json.loads(json.dumps(value)) for value in (saved, current))
+        paths = (("recipe", "member_routing", "model"),
+                 ("provider_identity", "recipe", "member_routing", "model"),
+                 ("provider_identity", "adapter_state", "core"))
+        old_sizes, new_sizes = [], []
+        for path in paths:
+            old, new = before, after
+            for key in path:
+                if not isinstance(old, dict) or not isinstance(new, dict):
+                    raise ValueError(message)
+                old, new = old.get(key, {}), new.get(key, {})
+            if not isinstance(old, dict) or not isinstance(new, dict):
+                raise ValueError(message)
+            old_size, new_size = old.get("query_tile_size"), new.get("query_tile_size")
+            if (old.get("schema") != "interaction_reused_detail_anchored_member_routing_v1"
+                    or new.get("schema") != old["schema"]
+                    or type(old_size) is not int or old_size < 1
+                    or type(new_size) is not int or new_size < 1):
+                raise ValueError(message)
+            old_sizes.append(old_size)
+            new_sizes.append(new_size)
+            old["query_tile_size"] = new_size
+        if (len(set(old_sizes)) != 1 or len(set(new_sizes)) != 1
+                or old_sizes == new_sizes or before != after):
+            raise ValueError(message)
+        return {"kind": "explicit_query_tile_continuation", "query_tile_size_before": old_sizes[0],
+                "query_tile_size": new_sizes[0], "optimizer_schedule_unchanged": True,
+                "trajectory_note": "Only query partitioning changes; weights, moments, RNG, data, sampling, objective and activation checkpointing are retained. Floating-point reduction order can differ."}
     if allow_horizon_extension:
         if saved.get("workflow") == "spatial_interaction_groups_joint_training_v1":
             if allow_microbatch_change:
@@ -3765,6 +3798,7 @@ class TrainingEngine:
         clean_stop_name: str = "CLEAN_STOP_REQUEST.json",
         allow_microbatch_change: bool = False,
         allow_horizon_extension: bool = False,
+        allow_query_tile_change: bool = False,
         external_state_continuation: bool = False,
         mathematical_route_branch: Mapping[str, Any] | None = None,
         joint_core_revision: Mapping[str, Any] | None = None,
@@ -4547,7 +4581,8 @@ class TrainingEngine:
             else:
                 amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
                     allow_microbatch_change=allow_microbatch_change,
-                    allow_horizon_extension=allow_horizon_extension)
+                    allow_horizon_extension=allow_horizon_extension,
+                    allow_query_tile_change=allow_query_tile_change)
             if readout_extension_amendment is not None:
                 if amendment is not None:
                     raise ValueError("Round6 extension receipt cannot be combined with another resume amendment.")
