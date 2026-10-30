@@ -21,15 +21,34 @@ def main() -> int:
     parser.add_argument("--directory-key", default="C_restricted")
     parser.add_argument("--cycle", type=int, help="actual contextual cycle to display; default last saved cycle")
     parser.add_argument("--per-role", type=int, default=2, help="shared M/E examples per role in service plots")
-    parser.add_argument("--edges", type=int, choices=(1, 2, 3), default=3,
-                        help="representative native rows displayed, not a learned group count")
+    parser.add_argument("--edges", default="auto", metavar="auto|N",
+                        help="adaptive native-row selection (default), or an explicit count; not learned groups")
+    parser.add_argument("--edge-resolution", type=float, default=.5,
+                        help="nearest normalized native-profile distance for adaptive selection")
+    parser.add_argument("--edge-coverage", type=float, default=.9,
+                        help="native-row distance quantile used by adaptive selection")
+    parser.add_argument("--max-edges", type=int, default=4, help="compact adaptive display budget; actual coverage is reported")
+    parser.add_argument("--edges-per-page", type=int, choices=(1, 2, 3, 4), default=4,
+                        help="exact-set page capacity; total selected count is chosen independently")
+    parser.add_argument("--connection-incoming", type=int, default=1,
+                        help="strongest positive actual MM donor gates per receiver for display")
+    parser.add_argument("--connection-limit", type=int, default=8,
+                        help="maximum actual MM arrows displayed per native-membership page")
     parser.add_argument("--e-display-threshold", type=float, default=.02,
                         help="visual-only directory weight threshold; all positive M and own E remain")
     args = parser.parse_args()
+    if args.edges != "auto":
+        try:
+            args.edges = int(args.edges)
+        except ValueError:
+            parser.error("edges must be auto or a positive native-row count.")
     if not 1 <= len(args.scene) <= 2:
         parser.error("Supply one or two scenes; generate separate matched reports for larger collections.")
-    if args.per_role < 1 or args.e_display_threshold < 0:
-        parser.error("per-role must be positive and e-display-threshold nonnegative.")
+    if (args.per_role < 1 or args.e_display_threshold < 0 or args.edge_resolution < 0
+            or not 0 < args.edge_coverage <= 1 or args.max_edges < 1
+            or args.connection_incoming < 0 or args.connection_limit < 0
+            or (args.edges != "auto" and args.edges < 1)):
+        parser.error("Invalid service, native-row selection, E-threshold or connection display setting.")
     # This command never imports the training runtime, torch or a model loader.
     args.output.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(args.output / "tmp" / "matplotlib"))
@@ -38,7 +57,7 @@ def main() -> int:
     from honf_viz.organization_data import load_scene, require_matched
     from honf_viz.organization_overview import render_overview, render_incidence
     from honf_viz.organization_services import render_donor_services, render_incoming_neighborhoods
-    from honf_viz.organization_hyperedges import render_native_hyperedges
+    from honf_viz.organization_connected_hyperedges import render_connectivity_hyperedges
 
     scenes = []
     for value in args.scene:
@@ -54,12 +73,19 @@ def main() -> int:
     contextual = all(set(scene.gates) == {"mm", "em", "ee", "me"} for scene in scenes)
     if contextual:
         figures.append(render_incoming_neighborhoods(scenes, args.output, per_role=args.per_role))
-    figures.append(render_native_hyperedges(scenes, args.output,
-                                           e_threshold=args.e_display_threshold, edges=args.edges))
+    figures.extend(render_connectivity_hyperedges(
+        scenes, args.output, e_threshold=args.e_display_threshold, edges=args.edges,
+        resolution=args.edge_resolution, coverage=args.edge_coverage, max_edges=args.max_edges,
+        per_page=args.edges_per_page, max_incoming=args.connection_incoming,
+        max_connections=args.connection_limit))
     evidence = {"scenes": [s.identity() for s in scenes], "query_arrays_used": False,
                 "model_or_checkpoint_loaded": False, "contextual_figure_available": contextual,
                 "visual_parameters": {"per_role": args.per_role, "edges": args.edges,
-                                      "e_display_threshold": args.e_display_threshold},
+                                      "e_display_threshold": args.e_display_threshold,
+                                      "edge_resolution": args.edge_resolution, "edge_coverage": args.edge_coverage,
+                                      "max_edges": args.max_edges, "edges_per_page": args.edges_per_page,
+                                      "connection_incoming": args.connection_incoming,
+                                      "connection_limit": args.connection_limit},
                 "figures": {item.stem: item.evidence for item in figures}}
     (args.output / "evidence.json").write_text(json.dumps(evidence, indent=2, allow_nan=False) + "\n")
     text = ["# Global HONF organization", "", "This gallery shows prepared scene-wide information organization. Query invocation is a separate supplementary view. Original member identities and weights are retained; all display selections and permutations are recorded in evidence.json.", "",

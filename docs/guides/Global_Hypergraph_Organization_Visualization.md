@@ -57,20 +57,78 @@ The directory has E receiver rows only. To show additional M receivers, overlay 
 For a receiver-centered interpretation, combine actual incoming gate rows rather than directory columns: an M receiver gets `[MM[m,:], ME[m,:]]`, and an E receiver gets `[EM[a,:], EE[a,:]]`. This exposes all four exchange routes in a consistent quantity. E-cell color marks incoming E gates; highlighted M symbols and arrows mark incoming M gates. A red receiver symbol has a different meaning from a donor marker and must be identified in the legend.
 
 
-## 4. Native overlapping hyperedges
+## 4. Native overlapping hyperedges and selective connectivity
 
-Use original M/E members as vertices and actual directory rows as hyperedges. Large, labeled M squares distinguish modules; smaller E circles retain original identities; a colored rim can mark a hyperedge's own E. Select at most three representative rows from the complete prepared directory for a readable exact-intersection diagram. The full global incidence remains the authoritative whole-scene view; a few selected hyperedges are an explanatory sample, not the entire topology.
+A native hyperedge is a stored organization row together with its original M/E members. The relation-anchored models use actual restricted E-address rows $C_{ai}$; Unified hypergraph uses its native M/E seed incidence $B_{si}$; a shared-slot model uses its actual slot memberships. Keep these row definitions and coefficient normalizations explicit. The diagram retains original members as vertices, prominent labeled M squares, E circles, and native rows as colored set boundaries.
 
-The default selection removes own E only from selection profiles, L2-normalizes each model's rows, concatenates the models equally, and chooses representative actual rows by deterministic medoid refinement. Abstract vertices are then placed inside exactly the ellipses corresponding to their memberships. Verify every inside/outside pattern numerically. Tilted ellipses are suitable for a small number of edges; ellipse area, abstract distance and arrangement do not encode physical extent, strength or causality. Keep a small locator for the true anchor coordinates.
+The earlier three-ellipse example below used a manually fixed display count. Three was a plotting choice, not a group count inferred by the organizer. The standard compact view now selects **one to four representative native rows on a single 16:9 page**, and overlays a small number of measured module connections. The complete incidence view remains the scene-wide account of the organization. A compact diagram explains a few actual memberships and interactions without expanding into a large collection of circles.
 
-A visual E threshold is allowed to reduce clutter, but it does not change the model's execution coverage. Always retain actual positive M memberships and actual positive own-E memberships. Never add a zero-weight own E. Record omitted original IDs and weights, and compute each selected edge's shown-mass fraction `η_a = Σ_(i displayed) C[a,i] / Σ_i C[a,i]`. Do not renormalize the displayed weights or report η as prediction fidelity. If an exact-intersection panel exceeds its declared display capacity, show fewer representative edges or choose and disclose another E display threshold; do not silently delete vertices.
+### 4.1 Select a compact, data-dependent number of native rows
 
+Use the entire prepared organization to select examples. For each model $m$, copy its native row matrix and remove actual own-member entries from this selection copy only. L2-normalize each nonzero row; a zero shared row stays zero. For aligned model comparisons, concatenate each model’s normalized profiles with equal model weight:
 
-A dual service-set picture is optional, but its meaning differs: E-address hyperedges become vertices, and one original member becomes the hyperedge of addresses it serves. Label it explicitly as a dual. Do not add original M symbols to a dual diagram while pretending that they have the same vertex meaning as the E addresses, and do not interpret transpose/reverse indexing as an executed reverse exchange.
+$$
+\mathbf p_a^{(m)}=\frac{\overline{\mathbf C}^{(m)}_{a,:}}{\|\overline{\mathbf C}^{(m)}_{a,:}\|_2},\qquad
+\mathbf p_a=\frac{1}{\sqrt{J}}\left[\mathbf p_a^{(1)},\ldots,\mathbf p_a^{(J)}\right],\qquad
+d(a,S)=\min_{s\in S}\|\mathbf p_a-\mathbf p_s\|_2.
+$$
+
+Here $J$ is the number of compared models; original module IDs retain their M role labels. The same construction applies to native $B$ or shared-slot rows. The selection does not average memberships or create synthetic hyperedges.
+
+Begin with the actual row minimizing total profile distance. Add a farthest row, refine the selected rows to medoids, and stop when the 90th percentile of $d(a,S)$ is at most 0.5 or four rows have been selected. These common defaults are display-resolution and readability settings, not model parameters. Keep the same rule across cases and the same actual selected E-address IDs across matched relation-anchored models. Record the complete distance history, selected IDs, assignments and actual coverage:
+
+$$
+\kappa(S)=\frac{1}{N}\sum_{a=1}^{N}\mathbf 1\!\left[d(a,S)\leq0.5\right].
+$$
+
+The figure’s count describes representative rows. A case can need one, two, three or four examples under the same rule; richer native structure is also expressed through memberships, weighted overlap and connections. When the four-row display budget is used, state its actual coverage in the caption and retain the full incidence. Avoid adding more pages by default or adjusting the resolution separately to obtain attractive counts. Larger explicitly requested selections are available for a detailed audit, with complete cross-page incidence retained.
+
+The implementation is [select_native_rows](../../src/honf_viz/organization_connectivity.py). It reads saved membership arrays and returns actual row indices. No prediction error, field target or query-specific weight enters this selection. For examples of different layouts, prefer different naturally selected counts and input-layout strata; retain the candidate inventory and tie rule rather than choosing cases for attractive reconstruction errors.
+
+### 4.2 Draw selective interaction lines with three absolute strength bins
+
+For original M vertices, the default overlay uses the saved actual contextual matrix $G^{MM}$ from a declared cycle. Its entry $G^{MM}_{ij}$ means **M receiver $i$ ← M donor $j$**. Draw the arrow from $j$ to $i$ and encode that recorded coefficient with three line widths:
+
+| Recorded coefficient | Stroke width | Meaning |
+| --- | ---: | --- |
+| $0<G<1/3$ | 1.2 pt | Lower applied gate |
+| $1/3\leq G<2/3$ | 2.6 pt | Middle applied gate |
+| $2/3\leq G\leq1$ | 4.4 pt | Higher applied gate |
+
+These shared absolute bins are visual encodings, not learned classes or measured physical interaction forces. Preserve direction and sequential-stage identity. Offset reciprocal arrows so both directions remain visible. Exclude zero and self entries; never add a reverse arrow by transposing a lookup. Other route overlays are possible only with their actual captured receiver/donor IDs and separate stage labels.
+
+Keep the default page sparse: nominate the strongest positive incoming M gate per receiver, then display at most eight of those arrows, with deterministic original-order ties. Compute this selection on the whole active M inventory before filtering to vertices that are actually visible in the selected hyperedges. Save all selected coefficients, positive counts, omitted counts/weights, the total and displayed gate mass, and any additional omissions caused by invisible endpoints. This is an explanatory interaction backbone; the existing full incoming-neighborhood view in Section 3 still shows every positive M gate for its declared receivers.
+
+Use dark, legible arrows over light set fills, prominent M symbols, and a clear donor→receiver legend. Keep strength bins fixed across matched cases/models. Use color for hyperedge identity and line width for connection coefficient so the two quantities remain distinct. A sparse picture is a display choice; gate positivity and executed work remain in the saved numerical evidence.
+
+A historical model without captured MM gates can use a separately labeled **symmetric shared-membership association**, or omit connection lines. One useful association normalizes each original module’s weights across all native rows, $p_{ih}=A_{ih}/\sum_g A_{ig}$, and computes
+
+$$
+S_{ij}=\sum_h\min(p_{ih},p_{jh})\in[0,1].
+$$
+
+Draw this derived association with undirected dashed lines, its own legend and explicit normalization. It describes similar participation, not an executed contextual exchange; its values are not numerically comparable to $G$. Keep the actual native memberships unchanged. [membership_overlap and select_connections](../../src/honf_viz/organization_connectivity.py) implement these two distinct quantities.
+
+### 4.3 Preserve exact intersections and disclose visual simplification
+
+For every shown original member, its inside/outside pattern must match the selected native rows exactly. The maintained geometry supports one to four genuine ellipses; the four-set construction realizes all fifteen nonempty membership patterns. It can adjust abstract placement for readable IDs while verifying every membership. For three or four rows, use the full page width and place legends below the drawing. A common invertible affine map may spread all vertices and ellipse boundaries together; recompute ellipse parameters and verify every inside/outside pattern after the map. The location, area and distance of an ellipse encode no physical extent or strength. Artist choices must not add or remove a member, change a coefficient, force locality, or merge native rows.
+
+An E display threshold may simplify a dense native row. Preserve every actual positive M membership and actual positive own-member entry, including a positive own E below the threshold. Never add a zero-weight own member. Record omitted original IDs and weights, and compute each row’s displayed fraction $\eta_a=\sum_{i\,\mathrm{shown}}C_{ai}/\sum_i C_{ai}$. Keep this fraction separate from profile coverage $\kappa$, connectivity mass and physical prediction fidelity. Do not renormalize shown weights. If vertex labels crowd, first revise geometry and label placement, then consider a separately disclosed E threshold; keep the row-selection rule and measured connections intact.
+
+![Historical three-edge S/X native hyperedge reference](../../diagnostics/global_organization_reference_v1/figures/06_native_overlapping_hyperedges.png)
+Figure 6. The historical manual three-row example uses h(E50), h(E81) and h(E140), formal S/X epoch 1600, case VAL0678/M10. Positive M and own-E entries are preserved; E threshold 0.02 omits no positive member in these rows, so displayed mass is 100%. It illustrates exact set intersections. The number three is the historical display request. [PDF master](../../diagnostics/global_organization_reference_v1/figures/06_native_overlapping_hyperedges.pdf).
+
+![One representative native hyperedge with measured module arrows in latest-checkpoint case 0278](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/case_0278/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.png)
+Figure 7. Detail-preserving relation-anchored neural field, captured latest checkpoint epoch 567, exposed VAL89 case 0278/M3. The common automatic rule selects one actual native E-address row; lines use recorded cycle-1 MM gates and the three fixed coefficient bins. Abstract membership geometry and directed module exchange are shown together. The [local example gallery](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/README.md) records selected IDs, profile coverage, displayed row mass and omitted connections. [PDF master](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/case_0278/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.pdf).
+
+![Four representative native hyperedges with measured module arrows in latest-checkpoint case 0293](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/case_0293/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.png)
+Figure 8. Same model and captured epoch, exposed VAL89 case 0293/M7. The same selection rule produces four representative native rows on one page. Positive M and own-E memberships are preserved; the caption and saved evidence disclose the E threshold, exact intersections, coefficient bins and display omissions. These four rows are native examples rather than four learned physical groups. The gallery also shows naturally selected two- and three-row cases. [PDF master](../reports/Report_R14/reviews/train600/epoch500/hyperedge_connectivity/case_0293/figures/07_connected_Detail_preserving_relation_anchored_neural_field_page01.pdf).
+
+A dual service-set picture remains optional: E-address hyperedges become vertices, and one original member becomes the hyperedge of addresses it serves. Label the changed definitions explicitly. Keep original-member hyperedges, actual contextual exchange and query invocation separate throughout the evidence.
 
 ## 5. Evidence input and adapter responsibilities
 
-The plotting tool expects one NPZ per scene/checkpoint with adjacent metadata JSON. It accepts one or two matched models. Required arrays follow the table below; padding is accepted only in M slots and is packed out by the loader. Original IDs can be noncontiguous integers or strings, stored without pickled object arrays. The command never reads `query_ids`, `query_xy`, β or targets, even when they coexist in a historical export.
+The plotting tool expects one NPZ per scene/checkpoint with adjacent metadata JSON. It accepts one or two matched models. Required arrays follow the table below; padding is accepted only in M slots and is packed out by the loader. Original IDs can be noncontiguous integers or strings, stored without pickled object arrays. The command never reads `query_ids`, `query_xy`, β or targets, even when they coexist in a historical export. Actual MM connection lines use the separately saved contextual matrix and stage provenance; derived association is an explicit alternative in the native-view Python API.
 
 | Array | Shape | Meaning |
 | --- | --- | --- |
@@ -92,22 +150,27 @@ Adapter-owned polygons take precedence. Otherwise a complete Cartesian coordinat
 
 ## 6. Reproduce the reference and use the API
 
-Run the plotter on saved scene evidence using explicit local input/output paths. This reads arrays only; it does not fit or load a model. Supply one or more aligned scenes, with their sidecars, as documented by `--help`:
+Run the plotter on saved scene evidence using explicit local input/output paths. This reads arrays only; it does not fit or load a model. Supply one or two aligned scenes with their sidecars. Verify the DATA2 binding and output budget before writing. This example uses the captured epoch-567 source; the four-row limit and sparse arrow defaults preserve a single compact page:
 
 ```bash
-python tools/plot_honf_organization.py --help
+CUDA_VISIBLE_DEVICES='' python tools/plot_honf_organization.py \
+  --scene 'Detail-preserving relation-anchored neural field=/data2/wanglz/ModularDT/r14_20261029/evaluations/latest_hyperedge_connectivity/organization_0293.npz' \
+  --output HONF_Proj/diagnostics/compact_hyperedge_example \
+  --edges auto --max-edges 4 --edges-per-page 4 \
+  --edge-resolution 0.5 --edge-coverage 0.9 \
+  --connection-incoming 1 --connection-limit 8 --e-display-threshold 0.02
 ```
 
 The [packaged README examples](../../README.md#relation-anchored-organization) show the three standard views from a frozen relation-anchored checkpoint at epoch 2813 on exposed VAL0678. Their [image index](../assets/readme/README.md) states original IDs, units, source age, thresholds and limitations. Other comparison galleries and full numerical evidence remain local; they are not silently relabeled as these examples.
 
-The Python entry points support composition in another report generator. Use the installed editable package or add `src` to the import path or use the installed package with its visualization dependencies:
+The Python entry points support composition in another report generator. Use the installed editable package or add `src` to the import path, with the project visualization dependencies:
 
 ```python
 from pathlib import Path
 from honf_viz.organization_data import load_scene, require_matched
 from honf_viz.organization_overview import render_overview, render_incidence
 from honf_viz.organization_services import render_donor_services, render_incoming_neighborhoods
-from honf_viz.organization_hyperedges import render_native_hyperedges
+from honf_viz.organization_connected_hyperedges import render_connectivity_hyperedges
 
 scenes = [load_scene("candidate", Path("/data2/path/to/scene.npz"))]
 require_matched(scenes)
@@ -115,7 +178,10 @@ output = Path("/data2/path/to/budgeted-visualization")
 overview = render_overview(scenes, output)
 incidence = render_incidence(scenes, output)
 services = render_donor_services(scenes, output, per_role=2)
-hyperedges = render_native_hyperedges(scenes, output, e_threshold=0.02, edges=3)
+hyperedges = render_connectivity_hyperedges(
+    scenes, output, e_threshold=0.02, edges="auto", max_edges=4,
+    per_page=4, max_incoming=1, max_connections=8)
+# The connectivity call returns one FigureArtifact per compact model page.
 # Each FigureArtifact returns stem, title, caption and numerical evidence.
 # Call render_incoming_neighborhoods only when all four actual gate blocks exist.
 ```
@@ -124,7 +190,7 @@ hyperedges = render_native_hyperedges(scenes, output, e_threshold=0.02, edges=3)
 
 Keep figure interiors clean. Retain only a main title, useful panel titles, physical axes/units when known, original IDs, a necessary symbol/direction legend and quantitative colorbars. Do not place redundant subtitles, pale-gray secondary explanation, checkpoint paragraphs, method notes, threshold warnings or a block of caveats around the panels. Put those details in readable prose captions. Do not shrink many tiny labels to force a large graph onto a page; select a declared illustrative panel and retain the full global matrix and numerical evidence.
 
-Use shared member colors and absolute quantitative scales within each comparison. A color is not a model group unless such a group actually exists. Keep exact zero distinct from small positive values; a logarithmic color floor is a color choice, not a support threshold. Label supplier, receiver and query markers distinctly. A dashed arrow must have a stated direction. Use two separate scales when C and G share a panel. Keep M/E input roles separate from predicted physical channels.
+Use shared member colors and absolute quantitative scales within each comparison. A color is not a model group unless such a group actually exists. Keep exact zero distinct from small positive values; a logarithmic color floor is a color choice, not a support threshold. Label supplier, receiver and query markers distinctly. An actual contextual arrow must state its donor→receiver direction; a derived membership association uses a separately labeled undirected dashed line. Use two separate scales when C and G share a panel. Keep M/E input roles separate from predicted physical channels.
 
 Every caption states source layout/case, partition, epoch, directory or contextual quantity, full/restricted mode, coordinate units/projection, example-selection rule, relevant self handling, any threshold/omission and the one main conclusion. For native ellipse diagrams, include retained mass and state that abstract geometry is illustrative. For sorting, state that values and support are preserved. Keep contextual stages distinct and never infer physical causality from a service field.
 

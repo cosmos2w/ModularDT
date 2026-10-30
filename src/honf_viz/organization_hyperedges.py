@@ -74,9 +74,35 @@ def select_representative_rows(
 
 def _ellipse_layout(masks: np.ndarray, count: int) -> tuple[np.ndarray, dict]:
     """Place original vertices inside exactly their enclosing edge subsets."""
-    centers = np.array([[-1.6, 1.0], [1.6, 1.0], [0, -1.6]])[:count]
-    axes = np.array([[4.6, 3.2], [4.6, 3.2], [4.8, 3.2]])[:count]
-    angles = np.deg2rad([12, -14, -28])[:count]
+    masks = np.asarray(masks)
+    if (isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 4
+            or masks.ndim != 1 or not np.issubdtype(masks.dtype, np.integer)
+            or np.any(masks < 0) or np.any(masks >= 2 ** count)):
+        raise ValueError("Ellipse layout requires one to four edges and valid integer membership masks.")
+    if count == 4:
+        # Four genuine ellipses with all fifteen nonempty intersection regions.
+        # Uniform scaling and translation keep the curves inside the existing
+        # panel bounds without altering any set relationship.
+        centers = .8 * np.array([
+            [-1.5951006084154455, .9755269730929066],
+            [-.28632181443576066, .5747441877069148],
+            [-.40475071955780617, -.5961656927393335],
+            [-1.8467073553515796, 1.395486016193479],
+        ]) + np.array([0., -.3])
+        axes = .8 * np.array([
+            [5.42402525508483, 2.827692066979509],
+            [5.9111528372095234, 1.617718294435266],
+            [5.038704929117802, 2.2852439906309847],
+            [5.389089135193927, 1.7210901569446246],
+        ])
+        angles = np.array([.4467172550047604, 1.8846789817011098,
+                           .1511271554653648, 1.954395987807259])
+        step, min_margin = .12, .12
+    else:
+        centers = np.array([[-1.6, 1.0], [1.6, 1.0], [0, -1.6]])[:count]
+        axes = np.array([[4.6, 3.2], [4.6, 3.2], [4.8, 3.2]])[:count]
+        angles = np.deg2rad([12, -14, -28])[:count]
+        step, min_margin = .20, .19
 
     def distances(points: np.ndarray) -> np.ndarray:
         result = []
@@ -87,33 +113,78 @@ def _ellipse_layout(masks: np.ndarray, count: int) -> tuple[np.ndarray, dict]:
             result.append((u / semi_axes[0]) ** 2 + (v / semi_axes[1]) ** 2)
         return np.asarray(result).T
 
-    grid = np.array([(x, y) for x in np.arange(-6.7, 6.7, .20)
-                     for y in np.arange(-5.8, 5.0, .20)])
-    grid_distance = distances(grid)
+    grid = np.array([(x, y) for x in np.arange(-6.7, 6.7, step)
+                     for y in np.arange(-5.8, 5.0, step)])
     powers = 2 ** np.arange(count)
+    geometry_choice = "all-intersections"
+    if count == 4 and len(masks):
+        # A second genuine four-ellipse arrangement gives more room to some
+        # dense intersections. Select by available grid positions per shown
+        # vertex, using only exact requested membership patterns. The general
+        # all-intersections geometry remains a fallback for any other pattern.
+        alternative = (
+            np.array([[.8377522270843414, -1.2888227430232133],
+                      [-.7795766025205335, .49432232040123636],
+                      [-.8716917511525661, 1.12586130091612],
+                      [1.6402172998754379, .619582135760012]]),
+            np.array([[4.757429204178687, 1.8732211269111732],
+                      [4.408358477698659, 1.8668510884430085],
+                      [3.788363826266445, 1.6084822786724147],
+                      [4.068598642704986, 2.8514910253690307]]),
+            np.array([.9964213569524447, 2.2169538302803593,
+                      1.6004274560620109, .7574702790800931]),
+        )
+        base = (centers, axes, angles)
+        required, multiplicities = np.unique(masks, return_counts=True)
+        choices = []
+        for geometry in (base, alternative):
+            centers, axes, angles = geometry
+            test_distance = distances(grid)
+            test_masks = ((test_distance < 1) * powers).sum(axis=1)
+            test_margin = np.min(abs(test_distance - 1), axis=1)
+            available = np.array([np.count_nonzero((test_masks == mask) & (test_margin > min_margin))
+                                  for mask in required])
+            choices.append(float(np.min(available / multiplicities)))
+        index = int(np.argmax(choices))
+        centers, axes, angles = (base, alternative)[index]
+        geometry_choice = ("all-intersections", "expanded-selected-intersections")[index]
+    grid_distance = distances(grid)
     grid_masks = ((grid_distance < 1) * powers).sum(axis=1)
     margin = np.min(abs(grid_distance - 1), axis=1)
     coordinates = np.empty((len(masks), 2))
-    for mask in np.unique(masks):
+    mask_order = np.unique(masks)
+    if count == 4:
+        # Fill the most constrained requested regions first, then space each
+        # new point from all previously placed vertices, not just its own set.
+        mask_order = sorted(mask_order, key=lambda mask: (
+            np.count_nonzero((grid_masks == mask) & (margin > min_margin))
+            / np.count_nonzero(masks == mask), int(mask)))
+    placed = []
+    for mask in mask_order:
         vertex_indices = np.flatnonzero(masks == mask)
-        candidate_indices = np.flatnonzero((grid_masks == mask) & (margin > .19))
+        candidate_indices = np.flatnonzero((grid_masks == mask) & (margin > min_margin))
         if len(candidate_indices) < len(vertex_indices):
             raise ValueError("Too many vertices in one ellipse intersection; raise the E display threshold or select fewer edges.")
         points = grid[candidate_indices]
-        chosen = [int(np.argmax(margin[candidate_indices]))]
-        nearest = np.full(len(points), np.inf)
-        for _ in range(len(vertex_indices) - 1):
-            nearest = np.minimum(nearest, np.linalg.norm(points - points[chosen[-1]], axis=1))
-            scores = nearest + np.minimum(margin[candidate_indices], 1) * .18
+        chosen = []
+        nearest = (np.min(np.linalg.norm(points[:, None] - np.asarray(placed)[None, :], axis=2), axis=1)
+                   if count == 4 and placed else np.full(len(points), np.inf))
+        for _ in vertex_indices:
+            scores = (nearest + np.minimum(margin[candidate_indices], 1) * .18
+                      if np.isfinite(nearest).all() else margin[candidate_indices])
             scores[chosen] = -1
             chosen.append(int(scores.argmax()))
+            nearest = np.minimum(nearest, np.linalg.norm(points - points[chosen[-1]], axis=1))
         coordinates[vertex_indices] = points[chosen]
+        placed.extend(points[chosen].tolist())
     actual_masks = ((distances(coordinates) < 1) * powers).sum(axis=1)
     if not np.array_equal(actual_masks, masks):
         raise ValueError("Ellipse layout does not match the original-member incidence.")
     return coordinates, {
         "centers": centers.tolist(), "semi_axes": axes.tolist(),
         "angles_degrees": np.rad2deg(angles).tolist(),
+        "bounds": [-6.7, 6.7, -5.8, 5.0],
+        "geometry_choice": geometry_choice,
         "exact_membership_verified": True,
     }
 
