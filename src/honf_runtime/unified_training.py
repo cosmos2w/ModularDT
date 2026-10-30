@@ -3277,7 +3277,10 @@ class TrainingEngine:
         optimizer.zero_grad(set_to_none=True)
         native_core = getattr(model, "core", model)
         from .joint_native_objective import JointMacroObjective
-        joint_objective = JointMacroObjective(native_core, optimizer, epoch, update_index)
+        joint_objective = JointMacroObjective(
+            native_core, optimizer, epoch, update_index,
+            enabled=getattr(provider, "joint_work_objective_enabled", True),
+        )
         budgeted_begin = getattr(native_core, "budgeted_begin_update", None)
         budgeted_begin_microbatch = getattr(native_core, "budgeted_begin_microbatch", None)
         budgeted_microbatch_result = getattr(native_core, "budgeted_microbatch_result", None)

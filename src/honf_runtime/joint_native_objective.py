@@ -7,9 +7,11 @@ import torch
 
 class JointMacroObjective:
     """Accumulate d(mean residual)/dtheta; hinge only after the complete native macro."""
-    def __init__(self, core, optimizer, epoch, update_index):
+    def __init__(self, core, optimizer, epoch, update_index, *, enabled=True):
+        if type(enabled) is not bool:
+            raise TypeError('Joint macro objective enabled must be a bool.')
         self.core=core;self.epoch=epoch;self.update_index=update_index
-        self.capable=callable(getattr(core,'joint_begin_update',None))
+        self.capable=enabled and callable(getattr(core,'joint_begin_update',None))
         self.enabled=self.capable
         self.residuals={};self.gradients={};self.denominators={};self.controller={};self.telemetry={}
         self.additive_values={};self.additive_gradients={};self.additive_denominators={}

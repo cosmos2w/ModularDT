@@ -28,6 +28,7 @@ class ThermalR14UnifiedComparisonTask(ThermalInteractionReusedMemberRoutingTask)
     """Use the native objective and case streams with the historical Unified model."""
 
     training_state_schema = TRAINING_STATE_SCHEMA
+    joint_work_objective_enabled = False
 
     def __init__(self, **kwargs):
         recipe = copy.deepcopy(kwargs["recipe"])
@@ -56,6 +57,7 @@ class ThermalR14UnifiedComparisonTask(ThermalInteractionReusedMemberRoutingTask)
                 "heat_independent_flow_constraint": True,
                 "response_training_families": [], "response_fit": False,
                 "organizer_objective": False,
+                "joint_work_objective": False,
             },
             "model_clock": "epoch is 3000 plus training epoch; macro clock receives within-epoch update index",
             "initialization": "fresh seed 0; configuration identity only; no reference weights",
@@ -92,6 +94,7 @@ class ThermalR14UnifiedComparisonTask(ThermalInteractionReusedMemberRoutingTask)
             raise TypeError(f"Unsupported Unified native prediction options: {sorted(kwargs)}")
         if model is not self.model or execution_mode != model.architecture:
             raise ValueError("Wrong Unified comparison model/arm.")
+        model.core.joint_begin_microbatch()
         prepared = model.prepare_native(scene.structure, receivers.fluid_xy,
             local_query_points=receivers.local_query_points, ntheta=receivers.ntheta, scene_key=scene.case_ids)
         native, counts = model.apply_native_with_work_counts(prepared, receivers.heat)
