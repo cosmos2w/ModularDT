@@ -163,7 +163,7 @@ def build_wind_relation_anchored_task(recipe, device):
     if value.get("catalogue_cache_ram_bytes") != 32 * 1024**3:
         raise ValueError("The existing Wind development provider requires its declared 32 GiB RAM bound.")
     shape = tuple(value["environment_shape"])
-    if shape not in ((4, 4, 4), (8, 4, 2), (8, 8, 2)):
+    if shape not in ((4, 4, 4), (8, 4, 2), (8, 8, 2), (8, 4, 4), (8, 8, 4)):
         raise ValueError("Unsupported Wind environment shape.")
     old = dict(value, schema="content_hypergraph_recipe_v2", architecture="A2-D", total_epochs=2500,
                edge_access="full",

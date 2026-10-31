@@ -86,9 +86,11 @@ def test_cover_continuity_masks_and_coordinate_derivative():
 
 def test_shape_measure_and_horizontal_design_contract():
     case = _case()
-    for shape in ((4,4,4),(8,4,2),(8,8,2)):
+    for shape in ((4,4,4),(8,4,2),(8,8,2),(8,4,4),(8,8,4)):
         model = _adapter(shape); scene = model.make_scene(case)
         torch.testing.assert_close(scene.environment_measure.sum(), torch.tensor(8.,dtype=torch.double))
+        expected = torch.tensor([2. / n for n in shape], dtype=torch.double)
+        torch.testing.assert_close(scene.environment_characteristic_lengths[0, 0], expected)
     moved = torch.tensor(case.module_centers,dtype=torch.double); moved[0,2] += .1
     with pytest.raises(ValueError, match="horizontal"):
         model.make_scene(case,moved)

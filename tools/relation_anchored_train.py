@@ -36,6 +36,10 @@ def build(recipe, *, device):
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("local_expert", {}).get("enabled", False):
+            from channelthermal.training.local_expert_task import build_thermal_local_expert_task
+
+            return build_thermal_local_expert_task(recipe, arm=arm, device=device)
         if recipe.get("local_ports", {}).get("enabled", False):
             from channelthermal.training.local_ports_task import build_thermal_local_ports_task
 
