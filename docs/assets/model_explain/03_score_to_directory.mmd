@@ -1,0 +1,8 @@
+flowchart TB
+    S["Contextual raw scores · per scene and stage"] --> A["Measure-aware donor softmax A"]
+    S --> G["Score calibration · applied gate G"]
+    A --> B["Guarded A × G message coefficients"]
+    G --> B
+    G --> EG["Final E-receiver gates + own-E access"]
+    EG --> PI["Access measure · joint row normalization"]
+    PI --> D["Full directory Pi → retained directory D"]

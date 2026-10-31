@@ -2,6 +2,8 @@
 
 The forward core owns reusable interaction, organization and query prediction. Case adapters own physical record schemas, units, geometry, controls, normalization, target extraction, physical laws and plotting. Core modules must not import a case package. See the [project README](../../README.md) for the maintained six families and their equations, and [case integration](../../docs/case_plugin.md) for adding data and physics.
 
+Use [Model_Explain.md](../../Model_Explain.md) for the implementation-bound core formulation and the canonical mathematical notation. It separates global conditions, contextual coefficients, prepared access weights and final query contributions, and maps each quantity to this implementation.
+
 ## Public model selection
 
 [`models.py`](models.py) exposes immutable `MODEL_FAMILIES`, `model_family(name)`, `build_model(name, config)` and `relation_anchored_config(name, base_model_config, ...)`. Public families are `hypergraph_routed`, `dense_pairwise`, `content_attention`, `unified_hypergraph`, `relation_anchored` and `relation_anchored_active`. For a fresh anchored model, pass the content core configuration to `relation_anchored_config` and its result to `build_model`; the optional arguments set the input dataset, query tile size, retained mass and initial EE width. Development aliases remain accepted at this boundary. Construction from a saved configuration preserves its schema, architecture and parameter inventory. Loading a trained case still requires that case's loader, saved normalizer and matching adapter.

@@ -1,511 +1,594 @@
-# Legacy six-hyperedge HONF: mathematics, configuration, and code map
+# Hypergraph Organized Neural Fields: model definition and implementation
 
-This document records the historical six-hyperedge formulation. For the maintained six-family catalogue, current relation-anchored models and case-owned physical interpretation, start with the [project README](README.md). Legacy equations are preserved for checkpoint compatibility and do not define every current model.
+**Implementation binding:** branch `ThermalWindUpdate`, source commit [`ea03e54204dc5424ab315b71d526f2ae0d687e45`](https://github.com/cosmos2w/ModularDT/tree/ea03e54204dc5424ab315b71d526f2ae0d687e45), 31 October 2026. **Document revision:** `HONF-Core-Explain-1`. This document describes fresh public `relation_anchored` and `relation_anchored_active` configurations at that source version. Their shared mechanism is detail-preserving relation-anchored reading. Source paths refer to repository-root `src/` and `Case_*/src/`.
 
+HONF constructs a conditional neural field from physical object records. The same learned relationships that regulate contextual exchange are reused to organize access to original members. A query combines accessible member messages according to its location, content and learned read strength. Case adapters supply physical records, units, coordinate conventions and observation operators.
 
-This document describes the historical six-hyperedge HONF platform. The recommended
-profile uses fixed six-edge softmax organization, the organizer's raw residual
-hyperedge state, dense query routing, and context fusion. The fused
-query-module executor is the behavior-equivalent efficient path. Exchangeable,
-adaptive, entmax, additive, and gathered mechanisms remain loadable optional
-research and checkpoint-compatibility modes. The registry also contains the
-standalone `case_adaptive_residual_context` candidate and the Phase-2
-`case_adaptive_tensor_residual_context` candidate; neither is accepted or
-recommended until its bounded evaluation gates pass.
+This document establishes the project's mathematical notation. Part I specifies the shared core; Part II defines the structure for ThermalChannel, WindFarm and electro-thermal case chapters. Diagram sources are collected in the [model explanation resource library](docs/assets/model_explain/README.md).
 
-## 1. Historical managed configuration
+## Table of contents
 
-The profile registry at `src/config_core/forward/profile_registry.json` declares `stage7_structured_context` as `recommended_forward_profile` and gives it `status="current"`. Efficient execution is represented by a strict overlay rather than rewriting the compatibility profile.
+- [Part I. HONF core](#core)
+    - [1. Problem and information flow](#problem)
+    - [2. Notation standard](#notation)
+    - [3. Preparing M/E/C](#inputs)
+        - [3.1 Identity, support, attributes and measure](#record-contract)
+        - [3.2 Environment discretization and patch encoding](#environment-encoding)
+        - [3.3 Conditions and owning records](#conditions)
+    - [4. Contextual exchange](#exchange)
+        - [4.1 One ordered block, stacked in depth](#exchange-block)
+        - [4.2 Raw score, softmax preference and applied relation](#contextual-scores)
+        - [4.3 Gate calibration and reuse](#gate-calibration)
+        - [4.4 E←E and scalability](#ee-scalability)
+    - [5. Forming the global organization](#organization)
+        - [5.1 A scorer produces a scene's tables](#scene-tables)
+        - [5.2 E-address rows and access measures](#directory-measures)
+        - [5.3 Joint P95 access](#p95-access)
+        - [5.4 End-to-end learning and reuse](#relation-reuse)
+    - [6. Query reading and neural-field formation](#query-reading)
+        - [6.1 Continuous address coverage](#address-coverage)
+        - [6.2 Query preference and role strength](#query-preference)
+        - [6.3 Coalescing shared original members](#member-coalescence)
+        - [6.4 Detail-preserving selected-member messages](#detail-messages)
+    - [7. Mapping visualization to the model](#visualization-mapping)
+    - [8. Learning and computational meaning](#learning-work)
+    - [9. Public interface and implementation map](#implementation)
+- [Part II. Case formulations](#cases)
+    - [10. Case chapter contract](#case-contract)
 
-| Role | Profile | Status |
-|---|---|---|
-| Recommended profile | `src/config_core/forward/stage7_structured_context.json` | Fixed K=6 architecture and 5K training policy |
-| Promoted efficient execution | `src/config_core/forward/experiments/stage7_fused_query_module.json` | Exact K=6 fused dense legacy-kernel path; sparse beta-0.98 is evaluation-only |
-| Optional residual candidate | `src/config_core/forward/case_adaptive_residual_context.json` | Case-specific residual mechanism count; 2500-epoch research candidate |
-| Phase-2 tensor candidate | `src/config_core/forward/case_adaptive_tensor_residual_context.json` | 32-dimensional residual interaction tensor and rank/support diagnostics; 500-epoch research candidate |
-| Compatibility profile | `src/config_core/forward/enhanced_honf_pairwise.json` | Established checkpoint architecture |
-| Optional research base | `src/config_core/forward/adaptive_sparse_additive.json` | Compatibility/research only |
-| ThermalChannel case policy | `Case_ThermalChannel/configs/case_default.json` | Current case, data, Stage-A, loss, and evaluation settings |
+<a id="core"></a>
 
-The recommended and compatibility profiles instantiate the same 237-key model architecture. Their main differences are run identity, training duration, plot/checkpoint cadence, and explicit modern configuration fields. The K=6 fused legacy-kernel overlay adds no parameters and preserves the checkpoint contract.
+## Part I. HONF core
 
-One operational distinction is important: the profile registry recommends
-`stage7_structured_context`, but the current `train.py` and `evaluate.py` CLI
-fallback still points to `enhanced_honf_pairwise`. Use the Stage-7 profile
-explicitly for new scientific work:
+<a id="problem"></a>
 
-```bash
-python train.py --config src/config_core/forward/stage7_structured_context.json --experiment-overlay src/config_core/forward/experiments/stage7_fused_query_module.json --run-id 1500 --dry-run
-python evaluate.py --config src/config_core/forward/stage7_structured_context.json --checkpoint /path/to/checkpoint.pt
+### 1. Problem and information flow
+
+For one scene, let $\Omega\subset\mathbb{R}^d$ be the physical domain. The input is $(\mathcal{M},\mathcal{E},\mathbf c)$: module/object records, environment records and prescribed global conditions. At a valid query $q\in\Omega$, the model predicts $\widehat{\mathbf y}(q)\in\mathbb{R}^{d_y}$. A record's role identifies its input ownership; both roles contribute to every configured output channel.
+
+$$
+\begin{aligned}
+(\mathcal{M},\mathcal{E},\mathbf c)&\longmapsto
+(\{z_i\}_{i\in\mathcal{V}},G,\Pi,D),\\
+(q,\{z_i\},D)&\longmapsto(h_M(q),h_E(q))
+\longmapsto\widehat{\mathbf y}(q),\qquad
+\mathcal{V}=\mathcal{M}\sqcup\mathcal{E}.
+\end{aligned}
+$$
+
+```mermaid
+flowchart TB
+    M["M · original objects"] --> ENC["Role encoders<br/>Geometry and C injection"]
+    C["C · global conditions"] --> ENC
+    E["E · environment regions"] --> ENC
+    ENC --> EX["Stacked contextual exchange blocks"]
+    EX --> DIR["E-address directory<br/>Original-member hyperedges"]
+    EX --> VAL["Individual contextual<br/>member values"]
+    DIR --> READ["Query location<br/>Organized member reading"]
+    VAL --> READ
+    Q["Query q<br/>Coordinates and features"] --> READ
+    READ --> OUT["Joint physical field"]
 ```
 
-Replace `1500` with an unused numeric run ID.
+Figure 1. Scene preparation produces both access organization and individual member values. C enters the record encodings. Queries reuse these prepared quantities.
 
-## 2. Problem definition and tensor contract
+<a id="notation"></a>
 
-For each case, the reusable HONF core receives:
+### 2. Notation standard
 
-- module centers $X\in\mathbb{R}^{B\times M\times2}$;
-- module features $S\in\mathbb{R}^{B\times M\times d_m}$;
-- an active-module mask $P_M\in\{0,1\}^{B\times M}$;
-- environment coordinates $Y\in\mathbb{R}^{B\times E\times2}$ and features
-  $R\in\mathbb{R}^{B\times E\times d_e}$;
-- case context $c\in\mathbb{R}^{B\times d_c}$;
-- arbitrary query coordinates $q\in\mathbb{R}^{B\times Q\times2}$.
+Equations suppress batch and padding axes. Sets contain present records; positive donor measure determines information eligibility. Matrix rows are receivers and columns are donors unless stated otherwise. A route $r\leftarrow s$ means a receiver of role $r$ reads a donor of role $s$; physical arrows point donor to receiver.
 
-$B$ is batch size, $M$ is the batch-local padded module width, $E$ is the
-environment-token count, $K$ is the hyperedge count, $Q$ is the query count,
-and $H$ is hidden width. Dynamic padding makes $M$ the maximum active module
-count in the current batch; it is not a learned model capacity. Inactive module
-rows remain masked through organization, Stage-A execution, losses, and
-metrics.
+| Symbol | Definition |
+| --- | --- |
+| $d,d_z,d_y$ | Coordinate dimension, contextual width and output-channel count. |
+| $\mathcal{M},\mathcal{E},\mathcal{V}$ | M inventory, E inventory and their disjoint union. |
+| $N_M,N_E,N_h,L$ | Present M/E counts, attention-head count and contextual-block count. |
+| $i,j,a,q$ | Original member, donor, E address and query coordinate; $a\in\mathcal{E}$. |
+| $r,s$ | Roles in $\{M,E\}$; $\mathcal{V}_M=\mathcal{M}$ and $\mathcal{V}_E=\mathcal{E}$; $r(i)$ is member $i$'s role. |
+| $x_i,f_i,\boldsymbol\ell_i$ | Member coordinate, prescribed features and positive per-axis characteristic lengths. |
+| $\omega_i,\mu_i,\nu_{ai}$ | Input donor measure, role-normalized inventory measure and address-specific access measure. |
+| $o,\mathbf L$ | Frame origin and positive per-axis scene scale. |
+| $\mathbf c,z_C$ | Global condition vector and its encoded state. C is reserved for conditions. |
+| $z_i^{(t)},z_q$ | Member state at block boundary $t$ and query state. |
+| $s_{ij}^h,A_{ij}^h,G_{ij},B_{ij}^h$ | Raw contextual score, donor-softmax coefficient, applied gate and actual message coefficient. |
+| $\Pi_{ai},D_{ai},\mathcal{S}_a,\mathcal{H}_a$ | Full directory, retained directory, selected member set and native hyperedge. |
+| $\eta,\lambda_a(q)$ | Retained mass target and continuous address-cover weight. |
+| $t_{ri}(q),\xi_{ari}(q),p_{ari}(q)$ | Raw query/member score, address-calibrated score and within-role read distribution. |
+| $\rho_{ar}(q),\beta_{ri}(q),h_r(q)$ | Role read strength, coalesced original-member coefficient and role context. |
+| $v_{ri},m_{ri}(q)$ | Prepared member value and query-relative selected-member message. |
+| $\mathbf u_\theta(q),\widehat{\mathbf y}(q)$ | Normalized joint core output and physical field after case unit conversion. |
+| $\mathcal{D}_{\mathrm{case}},\mathcal{O}_{\mathrm{case}}$ | Case unit conversion and native observation operator. |
 
-For ThermalChannel, the predicted global field has the fixed dataset order
+Use $\mathbf c$ for conditions, $h_r$ for read contexts and $\mathcal{H}_a$ for hyperedges. $\boldsymbol\ell_i$ is a length vector, $L$ counts blocks and $\mathbf L$ is scene scale. Route/block labels are restored when needed. Code and earlier visualization guides call $\Pi$ `R` or full access weights, and $D$ `C` or restricted access weights; these map to the same arrays, not additional model objects.
 
-$$
-\widehat U(q)=[\widehat u(q),\widehat v(q),\widehat p(q),
-\widehat\omega(q),\widehat T(q)]\in\mathbb{R}^{5}.
-$$
+<a id="inputs"></a>
 
-The primary output contract is:
+### 3. Preparing M/E/C
 
-| Output | Shape | Meaning |
-|---|---:|---|
-| `pred_field` | `[B,Q,5]` | Global continuous field |
-| `pred_internal_temperature` | `[B,M,Ql,1]` | Local solid temperature |
-| `pred_interface` | `[B,M,P,2]` | Interface temperature and normal flux |
-| `pred_port_condition` | `[B,M,P,5]` | Angular port tokens used by Stage A |
-| `organizer_aux` | dictionary | Incidences, hyperedge geometry, masks, and statistics |
-| `routing_aux` | dictionary | Query routing and pairwise diagnostics |
+<a id="record-contract"></a>
 
-## 3. ThermalChannel physical inputs
+#### 3.1 Identity, support, attributes and measure
 
-`ChannelThermalInputAdapter` constructs ten module features in this order:
+An original member is $(\mathrm{id}_i,r(i),x_i,f_i,\boldsymbol\ell_i,\omega_i)$. M records usually represent physical objects. E records represent selected parts of the surrounding domain: cells, sampled regions or boundary patches. IDs preserve correspondence through padding, sorting, preparation and visualization; they are identifiers, not learned numerical embeddings.
 
-1. dataset-scaled heat;
-2. absolute dataset-scaled heat;
-3. signed case-relative heat;
-4. absolute case-relative heat;
-5. active flag;
-6. solid diffusivity;
-7. fluid diffusivity;
-8. solid conductivity;
-9. fluid conductivity;
-10. module radius.
+`SceneBatch` carries coordinates, features, masks, measures, IDs, characteristic lengths and the coordinate frame. Geometry describes where and at what scale a record acts; measure controls its donor weighting. A centroid does not specify represented size, and a flattened index does not specify physical position. See [the input contracts](src/honf_forward_core/content_hypergraph/contracts.py).
 
-The current `padding_invariant_v2` global context has eighteen entries:
-Reynolds number, inlet velocity, active count, `log1p` active count, module
-number density, occupied-area fraction, total scaled heat, heat per domain
-area, mean active heat, maximum absolute heat, domain lengths $L_x$ and $L_y$,
-viscosity, solid and fluid diffusivities, solid and fluid conductivities, and
-module radius.
+| E information | Current core use | Adapter meaning |
+| --- | --- | --- |
+| $x_i,o,\mathbf L$ | Position encoding and relative geometry. | Native position and declared physical frame. |
+| $\boldsymbol\ell_i$ | Encoded normalized size and local pair distance. | Cell widths or another declared per-axis support scale. |
+| $\omega_i$ | Measure-aware exchange and E inventory normalization. | Area, volume or appropriate positive quadrature measure. |
+| $f_i$ | Role encoding and repeated raw-record injection. | Prescribed material fields, boundaries, sources and case attributes. |
+| ID and mask | Alignment and eligibility. | Original identity and present/padded status. |
 
-Historical checkpoints using `legacy_v1` retain their fourteen-entry context
-and saved fixed reference-slot denominator. Runtime padding does not alter that
-historical transform.
+These are the operational geometric fields of the current core. A case can additionally require orientation, boundary normals, connectivity or higher-order shape descriptors to distinguish physically different supports with the same centroid and widths. Such information belongs in adapter-defined features or a corresponding geometry contract; IDs do not encode it.
 
-`ChannelThermalEnvironmentBuilder` creates a cell-centered $24\times8$ grid,
-so the current profile uses $E=192$ environment tokens. Each token contains
-normalized $x$ and $y$, normalized distances to the bottom wall, top wall,
-inlet, and outlet, and centerline proximity. Query-side case features use the
-first six geometric quantities.
+<a id="environment-encoding"></a>
 
-## 4. Shared encoding
+#### 3.2 Environment discretization and patch encoding
 
-The Stage-7 core uses hidden width $H=256$, zero dropout, layer normalization,
-four Fourier frequencies for module, environment, query, and pairwise relative
-coordinates, nonperiodic geometry, and no query-time coordinate.
-
-The reusable encoder can be summarized as
+The adapter chooses regions $\{\Omega_a\}$ and encodes a prescribed field $b(x)$ through a regional operator $\mathcal{P}_a$, such as a weighted average, sampled patch encoder or basis coefficients:
 
 $$
-g=E_g(c),
+f_a^E=\mathcal{P}_a[b,\mathrm{geometry},\mathrm{boundaries}],\qquad
+x_a=\operatorname{centroid}(\Omega_a),\qquad
+\omega_a=\operatorname{measure}(\Omega_a).
 $$
 
-$$
-m_i=\left(E_m(S_i)+E_x\!\left(\Phi(X_i/s)\right)\right)P_{M,i},
-$$
+This is the patchification analogy: each region becomes a feature-bearing record, augmented with position, support scale and measure. The adapter decides which within-region distinctions survive encoding. A mean conductivity and a resolved conductivity pattern are different input representations. The core receives the chosen features rather than reconstructing the original patch automatically.
+
+Structured grids make centers, lengths and measures easy to define. Thermal currently uses $24\times8$ E records; Wind uses a configurable three-dimensional grid. The shared scorer consumes records and geometry. The maintained continuous locators additionally require the case's structured grid-to-original-ID map. An unstructured tessellation needs its own coverage/locator implementation.
+
+<a id="conditions"></a>
+
+#### 3.3 Conditions and owning records
+
+M/E/C is the general problem definition. Examples of $\mathbf c$ include inlet Reynolds number, reference velocity, wind direction and prescribed global operating parameters. In the current implementation, C is encoded once and broadcast into both roles, rather than instantiated as a third inventory of attention vertices:
 
 $$
-e_j=E_e([\Phi(Y_j/s),R_j])+g,
+z_C=\operatorname{Enc}_C(\mathbf c),\qquad
+z_i^{(0)}=\operatorname{Enc}_{r(i)}
+\!\left([f_i,\gamma_x((x_i-o)\oslash\mathbf L),
+\boldsymbol\ell_i\oslash\mathbf L]\right)+z_C.
 $$
 
-$$
-z_q=E_q([q/s,\Phi(q/s),f_{\mathrm{case}}(q)]).
-$$
+$\oslash$ denotes componentwise division; $\gamma_x$ is the configured coordinate feature map. Encoders are role-specific. If no condition encoder is configured, $z_C=0$. Changing conditions can therefore change member states and organization at a fixed layout. Spatially varying conditions belong in their owning M/E features; C carries prescribed scene-wide quantities.
 
-The global token is added to environment tokens because the selected decoder
-uses global context. The coordinate scale is `[12, 6]`; physical domain lengths
-and module radius marked `auto` are resolved from the dataset before model
-construction.
+Relation-anchored preparation reinjects learned projections of the individual initial encodings at every block and uses no extra pooled scene-summary value path. The query encoder receives a zero direct operating-state argument, so controls reach predictions through conditioned records and interactions. The query still has positional and declared query features. See [`_initial_states`](src/honf_forward_core/content_hypergraph/model_v2.py), [unified preparation](src/honf_forward_core/continuous_joint/unified.py) and [`_query_states`](src/honf_forward_core/interaction_reused_member_routing/core.py).
 
-## 5. Current fixed six-edge organizer
+<a id="exchange"></a>
 
-### 5.1 Module-to-environment context
+### 4. Contextual exchange
 
-With `use_A_me_auxiliary=true`, every active module first attends over all
-environment tokens:
+<a id="exchange-block"></a>
 
-$$
-A^{ME}_{ij}=\operatorname{softmax}_{j}
-\left(\frac{(W_qm_i)^\top(W_ke_j)}{\sqrt H}\right)P_{M,i},
-$$
+#### 4.1 One ordered block, stacked in depth
 
-$$
-\widetilde m_i=\left(m_i+0.25W_c\sum_jA^{ME}_{ij}e_j\right)P_{M,i}.
-$$
+One block executes M←M, E←M, E←E and M←E, reading the states produced by preceding stages. E's feed-forward update follows E←E; M's follows M←E. M←M excludes self, while E←E includes self. Updates are pre-normalized, residual and masked.
 
-### 5.2 Fixed softmax incidences
+```mermaid
+flowchart TB
+    IN["Block input · M and E"] --> RAW["Reinject original-record encodings"]
+    RAW --> MM["1 · M receives M"]
+    RAW --> E0["E state carried into exchange"]
+    MM --> EM["2 · E receives updated M"]
+    E0 --> EM
+    EM --> EE["3 · E receives E · E feed-forward"]
+    MM --> ME["4 · M receives updated E · M feed-forward"]
+    EE --> ME
+    ME --> NEXT["Next block or prepared members"]
+    EE --> NEXT
+```
 
-The accepted organizer uses `organizer_mode="fixed_projection"`, $K=6$, and
-learned edge-indexed projection columns:
+Figure 2. One reusable block with sequential state updates. Its four relation matrices belong to different stages. `context_depth` stacks separately parameterized blocks; current public recipes commonly use two.
 
-$$
-A^{MH}_{ik}=\operatorname{softmax}_{k}(W_M\widetilde m_i)_kP_{M,i}.
-$$
-
-The environment assignment includes a source-centered geometry bias:
+Before block $t$, gated raw-record projections are added to the current states. Each attention update and each role's feed-forward update have the forms
 
 $$
-A^{EH}_{jk}=\operatorname{softmax}_{k}\left((W_Ee_j)_k-
-\frac{\lVert Y_j-s_k\rVert_2}{0.25\sqrt{s_x^2+s_y^2}}\right).
-$$
-
-All six edges are active. There is no adaptive selection, entmax sparsity,
-edge-capacity schedule, or gathered execution in the Stage-7 primary path.
-Fields such as `initial_active_edges`, `minimum_active_edges`, and
-`slot_refinement_steps` are compatibility schema fields and do not change the
-fixed organizer.
-
-### 5.3 Hyperedge geometry and state
-
-For edge $k$, column-normalized incidence weights define source and thermal
-region centers:
-
-$$
-w^M_{ik}=\frac{A^{MH}_{ik}}{\sum_iA^{MH}_{ik}+\epsilon},\qquad
-s_k=\sum_iw^M_{ik}X_i,
+z_i\leftarrow z_i+\operatorname{Dropout}
+\left(\operatorname{Attn}_{r\leftarrow s}
+(\operatorname{LN}_r(z_i),\{\operatorname{LN}_s(z_j)\}_{j\in\mathcal{V}_s})\right),
 $$
 
 $$
-w^E_{jk}=\frac{A^{EH}_{jk}}{\sum_jA^{EH}_{jk}+\epsilon},\qquad
-r_k=\sum_jw^E_{jk}Y_j.
+z_i\leftarrow z_i+\operatorname{Dropout}
+\left(W_2\operatorname{SiLU}(W_1\operatorname{LN}(z_i)+b_1)+b_2\right).
 $$
 
-The organizer also calculates diagonal source/region variances and scales,
-normalized module/environment masses, assignment purities, source-to-region
-displacements, edge strengths, and diagnostic descriptors.
+The feed-forward hidden width is $4d_z$. Each route owns query/key/value/output projections and normalization. See [staged attention](src/honf_forward_core/content_hypergraph/staged_attention_v2.py) and [block construction and raw reinjection](src/honf_forward_core/content_hypergraph/model_v2.py).
 
-The content state is
+<a id="contextual-scores"></a>
 
-$$
-h_k=H_{mix}\left(
-\frac{\sum_iA^{MH}_{ik}W^h_M\widetilde m_i}{\sum_iA^{MH}_{ik}+\epsilon}
-+\frac{\sum_jA^{EH}_{jk}W^h_Ee_j}{\sum_jA^{EH}_{jk}+\epsilon}
-\right).
-$$
+#### 4.2 Raw score, softmax preference and applied relation
 
-The profile retains `mechanism_state_mode="residual_concat"` for strict
-configuration compatibility, but sets `use_hyper_mechanism_encoder=false`.
-Consequently, the decoder uses the organizer's raw $h_k$ directly. It does not
-instantiate or apply a second descriptor/mechanism encoder on the accepted
-path.
-
-## 6. Query routing and context-fusion decoder
-
-The current decoder mode is `enhanced_honf_pairwise`, whose enabled components
-are hyperedge value context, hypergraph-gated query/module pair context, global
-context, and near-module context.
-
-### 6.1 Query-to-edge attention
-
-Query-to-edge logits combine state compatibility with ten learned geometric
-features relative to the edge source and region:
+For one route and block, the raw score in head $h$ is
 
 $$
-\ell_{qk}=\frac{(W_qz_q)^\top(W_kh_k)}{\sqrt H}
-+W_\gamma\gamma(q,s_k,r_k).
+s_{ij}^h=\tau_h\langle\widehat Q_i^h,\widehat K_j^h\rangle+b_h(\zeta_{ij}),\qquad
+\zeta_{ij}=\left[
+\frac{x_i-x_j}{\mathbf L},
+\left\|\frac{x_i-x_j}{\mathbf L}\right\|_2,
+\operatorname{asinh}\!\left(
+\frac{x_i-x_j}{\sqrt{\boldsymbol\ell_i\odot\boldsymbol\ell_j}}
+\right)\right].
 $$
 
-The current query normalizer is dense softmax:
+Each $Q/K$ is projected from a separately layer-normalized state and then L2-normalized, giving $\widehat Q,\widehat K$; $b_h$ is learned geometric bias. Temperature is $\tau_h=1+31\operatorname{sigmoid}(\theta_h)$. Products, roots and fractions of vectors are componentwise. Geometry can support nearby and distant preferences.
+
+The donor-softmax coefficient includes positive input measure:
 
 $$
-\alpha_{qk}=\operatorname{softmax}_{k}(\ell_{qk}).
+A_{ij}^h=\frac{\exp(s_{ij}^h)\omega_j}
+{\sum_{k\in\mathcal{A}(i)}\exp(s_{ik}^h)\omega_k}.
 $$
 
-`hyper_attention_topk=0`, `query_edge_limit=0`, and
-`routing_execution="dense"`, so no route is pruned. The Stage-7 profile also
-sets query and environment locality to `none`.
-
-The hyperedge value context is
+$\mathcal{A}(i)$ is the route's eligible donor set, including its mask/self rules. A calibration of the same raw scores produces a shared-head gate $G_{ij}$. The actual contextual coefficient is
 
 $$
-c^H_q=\sum_k\alpha_{qk}W_vh_k.
+Z_i^h=\sum_jA_{ij}^hG_{ij},\qquad
+B_{ij}^h=\frac{A_{ij}^hG_{ij}}
+{Z_i^h+\epsilon(1-Z_i^h)^2},\qquad\epsilon=10^{-3}.
 $$
 
-### 6.2 Hypergraph-gated pairwise context
+Each head contracts $B$ with projected donor values. The output projection's bias is scaled by mean head message mass $Z/[Z+\epsilon(1-Z)^2]$. A zero gate row produces zero contextual message, while the residual state survives. Common measure references cancel within a softmax row; empty eligible rows contribute zero. See [contextual value reduction](src/honf_forward_core/continuous_joint/preparation.py).
 
-For every query/module pair, a shared four-layer legacy MLP receives relative geometry, module presence, the encoded module token, and the raw module features. Let its output be $\psi(q,i)$. With edge-mass-normalized incidence
+<a id="gate-calibration"></a>
 
-$$
-\bar A^{MH}_{ik}=\frac{A^{MH}_{ik}}{\sum_iA^{MH}_{ik}+\epsilon},
-$$
+#### 4.3 Gate calibration and reuse
 
-the edge-local and query-reduced pair contexts are
+Define $\psi(u)=[u]_+^2/(1+[u]_+^2)$, where $[u]_+=\max(u,0)$. For MM, EM and ME,
 
 $$
-c^{pair}_{qk}=\sum_i\bar A^{MH}_{ik}\psi(q,i),
+G_{ij}=\psi\!\left(a\sum_h\pi_h[s_{ij}^h-\max_ks_{ik}^h]+b\right),
+\qquad\pi=\operatorname{softmax}(\mathbf u),\qquad
+a=0.25+3.75\operatorname{sigmoid}(v).
+$$
+
+Head weights, scale and bias are learned per route; the active implementation initializes $b=1.5$. This calibration reuses the contextual scorer. Its gate first acts during exchange, then is reused by organization. Directory construction does not fit another grouping network. Gate calibration, query scoring and query-message projections still have learned parameters. The computational benefit of reuse is measured with preparation and query work included. One core-owned set of four route calibrators is shared across contextual blocks. The three non-EE routes each use $N_h+2$ scalars, and EE uses $N_h+1$, totaling $4N_h+7$: 23 for four heads. Directory compilation adds no learned parameters; block attention scorers remain separately parameterized.
+
+The public E←E gate instead uses per-head receiver-relative gaps. Normalize positive donor measures within each eligible row and compute the score variance $v_i^h$. Then
+
+$$
+\delta_{ij}^h=\frac{\max_ks_{ik}^h-s_{ij}^h}{\sqrt{1+v_i^h}},\qquad
+G_{ij}^{E\leftarrow E}=\sum_h\pi_h\,2\psi\!\left(1-\frac{\delta_{ij}^h}{\tau_E}\right),
+\qquad\tau_E=\operatorname{softplus}(u_E).
+$$
+
+A head's peak gate is one; it becomes zero at $\delta_{ij}^h\geq\tau_E$. The mixture remains positive if any positively mixed head supports the donor. The unit variance term stabilizes gap scale. See [`RelativeEECalibration`, `AppliedInteractionIncidence`](src/honf_forward_core/interaction_reused_member_routing/core.py) and [`ScoreCalibration`](src/honf_forward_core/joint_native/routing.py).
+
+<a id="ee-scalability"></a>
+
+#### 4.4 E←E and scalability
+
+E←M distributes object information into environmental receivers. E←E lets those records exchange their attributes and received object information before M reads the updated environment. Its dense score/geometry evaluation has quadratic dependence on $N_E$; zeroing messages alone does not avoid computing their scores.
+
+The bound implementation executes EE in every block and requires positive `context_depth`. It has no EE-only off switch that removes this pair scoring. Removing EE is a distinct architecture/execution choice to evaluate against matched field fidelity, responses and complete work. P95 query access does not remove contextual preparation cost.
+
+<a id="organization"></a>
+
+### 5. Forming the global organization
+
+<a id="scene-tables"></a>
+
+#### 5.1 A scorer produces a scene's tables
+
+The learned objects are projections, geometry networks and calibrations. For each scene and contextual stage they evaluate an actual receiver-by-donor score tensor with a head axis. The table is an execution result, not a persistent learned adjacency parameter. Layout, attributes and conditions determine its current values.
+
+The final block's captured E←M and E←E gates supply E-address directory rows. Earlier blocks have already influenced final member states. MM and ME act during contextualization, but their matrices do not create M-receiver rows in this directory. The captured object retains block, route and original-ID provenance.
+
+```mermaid
+flowchart TB
+    S["Contextual raw scores · per scene and stage"] --> A["Measure-aware donor softmax A"]
+    S --> G["Score calibration · applied gate G"]
+    A --> B["Guarded A × G message coefficients"]
+    G --> B
+    G --> EG["Final E-receiver gates + own-E access"]
+    EG --> PI["Access measure · joint row normalization"]
+    PI --> D["Full directory Pi → retained directory D"]
+```
+
+Figure 3. The contextual scorer supports both actual value exchange and access preparation. The directory reuses the applied gate, rather than copying one head's softmax coefficients.
+
+<a id="directory-measures"></a>
+
+#### 5.2 E-address rows and access measures
+
+For final-block E receiver $a$, combine the applied gates with structural own-E access:
+
+$$
+g_{ai}=\begin{cases}
+G_{ai}^{E\leftarrow M},&i\in\mathcal{M},\\
+G_{ai}^{E\leftarrow E}+\mathbf1[i=\operatorname{own}(a)],&i\in\mathcal{E}.
+\end{cases}
+$$
+
+Structural own E is added to the actual contextual EE diagonal. It supplies the address's original environmental record when other relations vanish, with its own recorded provenance.
+
+The inventory access measure is normalized separately within each role:
+
+$$
+\mu_i=\begin{cases}
+1/N_M,&i\in\mathcal{M},\\
+\omega_i/\sum_{j\in\mathcal{E}}\omega_j,&i\in\mathcal{E}.
+\end{cases}
+$$
+
+Only present M and present positive-measure E records participate; empty roles have zero mass. Uniform M weighting is this directory's access convention, distinct from contextual attention's input donor measure.
+
+For `relation_anchored`, $\nu_{ai}=\mu_i$. For `relation_anchored_active`, define $\mathcal{A}_r(a)=\{i\in\mathcal{V}_r:g_{ai}>0,\mu_i>0\}$ and use
+
+$$
+\nu_{ai}=\begin{cases}
+\displaystyle\frac{\mu_i}{\sum_{j\in\mathcal{A}_{r(i)}(a)}\mu_j},
+&i\in\mathcal{A}_{r(i)}(a),\\
+0,&\text{otherwise}.
+\end{cases}
+$$
+
+Both variants normalize jointly across M and E:
+
+$$
+\Pi_{ai}=\frac{g_{ai}\nu_{ai}}{\sum_{j\in\mathcal{V}}g_{aj}\nu_{aj}}.
+$$
+
+A zero-total row stays zero. Active-domain normalization changes each role's available-support measure; it creates no missing relationship and leaves the contextual scorer shared. See [`compile_e_access_directory`](src/honf_forward_core/interaction_reused_member_routing/anchored.py) and [`build_joint_member_measure`](src/honf_forward_core/interaction_reused_member_routing/primitives.py).
+
+<a id="p95-access"></a>
+
+#### 5.3 Joint P95 access
+
+Sort positive $\Pi_{ai}$ jointly across both roles, descending with stable role-then-original-ID ties. Let $\sigma_a$ denote this order. With $\eta=0.95$, take the shortest cumulative-mass prefix and append positive own E if absent:
+
+$$
+k_a=\min\left\{k:\sum_{j=1}^k\Pi_{a,\sigma_a(j)}\geq\eta\right\},\qquad
+\mathcal{S}_a=\{\sigma_a(1),\ldots,\sigma_a(k_a)\}
+\cup\{\operatorname{own}(a)\},
 $$
 
 $$
-c^{pair}_q=\sigma(\eta_{pair})\sum_k\alpha_{qk}c^{pair}_{qk}.
+D_{ai}=\Pi_{ai}\mathbf1[i\in\mathcal{S}_a],\qquad
+\mathcal{H}_a=\{i:D_{ai}>0\},\qquad\sum_iD_{ai}\geq\eta.
 $$
 
-The promoted executor contracts routing first,
+These expressions apply to a valid normalized row; own E is appended only if its stored weight is positive. Truncation preserves original weights without renormalizing. P95 means 95% cumulative directory mass, not a member fraction or score percentile. Selected counts vary by address and scene.
+
+| Illustrative descending row | Cumulative mass | Selection |
+| --- | ---: | --- |
+| $M_2:0.50$ | $0.50$ | Retained. |
+| $E_7\ \text{(own)}:0.30$ | $0.80$ | Retained. |
+| $M_1:0.16$ | $0.96$ | Retained; mass target reached. |
+| $E_4:0.04$ | $1.00$ | Omitted from restricted access. |
+
+This synthetic example retains three members and 96% of row mass. Appending an own-E entry outside the prefix can increase retained mass further.
+
+There is no distance cutoff: a remote member with sufficient relation mass remains accessible, and coverage blends several address rows. The rule imposes no minimum spatial spread, minimum M count or fixed hyperedge count; a concentrated learned row can remain concentrated. Numerical behavior is controlled by gate calibration, physical measures, guarded exchange and query normalization. P95 specifies a retained-access mass target with a row- and scene-dependent member count.
+
+<a id="relation-reuse"></a>
+
+#### 5.4 End-to-end learning and reuse
+
+Directory weights are computed from live applied gates and remain attached to autograd. Field loss can train the scorer and gate calibration through retained access and contextual exchange. Sorting, prefix length and selected indices are detached discrete decisions. Training is joint with piecewise-selected support, rather than differentiation through a combinatorial sort.
+
+Preparation builds one fine-grained scene-wide library of E-address rows. Queries reuse it. Native rows can overlap extensively; a compact picture of representative rows does not replace the library with a fixed number of pooled groups.
+
+<a id="query-reading"></a>
+
+### 6. Query reading and neural-field formation
+
+<a id="address-coverage"></a>
+
+#### 6.1 Continuous address coverage
+
+The adapter supplies E-address indices and nonnegative cover weights $\lambda_a(q)$ satisfying $\sum_a\lambda_a(q)=1$ on valid queries. Thermal uses tensor-product cubic smoothstep over at most four neighboring E centers; the maintained three-dimensional case locator supplies at most eight. The core validates a maximum of eight slots in three dimensions and four otherwise. Boundary queries clamp to edge centers. Neighbor lookup and coordinate-to-ID mapping belong to the adapter.
+
+For normalized position $u$ between neighboring centers, $s(u)=3u^2-2u^3$ on $[0,1]$; tensor products of $s$ and $1-s$ give the multidimensional cover. The candidate set is the union of members in covered rows. Restricted mode uses $D$, full mode uses $\Pi$. The equations below use restricted $D$.
+
+```mermaid
+flowchart TB
+    Q["Query q"] --> LOC["Neighbor addresses · continuous cover"]
+    LOC --> U["Union of accessible original members"]
+    U --> S["Score unique query/member pairs once"]
+    S --> ROW["Per-address calibration · role preferences"]
+    ROW --> COAL["Coalesce coefficients by original member"]
+    U --> MSG["Query-relative member messages"]
+    COAL --> RED["Weighted M/E reductions"]
+    MSG --> RED
+    RED --> Y["Joint field decoder"]
+    Q --> Y
+```
+
+Figure 4. Access selection precedes expensive query/member scoring and messages. Shared members receive one coalesced coefficient and one reusable message for that query.
+
+<a id="query-preference"></a>
+
+#### 6.2 Query preference and role strength
+
+The role-specific score $t_{ri}(q)$ is learned from the layer-normalized query state, layer-normalized prepared member key and geometry: $(q-x_i)\oslash\mathbf L$, its norm and $\operatorname{asinh}((q-x_i)\oslash\boldsymbol\ell_i)$. Each unique query/member score is evaluated once for the requested union and reused across rows.
+
+Within role $r$ and address $a$, normalize the directory prior and compute query-dependent moments. All sums here run over $\mathcal{S}_a\cap\mathcal{V}_r$:
 
 $$
-\beta_{qi}=\sum_k\alpha_{qk}\bar A^{MH}_{ik},
-\qquad
-c^{pair}_q=\sigma(\eta_{pair})\sum_i\beta_{qi}\psi(q,i),
+w_{ari}=\frac{D_{ai}}{\sum_{j\in\mathcal{S}_a\cap\mathcal{V}_r}D_{aj}},\qquad
+\bar t_{ar}=\sum_iw_{ari}t_{ri},\qquad
+v_{ar}=\sum_iw_{ari}(t_{ri}-\bar t_{ar})^2.
 $$
 
-which is algebraically equivalent to the accepted edge-explicit computation at full support while avoiding the full query-edge-module intermediate; the frozen Run-1401 output replay is numerically exact. The learned pairwise gate remains initialized to `0.1`, the legacy MLP parameter path remains unchanged, and K=6 checkpoints retain the same 237 keys. Dense full-beta execution is used for training. Evaluation may gather the smallest module set reaching retained beta mass 0.98 without renormalizing truncated beta; this is an evaluation override, not a training curriculum.
-
-### 6.3 Final context and field head
-
-The near-module context is Gaussian pooling over active module tokens with
-`local_context_scale=0.45`:
+Inherited calibration and within-role preference are
 
 $$
-c^{near}_q=\sum_i
-\frac{P_{M,i}\exp(-\lVert q-X_i\rVert^2/(2\sigma^2))}
-{\sum_jP_{M,j}\exp(-\lVert q-X_j\rVert^2/(2\sigma^2))+\epsilon}m_i.
+\xi_{ari}(q)=4\tanh\!\left(
+\frac{t_{ri}(q)-\bar t_{ar}(q)}{4\sqrt{1+v_{ar}(q)}}\right),\qquad
+p_{ari}(q)=\frac{D_{ai}\exp\xi_{ari}(q)}
+{\sum_{j\in\mathcal{S}_a\cap\mathcal{V}_r}D_{aj}\exp\xi_{arj}(q)}.
 $$
 
-The complete accepted context is
+Set $p_{ari}=0$ outside $\mathcal{S}_a\cap\mathcal{V}_r$. This is prior-times-evidence reading. Query evidence reweights accessible members while retaining their relation prior. Tiny-prior members have small influence on calibration statistics. The unit variance floor and bounded score control raw-score amplification; shifted log weights stabilize implementation. Empty roles contribute zero.
+
+A role-specific network consumes normalized query state, $\sum_i p_{ari}\xi_{ari}$ and entropy normalized by the logarithm of the full scene's eligible count for that role. Single-member support has zero entropy. If its two output logits have contrast $d_{ar}$, the read strength is
 
 $$
-c_q=c^H_q+c^{pair}_q+W_gg+W_nc^{near}_q.
+\rho_{ar}(q)=\frac12\left(1+\frac{d_{ar}(q)}{\sqrt{1+d_{ar}(q)^2}}\right).
 $$
 
-The direct module/environment residual branch is not enabled by
-`enhanced_honf_pairwise`, and `output_mean_residual_split=false`. Therefore
+Empty support sets $\rho_{ar}=0$. M/E strengths are not a two-role softmax; both can be strong or weak. See [packed reading](src/honf_forward_core/interaction_reused_member_routing/anchored.py) and [reader primitives](src/honf_forward_core/interaction_reused_member_routing/primitives.py).
+
+<a id="member-coalescence"></a>
+
+#### 6.3 Coalescing shared original members
+
+Combine address cover, role strength and within-role preference:
 
 $$
-\boxed{\widehat U(q)=H_{field}\!\left(\operatorname{LayerNorm}(c_q)\right)}.
+\beta_{ri}(q)=\sum_a\lambda_a(q)\rho_{ar}(q)p_{ari}(q).
 $$
 
-This is context fusion, not edge-additive output. Individual hyperedges
-organize and route latent information, but the primary model does not claim
-that the final physical field is an exact sum of separately predicted edge
-fields.
+Repeated appearances refer to one original member, so their coefficients add before contraction. For two hypothetical addresses, $(\lambda_1,\rho_{1M},p_{1Mi})=(0.6,0.5,0.4)$ and $(\lambda_2,\rho_{2M},p_{2Mi})=(0.4,0.75,0.2)$ give $\beta_{Mi}=0.18$. This is one weighted contribution, not duplicate member identities. The joint coefficient sum over M and E is not constrained to one.
 
-## 7. ThermalChannel Stage-A coupling
+<a id="detail-messages"></a>
 
-The generic HONF core has no ThermalChannel physics. The
-`ChannelThermalHONFModel` wrapper owns the frozen local disk surrogate and the
-coupled execution order.
+#### 6.4 Detail-preserving selected-member messages
 
-The case configuration loads a trusted local Stage-A checkpoint strictly and
-freezes it. The Stage-A surrogate uses seven module parameters,
-five-value angular port tokens
-$[\theta,\cos\theta,\sin\theta,T_{env},h]$, hidden and latent width 128, 16 port
-latents, four attention heads, four cross-attention layers, six coordinate
-Fourier frequencies, and zero dropout.
-
-For a normal coupled forward pass, the wrapper performs:
-
-1. build physical module, environment, global, and query features;
-2. encode the case and compute a base organizer;
-3. predict angular $T_{env}$ and positive $h$ port conditions;
-4. choose predicted, teacher, or mixed ports;
-5. execute Stage A only for active modules;
-6. assemble interface temperature and corrected physical flux;
-7. fuse six local-response summary values and the 128-value local latent into
-   the module state;
-8. perform one configured outside-temperature refinement, rerun Stage A, and
-   fuse the final response;
-9. recompute the final organizer and decode the requested global queries.
-
-The corrected flux is anchored to the Robin relation
+For prepared original-member value $v_{ri}$, the current shared Detail core constructs
 
 $$
-q_n^{Robin}=h(T_s-T_{env}),
+\Delta_i(q)=q-x_i,\qquad
+m_{ri}(q)=\operatorname{SiLU}\!\left[
+v_{ri}+W_r^qz_q+b_r^q
++W_r^g\gamma\!\left(\Delta_i(q)\oslash\mathbf L\right)
++W_r^\ell\operatorname{asinh}\!\left(\Delta_i(q)\oslash\boldsymbol\ell_i\right)
+\right],
 $$
 
-with a learned zero-initialized correction under
-`local_surrogate_flux_mode="corrected_physics"`.
-
-`PreparedChannelThermalCase` stores the final organizer tensors and global
-token. `decode_prepared()` can then evaluate additional query chunks without
-repeating feature encoding, Stage A, refinement, or organization. This is an
-execution optimization only; it does not change the prediction formula.
-
-## 8. Current data, training, and checkpoint policy
-
-The case profile uses the `thermal_channel_global_v1` manifest with 600 training
-and 90 test cases, 1024 sampled field points per case, train and validation
-batch size 48, four workers, input and target normalization, random
-training-point sampling, dynamic module padding, and module-count bucketing.
-
-The Stage-7 training profile specifies:
-
-| Setting | Value |
-|---|---:|
-| Seed | 0 |
-| Epoch budget | 5000 |
-| Optimizer | AdamW, one parameter group |
-| Learning rate | $3\times10^{-4}$ |
-| Organizer learning rate | `null` (shared optimizer group) |
-| Weight decay | $10^{-5}$ |
-| Gradient clipping | 1.0 |
-| AMP | false |
-| Port mode | predicted, no curriculum schedule |
-| Plot cadence | 50 epochs |
-| Latest-checkpoint cadence | 10 epochs |
-| Milestones | 500, 1000, 2500, 5000, 7500, 10000 |
-
-Milestones above the 5000-epoch budget are inert unless the budget is extended.
-Checkpoint selection should follow the relevant validation criterion rather
-than automatically using the latest epoch.
-
-The coupled objective is
-
 $$
-\mathcal L=\lambda_F\mathcal L_{field}
-+\lambda_I\mathcal L_{internal}
-+\lambda_\Gamma\mathcal L_{interface}
-+\lambda_P\mathcal L_{port}
-+\lambda_S\mathcal L_{port\ smooth}
-+\lambda_G\mathcal L_{port/global}
-+\lambda_C\mathcal L_{predicted\ consistency}
-+\mathcal L_{organizer}.
+\gamma(u)=\left[u,\{\sin(2\pi f u),\cos(2\pi f u)\}_{f\in\{1,2,4\}}\right],\qquad
+h_r(q)=\sum_{i\in\mathcal{V}_r}\beta_{ri}(q)m_{ri}(q),
 $$
 
-Current principal weights are `1.0`, `1.0`, `0.2`, `0.3`, `0.01`, `0.2`, and
-`0.05`, respectively. Predicted-port consistency warms up over 100 epochs. The
-interface and port-$h$ terms use smooth L1. Organizer regularization is
-implemented for research, but `enabled=false`, so it contributes zero in the
-current profile. There is no active-edge-count penalty in Stage 7.
+$$
+\mathbf u_\theta(q)=F_\theta([z_q,h_M(q),h_E(q)]),\qquad
+\widehat{\mathbf y}(q)=\mathcal{D}_{\mathrm{case}}(\mathbf u_\theta(q)),\qquad
+\widehat{\mathbf y}_{\mathrm{obs}}=\mathcal{O}_{\mathrm{case}}[\widehat{\mathbf y}].
+$$
 
-Checkpoint resume validates model identity, strict state loading, optimizer
-group count, parameter order, parameter names, and optimizer state before
-continuing. Evaluation also loads maintained checkpoint families with
-`strict=True`.
+The core predicts a normalized joint field. The adapter converts units and observes that field on native receivers. An observation can involve several query positions, for example an interpolation or a vorticity stencil; it is not generally a pointwise decoder operation.
 
-## 9. Compatibility and research modes
+The message uses learned role-specific maps $W_r^q\in\mathbb{R}^{d_z\times d_z}$, $W_r^g\in\mathbb{R}^{d_z\times7d}$, $W_r^\ell\in\mathbb{R}^{d_z\times d}$ and bias $b_r^q\in\mathbb{R}^{d_z}$. The Fourier-relative feature has $7d$ components.
 
-`UnifiedForwardConfig.from_dict()` supplies the historical defaults
-`fixed_projection`, `residual_concat`, `context_fusion`, softmax assignments,
-and dense execution when upgraded fields are absent. Old saved configurations
-therefore reconstruct their original path rather than silently selecting a
-research architecture.
+Detail preservation means that original members remain individually addressable, address access varies through continuous coverage, and selected values become query-relative messages rather than a single broadcast value for a region. Finite encodings and mass truncation still determine which distinctions reach the output.
 
-The following mechanisms remain supported but are outside the primary reading
-path:
+The query controls member preference $p$, role strength $\rho$ and message content $m$. Near a heated object and farther downstream, it can use the same object with different weights and different relative messages. These are learned dependencies; a physical transfer interpretation requires corresponding response or conservation evidence.
 
-| Mechanism | Maintained implementation | Primary Stage-7 value |
-|---|---|---|
-| Exchangeable slot organizer | `organization/exchangeable.py` | fixed projection |
-| Adaptive quality/coverage selection | exchangeable organizer | all six active |
-| Scheduled softmax-to-entmax assignments | `organization/helpers.py`, `routing.py` | softmax |
-| Descriptor-first mechanism state | `decoding/pairwise.py` | raw organizer state |
-| Exact background-plus-edge fields | `decoding/research.py` | context fusion |
-| Gathered query-edge/module execution | `decoding/research.py`, `decoding/pairwise.py` | dense |
-| Topology schema v3 export | `src/honf_forward_core/evaluation/topology_signature.py` | optional evaluation feature |
+Prepared keys and values are shared across queries. Paired reads reuse raw query scores; messages for positive selected pairs appearing in both paths are computed once, and missing pairs are computed when needed. Each path retains its own priors, calibrations and coefficients. See [the Detail implementation](src/honf_forward_core/interaction_reused_member_routing/detail.py) and [`_decode_requests`](src/honf_forward_core/interaction_reused_member_routing/anchored.py).
 
-`adaptive_sparse_additive.json` remains the base for optional research and
-compatibility overlays. Lifecycle/status metadata lives in
-`profile_registry.json` instead of being written into individual configs.
+<a id="visualization-mapping"></a>
 
-Sparse execution for the accepted context-fusion model is implemented as the
-promoted fused gathered beta-0.98 evaluation/deployment path. It preserves the
-Stage-7 scientific formula and full-support numerical parity without
-reactivating additive field assembly.
+### 7. Mapping visualization to the model
 
-The optional `case_adaptive_residual_context` profile changes only the
-organizer. It builds a normalized nonnegative module-environment coupling,
-extracts shared rank-one mechanisms sequentially, subtracts each explained
-component, and stops independently per case when the residual fraction reaches
-the configured tolerance. `num_hyperedges=0` is a profile declaration that no
-global scientific K exists; tensor packing still uses the batch-local active
-module width. Soft survival supports training and a hard residual mask supports
-evaluation. The candidate retains the established encoders, context-fusion
-decoder, fused beta routing, legacy pairwise kernel, ThermalChannel coupling,
-losses, and disabled organizer regularization. Residual traces and counts are
-evaluation diagnostics, not topology-signature schema changes.
+The primary organization views are whole-layout access regions, original-member service maps and native overlapping hyperedges. Their source quantities remain distinct from contextual attention and final query use.
 
-The Phase-2 `case_adaptive_tensor_residual_context` candidate keeps that
-contract while exposing vector-valued residual mechanisms. For active
-mechanism $h$, the interaction tensor has shape
-$[M,E,D_I]$ with $D_I=32$ and is summarized by module, environment, and
-content unfoldings. Content factors, environment-factor cosine/rank, region
-separation, query/pairwise rank, support gaps, and the observed per-case K
-distribution are evaluation-only diagnostics. The candidate uses
-$K_{cap}=\lceil1.5M_b\rceil$ (with the configured minimum) as a case-size cap,
-one factor-refinement step, and a 500-epoch training budget; the full tensor is requested explicitly with
-`--tensor-diagnostics` so normal inference does not carry the extra array.
+| View | Mathematical source | Meaning |
+| --- | --- | --- |
+| Contextual M receiver | Row of $[G^{M\leftarrow M}\ \ G^{M\leftarrow E}]$. | Incoming actual relations from both roles, with their separate stages. |
+| Contextual E receiver | Row of $[G^{E\leftarrow M}\ \ G^{E\leftarrow E}]$. | Incoming actual relations; structural directory self access is separate. |
+| Contextual donor | Column of captured $G^{r\leftarrow s}$. | Receivers reached by that directed relation. |
+| Prepared receiver | Row $D_{a,:}$. | One E address's retained native hyperedge. |
+| Prepared donor | Column $D_{:,i}$. | E addresses that can read original donor $i$. |
+| Query contribution | $\beta_{ri}(q)$ and $m_{ri}(q)$. | Actual organized weighting and message at one query. |
+| Native set diagram | Supports $\mathcal{H}_a$ of selected actual rows. | Exact displayed intersections of original members. |
 
-## 10. Current code structure
+Concatenating MM and ME receiver rows requires their sequential-stage labels. Transposing EM gives a reverse lookup, not evidence that ME ran. The E-address directory has E receiver rows only; it does not invent an M-row directory.
 
-The Stage-7 cleanup preserved public facades and checkpoint-visible parameter
-ownership while moving optional or procedural logic into focused modules.
+The region map removes own E in a display copy and assigns each address its leading positive nonself donor $g(a)$; an empty nonself row is neutral. Original M donor participation in the resulting categorical regions is
 
-| Responsibility | Maintained source |
-|---|---|
-| Strict core config and `BatchData` | `src/honf_forward_core/config.py` |
-| Generic encode/organize/decode orchestration | `src/honf_forward_core/model.py` |
-| Fixed organizer and stable parameter owner | `src/honf_forward_core/organizer.py` |
-| Organizer math helpers | `src/honf_forward_core/organization/helpers.py` |
-| Exchangeable/adaptive organizer | `src/honf_forward_core/organization/exchangeable.py` |
-| Context-fusion decoder and stable parameter owner | `src/honf_forward_core/decoder.py` |
-| Pairwise and optional mechanism encoders | `src/honf_forward_core/decoding/pairwise.py` |
-| Additive/gathered compatibility execution | `src/honf_forward_core/decoding/research.py` |
-| Assignment normalization and entmax | `src/honf_forward_core/routing.py` |
-| Thermal physical input and environment features | `Case_ThermalChannel/src/channelthermal/input_adapter.py`, `environment.py` |
-| Complete coupled ThermalChannel model | `Case_ThermalChannel/src/channelthermal/model.py` |
-| Non-registering ThermalChannel support methods | `Case_ThermalChannel/src/channelthermal/model_support.py` |
-| Stage-A model and coupling | `Case_ThermalChannel/src/channelthermal/local_surrogate/model.py`, `local_coupling.py` |
-| Forward workflow facade | `Case_ThermalChannel/src/channelthermal/workflows/train_forward.py` |
-| Epoch/loss execution | `Case_ThermalChannel/src/channelthermal/training/epoch.py` |
-| Optimizer inventory and resume parity | `Case_ThermalChannel/src/channelthermal/training/optimizer.py` |
-| Checkpoint construction and validation | `Case_ThermalChannel/src/channelthermal/training/checkpoints.py` |
-| Metrics and plots | `Case_ThermalChannel/src/channelthermal/training/reporting.py` |
-| Evaluation workflow facade | `Case_ThermalChannel/src/channelthermal/workflows/evaluate_forward.py` |
-| Evaluation load, prepared decode, and results | `Case_ThermalChannel/src/channelthermal/evaluation/{loading,prepared,results}.py` |
-| Canonical artifact layout | `src/honf_runtime/artifact_layout.py`, `src/honf_runtime/run_store.py` |
-| Maintained offline diagnostics | `tools/diagnostics/` |
+$$
+W_{mg}=\frac{\sum_{a:g(a)=g}D_{am}}{\sum_aD_{am}}.
+$$
 
-The fixed organizer layers remain registered directly on
-`HypergraphOrganizerCore`, and context-fusion decoder layers remain registered
-directly on `HypergraphFieldDecoder`. `ResearchDecoderExecutionMixin` and
-`ChannelThermalModelSupportMixin` register no `nn.Module` children. This is why
-the cleanup can improve source organization without changing state-dict keys,
-parameter shapes, parameter order, or optimizer-resume semantics.
+Ring sectors display $W_{mg}$; cell colors display $g(a)$. These summarize incidence without changing soft membership. Donor service maps show directory columns across physical E receiver coordinates; the standard nonself display hides the E supplier's own-E entry while preserving it in the saved directory.
 
-## 11. Evaluation artifacts and frozen references
+Native set diagrams select one to four actual rows with the common profile-coverage rule. Own E is removed only in the selection copy; nonzero profiles are L2-normalized, medoids/farthest profiles are selected, and selection stops at 90th-percentile distance at most 0.5 or four rows. Displayed membership comes from the original retained rows. Positive M and own E are preserved; other E vertices can be omitted by a declared display threshold with retained/omitted mass recorded. Ellipse area and abstract distance have no physical scale.
 
-The canonical evaluator writes one timestamped job containing category-owned
-artifacts such as:
+Set-diagram arrows use a separately declared captured contextual gate, normally MM from a named block, with donor-to-receiver direction and common strength bins. Profile coverage, displayed directory mass and arrow gate mass are recorded separately. See [the visualization specification](docs/guides/Global_Hypergraph_Organization_Visualization.md) and [plotting entry point](tools/plot_honf_organization.py).
 
-- `fields/` for quicklooks and local/interface plots;
-- `metrics/metrics_<mode>.csv`;
-- `arrays/evaluation_outputs_<mode>.npz`;
-- `organization/`, `routing/`, `diagnostics/`, and `plans/` when requested;
-- `summary.json` and `evaluation_manifest.json`.
+<a id="learning-work"></a>
 
-Generated evidence is separate from maintained diagnostic source. Historical
-diagnostic entry points remain as compatibility wrappers, while maintained
-implementations live under `tools/diagnostics/`.
+### 8. Learning and computational meaning
 
-The reusable compatibility contract is stored at:
+Field loss jointly trains encoders, contextual scores, gate calibration, query scores, role strengths, messages and the joint decoder. Discrete masks, neighbor indices and P95 choices select the current execution path. Coordinate derivatives flow through positional features, relative scoring/messages and cover weights on that path. Case observation operators add their declared interpolation or derivative stencils.
 
-| Evidence | Location |
-|---|---|
-| Golden numerical replay contract | `tests/fixtures/forward_cleanup/golden_replay.json` |
-| Public schema snapshots | `tests/fixtures/forward_cleanup/public_schemas.json` |
-| Replay command | `tools/diagnostics/replay_forward_golden.py` |
-| Architecture contract | `docs/architecture/` |
+| Normalization | Axis and purpose |
+| --- | --- |
+| Contextual $A$ | Eligible donors per receiver/head: measure-aware preference. |
+| Guarded $B$ | Gate-weighted message mass: permits a zero contextual message. |
+| Inventory/active measure | Within role, globally or on a receiver's support: comparable access mass. |
+| Directory $\Pi$ | Joint M+E row: the address's original-member prior. |
+| Query score moments | Directory prior within role/address: bounded relative evidence scale. |
+| Query $p$ | Accessible members within role/address: prior-times-evidence distribution. |
+| Cover $\lambda$ | Neighboring addresses for one query: spatial blending. |
 
-Trusted local checkpoints can be replayed against these schemas and fixtures;
-checkpoint binaries and generated replay evidence remain local-only.
+These operations specify numerical behavior and access semantics. They do not impose a group count or diverse learned relations. Relation structure is measured from directories, contributions and field responses.
+
+| Work | Executed operation |
+| --- | --- |
+| Contextual preparation | Dense route scores/geometry, including quadratic EE scoring. |
+| Directory preparation | E receiver rows, normalization, joint sorting and packed supports. |
+| Query scores | Unique accessible query/member pairs for requested mode(s). |
+| Address reading | Per-role/per-address calibration, distribution and strength. |
+| Detail messages | Positive selected query/member pairs, coalesced across addresses and shared across paired modes. |
+| Case work | Input preparation, interpolation/stencils, native losses and optional local operators. |
+
+Restricted access can reduce query pairs while dense context preparation remains. Paired full/restricted training can score the full union while sharing work. Report score pairs, selected message pairs, preparation cost, peak memory and complete runtime separately. Query tiling changes execution chunks rather than receiver population or equations. See [query tiling](docs/guides/Query_Tiling.md).
+
+<a id="implementation"></a>
+
+### 9. Public interface and implementation map
+
+```python
+from honf_forward_core.models import build_model, relation_anchored_config
+
+config = relation_anchored_config(
+    "relation_anchored", base_core_config,
+    input_dataset="my_case", query_tile_size=256,
+)
+model = build_model("relation_anchored", config)
+# The case adapter supplies SceneBatch and QueryBatch, including address cover.
+prepared = model.prepare(scene)
+restricted = model.decode(
+    prepared, queries, intervention={"read_mode": "restricted"},
+)
+full, restricted, shared_work = model.decode_paired(prepared, queries)
+fields = restricted.joint_fields
+```
+
+The adapter supplies `base_core_config`, `scene` and `queries`. Bare `decode()` defaults to full access unless explicitly overridden. Retained-mass configuration prepares restricted access but does not itself select restricted inference. Save `get_config()`, model state and adapter transforms together. Saved schemas reconstruct their own implementation; the public name does not rewrite checkpoint semantics.
+
+| Concept | Maintained source |
+| --- | --- |
+| Public construction | [`relation_anchored_config`, `build_model`](src/honf_forward_core/models.py). |
+| Input contracts | [`SceneBatch`, `QueryBatch`](src/honf_forward_core/content_hypergraph/contracts.py). |
+| Encoding and block stack | [`ContentHypergraphCoreV2`](src/honf_forward_core/content_hypergraph/model_v2.py). |
+| Ordered scorer/exchange | [Staged attention](src/honf_forward_core/content_hypergraph/staged_attention_v2.py). |
+| Applied contextual coefficients | [`contextual_value_update`](src/honf_forward_core/continuous_joint/preparation.py). |
+| Applied gates/query scorer | [`RelativeEECalibration`, `AppliedInteractionIncidence`, `InteractionMemberRouter`](src/honf_forward_core/interaction_reused_member_routing/core.py). |
+| Directory/P95/reader | [`compile_e_access_directory`, `AnchoredMemberRoutingCore`](src/honf_forward_core/interaction_reused_member_routing/anchored.py). |
+| Access measures/calibration | [Reader primitives](src/honf_forward_core/interaction_reused_member_routing/primitives.py). |
+| Detail messages | [`DetailAnchoredMemberRoutingCore`](src/honf_forward_core/interaction_reused_member_routing/detail.py). |
+| Organization visualization | [Plotting tool](tools/plot_honf_organization.py) and [specification](docs/guides/Global_Hypergraph_Organization_Visualization.md). |
+
+<a id="cases"></a>
+
+## Part II. Case formulations
+
+<a id="case-contract"></a>
+
+### 10. Case chapter contract
+
+Each case chapter will define its physical problem and units, M/E/C contents, E discretization/support, prescribed-versus-target separation, query cover, observation operators, training objective and outputs. Case-owned additions specify their exact inputs, trainable/frozen components and gradient path. Field fidelity, organized work and physical responses use their own measured quantities.
+
+| Case | Formulation to develop | Current integration |
+| --- | --- | --- |
+| ThermalChannel | Heated modules, geometric E records, operating conditions, fluid/material/interface observations and optional task-trained local readout. | [Case guide](docs/guides/Case_Relation_Anchored_Training.md), [local expert](Case_ThermalChannel/src/channelthermal/training/local_expert_task.py). |
+| WindFarm | Turbines, three-dimensional E support, inflow/direction conditions and velocity observation roles. | [Case guide](docs/guides/Case_Relation_Anchored_Training.md), [Wind adapter](Case_WindFarm/src/windfarm/content_hypergraph.py). |
+| Electro-thermal | Material/source/boundary patches, operating conditions and coupled output/observation definitions. | [Integration walkthrough](Case_ElectroThermal/docs/COWORKER_HANDOFF.md). |
+
+This revision establishes the core and the case chapter structure. Case-specific laws and results belong in their chapters; a Thermal-only port law or Wind-only background prescription remains case-owned.

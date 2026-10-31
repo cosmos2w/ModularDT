@@ -10,6 +10,8 @@ Object records, overlapping relationships and multiple physical fields. The fiel
 
 The public models `relation_anchored` and `relation_anchored_active` share one detail-preserving mechanism. Both retain individual contextualized records, reuse applied relations to prepare an address directory, combine nearby addresses through continuous coverage, and construct messages relative to each query. The active model changes the access measure used by the directory.
 
+The [model definition and notation standard](Model_Explain.md) specifies the M/E/C input contract, contextual exchange, applied-relation reuse, native hyperedges and query reading, with equations, diagrams and source correspondence bound to a specific implementation version.
+
 Let `M` and `E` denote input-object roles, with original records $V=M\cup E$. A member $i$ has coordinates $x_i$, prescribed features and controls, physical measure $\mu_i$, and contextual state $z_i$. These roles describe inputs; both contribute to a joint predictor of the requested physical channels. Case adapters define record features, geometry, units, normalization and observation operators.
 
 1. **Prepare records.** Encode each member with its owning geometry, attributes and prescribed controls.

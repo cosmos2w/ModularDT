@@ -1,0 +1,11 @@
+flowchart TB
+    M["M · original objects"] --> ENC["Role encoders<br/>Geometry and C injection"]
+    C["C · global conditions"] --> ENC
+    E["E · environment regions"] --> ENC
+    ENC --> EX["Stacked contextual exchange blocks"]
+    EX --> DIR["E-address directory<br/>Original-member hyperedges"]
+    EX --> VAL["Individual contextual<br/>member values"]
+    DIR --> READ["Query location<br/>Organized member reading"]
+    VAL --> READ
+    Q["Query q<br/>Coordinates and features"] --> READ
+    READ --> OUT["Joint physical field"]

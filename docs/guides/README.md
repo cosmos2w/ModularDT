@@ -4,6 +4,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 
 | Guide | Purpose |
 | --- | --- |
+| [Model definition and notation](../../Model_Explain.md) | Implementation-bound M/E/C formulation, exchange, native hyperedges and query reading; canonical symbols for new model descriptions. |
 | [Global organization visualization](Global_Hypergraph_Organization_Visualization.md) | Actual relation provenance, three standard views and saved-evidence plotting. |
 | [Run artifacts and monitoring](Run_Artifacts_and_Monitoring.md) | Complete histories, meaningful loss panels, selectors and old layouts. |
 | [Query tiling](Query_Tiling.md) | Decoder speed/memory tradeoffs, testing on your own inputs and explicit resume scope. |
