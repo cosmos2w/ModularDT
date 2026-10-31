@@ -1,0 +1,24 @@
+{
+  "schema": "wind_relation_anchored_r15_2_v1",
+  "dataset": "wind",
+  "architecture": "relation_anchored",
+  "protocol": "development",
+  "seed": 42,
+  "primary_queries": 4096,
+  "effective_batch_size": 24,
+  "total_epochs": 200,
+  "stop_after": 100,
+  "precision": "fp32",
+  "optimizer_bias_norm_exclusion": true,
+  "query_tile_size": 256,
+  "microbatch_size": 1,
+  "catalogue_cache_ram_bytes": 34359738368,
+  "pilot_root": "HONF_Proj/Case_WindFarm/diagnostics/generated/shared_interaction_20261007/wind_pilot",
+  "role_scale_cache_dir": "HONF_Proj/Case_WindFarm/diagnostics/generated/joint_regional_20261009/audit/train_role_scale_cache",
+  "environment_shape": [
+    8,
+    4,
+    2
+  ],
+  "existing_role_scale_cache": "HONF_Proj/Case_WindFarm/diagnostics/generated/joint_regional_20261009/audit/train_role_scale_cache/wind_shared_fixed24_v1-60bbffdcd862c0a4b847.json"
+}

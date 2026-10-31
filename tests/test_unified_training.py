@@ -105,6 +105,35 @@ class _GuardedToyProvider(_ToyProvider):
         return {**super().reduce_native_metrics(records), "response_guard_max_ratio": 0.9}
 
 
+def test_validation_loss_allows_empty_mask_in_one_batch():
+    class Provider(_ToyProvider):
+        def validation_loss_terms(self, predictions, targets, auxiliary_state, *, batch, arm):
+            del auxiliary_state, arm
+            if batch.case_keys[0] == 0:
+                return {"masked": LossTerm(predictions.sum() * 0, 0)}
+            return {"masked": LossTerm((predictions - targets).square().sum(), targets.numel())}
+
+    provider = Provider()
+    engine = TrainingEngine(EngineConfig(seed=0, microbatch_cases=2, effective_cases=4,
+        total_epochs=10, training_mode="joint"), device="cpu")
+    model = nn.Linear(1, 1)
+    result = engine._evaluate(model, provider, "joint", "joint", 1)
+    assert result["validation_loss_terms"]["masked"] >= 0
+
+    class EmptyProvider(Provider):
+        def validation_loss_terms(self, predictions, targets, auxiliary_state, *, batch, arm):
+            return {"masked": LossTerm(predictions.sum() * 0, 0)}
+
+    assert "validation_loss_terms" not in engine._evaluate(model, EmptyProvider(), "joint", "joint", 1)
+
+    class InvalidProvider(Provider):
+        def validation_loss_terms(self, predictions, targets, auxiliary_state, *, batch, arm):
+            return {"masked": LossTerm(predictions.sum() * 0 + 1, 0)}
+
+    with pytest.raises(ValueError, match="nonzero numerator"):
+        engine._evaluate(model, InvalidProvider(), "joint", "joint", 1)
+
+
 class _DiagnosticToyModel(nn.Module):
     def __init__(self):
         super().__init__()

@@ -3705,6 +3705,9 @@ class TrainingEngine:
                         numerator = float(term.numerator.detach())
                         if not math.isfinite(weight) or not math.isfinite(numerator):
                             raise FloatingPointError(f"Validation loss {name!r} is nonfinite.")
+                        # A declared objective can have no valid observations in
+                        # one batch while remaining valid elsewhere in the panel.
+                        loss_batch_counts[name] = loss_batch_counts.get(name, 0) + 1
                         if denominator == 0:
                             if numerator != 0.0:
                                 raise ValueError(f"Validation loss {name!r} has a nonzero numerator with no valid elements.")
@@ -3715,7 +3718,6 @@ class TrainingEngine:
                             raise ValueError(f"Validation objective weight for {name!r} changed across batches.")
                         aggregate["numerator"] += numerator
                         aggregate["denominator"] += denominator
-                        loss_batch_counts[name] = loss_batch_counts.get(name, 0) + 1
             if batch_count == 0:
                 raise ValueError("The task provider returned no exposed validation batches.")
             if any(count != batch_count for count in loss_batch_counts.values()):

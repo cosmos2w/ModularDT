@@ -2461,6 +2461,7 @@ def _build_wind_content_task(
     device: torch.device | str,
     *,
     schema_version: int,
+    role_scale_loader=None,
 ) -> tuple[nn.Module, WindContentHypergraphTask]:
     if schema_version == 1:
         value, architecture, microbatch = _validate_recipe(recipe)
@@ -2608,7 +2609,8 @@ def _build_wind_content_task(
         cache_identity = None
         component_scales = None
     else:
-        calibration, cache_identity = _fit_or_load_role_scales(
+        loader = _fit_or_load_role_scales if role_scale_loader is None else role_scale_loader
+        calibration, cache_identity = loader(
             view=view,
             train_rows=np.asarray(train_rows, dtype=np.int64),
             train_layouts=train_layouts,
