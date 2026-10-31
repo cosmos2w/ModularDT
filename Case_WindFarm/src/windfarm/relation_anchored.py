@@ -5,7 +5,7 @@ centres and receiver coordinates remain live torch tensors through decoding.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from itertools import product
 from collections.abc import Mapping
 
@@ -162,6 +162,39 @@ class WindRelationAnchoredAdapter(nn.Module):
             query_mask=query_mask, query_ids=query_ids, scene_key=scene.scene_key,
             coordinate_frame_key=scene.coordinate_frame_key, receiver_key=(scene.scene_key, coordinates.shape[1]))
         return attach_wind_e_cover(query, scene, self.environment_shape)
+
+    def make_scene_batch(self, cases, *, module_ids=None):
+        """Pack native scenes with masked M padding and the configured E lattice."""
+        cases = tuple(cases)
+        if not cases:
+            raise ValueError("Wind scene batches cannot be empty.")
+        if module_ids is None:
+            module_ids = (None,) * len(cases)
+        if len(module_ids) != len(cases):
+            raise ValueError("Wind original module IDs must align with cases.")
+        scenes = [self.make_scene(case, module_ids=ids) for case, ids in zip(cases, module_ids)]
+        max_modules = max(scene.num_modules for scene in scenes)
+        module_fields = {"module_features", "module_coordinates", "module_mask", "module_measure",
+                         "module_ids", "local_radius", "module_characteristic_lengths"}
+        positive_padding = {"local_radius", "module_characteristic_lengths"}
+        result = {}
+        for field in fields(SceneBatch):
+            name = field.name
+            if name == "scene_key":
+                result[name] = tuple(scene.scene_key for scene in scenes)
+            elif name in ("normalizer_key", "coordinate_frame_key"):
+                result[name] = getattr(scenes[0], name)
+            else:
+                values = []
+                for scene in scenes:
+                    value = getattr(scene, name)
+                    if name in module_fields and scene.num_modules < max_modules:
+                        shape = (1, max_modules - scene.num_modules, *value.shape[2:])
+                        fill = -1 if name == "module_ids" else 1 if name in positive_padding else 0
+                        value = torch.cat((value, value.new_full(shape, fill)), dim=1)
+                    values.append(value)
+                result[name] = torch.cat(values, dim=0)
+        return SceneBatch(**result)
 
     def forward(self, case, coordinates, module_centers=None, *, module_ids=None, query_ids=None, query_mask=None, return_trace=False):
         scene = self.make_scene(case, module_centers, module_ids=module_ids)

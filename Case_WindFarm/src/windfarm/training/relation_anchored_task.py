@@ -61,7 +61,7 @@ def _load_panel_verified_role_scales(*, existing_cache, **kwargs):
 
 
 class WindRelationAnchoredTask(WindContentHypergraphTaskV2):
-    """Reuse native sampling and five-role losses; execute one scene at a time."""
+    """Reuse native sampling and five-role losses with masked ragged batches."""
 
     def identity_payload(self):
         result = dict(self._native_identity)
@@ -75,7 +75,7 @@ class WindRelationAnchoredTask(WindContentHypergraphTaskV2):
             environment_characteristic_length="support.extent_D / environment_shape, per axis")
         result["training"] = dict(result["training"], total_epochs=self.total_epochs,
             microbatch_size=self.max_microbatch_cases, optimizer_schedule=vars(self._schedule()),
-            sampling_dataset_id=self.sampling_dataset_id, scene_execution="sequential within microbatch")
+            sampling_dataset_id=self.sampling_dataset_id, scene_execution="batched with masked module padding")
         result["uncovered_train_module_count_strata"] = list(
             self.manifest.get("train_layout_selection", {}).get("uncovered_turbine_count_strata_by_limited_selection", ()))
         return result
@@ -114,37 +114,33 @@ class WindRelationAnchoredTask(WindContentHypergraphTaskV2):
         del epoch, temperature
         if model is not self.model or execution_mode != "relation_anchored" or phase not in ("joint", "development", "validation"):
             raise ValueError("Invalid Wind relation-anchored model or execution mode.")
-        physical, normalized, residual, profile = [], [], [], []
-        work = {}
-        for i, item in enumerate(scene):
-            case = SimpleNamespace(index=item.row_index, case=item.case_name, layout_index=item.layout_index,
+        cases = [SimpleNamespace(index=item.row_index, case=item.case_name, layout_index=item.layout_index,
                 wind_direction_deg=item.wind_direction_deg, module_centers=item.module_centers_D,
                 module_features=item.module_features, module_present=item.module_present,
                 global_context=item.operating_features,
-                support=SimpleNamespace(lower_D=item.support_lower_D, extent_D=item.support_extent_D))
-            native = model.make_scene(case, module_ids=item.module_ids)
-            coords = torch.as_tensor(np.array(receivers.coordinates_D[i], copy=True), device=self.device,
-                                     dtype=next(model.parameters()).dtype)
-            ids = torch.as_tensor(np.array(receivers.flat_indices[i:i+1], copy=True), device=self.device)
-            query = model.make_query(native, coords, query_ids=ids)
-            organization = model.core.prepare(native)
-            output = model.core.decode(organization, query)
-            for prefix, counts in (("core_prepare", organization.work_counts),
-                                   ("core_decode", output.work_counts)):
-                for name, count in (counts or {}).items():
-                    key = f"{prefix}_{name}"
-                    work[key] = work.get(key, 0) + int(count)
-            velocity, baseline, delta = model.transforms.physical_velocity(output.joint_fields, query.coordinates)
-            physical.append(velocity); normalized.append(output.joint_fields)
-            profile.append(baseline); residual.append(delta)
-        predictions = WindContentPredictions(torch.cat(physical), torch.cat(normalized), torch.cat(residual),
-            torch.cat(profile), torch.as_tensor(np.array(receivers.role_ids, copy=True), device=self.device))
+                support=SimpleNamespace(lower_D=item.support_lower_D, extent_D=item.support_extent_D)) for item in scene]
+        native = model.make_scene_batch(cases, module_ids=[item.module_ids for item in scene])
+        coords = torch.as_tensor(np.array(receivers.coordinates_D, copy=True), device=self.device,
+                                 dtype=next(model.parameters()).dtype)
+        ids = torch.as_tensor(np.array(receivers.flat_indices, copy=True), device=self.device)
+        query = model.make_query(native, coords, query_ids=ids)
+        organization = model.core.prepare(native)
+        output = model.core.decode(organization, query)
+        work = {f"{prefix}_{name}": int(count)
+                for prefix, counts in (("core_prepare", organization.work_counts),
+                                       ("core_decode", output.work_counts))
+                for name, count in (counts or {}).items()}
+        velocity, baseline, delta = model.transforms.physical_velocity(output.joint_fields, query.coordinates)
+        predictions = WindContentPredictions(velocity, output.joint_fields, delta, baseline,
+            torch.as_tensor(np.array(receivers.role_ids, copy=True), device=self.device))
         return predictions, {"work": work}
 
     def work_counts(self, batch, predictions, auxiliary_state):
         del predictions
         return {**auxiliary_state["work"], "native_receivers": int(np.prod(batch.receivers.coordinates_D.shape[:2])),
                 "active_physical_sources": sum(int(np.count_nonzero(item.module_present)) for item in batch.scene_inputs),
+                "module_padding_slots": len(batch.scene_inputs) * max(len(item.module_present) for item in batch.scene_inputs)
+                    - sum(len(item.module_present) for item in batch.scene_inputs),
                 "environment_records": len(batch.scene_inputs) * int(np.prod(self.model.environment_shape)),
                 "complete_native_prediction": 1}
 
