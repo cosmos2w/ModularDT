@@ -6,8 +6,23 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from channelthermal.local_ports import ThermalPortHead, fit_port_statistics, port_loss
+from channelthermal.local_ports import ThermalCalibratedPorts, ThermalPortHead, fit_port_statistics, port_loss
 from channelthermal.local_coupling import update_local_module_params_from_ports
+
+
+def test_calibrated_ports_preserve_input_gradient_and_strict_state():
+    ports_builder = ThermalCalibratedPorts(14.8148)
+    assert not list(ports_builder.parameters())
+    restored = ThermalCalibratedPorts(0.0)
+    restored.load_state_dict(ports_builder.state_dict(), strict=True)
+    outside = torch.randn(1, 2, 64, requires_grad=True)
+    present = torch.tensor([[1.0, 0.0]])
+    ports = restored(outside, torch.zeros(1, 2, 3), present)
+    torch.testing.assert_close(ports[0, 0, :, 3], outside[0, 0])
+    torch.testing.assert_close(ports[0, 0, :, 4], restored.mean[1].expand(64))
+    assert ports[0, 1].count_nonzero() == 0
+    ports[..., 3].sum().backward()
+    torch.testing.assert_close(outside.grad, present[..., None].expand_as(outside))
 
 
 def test_train_statistics_and_port_masks_exclude_absent_and_invalid_h():

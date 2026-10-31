@@ -60,6 +60,22 @@ class ThermalPortHead(nn.Module):
         return ports * present[..., None, None].to(ports)
 
 
+class ThermalCalibratedPorts(nn.Module):
+    """Inference-only raw organized outside temperature and TRAIN mean h."""
+
+    def __init__(self, mean_h):
+        super().__init__()
+        self.register_buffer("mean", torch.tensor([0.0, mean_h], dtype=torch.float32))
+
+    def forward(self, outside, prescribed, present):
+        n = outside.shape[-1]
+        theta = torch.arange(n, dtype=outside.dtype, device=outside.device) * (2 * torch.pi / n)
+        geometry = torch.stack((theta, theta.cos(), theta.sin()), -1).view(1, 1, n, 3).expand(*outside.shape, 3)
+        h = torch.ones_like(outside) * self.mean[1].to(outside)
+        ports = torch.cat((geometry, outside[..., None], h[..., None]), dim=-1)
+        return ports * present[..., None, None].to(ports)
+
+
 def organized_outside64(adapter, prepared):
     """Read native outside receivers through the existing prepared organization."""
     adapter.validate_prepared(prepared)
