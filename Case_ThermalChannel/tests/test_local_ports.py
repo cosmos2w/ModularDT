@@ -122,12 +122,37 @@ def test_actual_native_port_union_matches_full_fluid_union():
     assert set(review["metrics"]["direct_fluid"]) == {"u", "v", "pressure", "vorticity", "temperature"}
     assert review["metrics"]["direct_fluid"]["temperature"]["count"] > 0
     assert review["metrics"]["oracle"]["solid_temperature"]["count"] > 0
+    matched = review["metrics"]["oracle_eligible_comparison"]
+    for role in ("solid_temperature", "surface_temperature", "q_proxy", "module_peak_sampled_points"):
+        counts = {entry[role]["count"] for entry in matched.values()}
+        assert len(counts) == 1 and next(iter(counts)) > 0
+    class OneNonfinite(torch.nn.Module):
+        def __init__(self, local):
+            super().__init__()
+            self.local = local
+            self.calls = 0
+
+        def forward(self, *args):
+            output = self.local(*args)
+            self.calls += 1
+            if self.calls == 1:
+                output = dict(output)
+                output["internal_temperature"] = output["internal_temperature"].clone()
+                output["internal_temperature"][0, 0, 0, 0] = float("nan")
+            return output
+
+    nonfinite = evaluate_local_port_readouts(model, provider, batch, local_readout=OneNonfinite(provider.build_local_readout()))
+    counts = [value["solid_temperature"]["count"] for value in nonfinite["metrics"]["oracle_eligible_comparison"].values()]
+    assert len(set(counts)) == 1 and counts[0] == matched["direct"]["solid_temperature"]["count"] - 1
     assert review["timing_seconds"]["complete_predicted"] >= review["timing_seconds"]["direct_decode"]
     invalid_batch = replace(batch, targets=replace(batch.targets, teacher_h_valid=torch.zeros_like(batch.targets.teacher_h_valid)))
     invalid_review = evaluate_local_port_readouts(model, provider, invalid_batch)
     assert invalid_review["metrics"]["oracle"]["solid_temperature"]["count"] == 0
     assert invalid_review["metrics"]["predicted"]["solid_temperature"]["count"] > 0
     assert invalid_review["oracle_conditioning"]["valid_modules"] == 0
+    for entry in invalid_review["metrics"]["oracle_eligible_comparison"].values():
+        assert all(entry[role]["count"] == 0 and entry[role]["rmse"] is None
+                   for role in ("solid_temperature", "surface_temperature", "q_proxy", "module_peak_sampled_points"))
     full_batch = next(provider.native_evaluation_batches(
         "validation", case_keys=[provider.validation_case_ids[0]], microbatch_size=1))
     full_review = evaluate_local_port_readouts(model, provider, full_batch)

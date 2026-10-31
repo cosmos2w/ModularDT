@@ -169,10 +169,10 @@ def evaluate_local_port_readouts(model, provider, batch, *, local_readout=None):
             direct_solid = native["pred_internal_temperature"][..., 0]
             direct_interface = native["pred_interface"]
 
-            def native_metrics(solid, interface, module_mask):
-                sm = solid_mask & module_mask[..., None]
-                sf = surface_mask & module_mask[..., None]
-                fm = flux_mask & module_mask[..., None]
+            def native_metrics(solid, interface, module_mask, *, masks=None):
+                sm, sf, fm = masks if masks is not None else (
+                    solid_mask & module_mask[..., None], surface_mask & module_mask[..., None],
+                    flux_mask & module_mask[..., None])
                 solid_safe = torch.where(sm, solid, solid.new_full((), -torch.inf))
                 target_safe = torch.where(sm, solid_target, solid_target.new_full((), -torch.inf))
                 module_valid = sm.any(-1)
@@ -193,6 +193,21 @@ def evaluate_local_port_readouts(model, provider, batch, *, local_readout=None):
             for name, output in paths.items():
                 module_mask = oracle_modules if name == "oracle" else present
                 metrics[name] = native_metrics(output["internal_temperature"][..., 0], output["interface_pred"][..., ::stride, :], module_mask)
+            matched_solid = solid_mask & oracle_modules[..., None] & torch.isfinite(direct_solid)
+            matched_surface = surface_mask & oracle_modules[..., None] & torch.isfinite(direct_interface[..., 0])
+            matched_flux = flux_mask & oracle_modules[..., None] & torch.isfinite(direct_interface[..., 1])
+            for output in paths.values():
+                matched_solid &= torch.isfinite(output["internal_temperature"][..., 0])
+                matched_surface &= torch.isfinite(output["interface_pred"][..., ::stride, 0])
+                matched_flux &= torch.isfinite(output["interface_pred"][..., ::stride, 1])
+            matched_masks = (matched_solid, matched_surface, matched_flux)
+            matched = {"direct": native_metrics(direct_solid, direct_interface, oracle_modules,
+                                                masks=matched_masks)}
+            for name, output in paths.items():
+                matched[name] = native_metrics(output["internal_temperature"][..., 0],
+                                               output["interface_pred"][..., ::stride, :],
+                                               oracle_modules, masks=matched_masks)
+            metrics["oracle_eligible_comparison"] = matched
             port_mask = present[..., None] & prediction.port_valid
             metrics["ports"] = {
                 "outside_temperature": _rmse(prediction.port_values[..., 3], teacher[..., 3], port_mask),
@@ -211,6 +226,9 @@ def evaluate_local_port_readouts(model, provider, batch, *, local_readout=None):
                                                     "oracle_solid": solid_mask & oracle_modules[..., None],
                                                     "oracle_surface": surface_mask & oracle_modules[..., None],
                                                     "oracle_flux": flux_mask & oracle_modules[..., None],
+                                                    "oracle_matched_solid": matched_solid,
+                                                    "oracle_matched_surface": matched_surface,
+                                                    "oracle_matched_flux": matched_flux,
                                                     "port_t": port_mask & torch.isfinite(teacher[..., 3]),
                                                     "port_h": port_mask & target.teacher_h_valid.bool() & torch.isfinite(teacher[..., 4])},
                     "metrics": metrics, "work": dict(prediction.work),
@@ -221,9 +239,10 @@ def evaluate_local_port_readouts(model, provider, batch, *, local_readout=None):
                                        **{f"complete_{name}": prepare_seconds + direct_seconds + port_seconds + value for name, value in timings.items()}},
                     "timing_scope": "synchronized forward readout; complete paths include global and one local call; asset load is separate",
                     "h_semantics": "Stored target uses epsilon regularization, configured clipping and validity mask; predicted h is nonnegative without an additional upper clip.",
+                    "train_mean_h_semantics": "Uses raw organization-controlled outside temperature before the port-head residual and the selected-TRAIN mean h. Relative to predicted ports, both T and h may change; this is not an isolated h-head ablation or a zero-fit global model.",
                     "oracle_conditioning": {"valid_modules": int(oracle_modules.sum()),
                         "present_modules": int(present.sum()),
-                        "rule": "Only modules with all 64 outside receivers valid and finite teacher T/h with valid h are scored."},
+                        "rule": "Only modules with all 64 outside receivers valid and finite teacher T/h with valid h are scored; matched comparisons additionally intersect finite predictions across all four paths."},
                     "deployment_limits": {"present_port_count": int(present.sum()) * int(prediction.port_valid.shape[-1]),
                         "outside_invalid_port_count": int((present[..., None] & ~prediction.port_valid.bool()).sum()),
                         "modules_with_invalid_outside_port": int((present & ~prediction.port_valid.all(-1)).sum())},
