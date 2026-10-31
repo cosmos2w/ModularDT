@@ -251,8 +251,18 @@ class ThermalLocalExpertTask(ThermalR138AnchoredMemberRoutingTask):
 
 def build_thermal_local_expert_task(recipe, *, arm=ARM_DETAIL, device="cpu"):
     spec = recipe["local_expert"]
-    if spec.get("schema") != "thermal_organized_local_expert_v1" or recipe["training"]["membership"] != "fixed25_train150_dev22":
-        raise ValueError("Local expert requires its named schema and TRAIN150 membership.")
+    membership = recipe["training"]["membership"]
+    if spec.get("schema") != "thermal_organized_local_expert_v1" or membership not in (
+            "fixed25_train150_dev22", "full_train600"):
+        raise ValueError("Local expert requires its named schema and supported TRAIN membership.")
+    if membership == "full_train600":
+        initialization = recipe["initialization"]
+        if (spec["phase"] != "joint" or spec.get("source_checkpoint") is not None
+                or initialization["source_kind"] != DETAIL_SOURCE_KIND
+                or initialization.get("pretrained_weights") is not False
+                or initialization.get("source_checkpoint") is not None
+                or initialization.get("source_parent_age") != 0):
+            raise ValueError("Full TRAIN600 local expert must start fresh with joint core/head training.")
     base = copy.deepcopy(recipe)
     base["initialization"].update(source_kind=DETAIL_SOURCE_KIND, source_checkpoint=None,
                                   pretrained_weights=False, source_arm=f"scratch_common_seed{base['initialization']['seed']}",
@@ -261,6 +271,9 @@ def build_thermal_local_expert_task(recipe, *, arm=ARM_DETAIL, device="cpu"):
     model, provider = _build_thermal_member_routing_task(base, arm=arm, device=device,
         task_type=ThermalLocalExpertTask, variants={DETAIL_CORE_SCHEMA: {**_VARIANTS[DETAIL_CORE_SCHEMA], "arm": arm}},
         section_schema=DETAIL_CONFIG_SCHEMA, source_kind=DETAIL_SOURCE_KIND, lineage="local expert", required_address_mode=None)
+    if membership == "full_train600":
+        provider.configure_expert(recipe)
+        return model, provider
     source = load_trusted_checkpoint(spec["source_checkpoint"], map_location="cpu")
     old_recipe = source["experiment_identity"]["recipe"]
     if (old_recipe["dataset"] != recipe["dataset"] or old_recipe["training"]["membership"] != "fixed25_train150_dev22"

@@ -186,3 +186,42 @@ def test_joint_loss_metadata_covers_direct_and_local_objectives():
     assert 'full and restricted' in metadata['temperature/material']['formula']
     task.phase = 'frozen'
     assert set(task.loss_metadata()) == {name for name in metadata if name.startswith('expert/')}
+
+
+def test_full_train_expert_starts_fresh_without_loading_global_weights(monkeypatch):
+    import json
+    from pathlib import Path
+    from channelthermal.training import local_expert_task as module
+
+    recipe = json.loads(Path('configs/research/thermal_r15_2_h_joint_train600_full1000_v1.json').read_text())
+    model = torch.nn.Linear(2, 2)
+    configured = []
+    provider = SimpleNamespace(configure_expert=lambda value: configured.append(value))
+    def build(base, **kwargs):
+        assert base['training']['membership'] == 'full_train600'
+        assert base['initialization']['pretrained_weights'] is False
+        assert base['initialization']['source_parent_age'] == 0
+        return model, provider
+    monkeypatch.setattr(module, '_build_thermal_member_routing_task', build)
+    def no_transfer(*args, **kwargs):
+        raise AssertionError('Fresh full-data construction must not load global transfer weights')
+    monkeypatch.setattr(module, 'load_trusted_checkpoint', no_transfer)
+    assert module.build_thermal_local_expert_task(recipe) == (model, provider)
+    assert configured == [recipe]
+
+
+@pytest.mark.parametrize('change', ['frozen_phase', 'transfer_source', 'pretrained'])
+def test_full_train_expert_rejects_transfer_initialization(change):
+    import json
+    from pathlib import Path
+    from channelthermal.training.local_expert_task import build_thermal_local_expert_task
+
+    recipe = json.loads(Path('configs/research/thermal_r15_2_h_joint_train600_full1000_v1.json').read_text())
+    if change == 'frozen_phase':
+        recipe['local_expert']['phase'] = 'frozen'
+    elif change == 'transfer_source':
+        recipe['local_expert']['source_checkpoint'] = '/old_subset_weights.pt'
+    else:
+        recipe['initialization']['pretrained_weights'] = True
+    with pytest.raises(ValueError, match='start fresh'):
+        build_thermal_local_expert_task(recipe)

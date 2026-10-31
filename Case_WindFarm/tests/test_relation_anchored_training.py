@@ -49,10 +49,11 @@ def test_calibration_replay_accepts_only_exact_panel_and_other_bindings(monkeypa
         bridge._load_panel_verified_role_scales(existing_cache=path, **args)
 
 
-def test_batched_microbatch_loss_backward_and_optimizer_groups():
+@pytest.mark.parametrize('total_epochs', [200, 1000])
+def test_batched_microbatch_loss_backward_and_optimizer_groups(total_epochs):
     model = _adapter().float()
     task = object.__new__(WindRelationAnchoredTask)
-    task.model, task.device, task.total_epochs = model, torch.device("cpu"), 200
+    task.model, task.device, task.total_epochs = model, torch.device("cpu"), total_epochs
     task.role_component_scales = {role: np.ones(3) for role in ROLE_NAMES}
     case = _case()
     scene = SimpleNamespace(row_index=case.index, case_name=case.case, layout_index=case.layout_index,
@@ -76,6 +77,8 @@ def test_batched_microbatch_loss_backward_and_optimizer_groups():
     assert sum(len(group.parameter_names) for group in groups) == len(list(model.named_parameters()))
     assert all(name.endswith('.bias') or 'norm' in name.lower() for name in groups[1].parameter_names)
     assert groups[1].weight_decay == 0
+    assert all(group.schedule.total_epochs == total_epochs for group in groups)
+    assert all(group.schedule.peak_lr == group.schedule.final_lr == 3e-4 for group in groups)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     optimizer.step()
     restored = type(model).from_state_payload(model.state_payload(), state_dict=model.state_dict()).float()
@@ -93,6 +96,44 @@ def test_batched_microbatch_loss_backward_and_optimizer_groups():
     task.training_samples = task.validation_samples = 0
     task.load_training_state_dict(state)
     assert (task.training_samples, task.validation_samples) == (7, 3)
+
+
+def test_full_train_transform_reuse_requires_all_train_draw_replay(monkeypatch, tmp_path):
+    import json
+    from windfarm.training import relation_anchored_task as module
+
+    normalizer = SimpleNamespace(to_dict=lambda: {'mean': [1., 2., 3.]})
+    profile = SimpleNamespace(to_dict=lambda: {'values': [[4., 5., 6.]]})
+    key = {'dataset_profile': 'full', 'subset_manifest_sha256': 'manifest',
+           'training_fingerprint': 'manifest', 'train_row_indices': [0, 1, 2],
+           'train_layout_indices': [0], 'samples_per_row': 8192, 'profile_bins': 32,
+           'seed': 42, 'dataset_fingerprint': 'old', 'train_row_indices_sha256': 'rows'}
+    path = tmp_path / 'transforms.json'
+    path.write_text(json.dumps({'cache_key': key}))
+    def missing(**kwargs):
+        raise FileNotFoundError('Current filesystem key is unavailable')
+    monkeypatch.setattr(module, '_fit_or_load_formal_transforms', missing)
+    monkeypatch.setattr(module, '_read_transform_cache', lambda *args: (normalizer, profile))
+    monkeypatch.setattr(module, '_wind_dataset_fingerprint', lambda view: 'new')
+    replayed = []
+    def replay(volume, rows, **kwargs):
+        replayed.append((rows.tolist(), kwargs))
+        return normalizer, profile
+    monkeypatch.setattr(module, 'fit_velocity_statistics', replay)
+    args = dict(existing_cache=path, view=SimpleNamespace(volume=object()),
+                train_rows=np.array([0, 1, 2]), train_layouts=[0], manifest={'manifest_sha256': 'manifest'},
+                training_fingerprint='manifest', profile_id='full', seed=42,
+                cache_dir=tmp_path, allow_cache_write=False)
+    _, _, binding = module._load_replayed_full_train_transforms(**args)
+    assert replayed == [([0, 1, 2], {'samples_per_row': 8192, 'seed': 42, 'profile_bins': 32})]
+    assert binding['dataset_fingerprint'] == 'new' and binding['saved_dataset_fingerprint'] == 'old'
+    assert binding['wind_test_target_values_read'] is False
+    monkeypatch.setattr(module, 'fit_velocity_statistics', lambda *a, **k: (
+        SimpleNamespace(to_dict=lambda: {'mean': [9., 2., 3.]}), profile))
+    with pytest.raises(ValueError, match='do not reproduce'):
+        module._load_replayed_full_train_transforms(**args)
+    with pytest.raises(ValueError, match='full TRAIN recipe'):
+        module._load_replayed_full_train_transforms(**{**args, 'train_rows': np.array([0, 1, 9])})
 
 
 @pytest.mark.parametrize("shape", [(4,4,4), (8,4,2)])

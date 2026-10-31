@@ -2462,6 +2462,7 @@ def _build_wind_content_task(
     *,
     schema_version: int,
     role_scale_loader=None,
+    transform_loader=None,
 ) -> tuple[nn.Module, WindContentHypergraphTask]:
     if schema_version == 1:
         value, architecture, microbatch = _validate_recipe(recipe)
@@ -2578,7 +2579,8 @@ def _build_wind_content_task(
         )
         profile_id = JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID
         train_layouts = manifest["train_layout_indices"]
-        normalizer, profile, transform_binding = _fit_or_load_formal_transforms(
+        load_transforms = _fit_or_load_formal_transforms if transform_loader is None else transform_loader
+        normalizer, profile, transform_binding = load_transforms(
             view=view,
             train_rows=np.asarray(train_rows, dtype=np.int64),
             train_layouts=train_layouts,

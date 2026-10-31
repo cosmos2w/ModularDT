@@ -16,8 +16,51 @@ from ..relation_anchored import WindRelationAnchoredAdapter
 from .content_hypergraph_task import (
     WindContentHypergraphTaskV2, WindContentPredictions, _build_wind_content_task,
 )
-from .joint_task import _fit_or_load_role_scales, _read_role_scale_cache, _role_scale_cache_key, _sha256
+from .joint_task import (
+    _fit_or_load_role_scales, _read_role_scale_cache, _role_scale_cache_key, _sha256,
+    _fit_or_load_formal_transforms, _read_transform_cache, _wind_dataset_fingerprint,
+    fit_velocity_statistics,
+)
 from .unified_task import _fit_train_role_scales
+
+
+def _load_replayed_full_train_transforms(*, existing_cache, **kwargs):
+    """Reuse a moved TRAIN420 cache after replaying every TRAIN fit draw."""
+    try:
+        return _fit_or_load_formal_transforms(**kwargs)
+    except FileNotFoundError:
+        pass
+    path = Path(existing_cache).expanduser().resolve(strict=True)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    key = payload["cache_key"]
+    saved = _read_transform_cache(path, key)
+    expected = {
+        "dataset_profile": kwargs["profile_id"],
+        "subset_manifest_sha256": str(kwargs["manifest"]["manifest_sha256"]),
+        "training_fingerprint": str(kwargs["training_fingerprint"]),
+        "train_row_indices": np.asarray(kwargs["train_rows"], dtype=np.int64).tolist(),
+        "train_layout_indices": list(kwargs["train_layouts"]),
+        "samples_per_row": 8192, "profile_bins": 32, "seed": int(kwargs["seed"]),
+    }
+    if saved is None or any(key.get(name) != value for name, value in expected.items()):
+        raise ValueError("Saved Wind transforms differ from the original full TRAIN recipe.")
+    normalizer, profile = saved
+    actual_normalizer, actual_profile = fit_velocity_statistics(
+        kwargs["view"].volume, kwargs["train_rows"], samples_per_row=8192,
+        seed=int(kwargs["seed"]), profile_bins=32)
+    if (actual_normalizer.to_dict() != normalizer.to_dict()
+            or actual_profile.to_dict() != profile.to_dict()):
+        raise ValueError("Saved Wind transforms do not reproduce on all TRAIN420 fit draws.")
+    return normalizer, profile, {
+        "mode": "explicit_saved_transform_exact_full_train_replay",
+        "cache_file": str(path), "cache_file_sha256": _sha256(path),
+        "saved_dataset_fingerprint": key["dataset_fingerprint"],
+        "dataset_fingerprint": _wind_dataset_fingerprint(kwargs["view"]),
+        "training_rows_sha256": key["train_row_indices_sha256"],
+        "source_rows": len(kwargs["train_rows"]), "samples_per_row": 8192,
+        "wind_test_target_values_read": False, "solver_attempts": 0,
+        "scope": "Exact sampled transform fit on every TRAIN row; not whole-dataset identity.",
+    }
 
 
 def _load_panel_verified_role_scales(*, existing_cache, **kwargs):
@@ -153,25 +196,32 @@ class WindRelationAnchoredTask(WindContentHypergraphTaskV2):
 
 
 def build_wind_relation_anchored_task(recipe, device):
-    """Load the existing fixed development binding and build a fresh joint model."""
+    """Load the existing subset or original full split and build a fresh model."""
     value = dict(recipe)
+    full = value.get("protocol") == "full_train1000"
     required = {"schema": "wind_relation_anchored_r15_2_v1", "dataset": "wind", "architecture": "relation_anchored",
-                "protocol": "development", "seed": 42, "primary_queries": 4096, "effective_batch_size": 24,
-                "total_epochs": 200, "precision": "fp32", "optimizer_bias_norm_exclusion": True}
+                "protocol": "full_train1000" if full else "development", "seed": 42,
+                "primary_queries": 4096, "effective_batch_size": 24,
+                "total_epochs": 1000 if full else 200, "precision": "fp32", "optimizer_bias_norm_exclusion": True}
     if any(value.get(k) != v for k, v in required.items()):
-        raise ValueError("Wind R15-2 recipe differs from the declared development workload.")
-    if value.get("catalogue_cache_ram_bytes") != 32 * 1024**3:
-        raise ValueError("The existing Wind development provider requires its declared 32 GiB RAM bound.")
+        raise ValueError("Wind R15-2 recipe differs from its declared subset/full workload.")
+    if value.get("catalogue_cache_ram_bytes") != (128 if full else 32) * 1024**3:
+        raise ValueError("Wind requires its declared subset/full catalogue RAM bound.")
     shape = tuple(value["environment_shape"])
     if shape not in ((4, 4, 4), (8, 4, 2), (8, 8, 2), (8, 4, 4), (8, 8, 4)):
         raise ValueError("Unsupported Wind environment shape.")
-    old = dict(value, schema="content_hypergraph_recipe_v2", architecture="A2-D", total_epochs=2500,
+    old = dict(value, schema="content_hypergraph_recipe_v2", architecture="A2-H6" if full else "A2-D",
+               total_epochs=5000 if full else 2500,
                edge_access="full",
                model={"context_dim": 128, "num_heads": 4, "context_depth": 2, "num_hyperedges": 6,
                       "thermal_response_rank": 0, "local_hidden_dim": 128, "dropout": 0.0})
+    if full:
+        old["approved_stop_after"] = 1000
     existing_cache = value["existing_role_scale_cache"]
     _, provider = _build_wind_content_task(old, "cpu", schema_version=2,
-        role_scale_loader=lambda **kwargs: _load_panel_verified_role_scales(existing_cache=existing_cache, **kwargs))
+        role_scale_loader=lambda **kwargs: _load_panel_verified_role_scales(existing_cache=existing_cache, **kwargs),
+        transform_loader=(lambda **kwargs: _load_replayed_full_train_transforms(
+            existing_cache=value["existing_transform_cache"], **kwargs)) if full else None)
     native_identity = provider.identity_payload()
     base = ContentHypergraphCoreV2(module_input_dim=2, environment_input_dim=7, coordinate_dim=3,
         query_input_dim=7, operating_input_dim=11, output_dim=3, architecture="A2-D", context_dim=128,
@@ -184,5 +234,5 @@ def build_wind_relation_anchored_task(recipe, device):
                                             core_config=config, environment_shape=shape).to(device)
     provider.__class__ = WindRelationAnchoredTask
     provider._native_identity = native_identity
-    provider.model, provider.recipe, provider.total_epochs, provider.device = model, value, 200, torch.device(device)
+    provider.model, provider.recipe, provider.total_epochs, provider.device = model, value, int(value["total_epochs"]), torch.device(device)
     return model, provider
