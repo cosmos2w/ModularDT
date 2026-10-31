@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import hashlib
 import json
 import textwrap
+import errno
 
 import numpy as np
 import pytest
@@ -152,6 +153,21 @@ def test_higher_precision_geometry_cannot_reuse_float32_entry(tmp_path, monkeypa
     changed.module_centers[0, 0] += 1e-10
     with pytest.raises(FileNotFoundError, match='prebuilt Wind catalogue'):
         joint.NativeRoleCatalogueCache(persistent_dir=tmp_path).get(changed)
+
+
+@pytest.mark.parametrize('error_number', [errno.EMFILE, errno.ENFILE])
+def test_descriptor_exhaustion_is_not_reported_as_a_catalogue_miss(tmp_path, monkeypatch, error_number):
+    from windfarm.workflows import native_role_cache as store
+    prepare(tmp_path)
+    monkeypatch.setattr(joint.NativeRoleCatalogueCache, '_build_catalogue', forbid_build)
+    def exhausted(path):
+        raise OSError(error_number, 'Too many open files', str(path))
+    monkeypatch.setattr(store, '_sha256', exhausted)
+    cache = joint.NativeRoleCatalogueCache(persistent_dir=tmp_path)
+    with pytest.raises(OSError) as caught:
+        cache.get(case())
+    assert caught.value.errno == error_number
+    assert cache.persistent_miss_count == cache.build_count == cache.disk_write_count == 0
 
 
 def test_real_shared_catalogue_load_forbids_builder_and_writes(monkeypatch):

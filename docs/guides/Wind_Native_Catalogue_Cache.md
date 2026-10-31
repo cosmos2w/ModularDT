@@ -27,6 +27,8 @@ Each geometry key still binds layout identity, exact native axes/grid shape, tur
 
 Catalogue coordinates remain float32, non-volume indices uint32, and role CDFs/support measures float64. Arrays retain their original ordering and precision. Targets, sampled queries, RNG, normalization, losses and checkpoints are never stored in this cache. Shared geometry does not grant access to another partition's targets. The bounded RAM LRU retains verified mappings and reopens disk entries after eviction or an oversized-entry bypass.
 
+Full-population training retains ten mapped arrays per catalogue. Set `ulimit -n 8192` in the training launcher before Python starts: all 510 catalogues need more descriptors than the host's default soft limit of 1024. A streaming coverage check holds only one catalogue at a time and does not test this resident-mapping requirement. Descriptor exhaustion propagates as its real operating-system error rather than being mislabeled as an incompatible cache entry.
+
 Only explicit preparation uses per-entry process locks and atomic publication. It may archive an invalid numerical-namespace entry before rebuilding it. Training does not acquire these write locks, archive entries or repair them implicitly.
 
 ## Measured coverage and regressions

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import errno
 import hashlib
 import json
 import os
@@ -140,7 +141,13 @@ class NativeRoleCatalogueStore:
                 elif arrays[f"indices_{role}"].shape != cdf.shape:
                     return None
             return arrays, manifest["role_support_volume_m3"]
-        except (OSError, ValueError, KeyError, TypeError, EOFError):
+        except OSError as error:
+            # Resource exhaustion is not an incompatible catalogue. Preserve
+            # the actual failure instead of reporting a false preparation miss.
+            if error.errno in (errno.EMFILE, errno.ENFILE):
+                raise
+            return None
+        except (ValueError, KeyError, TypeError, EOFError):
             return None
 
     def write(self, layout: int, geometry: str, arrays: dict[str, np.ndarray], supports: dict[str, float]):
