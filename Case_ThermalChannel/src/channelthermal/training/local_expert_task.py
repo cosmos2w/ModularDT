@@ -131,12 +131,28 @@ class ThermalLocalExpertTask(ThermalR138AnchoredMemberRoutingTask):
                                   "validation_field_score": "assembled direct fluid and local material/interface"}
         return result
 
-    def phase_reporting(self, *, arm, epoch, phase):
-        result = dict(super().phase_reporting(arm=arm, epoch=epoch, phase=phase))
-        result["all_joint_parameters_active"] = self.phase == "joint"
-        result["local_expert_phase"] = self.phase
-        result["flow_and_temperature_supervised_together"] = self.phase == "joint"
-        return result
+    def completed_training_epoch(self, model, engine, epoch, output, row):
+        super().completed_training_epoch(model, engine, epoch, output, row)
+        initialization = self.recipe["initialization"]
+        context = {
+            "schema": "thermal_local_expert_epoch_context_v1",
+            "source_kind": initialization["source_kind"],
+            "source_parent_completed_epoch": int(initialization["source_parent_age"]),
+            "source_checkpoint": self.recipe["local_expert"]["source_checkpoint"],
+            "phase_completed_epoch": int(epoch),
+            "additional_epochs_after_parent": int(epoch),
+        }
+        row["reader_epoch_context"] = context
+        if "paired_reader_native_losses" in row:
+            row["paired_reader_native_losses"]["epoch_context"] = copy.deepcopy(context)
+        row["local_expert_training_prediction_mode"] = (
+            "fixed global core and fixed local operator; only organized condition head is trainable"
+            if self.phase == "frozen" else
+            "paired native and organized local paths; global core and condition head trainable, local operator fixed"
+        )
+        row["local_expert_validation_prediction_mode"] = (
+            "restricted direct fluid and condition head with frozen local material and interface prediction"
+        )
 
     def loss_metadata(self):
         result = super().loss_metadata() if self.phase == "joint" else {}

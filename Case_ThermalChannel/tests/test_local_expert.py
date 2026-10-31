@@ -147,3 +147,26 @@ def test_sliced_trace_work_and_invalid_interpolation(monkeypatch):
     assert valid.tolist() == [[[True, False]]]
     assert fields[0, 0, 0].tolist() == [10., 11., 12., 13.]
     assert fields[0, 0, 1].tolist() == [0., 0., 0., 0.]
+
+
+def test_completed_epoch_records_transfer_source_and_phase_scope(monkeypatch):
+    from channelthermal.training.r13_8_anchored_task import ThermalR138AnchoredMemberRoutingTask
+    def inherited(self, model, engine, epoch, output, row):
+        row['reader_epoch_context'] = {'source_kind': 'scratch'}
+        row['paired_reader_native_losses'] = {'epoch_context': {'source_kind': 'scratch'}}
+    monkeypatch.setattr(ThermalR138AnchoredMemberRoutingTask, 'completed_training_epoch', inherited)
+    task = object.__new__(ThermalLocalExpertTask)
+    task.recipe = {'initialization': {'source_kind': 'thermal_local_expert_transfer', 'source_parent_age': 100},
+                   'local_expert': {'source_checkpoint': '/source/t0_e100.pt'}}
+    task.phase = 'frozen'
+    row = {}
+    task.completed_training_epoch(None, None, 7, None, row)
+    context = row['reader_epoch_context']
+    assert context['source_kind'] == 'thermal_local_expert_transfer'
+    assert context['source_parent_completed_epoch'] == 100 and context['phase_completed_epoch'] == 7
+    assert context['additional_epochs_after_parent'] == 7 and context['source_checkpoint'] == '/source/t0_e100.pt'
+    assert row['paired_reader_native_losses']['epoch_context'] == context
+    assert 'only organized condition head is trainable' in row['local_expert_training_prediction_mode']
+    task.phase = 'joint'
+    task.completed_training_epoch(None, None, 1, None, row)
+    assert 'global core and condition head trainable' in row['local_expert_training_prediction_mode']
