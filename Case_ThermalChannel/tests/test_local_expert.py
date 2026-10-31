@@ -170,3 +170,19 @@ def test_completed_epoch_records_transfer_source_and_phase_scope(monkeypatch):
     task.phase = 'joint'
     task.completed_training_epoch(None, None, 1, None, row)
     assert 'global core and condition head trainable' in row['local_expert_training_prediction_mode']
+
+
+def test_joint_loss_metadata_covers_direct_and_local_objectives():
+    task = object.__new__(ThermalLocalExpertTask)
+    task.phase = 'joint'
+    task.native_weights = {'flow/u': .125, 'temperature/material': 1 / 6, 'q_proxy': .05}
+    task.local_weight, task.outside_weight = .1, .01
+    metadata = task.loss_metadata()
+    assert set(metadata) == {*task.native_weights, 'expert/temperature/material',
+                             'expert/temperature/surface', 'expert/q_proxy',
+                             'expert/outside_temperature'}
+    assert float(metadata['q_proxy']['weight']) == .05
+    assert float(metadata['expert/q_proxy']['weight']) == pytest.approx(.1 / 3)
+    assert 'full and restricted' in metadata['temperature/material']['formula']
+    task.phase = 'frozen'
+    assert set(task.loss_metadata()) == {name for name in metadata if name.startswith('expert/')}

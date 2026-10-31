@@ -155,7 +155,15 @@ class ThermalLocalExpertTask(ThermalR138AnchoredMemberRoutingTask):
         )
 
     def loss_metadata(self):
-        result = super().loss_metadata() if self.phase == "joint" else {}
+        result = {}
+        if self.phase == "joint":
+            for name, weight in self.native_weights.items():
+                result[name] = {
+                    "panel": "native_prediction", "label": f"Direct {name}",
+                    "unit": "dimensionless scaled squared error",
+                    "formula": "TRAIN averages full and restricted native losses; validation uses restricted native loss. Native masks and per-case reductions are unchanged.",
+                    "weight": str(weight),
+                }
         for role in ("temperature/material", "temperature/surface", "q_proxy"):
             result[f"expert/{role}"] = {
                 "panel": "native_prediction", "label": f"Local {role}",
