@@ -55,10 +55,13 @@ def test_thermal_recipes_declare_horizon_beyond_first_stop():
 
 def test_fit_passes_resume_and_stop_to_the_existing_engine(monkeypatch, capsys):
     import json
+    from types import SimpleNamespace
 
     recipe = {"dataset": "wind", "architecture": "relation_anchored"}
     monkeypatch.setattr(Path, "read_text", lambda self: json.dumps(recipe))
-    model, provider = object(), object()
+    model = object()
+    provider = SimpleNamespace(preparation_summary=lambda: {"catalogue_build_count": 0,
+                                                           "persistent_disk_hit_count": 12})
     monkeypatch.setattr(cli, "build", lambda value, device: (model, provider))
     calls = {}
 
@@ -73,7 +76,26 @@ def test_fit_passes_resume_and_stop_to_the_existing_engine(monkeypatch, capsys):
     assert calls["model"] is model and calls["provider"] is provider
     assert calls["resume_checkpoint"] == "latest" and calls["stop_after"] == 500
     assert calls["identity"]["recipe"] == recipe
-    assert json.loads(capsys.readouterr().out)["completed_epoch"] == 500
+    preparation, result = map(json.loads, capsys.readouterr().out.splitlines())
+    assert preparation["event"] == "wind_preparation_complete"
+    assert preparation["preparation"]["catalogue_build_count"] == 0
+    assert preparation["preparation"]["persistent_disk_hit_count"] == 12
+    assert result["completed_epoch"] == 500
+
+
+def test_wind_v2_recipe_has_one_physical_batch_per_effective_batch():
+    import json
+
+    path = Path(__file__).resolve().parents[1] / "configs/research/wind_relation_anchored_r15_2_w2_train420_q8192_b24_full1000_v2.json"
+    recipe = json.loads(path.read_text())
+    engine = cli.engine_for(recipe, device="cpu")
+    assert engine.config.microbatch_cases == engine.config.effective_cases == 24
+    assert engine.config.total_epochs == 1000
+    assert recipe["gradient_accumulation"] is False
+    assert recipe["primary_queries"] == 8192 and recipe["query_tile_size"] == 1024
+    assert recipe["validation_queries"] == 4096 and recipe["validation_microbatch_size"] == 4
+    assert engine.config.monitor_every == 100 and engine.config.curve_every == 10
+    assert engine.config.checkpoint_epochs == tuple(range(100, 1001, 100))
 
 
 def test_total_curves_include_weighted_port_terms(monkeypatch):

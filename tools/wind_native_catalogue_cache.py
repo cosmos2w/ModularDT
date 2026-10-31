@@ -75,9 +75,11 @@ def prepare_rows(view, rows, cache, *, progress=None):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scope", choices=("full", "segmented"), required=True)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--prepare", action="store_true", help="Build missing geometry entries; otherwise only show the selection."
     )
+    mode.add_argument("--verify", action="store_true", help="Verify every required prebuilt entry without building or writing.")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--derived-root", type=Path, default=DEFAULT_DERIVED_ROOT)
     parser.add_argument("--manifest-path", type=Path, default=DEFAULT_PILOT_ROOT / "fixed_subset_manifest.json")
@@ -90,10 +92,12 @@ def main(argv=None) -> int:
     view = WindFarmNativeView(args.data_root, allow_npz_metadata_fallback=True)
     split = _load_original_split(view, args.derived_root)
     rows, result = select_rows(view, split, args.scope, args.manifest_path)
-    result.update({"cache_directory": str(directory.expanduser().resolve()), "prepared": args.prepare})
-    if args.prepare:
+    result.update({"cache_directory": str(directory.expanduser().resolve()), "prepared": args.prepare,
+                   "verified": args.verify})
+    if args.prepare or args.verify:
         started = time.perf_counter()
-        cache = NativeRoleCatalogueCache(max_cached_bytes=1, persistent_dir=directory)
+        cache = NativeRoleCatalogueCache(max_cached_bytes=1, persistent_dir=directory,
+                                         read_only_persistent=not args.prepare)
         result.update(
             prepare_rows(
                 view,

@@ -97,6 +97,10 @@ def main(argv=None):
     elif args.command == "fit":
         if args.output is None or args.stop_after is None:
             parser.error("fit requires --output and --stop-after")
+        if recipe["dataset"] == "wind":
+            print(json.dumps({"event": "wind_preparation_complete",
+                              "preparation": provider.preparation_summary()},
+                             sort_keys=True, default=str, allow_nan=False), flush=True)
         result = engine.fit(model, provider, args.output, identity=identity, arm=arm,
                             stop_after=args.stop_after, resume_checkpoint=args.resume)
     else:

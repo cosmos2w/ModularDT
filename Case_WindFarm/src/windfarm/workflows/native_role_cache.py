@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shlex
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -15,6 +16,23 @@ from typing import Any
 import numpy as np
 
 DEFAULT_NATIVE_ROLE_CACHE_DIR = Path(__file__).resolve().parents[3] / "diagnostics/generated/native_role_catalogues_v1"
+
+# The numerical implementation was independently checked against this immutable
+# v1 payload recipe. A changed numerical digest cannot use the compatibility path.
+V1_NUMERICAL_IMPLEMENTATION_SHA256 = "29c0032899eb75d8c7e43e8156aa6460d51be97b012b96301eda44dad8c88311"
+V1_PAYLOAD_IMPLEMENTATION_SHA256 = "8ceb1d0b1f91eb971aad88fb7e21c28eaa1543ac6b2357ebbc3a19b9f4691730"
+
+
+def compatible_v1_recipe(recipe: dict[str, Any]) -> dict[str, Any] | None:
+    if recipe.get("schema_version") != 1 or recipe.get("implementation_sha256") != V1_NUMERICAL_IMPLEMENTATION_SHA256:
+        return None
+    return {**recipe, "implementation_sha256": V1_PAYLOAD_IMPLEMENTATION_SHA256}
+
+
+def catalogue_preparation_command(directory: Path | None = None) -> str:
+    directory = DEFAULT_NATIVE_ROLE_CACHE_DIR if directory is None else directory
+    return ("python tools/wind_native_catalogue_cache.py --scope full --prepare --cache-dir "
+            + shlex.quote(str(Path(directory).expanduser().resolve())))
 
 
 def training_catalogue_cache_directory() -> Path | None:
@@ -41,6 +59,13 @@ class NativeRoleCatalogueStore:
         self.roles = roles
         recipe_hash = hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         self.directory = Path(directory).expanduser().resolve() / recipe_hash
+        legacy = compatible_v1_recipe(recipe)
+        self._load_locations = [(self.directory, recipe)]
+        if legacy is not None:
+            legacy_hash = hashlib.sha256(json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            self._load_locations.append((self.directory.parent / legacy_hash, legacy))
+        self.last_loaded_entry: Path | None = None
+        self.last_loaded_legacy = False
         self.array_names = (
             "coordinates",
             *(f"cdf_{role}" for role in roles),
@@ -67,12 +92,21 @@ class NativeRoleCatalogueStore:
 
     def load(self, layout: int, geometry: str, cell_count: int):
         """Reject stale, partial or corrupt payloads before returning mapped arrays."""
-        entry = self.entry(layout, geometry)
+        name = self.entry(layout, geometry).name
+        for directory, recipe in self._load_locations:
+            loaded = self._load_entry(directory / name, layout, geometry, cell_count, recipe)
+            if loaded is not None:
+                self.last_loaded_entry = directory / name
+                self.last_loaded_legacy = directory != self.directory
+                return loaded
+        return None
+
+    def _load_entry(self, entry: Path, layout: int, geometry: str, cell_count: int, recipe: dict[str, Any]):
         try:
             manifest = json.loads((entry / "manifest.json").read_text())
             if (
                 manifest["schema_version"] != 1
-                or manifest["recipe"] != self.recipe
+                or manifest["recipe"] != recipe
                 or manifest["layout_index"] != layout
                 or manifest["geometry_sha256"] != geometry
                 or manifest["native_cell_count"] != cell_count

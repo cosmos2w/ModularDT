@@ -417,7 +417,7 @@ class WindContentHypergraphTask:
         return {
             "cache_recipe_sha256": recipe_sha,
             "persistent_directory": None if persistent is None else str(persistent.resolve()),
-            "policy": "read-only exact geometry reuse; bounded shared-RAM fallback; no disk writes",
+            "policy": "mandatory prebuilt shared catalogue; exact numerical/geometry checks; no builds or disk writes",
             "max_ram_bytes": self.catalogue_cache.max_cached_bytes,
             "roles": list(ROLE_NAMES),
         }
@@ -718,7 +718,7 @@ class WindContentHypergraphTask:
         return self._make_batch(rows, key, validation=True, query_count=query_count)
 
     def validation_batches(self) -> Iterable[TaskBatch]:
-        return self.validation_batches_for(self.primary_queries)
+        return self.validation_batches_for(int(getattr(self, "validation_query_count", self.primary_queries)))
 
     def validation_batches_for(
         self,
@@ -729,7 +729,7 @@ class WindContentHypergraphTask:
         """Return deterministic DEV-only panels, including endpoint Q8192."""
         query_count = int(query_count)
         counts = _role_counts_for_query_count(query_count)
-        chunk_size = self.max_microbatch_cases if microbatch_size is None else int(microbatch_size)
+        chunk_size = int(getattr(self, "validation_microbatch_cases", self.max_microbatch_cases)) if microbatch_size is None else int(microbatch_size)
         if chunk_size < 1 or chunk_size > 24:
             raise ValueError("Wind validation microbatch size must lie in [1,24].")
         # Cache only the engine's default panel; explicit endpoint panels are
@@ -750,7 +750,7 @@ class WindContentHypergraphTask:
                 dataset_id=self.sampling_dataset_id,
             )
             batches.append(self._validation_batch(rows, key, query_count))
-        if query_count == self.primary_queries:
+        if query_count == int(getattr(self, "validation_query_count", self.primary_queries)):
             self._validation_cache[query_count] = tuple(batches)
         del counts
         return iter(batches)

@@ -10,12 +10,14 @@ work proxy.
 from __future__ import annotations
 
 import copy
+import ast
 import hashlib
 import inspect
 import json
 import math
 import os
 import time
+import textwrap
 from collections import Counter, OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -53,7 +55,9 @@ from .native_cover_panel import (
     freeze_organizer_layout_split,
     select_training_layouts,
 )
-from .native_role_cache import NativeRoleCatalogueStore
+from .native_role_cache import (
+    NativeRoleCatalogueStore, catalogue_preparation_command, training_catalogue_cache_directory,
+)
 from .train_forward import _compact_metadata, _json_write, _resolved_path
 
 ROLE_NAMES = (
@@ -138,7 +142,7 @@ class NativeRoleCatalogueCache:
         *,
         max_cached_bytes: int = DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
         persistent_dir: str | Path | None = None,
-        read_only_persistent: bool = False,
+        read_only_persistent: bool = True,
     ) -> None:
         if isinstance(max_cached_bytes, bool) or not isinstance(max_cached_bytes, int) or max_cached_bytes <= 0:
             raise ValueError("role catalogue cache byte limit must be a positive integer")
@@ -152,13 +156,20 @@ class NativeRoleCatalogueCache:
         self.miss_count = 0
         self.eviction_count = 0
         self.oversize_bypass_count = 0
-        self.persistent_dir = None if persistent_dir is None else Path(persistent_dir)
         if type(read_only_persistent) is not bool:
             raise TypeError("read_only_persistent must be a boolean")
+        if read_only_persistent and persistent_dir is None:
+            persistent_dir = training_catalogue_cache_directory()
+            if persistent_dir is None:
+                raise FileNotFoundError("Wind training requires a prebuilt shared catalogue. Prepare explicitly: "
+                                        + catalogue_preparation_command())
+        self.persistent_dir = None if persistent_dir is None else Path(persistent_dir)
         self.read_only_persistent = read_only_persistent
         self._store: NativeRoleCatalogueStore | None = None
         self.disk_hit_count = 0
         self.disk_write_count = 0
+        self.legacy_disk_hit_count = 0
+        self.persistent_miss_count = 0
         self.catalogue_build_seconds = 0.0
 
     @staticmethod
@@ -220,19 +231,18 @@ class NativeRoleCatalogueCache:
             self.catalogue_build_seconds += time.perf_counter() - build_started
             self.build_count += 1
         elif self.read_only_persistent:
-            # New model families may reuse verified geometry-only entries while
-            # keeping cold misses in the bounded RAM cache. Do not create lock
-            # files or publish persistent arrays on this path.
+            # Training never builds, publishes, or locks catalogue entries.
             if self._store is None:
                 self._store = NativeRoleCatalogueStore(
                     self.persistent_dir, _native_role_catalogue_recipe(), ROLE_NAMES,
                 )
             loaded = self._store.load(layout_index, geometry_sha256, int(case.run.cell_count))
             if loaded is None:
-                build_started = time.perf_counter()
-                catalogue = self._build_catalogue(case, geometry_sha256)
-                self.catalogue_build_seconds += time.perf_counter() - build_started
-                self.build_count += 1
+                self.persistent_miss_count += 1
+                raise FileNotFoundError(
+                    f"Missing or incompatible prebuilt Wind catalogue: layout {layout_index}, "
+                    f"geometry {geometry_sha256}, directory {self.persistent_dir}. Prepare explicitly: "
+                    + catalogue_preparation_command(self.persistent_dir))
             else:
                 arrays, supports = loaded
                 catalogue = NativeRoleCatalogue(
@@ -247,6 +257,7 @@ class NativeRoleCatalogueCache:
                     cached_nbytes=sum(int(array.nbytes) for array in arrays.values()),
                 )
                 self.disk_hit_count += 1
+                self.legacy_disk_hit_count += int(self._store.last_loaded_legacy)
         else:
             if self._store is None:
                 self._store = NativeRoleCatalogueStore(
@@ -280,6 +291,7 @@ class NativeRoleCatalogueCache:
                         cached_nbytes=sum(int(array.nbytes) for array in arrays.values()),
                     )
                     self.disk_hit_count += 1
+                    self.legacy_disk_hit_count += int(self._store.last_loaded_legacy)
         if catalogue.cached_nbytes > self.max_cached_bytes:
             self.oversize_bypass_count += 1
             return catalogue
@@ -321,6 +333,8 @@ class NativeRoleCatalogueCache:
                 "persistent_directory": str(self.persistent_dir.expanduser().resolve()),
                 "persistent_disk_hit_count": self.disk_hit_count,
                 "persistent_disk_write_count": self.disk_write_count,
+                "persistent_legacy_v1_hit_count": self.legacy_disk_hit_count,
+                "persistent_missing_or_incompatible_count": self.persistent_miss_count,
                 "persistent_read_only": self.read_only_persistent,
                 "persistent_verification": "exact geometry, recipe, array shapes/dtypes and SHA256 payloads",
             })
@@ -370,7 +384,11 @@ class NativeRoleCatalogueCache:
         )
 
 
-_DEFAULT_ROLE_CATALOGUE_CACHE = NativeRoleCatalogueCache()
+@lru_cache(maxsize=1)
+def _default_role_catalogue_cache() -> NativeRoleCatalogueCache:
+    # Resolve training storage on use, so explicit CPU preparation can override
+    # a disabled training-cache environment without failing during import.
+    return NativeRoleCatalogueCache()
 
 
 class RunResourceLedger:
@@ -622,7 +640,20 @@ def _native_role_masks(case: Any) -> tuple[np.ndarray, dict[str, np.ndarray], np
 @lru_cache(maxsize=1)
 def _native_role_catalogue_recipe() -> dict[str, Any]:
     """Separate stores when numerical implementation or role policy changes."""
-    from .. import geometry, study_spatial
+    from ..geometry import _axis_array, cell_centre_weights
+
+    dependencies = (
+        _native_role_masks, NativeRoleCatalogueCache._build_catalogue,
+        native_coordinates, downstream_envelope, support_weights, cell_centre_weights, _axis_array,
+    )
+    numerical_sources = []
+    for function in dependencies:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant) and isinstance(node.body[0].value.value, str):
+                    node.body.pop(0)
+        numerical_sources.append(ast.dump(tree, include_attributes=False))
 
     return {
         "schema_version": 1,
@@ -632,12 +663,7 @@ def _native_role_catalogue_recipe() -> dict[str, Any]:
         "downstream_length_D": DOWNSTREAM_LENGTH_D,
         "downstream_radius_D": DOWNSTREAM_RADIUS_D,
         "near_turbine_radius_D": NEAR_TURBINE_RADIUS_D,
-        "implementation_sha256": hashlib.sha256(
-            inspect.getsource(_native_role_masks).encode()
-            + inspect.getsource(NativeRoleCatalogueCache._build_catalogue).encode()
-            + Path(geometry.__file__).read_bytes()
-            + Path(study_spatial.__file__).read_bytes()
-        ).hexdigest(),
+        "implementation_sha256": hashlib.sha256("\n".join(numerical_sources).encode()).hexdigest(),
     }
 
 
@@ -661,7 +687,7 @@ def sample_native_role_queries(
         raise ValueError("all protected WindFarm role query counts must be positive")
     if rng_by_role is not None and set(rng_by_role) != set(ROLE_NAMES):
         raise ValueError("Packing-independent Wind sampling requires one RNG for every protected role.")
-    catalogue = (catalogue_cache or _DEFAULT_ROLE_CATALOGUE_CACHE).get(case)
+    catalogue = (catalogue_cache or _default_role_catalogue_cache()).get(case)
     pieces: list[np.ndarray] = []
     target_pieces: list[np.ndarray] = []
     flat_pieces: list[np.ndarray] = []

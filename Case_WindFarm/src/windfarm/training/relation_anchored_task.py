@@ -21,7 +21,7 @@ from .joint_task import (
     _fit_or_load_formal_transforms, _read_transform_cache, _wind_dataset_fingerprint,
     fit_velocity_statistics,
 )
-from .unified_task import _fit_train_role_scales
+from .unified_task import _fit_train_role_scales, _role_counts_for_query_count
 
 
 def _load_replayed_full_train_transforms(*, existing_cache, **kwargs):
@@ -118,7 +118,17 @@ class WindRelationAnchoredTask(WindContentHypergraphTaskV2):
             environment_characteristic_length="support.extent_D / environment_shape, per axis")
         result["training"] = dict(result["training"], total_epochs=self.total_epochs,
             microbatch_size=self.max_microbatch_cases, optimizer_schedule=vars(self._schedule()),
+            primary_queries_per_case=self.primary_queries,
             sampling_dataset_id=self.sampling_dataset_id, scene_execution="batched with masked module padding")
+        if self.recipe["schema"] == "wind_relation_anchored_r15_2_v2":
+            result["training"].update(physical_batch_size=self.max_microbatch_cases,
+                                      gradient_accumulation=False)
+            result["validation"] = {
+                "queries_per_case": self.validation_query_count,
+                "microbatch_size": self.validation_microbatch_cases,
+                "role_query_counts": _role_counts_for_query_count(self.validation_query_count),
+                "sampling_epoch": 0, "partition": "original fixed VALID90",
+            }
         result["uncovered_train_module_count_strata"] = list(
             self.manifest.get("train_layout_selection", {}).get("uncovered_turbine_count_strata_by_limited_selection", ()))
         return result
@@ -199,19 +209,26 @@ def build_wind_relation_anchored_task(recipe, device):
     """Load the existing subset or original full split and build a fresh model."""
     value = dict(recipe)
     full = value.get("protocol") == "full_train1000"
-    required = {"schema": "wind_relation_anchored_r15_2_v1", "dataset": "wind", "architecture": "relation_anchored",
+    tuned = value.get("schema") == "wind_relation_anchored_r15_2_v2"
+    required = {"schema": "wind_relation_anchored_r15_2_v2" if tuned else "wind_relation_anchored_r15_2_v1",
+                "dataset": "wind", "architecture": "relation_anchored",
                 "protocol": "full_train1000" if full else "development", "seed": 42,
-                "primary_queries": 4096, "effective_batch_size": 24,
+                "primary_queries": 8192 if tuned else 4096, "effective_batch_size": 24,
                 "total_epochs": 1000 if full else 200, "precision": "fp32", "optimizer_bias_norm_exclusion": True}
+    if tuned:
+        required.update(protocol="full_train1000", microbatch_size=24, query_tile_size=1024,
+                        validation_queries=4096, validation_microbatch_size=4, gradient_accumulation=False)
     if any(value.get(k) != v for k, v in required.items()):
         raise ValueError("Wind R15-2 recipe differs from its declared subset/full workload.")
     if value.get("catalogue_cache_ram_bytes") != (128 if full else 32) * 1024**3:
         raise ValueError("Wind requires its declared subset/full catalogue RAM bound.")
     shape = tuple(value["environment_shape"])
+    if tuned and shape != (8, 4, 4):
+        raise ValueError("Wind Q8192/batch24 uses the declared W2 8x4x4 environment grid.")
     if shape not in ((4, 4, 4), (8, 4, 2), (8, 8, 2), (8, 4, 4), (8, 8, 4)):
         raise ValueError("Unsupported Wind environment shape.")
     old = dict(value, schema="content_hypergraph_recipe_v2", architecture="A2-H6" if full else "A2-D",
-               total_epochs=5000 if full else 2500,
+               total_epochs=5000 if full else 2500, primary_queries=4096,
                edge_access="full",
                model={"context_dim": 128, "num_heads": 4, "context_depth": 2, "num_hyperedges": 6,
                       "thermal_response_rank": 0, "local_hidden_dim": 128, "dropout": 0.0})
@@ -222,6 +239,13 @@ def build_wind_relation_anchored_task(recipe, device):
         role_scale_loader=lambda **kwargs: _load_panel_verified_role_scales(existing_cache=existing_cache, **kwargs),
         transform_loader=(lambda **kwargs: _load_replayed_full_train_transforms(
             existing_cache=value["existing_transform_cache"], **kwargs)) if full else None)
+    # The historical loader supplies data/transforms; live workload and identity
+    # use the requested training queries and the unchanged fixed validation panel.
+    provider.primary_queries = int(value["primary_queries"])
+    provider.role_query_counts = _role_counts_for_query_count(provider.primary_queries)
+    if tuned:
+        provider.validation_query_count = int(value["validation_queries"])
+        provider.validation_microbatch_cases = int(value["validation_microbatch_size"])
     native_identity = provider.identity_payload()
     base = ContentHypergraphCoreV2(module_input_dim=2, environment_input_dim=7, coordinate_dim=3,
         query_input_dim=7, operating_input_dim=11, output_dim=3, architecture="A2-D", context_dim=128,

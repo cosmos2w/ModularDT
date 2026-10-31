@@ -136,6 +136,27 @@ def test_full_train_transform_reuse_requires_all_train_draw_replay(monkeypatch, 
         module._load_replayed_full_train_transforms(**{**args, 'train_rows': np.array([0, 1, 9])})
 
 
+def test_q8192_training_retains_fixed_q4096_validation_and_packing():
+    from honf_runtime.unified_training import SamplingKey
+    task = object.__new__(WindRelationAnchoredTask)
+    task.primary_queries, task.max_microbatch_cases = 8192, 24
+    task.validation_query_count, task.validation_microbatch_cases = 4096, 4
+    task.validation_rows = np.arange(90)
+    task._validation_cache = {}
+    task.seed, task.sampling_version, task.sampling_dataset_id = 42, SamplingKey.CASE_EPOCH_VERSION, 'fixed'
+    calls = []
+    def batch(rows, key, query_count):
+        calls.append((list(rows), key.epoch, query_count))
+        return tuple(rows)
+    task._validation_batch = batch
+    panels = list(task.validation_batches())
+    assert [len(panel) for panel in panels] == [4] * 22 + [2]
+    assert sum(len(rows) for rows, _, _ in calls) == 90
+    assert all(epoch == 0 and queries == 4096 for _, epoch, queries in calls)
+    assert list(task.validation_batches()) == panels
+    assert len(calls) == 23  # Fixed validation samples are reused across reviews.
+
+
 @pytest.mark.parametrize("shape", [(4,4,4), (8,4,2)])
 @pytest.mark.parametrize("batch_size", [2, 4])
 def test_ragged_batch_matches_sequential_native_outputs_and_parameter_gradients(shape, batch_size):
