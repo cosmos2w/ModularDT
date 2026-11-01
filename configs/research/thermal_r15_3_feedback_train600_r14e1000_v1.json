@@ -48,16 +48,20 @@
   },
   "training": {
     "membership": "full_train600",
-    "local_horizon": 100,
+    "local_horizon": 500,
     "first_segment_epochs": 100,
-    "optimizer_schedule_horizon": 100,
+    "optimizer_schedule_horizon": 500,
     "effective_batch_size": 48,
     "microbatch_cases": 12,
     "primary_queries": 1024,
     "seed": 0,
     "monitor_every": 100,
     "checkpoint_epochs": [
-      100
+      100,
+      200,
+      300,
+      400,
+      500
     ],
     "latest_every": 1,
     "curve_every": 10,

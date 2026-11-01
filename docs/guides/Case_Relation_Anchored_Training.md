@@ -75,6 +75,8 @@ TRAIN shares preparation zero across full/restricted reads but prepares separate
 
 The recorded objective is final paired native loss plus 0.25 initial paired native loss, 0.1 times the equal mean of final local material-temperature/surface-temperature/q losses, and 0.05 times direct/local interface consistency. Physical reference masks, source TRAIN scales and equal active-module/case reductions apply; nonfinite predictions cannot silently shrink scored support. Validation reports joint fluid with final local material/interface outputs, while direct native loss terms remain separate. Evaluate response-zero/response-one discrepancy, temperature and flow drift, and actual E-state/read sensitivity alongside final field accuracy before choosing this composition.
 
+The formal feedback recipe saves a 500-epoch execution ceiling so a justified same-lineage continuation can preserve its exact identity, optimizer, RNG and history. Its initial stop is 100 new epochs; the terminal control remains capped at 100. The saved ceiling does not authorize fitting beyond the first stop. Complete both cases' initial formal reviews before deciding any final-candidate continuation under the applicable plan.
+
 ## Dense Wind coverage recipes
 
 `Case_WindFarm/configs/research/wind_r15_3_w{128,256,576,1152}_train{72,420}.json` use the separate `wind_relation_anchored_r15_3_v1` provider. Their E lattices are respectively `8x4x4`, `8x8x4`, `12x12x4` and `12x12x8`, with unchanged physical support, total represented volume and original turbine identities. The historical R15-2 validator still requires its saved grid, physical batch and precision settings.
