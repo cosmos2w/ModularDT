@@ -82,8 +82,20 @@ def test_historical_diagnostic_fork_is_explicit_and_preserves_state(tmp_path, mo
         training.resume_contextual_frontier(source, device='cpu', stop_after_epoch=2001,
             extend_horizon=True, diagnostic_fork_output=tmp_path / 'too_far', verify_bindings=False)
 
+    training.resume_contextual_frontier(target, device='cpu', stop_after_epoch=2000,
+        extend_horizon=True, verify_bindings=False, wall_clock_budget_seconds=6000)
+    amended_manifest = json.loads((target / 'run_manifest.json').read_text())
+    assert amended_manifest['diagnostic_fork'] == fork
+    assert amended_manifest['execution_budget'] == {
+        'provider_budget_seconds': 6000, 'previous_provider_budget_seconds': 5000}
+    assert observed['wall_clock_budget_seconds'] == 6000
+    training.resume_contextual_frontier(target, device='cpu', stop_after_epoch=2000,
+        extend_horizon=True, verify_bindings=False)
+    assert observed['wall_clock_budget_seconds'] == 6000
+    assert json.loads((target / 'run_manifest.json').read_text())['execution_budget'] == amended_manifest['execution_budget']
     with pytest.raises(ValueError):
-        training._resume_execution_budget(config, {}, source_latest, state, 6000, diagnostic_fork=fork)
-    assert training._resume_execution_budget(config, {}, source_latest, state, None, diagnostic_fork=fork)[0] == 5000
+        training._resume_execution_budget(config, amended_manifest, source_latest, state, 1200 + 24 * 3600 + 1, diagnostic_fork=fork)
+    with pytest.raises(ValueError):
+        training._resume_execution_budget(config, amended_manifest, source_latest, state, 1800, diagnostic_fork=fork)
     with pytest.raises(ValueError):
         training._resume_execution_budget(config, {}, source_latest, state, 5000)

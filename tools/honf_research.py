@@ -89,7 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     resume_member_routing.add_argument(
         "--wall-clock-budget-seconds", type=int,
-        help="fixed cumulative provider elapsed-time cap for an explicit R14 TRAIN150 diagnostic fork",
+        help="explicit cumulative provider elapsed-time cap for an R14 TRAIN150 diagnostic fork; omitted resumes retain the saved cap",
     )
 
     for resumer in (resume_member_routing,):

@@ -474,19 +474,25 @@ def _resume_execution_budget(
     config: Mapping[str, Any], manifest: Mapping[str, Any], latest_path: Path,
     latest_payload: Mapping[str, Any], requested_seconds: int | None,
     *, diagnostic_fork: Mapping[str, Any] | None = None,
-) -> tuple[int, None]:
+) -> tuple[int, dict[str, Any] | None]:
     if diagnostic_fork is not None:
         elapsed = float(latest_payload.get("provider_training_state", {}).get("training_elapsed_seconds", -1))
         source_elapsed = float(diagnostic_fork.get("source_elapsed_seconds", elapsed))
-        saved_cap = diagnostic_fork.get("provider_budget_seconds")
+        saved_budget = manifest.get("execution_budget")
+        if saved_budget is not None and not isinstance(saved_budget, Mapping):
+            raise ValueError("Diagnostic fork execution budget must be a mapping.")
+        initial_cap = diagnostic_fork.get("provider_budget_seconds")
+        saved_cap = saved_budget.get("provider_budget_seconds") if saved_budget is not None else initial_cap
         cap = saved_cap if requested_seconds is None else requested_seconds
         reserve = int(config["training"]["clean_save_reserve_seconds"])
         if (not math.isfinite(elapsed) or elapsed < 0 or not math.isfinite(source_elapsed)
                 or source_elapsed < 0 or type(cap) is not int
-                or cap <= elapsed + reserve or cap > source_elapsed + 24 * 3600
-                or (saved_cap is not None and cap != saved_cap)):
-            raise ValueError("Diagnostic fork needs a fixed cumulative provider deadline with clean-save reserve and at most 24 new hours.")
-        return cap, None
+                or cap <= elapsed + reserve or cap > source_elapsed + 24 * 3600):
+            raise ValueError("Diagnostic fork needs a cumulative provider deadline with clean-save reserve and at most 24 new hours.")
+        previous_cap = (saved_cap if requested_seconds is not None and cap != saved_cap
+                        else saved_budget.get("previous_provider_budget_seconds") if saved_budget is not None
+                        else None)
+        return cap, {"provider_budget_seconds": cap, "previous_provider_budget_seconds": previous_cap}
     if requested_seconds is not None or manifest.get("execution_budget") is not None:
         raise ValueError("Anchored runs do not support cumulative wall-clock overrides.")
     return int(config["training"]["wall_clock_budget_seconds"]), None
