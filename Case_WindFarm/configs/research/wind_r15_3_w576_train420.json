@@ -6,7 +6,7 @@
   "seed": 42,
   "primary_queries": 8192,
   "effective_batch_size": 24,
-  "total_epochs": 100,
+  "total_epochs": 500,
   "stop_after": 100,
   "precision": "fp32",
   "optimizer_bias_norm_exclusion": true,
@@ -24,7 +24,11 @@
   "execution": {
     "monitor_every": 100,
     "checkpoint_epochs": [
-      100
+      100,
+      200,
+      300,
+      400,
+      500
     ],
     "latest_every": 1,
     "curve_every": 10,
@@ -32,7 +36,7 @@
     "write_initial_artifacts": true
   },
   "existing_transform_cache": "HONF_Proj/Case_WindFarm/diagnostics/generated/joint_regional_20261009/audit/train_role_scale_cache/wind_original420_train_fullVALID90_followup1000_v1-transforms-7caa6b12cb50d7931a2d.json",
-  "name": "wind_r15_3_w576_train420",
+  "name": "wind_r15_3_e576_train420_q8192_v1",
   "gradient_accumulation": true,
   "validation_queries": 4096,
   "validation_microbatch_size": 4
