@@ -639,7 +639,9 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
     _validate_loaded_contextual_config(config)
     if compact_history is None:
         history_path = layout.read_path("history.json")
-        saved_history = _read_json(history_path) if history_path.exists() else []
+        saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
+        if not isinstance(saved_history, list) or (saved_history and not isinstance(saved_history[0], Mapping)):
+            raise ValueError("Saved training history must be a list of epoch records.")
         compact_history = bool(saved_history and saved_history[0].get("history_metadata_version") == 1)
     latest_path = resolve_checkpoint(run, "latest")
     from .compat import load_trusted_checkpoint

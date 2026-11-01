@@ -9,7 +9,8 @@ from honf_runtime import contextual_frontier_training as training
 from honf_runtime.run_layout import RunLayout
 
 
-def test_historical_diagnostic_fork_is_explicit_and_preserves_state(tmp_path, monkeypatch):
+@pytest.mark.parametrize('compact_history', [False, True])
+def test_historical_diagnostic_fork_is_explicit_and_preserves_state(tmp_path, monkeypatch, compact_history):
     source = tmp_path / 'source'
     layout = RunLayout(source)
     layout.ensure()
@@ -31,6 +32,9 @@ def test_historical_diagnostic_fork_is_explicit_and_preserves_state(tmp_path, mo
     source_latest = layout.write_path('latest_model.pt')
     torch.save(state, source_latest)
     before = source_latest.read_bytes()
+    history = [{'history_metadata_version': 1}] if compact_history else [{'epoch': 1}]
+    history_path = layout.write_path('history.json')
+    history_path.write_text(json.dumps(history))
     for name in ('loss_curves.pdf', 'loss_curves.png'):
         layout.write_path('plots/training/' + name).write_bytes(b'inherited curve')
     monkeypatch.setattr(training, '_validate_loaded_contextual_config', lambda config: None)
@@ -67,6 +71,9 @@ def test_historical_diagnostic_fork_is_explicit_and_preserves_state(tmp_path, mo
     assert (target / 'plots/training/loss_curves.png').read_bytes() == b'inherited curve'
     assert rendered == [(1000, target)]
     assert observed['wall_clock_budget_seconds'] == 5000
+    assert observed['compact_history'] is compact_history
+    assert json.loads(history_path.read_text()) == history
+    assert json.loads((target / 'metrics/history.json').read_text()) == history
     assert observed['identity_override']['recipe'] == {'unchanged': True}
     assert 'provider_identity' not in observed['identity_override']
     assert observed['allow_horizon_extension'] is True
