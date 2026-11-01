@@ -84,8 +84,12 @@ def _parser() -> argparse.ArgumentParser:
         help="explicitly continue a completed configured endpoint with the same optimizer schedule",
     )
     resume_member_routing.add_argument(
+        "--diagnostic-fork-output",
+        help="create a separate R14 Detail TRAIN150 diagnostic continuation from its completed latest state",
+    )
+    resume_member_routing.add_argument(
         "--wall-clock-budget-seconds", type=int,
-        help="absolute cumulative provider elapsed-time cap for Relative full-TRAIN600 continuation",
+        help="fixed cumulative provider elapsed-time cap for an explicit R14 TRAIN150 diagnostic fork",
     )
 
     for resumer in (resume_member_routing,):
@@ -170,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             stop_after_epoch=args.stop_after_epoch, extend_horizon=args.extend_horizon,
             wall_clock_budget_seconds=args.wall_clock_budget_seconds,
             compact_history=args.compact_history,
+            diagnostic_fork_output=args.diagnostic_fork_output,
         )
     elif args.command == "evaluate":
         result = research.evaluate(args.run, device=args.device, checkpoint=args.checkpoint)

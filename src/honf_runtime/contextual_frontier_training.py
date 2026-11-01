@@ -10,6 +10,7 @@ import copy
 import json
 import math
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -472,10 +473,35 @@ def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Pa
 def _resume_execution_budget(
     config: Mapping[str, Any], manifest: Mapping[str, Any], latest_path: Path,
     latest_payload: Mapping[str, Any], requested_seconds: int | None,
+    *, diagnostic_fork: Mapping[str, Any] | None = None,
 ) -> tuple[int, None]:
+    if diagnostic_fork is not None:
+        elapsed = float(latest_payload.get("provider_training_state", {}).get("training_elapsed_seconds", -1))
+        source_elapsed = float(diagnostic_fork.get("source_elapsed_seconds", elapsed))
+        saved_cap = diagnostic_fork.get("provider_budget_seconds")
+        cap = saved_cap if requested_seconds is None else requested_seconds
+        reserve = int(config["training"]["clean_save_reserve_seconds"])
+        if (not math.isfinite(elapsed) or elapsed < 0 or not math.isfinite(source_elapsed)
+                or source_elapsed < 0 or type(cap) is not int
+                or cap <= elapsed + reserve or cap > source_elapsed + 24 * 3600
+                or (saved_cap is not None and cap != saved_cap)):
+            raise ValueError("Diagnostic fork needs a fixed cumulative provider deadline with clean-save reserve and at most 24 new hours.")
+        return cap, None
     if requested_seconds is not None or manifest.get("execution_budget") is not None:
         raise ValueError("Anchored runs do not support cumulative wall-clock overrides.")
     return int(config["training"]["wall_clock_budget_seconds"]), None
+
+
+def _refresh_diagnostic_fork_curves(history: Sequence[Mapping[str, Any]], output: Path, provider: Any) -> None:
+    """Render current total-loss panels from the inherited complete history."""
+    from .unified_training import _render_loss_curves, capture_rng_state, restore_rng_state
+
+    rng = capture_rng_state()
+    try:
+        metadata = provider.loss_metadata() if callable(getattr(provider, "loss_metadata", None)) else None
+        _render_loss_curves(history, output / "plots/training", "field_score", loss_metadata=metadata)
+    finally:
+        restore_rng_state(rng)
 
 
 def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], output: Path, *,
@@ -484,7 +510,8 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
          engine_horizon: int | None = None,
          engine_checkpoint_epochs: Sequence[int] | None = None,
          allow_horizon_extension: bool = False,
-         compact_history: bool | None = None) -> dict[str, Any]:
+         compact_history: bool | None = None,
+         identity_override: Mapping[str, Any] | None = None) -> dict[str, Any]:
     from .research_training import ResearchTrainingEngine
 
     arm = _arm(config)
@@ -519,7 +546,7 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
             continuation_options["compact_history"] = compact_history
         return engine.fit(
             model, provider, output,
-            identity=_run_identity(config, provider),
+            identity=_run_identity(config, provider) if identity_override is None else dict(identity_override),
             arm=arm,
             stop_after=int(stop_after),
             resume_checkpoint=resume_checkpoint,
@@ -586,12 +613,17 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
                                wall_clock_budget_seconds: int | None = None,
                                extend_horizon: bool = False,
                                verify_bindings: bool = True,
-                               compact_history: bool | None = None) -> dict[str, Any]:
+                               compact_history: bool | None = None,
+                               diagnostic_fork_output: str | Path | None = None) -> dict[str, Any]:
     run = Path(run_dir).expanduser().resolve(strict=True)
     layout = RunLayout(run)
     manifest_path = layout.read_path("run_manifest.json")
     manifest = _read_json(manifest_path)
-    if (manifest.get("schema") not in (R13_8_E_ANCHORED_MANIFEST_SCHEMA, R14_MANIFEST_SCHEMA)
+    historical_fork = diagnostic_fork_output is not None
+    if historical_fork:
+        if manifest.get("schema") != "honf_r14_comparison_run_v1":
+            raise ValueError("Diagnostic fork requires the historical R14 comparison manifest.")
+    elif (manifest.get("schema") not in (R13_8_E_ANCHORED_MANIFEST_SCHEMA, R14_MANIFEST_SCHEMA)
             or manifest.get("artifact_layout_version") != 1):
         raise ValueError("Run is missing the anchored member-routing manifest.")
     config = copy.deepcopy(manifest.get("config"))
@@ -601,7 +633,7 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         arm = _arm(config)
     except (KeyError, TypeError):
         arm = ""
-    if manifest.get("arm") != arm or manifest.get("schema") != _manifest_schema(arm):
+    if not historical_fork and (manifest.get("arm") != arm or manifest.get("schema") != _manifest_schema(arm)):
         raise ValueError("Saved run arm differs from its versioned config.")
     # Revalidate the stored config with a temporary on-disk-free structural pass.
     _validate_loaded_contextual_config(config)
@@ -618,10 +650,29 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         raise ValueError("Resume stop must advance the latest completed epoch.")
     configured_horizon = int(config["training"]["local_horizon"])
     member_routing = "member_routing" in config
+    fork_info = manifest.get("diagnostic_fork")
+    if historical_fork:
+        if (arm != R14_ARM or config["training"].get("membership") != "fixed25_train150_dev22"
+                or current_epoch != 1000 or not extend_horizon or stop_after_epoch > 2000
+                or latest_payload.get("arm") != arm
+                or latest_payload.get("experiment_identity", {}).get("schema") != "honf_r14_comparison_training_v1"):
+            raise ValueError("Diagnostic fork requires the completed R14 Detail TRAIN150 epoch-1000 state and an explicit stop at or before 2000.")
+        if any(not layout.read_path(name).is_file() for name in
+               ("plots/training/loss_curves.pdf", "plots/training/loss_curves.png")):
+            raise ValueError("Diagnostic fork requires inherited loss curves before continuation.")
+        target = Path(diagnostic_fork_output).expanduser().resolve(strict=False)
+        if target.exists() or target.is_relative_to(run) or run.is_relative_to(target):
+            raise ValueError("Diagnostic fork output must be a new directory separate from the source run.")
+        fork_info = {"source_run": str(run), "source_checkpoint": str(latest_path),
+                     "source_epoch": current_epoch, "output_root": str(target)}
+    elif fork_info is not None and (not isinstance(fork_info, dict) or arm != R14_ARM
+            or config["training"].get("membership") != "fixed25_train150_dev22"
+            or stop_after_epoch > 2000 or not extend_horizon):
+        raise ValueError("Invalid explicit R14 TRAIN150 diagnostic-fork continuation.")
     horizon_extension = stop_after_epoch > configured_horizon
     if horizon_extension and not (
             extend_horizon and member_routing
-            and config["training"].get("membership") == "full_train600"
+            and (config["training"].get("membership") == "full_train600" or fork_info is not None)
             and current_epoch >= configured_horizon):
         raise ValueError(
             f"Resume stop exceeds the configured absolute {configured_horizon}-epoch horizon; "
@@ -637,20 +688,48 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         }))
     selected_budget, execution_budget = _resume_execution_budget(
         config, manifest, latest_path, latest_payload, wall_clock_budget_seconds,
+        diagnostic_fork=fork_info,
     )
+    if historical_fork:
+        fork_info["source_elapsed_seconds"] = float(latest_payload["provider_training_state"]["training_elapsed_seconds"])
+        fork_info["provider_budget_seconds"] = selected_budget
 
     binding_info = _ensure_workspace_storage_bindings() if verify_bindings else {}
-    research.verify_storage(config, output=run, estimated_bytes=0, peak_temporary_bytes=0)
+    storage_config = copy.deepcopy(config)
+    output_run = target if historical_fork else run
+    if fork_info is not None:
+        storage_config["storage"] = {"output_root": fork_info["output_root"],
+            "max_output_bytes": 2 * 1024**3, "max_peak_temporary_bytes": 256 * 1024**2,
+            "minimum_free_headroom_bytes": 100 * 1024**3}
+    research.verify_storage(storage_config, output=output_run, estimated_bytes=0, peak_temporary_bytes=0)
     configured_devices = config["execution"].get("preferred_devices")
     permitted = research._permitted_order(device, devices or configured_devices)
     selected_device, device_info = research.resolve_device(permitted[0], permitted_devices=permitted)
     model, provider = _build_task(config, arm, selected_device, task_factory=task_factory)
     estimated_bytes, peak_temporary = _storage_estimate(
         model, completed_epoch=current_epoch, stop_after=stop_after_epoch, config=config,
-        checkpoint_epochs=engine_checkpoint_epochs,
+        checkpoint_epochs=engine_checkpoint_epochs, fresh_namespace=historical_fork,
     )
-    storage = _prepare_storage(config, run, estimated_bytes=estimated_bytes,
+    storage = _prepare_storage(storage_config, output_run, estimated_bytes=estimated_bytes,
                                 peak_temporary_bytes=peak_temporary, bindings=binding_info)
+    if historical_fork:
+        output_run.mkdir(parents=True, exist_ok=False)
+        fork_layout = RunLayout(output_run)
+        fork_layout.ensure()
+        shutil.copy2(latest_path, fork_layout.write_path("latest_model.pt"))
+        for name in ("best_by_field_mse_model.pt", "history.json", "metrics/history_metadata.json",
+                     "plots/training/loss_curves.pdf", "plots/training/loss_curves.png",
+                     "plots/training/loss_curves_metadata.json"):
+            source = layout.read_path(name)
+            if source.exists():
+                shutil.copy2(source, fork_layout.write_path(name))
+        manifest = {"schema": _manifest_schema(arm), "artifact_layout_version": 1,
+                    "config": config, "config_path": str(manifest.get("config_path", "")),
+                    "arm": arm, "diagnostic_fork": fork_info}
+        research._atomic_json(fork_layout.write_path("run_manifest.json"), manifest)
+        _refresh_diagnostic_fork_curves(latest_payload["history"], output_run, provider)
+        run = output_run
+        latest_path = resolve_checkpoint(run, "latest")
     _write_run_manifest(run, config, Path(str(manifest.get("config_path", ""))),
                         arm, storage, resumed=True, execution_budget=execution_budget)
     print(json.dumps({
@@ -665,12 +744,18 @@ def resume_contextual_frontier(run_dir: str | Path, *, device: str, stop_after_e
         "wall_clock_budget_scope": "absolute cumulative provider elapsed seconds",
         "storage": storage,
     }, sort_keys=True, default=str, allow_nan=False), flush=True)
+    identity_override = None
+    if fork_info is not None:
+        identity_override = copy.deepcopy(latest_payload["experiment_identity"])
+        for name in ("provider_identity", "engine_config", "selection_policy", "optimizer_schedule_contract", "sampling_dataset_id"):
+            identity_override.pop(name, None)
     return _fit(model, provider, config, run, device=selected_device,
                 stop_after=stop_after_epoch, resume_checkpoint=latest_path,
                 wall_clock_budget_seconds=selected_budget,
                 engine_horizon=(stop_after_epoch if horizon_extension else None),
                 engine_checkpoint_epochs=engine_checkpoint_epochs,
-                allow_horizon_extension=horizon_extension, compact_history=compact_history)
+                allow_horizon_extension=horizon_extension, compact_history=compact_history,
+                identity_override=identity_override)
 
 
 def _validate_loaded_contextual_config(config: Mapping[str, Any]) -> None:
