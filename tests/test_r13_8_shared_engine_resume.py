@@ -431,7 +431,7 @@ def test_detail_query_tile_change_preserves_resume_state(tmp_path):
             _resume_identity_amendment(saved, changed, allow_query_tile_change=True)
 
 
-def test_detail_horizon_extension_preserves_engine_resume_state(tmp_path):
+def test_detail_horizon_extension_preserves_engine_resume_state(tmp_path, monkeypatch):
     from channelthermal.training.r13_8_anchored_task import ARM_DETAIL, DETAIL_WORKFLOW
     from honf_runtime.unified_training import _resume_identity_amendment
 
@@ -444,9 +444,12 @@ def test_detail_horizon_extension_preserves_engine_resume_state(tmp_path):
                                              arm=ARM_DETAIL, stop_after=2)
     source = torch.load(resolve_checkpoint(split, 'latest'), map_location='cpu', weights_only=False)
     model, provider = _start(ARM_DETAIL)
-    result = TrainingEngine(extended, device='cpu').fit(
-        model, provider, split, identity=identity, arm=ARM_DETAIL, stop_after=2,
-        resume_checkpoint=resolve_checkpoint(split, 'latest'), allow_horizon_extension=True)
+    from honf_runtime import contextual_frontier_training as runner
+    monkeypatch.setattr(runner, '_engine_config', lambda *args, **kwargs: extended)
+    result = runner._fit(
+        model, provider, {'member_routing': {'arm': ARM_DETAIL}}, split, device=torch.device('cpu'),
+        stop_after=2, resume_checkpoint=resolve_checkpoint(split, 'latest'),
+        allow_horizon_extension=True, identity_override=identity)
     assert result['completed_epoch'] == 2
     resumed = torch.load(resolve_checkpoint(split, 'latest'), map_location='cpu', weights_only=False)
     model, provider = _start(ARM_DETAIL)

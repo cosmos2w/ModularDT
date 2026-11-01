@@ -517,14 +517,22 @@ def _fit(model: torch.nn.Module, provider: Any, config: Mapping[str, Any], outpu
     arm = _arm(config)
     engine_config = _engine_config(config, total_epochs=engine_horizon,
                                    checkpoint_epochs=engine_checkpoint_epochs)
-    engine = ResearchTrainingEngine(
-        engine_config, device=device, parent_age=0,
-        selection=SelectionPolicy(field_metric="field_score"),
-    )
-    engine.bind_execution_runtime(
-        output / "execution_runtime.json",
-        nominal_microbatch_cases=int(config["training"]["microbatch_cases"]),
-    )
+    if identity_override is not None:
+        # The historical comparison was trained by the base engine, whose
+        # identity and sampler clock must be retained by its diagnostic fork.
+        from .unified_training import TrainingEngine
+
+        engine = TrainingEngine(engine_config, device=device,
+                                selection=SelectionPolicy(field_metric="field_score"))
+    else:
+        engine = ResearchTrainingEngine(
+            engine_config, device=device, parent_age=0,
+            selection=SelectionPolicy(field_metric="field_score"),
+        )
+        engine.bind_execution_runtime(
+            output / "execution_runtime.json",
+            nominal_microbatch_cases=int(config["training"]["microbatch_cases"]),
+        )
     budget_binder = getattr(provider, "bind_wall_clock_budget", None)
     if wall_clock_budget_seconds is not None and not callable(budget_binder):
         raise ValueError("The selected provider cannot enforce an explicit cumulative wall-clock budget.")
