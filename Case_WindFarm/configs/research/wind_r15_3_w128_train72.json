@@ -1,0 +1,39 @@
+{
+  "schema": "wind_relation_anchored_r15_3_v1",
+  "dataset": "wind",
+  "architecture": "relation_anchored",
+  "protocol": "development",
+  "seed": 42,
+  "primary_queries": 8192,
+  "effective_batch_size": 24,
+  "total_epochs": 150,
+  "stop_after": 150,
+  "precision": "fp32",
+  "optimizer_bias_norm_exclusion": true,
+  "query_tile_size": 1024,
+  "microbatch_size": 1,
+  "catalogue_cache_ram_bytes": 34359738368,
+  "pilot_root": "HONF_Proj/Case_WindFarm/diagnostics/generated/shared_interaction_20261007/wind_pilot",
+  "role_scale_cache_dir": "HONF_Proj/Case_WindFarm/diagnostics/generated/joint_regional_20261009/audit/train_role_scale_cache",
+  "environment_shape": [
+    8,
+    4,
+    4
+  ],
+  "existing_role_scale_cache": "HONF_Proj/Case_WindFarm/diagnostics/generated/joint_regional_20261009/audit/train_role_scale_cache/wind_shared_fixed24_v1-60bbffdcd862c0a4b847.json",
+  "name": "wind_r15_3_w128_train72",
+  "gradient_accumulation": true,
+  "validation_queries": 4096,
+  "validation_microbatch_size": 4,
+  "execution": {
+    "monitor_every": 10,
+    "checkpoint_epochs": [
+      100,
+      150
+    ],
+    "latest_every": 1,
+    "curve_every": 10,
+    "progress_enabled": true,
+    "write_initial_artifacts": true
+  }
+}

@@ -40,6 +40,37 @@ def test_formal_horizon_is_fixed_independently_of_requested_stop():
     assert engine.config.checkpoint_epochs == (100, 200, 300, 400, 500)
 
 
+def test_r15_3_wind_dispatch_keeps_historical_builder_separate(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    module = ModuleType("windfarm.training.relation_anchored_r15_3_task")
+    expected = (object(), object())
+    module.build_wind_r15_3_task = lambda recipe, device: expected
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert cli.build({"dataset": "wind", "seed": 42,
+                      "schema": "wind_relation_anchored_r15_3_v1"}, device="cpu") == expected
+
+
+def test_thermal_feedback_dispatch_selects_case_owned_composition(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    module = ModuleType("channelthermal.training.thermal_response_feedback_task")
+    calls = {}
+    expected = (object(), object())
+    def build(recipe, *, arm, device):
+        calls.update(arm=arm, device=device, returned=recipe["thermal_feedback"]["return_response"])
+        return expected
+    module.build_thermal_response_feedback_task = build
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    recipe = {"dataset": {"name": "thermal"}, "initialization": {"seed": 0},
+              "member_routing": {"arm": "R14-Detail-LocalECover"},
+              "thermal_feedback": {"enabled": True, "return_response": False}}
+    assert cli.build(recipe, device="cpu") == expected
+    assert calls == {"arm": "R14-Detail-LocalECover", "device": "cpu", "returned": False}
+
+
 def test_thermal_recipes_declare_horizon_beyond_first_stop():
     import json
 

@@ -31,11 +31,19 @@ def build(recipe, *, device):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     if recipe["dataset"] == "wind":
+        if recipe.get("schema") == "wind_relation_anchored_r15_3_v1":
+            from windfarm.training.relation_anchored_r15_3_task import build_wind_r15_3_task
+
+            return build_wind_r15_3_task(recipe, device=device)
         from windfarm.training.relation_anchored_task import build_wind_relation_anchored_task
 
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("thermal_feedback", {}).get("enabled", False):
+            from channelthermal.training.thermal_response_feedback_task import build_thermal_response_feedback_task
+
+            return build_thermal_response_feedback_task(recipe, arm=arm, device=device)
         if recipe.get("local_expert", {}).get("enabled", False):
             from channelthermal.training.local_expert_task import build_thermal_local_expert_task
 

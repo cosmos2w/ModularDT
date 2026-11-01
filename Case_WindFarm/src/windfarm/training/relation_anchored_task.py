@@ -120,14 +120,16 @@ class WindRelationAnchoredTask(WindContentHypergraphTaskV2):
             microbatch_size=self.max_microbatch_cases, optimizer_schedule=vars(self._schedule()),
             primary_queries_per_case=self.primary_queries,
             sampling_dataset_id=self.sampling_dataset_id, scene_execution="batched with masked module padding")
-        if self.recipe["schema"] == "wind_relation_anchored_r15_2_v2":
+        if self.recipe["schema"] in ("wind_relation_anchored_r15_2_v2", "wind_relation_anchored_r15_3_v1"):
             result["training"].update(physical_batch_size=self.max_microbatch_cases,
-                                      gradient_accumulation=False)
+                                      gradient_accumulation=self.recipe.get("gradient_accumulation", False))
+            if self.recipe["schema"] == "wind_relation_anchored_r15_3_v1":
+                result["training"]["effective_batch_size"] = self.recipe["effective_batch_size"]
             result["validation"] = {
                 "queries_per_case": self.validation_query_count,
                 "microbatch_size": self.validation_microbatch_cases,
                 "role_query_counts": _role_counts_for_query_count(self.validation_query_count),
-                "sampling_epoch": 0, "partition": "original fixed VALID90",
+                "sampling_epoch": 0, "partition": ("original fixed VALID90" if self.recipe["protocol"] == "full_train1000" else "fixed DEV24"),
             }
         result["uncovered_train_module_count_strata"] = list(
             self.manifest.get("train_layout_selection", {}).get("uncovered_turbine_count_strata_by_limited_selection", ()))
@@ -227,6 +229,12 @@ def build_wind_relation_anchored_task(recipe, device):
         raise ValueError("Wind Q8192/batch24 uses the declared W2 8x4x4 environment grid.")
     if shape not in ((4, 4, 4), (8, 4, 2), (8, 8, 2), (8, 4, 4), (8, 8, 4)):
         raise ValueError("Unsupported Wind environment shape.")
+    return _build_wind_relation_anchored_from_validated(value, device, full=full, tuned=tuned)
+
+
+def _build_wind_relation_anchored_from_validated(value, device, *, full, tuned):
+    """Build from a case-specific validated workload without changing legacy validation."""
+    shape = tuple(value["environment_shape"])
     old = dict(value, schema="content_hypergraph_recipe_v2", architecture="A2-H6" if full else "A2-D",
                total_epochs=5000 if full else 2500, primary_queries=4096,
                edge_access="full",
