@@ -171,7 +171,7 @@ def render_donor_services(scenes: list[OrganizationScene], output: Path, *,
                    ncol=len(handles), frameon=False, fontsize=14 if single else 10)
         cax = fig.add_axes([.12, .075, .36, .018])
         cb = fig.colorbar(plt.cm.ScalarMappable(norm=c_norm, cmap=c_cmap), cax=cax, orientation="horizontal")
-        cb.set_label("Prepared directory C · E services", fontsize=14 if single else 10)
+        cb.set_label("Prepared directory weight · E services", fontsize=14 if single else 10)
         cb.ax.tick_params(labelsize=12 if single else 10)
         if present_routes:
             gax = fig.add_axes([.61, .075, .27, .018])
@@ -180,18 +180,18 @@ def render_donor_services(scenes: list[OrganizationScene], output: Path, *,
             gb.ax.tick_params(labelsize=12 if single else 10)
         caption = (
             f"Matched {role} suppliers are selected by pooled nonself directory mass across all supplied models, "
-            "independently within M and E roles. Each E cell shows the prepared directory weight C for accessing "
+            "independently within M and E roles. Each E cell shows the prepared directory weight for accessing "
             "the highlighted original supplier; own-E directory entries are omitted only from this service display. "
             "Orange squares and dashed supplier-to-M arrows show actual contextual gates G on a separate 0–1 scale, "
             f"using {'MM (M←M)' if role == 'M' else 'ME (M←E)'}. Every positive M receiver is shown without an added threshold. "
-            "C and G belong to distinct operations and are not added together; G stages are recorded in the evidence. "
-            "White cells have zero nonself C. The red ring locates the supplier, not a query. "
+            "Directory weights and G belong to distinct operations and are not added together; G stages are recorded in the evidence. "
+            "White cells have zero nonself directory weight. The red ring locates the supplier, not a query. "
             "Selection is a display choice and does not create learned groups."
         )
         if not present_routes:
             caption += " No matching actual M-receiver gate was exported, so no M gate overlay is drawn."
         artifacts.append(save_figure(fig, output, f"03_directory_services_{len(artifacts) + 1:02d}", title,
-                                     caption, {"weight": "C for E services; actual G for M receivers",
+                                     caption, {"weight": "prepared directory weights for E services; actual G for M receivers",
                                                "selection": members, "panels": panel_evidence,
                                                "C_scale": [c_norm.vmin, c_norm.vmax], "G_scale": [0, 1]}))
     return artifacts
@@ -290,7 +290,7 @@ def render_incoming_neighborhoods(scenes: list[OrganizationScene], output: Path,
         "Dashed arrows run from M donor to receiver. The contextual stages execute sequentially MM→EM→EE→ME, "
         "so combined neighborhoods do not imply simultaneous influence. No structural own-E access is added. "
         "Red squares identify original M/E receivers, not queries. These are actual interaction gates, not "
-        "prepared directory C or executed query weights."
+        "prepared directory weights or executed query weights."
     )
     stem = "05_four_route_context_neighborhoods" + (f"_{receiver_role}" if receiver_role else "")
     return save_figure(fig, output, stem, title, caption,
