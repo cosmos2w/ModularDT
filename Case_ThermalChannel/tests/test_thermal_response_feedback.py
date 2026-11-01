@@ -69,6 +69,23 @@ def test_same_mean_angular_responses_can_have_distinct_encodings():
     assert not torch.equal(encoder(x), encoder(y))
 
 
+def test_native_16_view_selects_each_modules_aligned_64_stencil():
+    from channelthermal.native_observations import NativeStencil
+    from channelthermal.thermal_coupling import native_angle_view
+    from dataclasses import make_dataclass
+
+    Prepared = make_dataclass('Prepared', ['source_present', 'stencils', 'role_shapes', 'ntheta'])
+    values = torch.arange(2 * 3 * 64).reshape(2, 3 * 64)
+    stencil = NativeStencil(values[..., None].expand(-1, -1, 4), values[..., None].expand(-1, -1, 4).float(), values.bool())
+    original = Prepared(torch.ones(2, 3, dtype=torch.bool), {'surface': stencil, 'outside': stencil},
+                        {'surface': (3, 64), 'outside': (3, 64)}, 64)
+    view = native_angle_view(original, 16)
+    expected = values.reshape(2, 3, 64)[:, :, ::4].reshape(2, 48)
+    assert torch.equal(view.stencils['outside'].indices[..., 0], expected)
+    assert torch.equal(original.stencils['outside'].indices[..., 0], values)
+    assert view.role_shapes['surface'] == (3, 16)
+
+
 def test_native_nonfinite_predictions_fail_on_reference_masks_with_identity():
     from types import SimpleNamespace as S
     from channelthermal.training.thermal_response_feedback_task import ThermalResponseFeedbackTask
@@ -114,18 +131,19 @@ def test_paired_control_reuses_native_and_local_work(monkeypatch):
             return S(organization=S(work_counts={'pairs': 11}))
         def apply_native_with_work_counts(self, prepared, heat):
             self.core.reads.append(self.core.mode)
-            return {'path': self.core.mode}, {'pairs': 7}, None
+            return {'path': self.core.mode}, {'pairs': 7}, self.core.mode
     model = Model()
     provider = object.__new__(task.ThermalResponseFeedbackTask)
     provider.model = model
     provider.feedback = False
     provider.local_operator = object()
     calls = []
-    monkeypatch.setattr(task, 'outside_geometry', lambda model, prepared: object())
-    def local(model, operator, prepared, heat, points, mode, geometry):
-        calls.append(mode)
-        return {'interface_pred': mode}, {'pairs': 3}
-    monkeypatch.setattr(task, 'local_response', local)
+    monkeypatch.setattr(task, 'native_angle_view', lambda prepared, n: prepared)
+    monkeypatch.setattr(task, 'outside_from_native_output', lambda model, prepared, raw: raw)
+    def local(model, operator, prepared, heat, points, outside):
+        calls.append(outside)
+        return {'interface_pred': outside}
+    monkeypatch.setattr(task, 'local_response_from_outside', local)
     scene = S(structure={}, case_ids=('a',))
     receivers = S(fluid_xy=None, heat=None, local_query_points=None, ntheta=64)
     pred, _ = provider.predict_native(model, scene, receivers, 'arm', 'joint')
@@ -133,7 +151,7 @@ def test_paired_control_reuses_native_and_local_work(monkeypatch):
     assert pred.full is pred.initial.full and pred.restricted is pred.initial.restricted
     assert pred.local0 == pred.local1
     assert pred.work['preparations'] == 1 and pred.work['local_calls'] == 2
-    assert pred.work['port_geometry_builds'] == 1
+    assert pred.work['port_geometry_builds'] == pred.work['port_decodes'] == 0
     assert pred.work['stage1_full_reused_stage0'] == 1
     assert not any(k.startswith('stage1_full_decode_') for k in pred.work)
 
@@ -159,24 +177,23 @@ def test_feedback_paired_paths_prepare_from_their_own_local_responses(monkeypatc
             self.prepares += 1
             return S(label='stage0', organization=S(work_counts={'pairs': 1}))
         def apply_native_with_work_counts(self, prepared, heat):
-            return {'source': (prepared.label, self.core.mode)}, {'rows': 1}, None
+            return {'source': (prepared.label, self.core.mode)}, {'rows': 1}, self.core.mode
     model = Model()
     provider = object.__new__(task.ThermalResponseFeedbackTask)
     provider.model, provider.feedback, provider.local_operator = model, True, object()
     provider.response_mean, provider.response_scale = [0., 0.], [1., 1.]
-    geometry = object()
-    monkeypatch.setattr(task, 'outside_geometry', lambda model, first: geometry)
+    monkeypatch.setattr(task, 'native_angle_view', lambda prepared, n: prepared)
+    monkeypatch.setattr(task, 'outside_from_native_output', lambda model, prepared, raw: raw)
     builds = []
     def prepare(model, first, response, mean, scale):
         builds.append((first.label, response))
         return S(label='stage1-' + response, organization=S(work_counts={'pairs': 1}))
-    def local(model, operator, prepared, heat, points, mode, passed_geometry):
-        assert passed_geometry is geometry
+    def local(model, operator, prepared, heat, points, mode):
         if prepared.label != 'stage0':
             assert prepared.label == 'stage1-' + mode
-        return {'interface_pred': mode if prepared.label == 'stage0' else prepared.label}, {'rows': 1}
+        return {'interface_pred': mode if prepared.label == 'stage0' else prepared.label}
     monkeypatch.setattr(task, 'prepare_response', prepare)
-    monkeypatch.setattr(task, 'local_response', local)
+    monkeypatch.setattr(task, 'local_response_from_outside', local)
     scene = S(structure={}, case_ids=('a',))
     receivers = S(fluid_xy=None, heat=None, local_query_points=None, ntheta=64)
     pred, _ = provider.predict_native(model, scene, receivers, 'arm', 'joint')
@@ -187,5 +204,46 @@ def test_feedback_paired_paths_prepare_from_their_own_local_responses(monkeypatc
     assert pred.restricted.native_main['source'] == ('stage1-restricted', 'restricted')
     assert pred.local1['full']['interface_pred'] == 'stage1-full'
     assert pred.local1['restricted']['interface_pred'] == 'stage1-restricted'
-    assert pred.work['preparations'] == 3 and pred.work['port_geometry_builds'] == 1
-    assert pred.work['local_calls'] == pred.work['port_decodes'] == 4
+    assert pred.work['preparations'] == 3 and pred.work['port_geometry_builds'] == 0
+    assert pred.work['local_calls'] == 4 and pred.work['port_decodes'] == 0
+
+
+def test_feedback_inference_defers_initial_native_read_until_validation_loss(monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace as S
+    from channelthermal.training import thermal_response_feedback_task as task
+
+    class Core:
+        @contextmanager
+        def read_execution(self, mode):
+            yield
+    class Model:
+        architecture = 'arm'
+        training = False
+        core = Core()
+        def __init__(self):
+            self.reads = []
+        def prepare_native(self, *args, **kwargs):
+            return S(label='initial', organization=S(work_counts={}))
+        def apply_native_with_work_counts(self, prepared, heat):
+            self.reads.append(prepared.label)
+            return {'source': prepared.label}, {'rows': 1}, prepared.label
+    model = Model()
+    provider = object.__new__(task.ThermalResponseFeedbackTask)
+    provider.model, provider.feedback, provider.local_operator = model, True, object()
+    provider.response_mean, provider.response_scale = [0., 0.], [1., 1.]
+    monkeypatch.setattr(task, 'native_angle_view', lambda prepared, n: prepared)
+    monkeypatch.setattr(task, 'outside_geometry', lambda model, prepared: object())
+    monkeypatch.setattr(task, 'local_response', lambda *args: ({'interface_pred': 'response0'}, {'rows': 2}))
+    monkeypatch.setattr(task, 'prepare_response', lambda *args: S(label='final', organization=S(work_counts={})))
+    monkeypatch.setattr(task, 'outside_from_native_output', lambda model, prepared, raw: raw)
+    monkeypatch.setattr(task, 'local_response_from_outside', lambda *args: {'interface_pred': 'response1'})
+    monkeypatch.setattr(provider, '_terms', lambda prediction, targets: prediction.initial.native_main)
+    scene = S(structure={}, case_ids=('a',))
+    receivers = S(fluid_xy=None, heat=None, local_query_points=None, ntheta=16)
+    prediction, aux = provider.predict_native(model, scene, receivers, 'arm', 'joint')
+    assert model.reads == ['final'] and prediction.initial.native_main is None
+    assert provider.validation_loss_terms(prediction, None, aux) == {'source': 'initial'}
+    assert model.reads == ['final', 'initial']
+    provider.validation_loss_terms(prediction, None, aux)
+    assert model.reads == ['final', 'initial']

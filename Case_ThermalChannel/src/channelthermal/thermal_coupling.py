@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import torch
 
-from .native_observations import interpolate_native
+from .native_observations import NativeStencil, interpolate_native
 from .training.local_expert_task import prescribed_h
 
 
@@ -73,6 +73,41 @@ def outside_geometry(adapter, prepared):
     return adapter._query_union(prepared.scene_batch, prepared.fluid_xy[:, :1], None, 64)
 
 
+def native_angle_view(prepared, ntheta):
+    """Keep the 64-port union while exposing the requested native angle roles."""
+    if ntheta == 64:
+        return prepared
+    if ntheta != 16 or prepared.ntheta != 64:
+        raise ValueError("Expected the native 16- or 64-angle receiver catalogue.")
+    batch, modules = prepared.source_present.shape
+    stencils = dict(prepared.stencils)
+    shapes = dict(prepared.role_shapes)
+    for name in ("surface", "outside"):
+        stencil = stencils[name]
+        def select(value):
+            return value.reshape(batch, modules, 64, *value.shape[2:])[:, :, ::4].reshape(batch, modules * 16, *value.shape[2:])
+        stencils[name] = NativeStencil(select(stencil.indices), select(stencil.weights), select(stencil.valid))
+        shapes[name] = (modules, 16)
+    return replace(prepared, stencils=stencils, role_shapes=shapes, ntheta=16)
+
+
+def outside_from_native_output(adapter, prepared64, output):
+    """Extract physical 64-angle ports from an already executed native decode."""
+    temperature = adapter._physical_temperature(output.joint_fields[..., 3])
+    stencil = prepared64.stencils["outside"]
+    outside = interpolate_native(temperature[..., None], stencil).reshape(
+        prepared64.source_present.shape[0], *prepared64.role_shapes["outside"])
+    valid = stencil.valid.reshape_as(outside)
+    bad = prepared64.source_present[..., None] & (~valid | ~torch.isfinite(outside))
+    if bad.any():
+        case, module, angle = torch.nonzero(bad)[0].tolist()
+        ids = prepared64.scene_key
+        case_id = ids[case] if isinstance(ids, (tuple, list)) else case
+        module_id = int(prepared64.scene_batch.module_ids[case, module])
+        raise ValueError(f"Incomplete/nonfinite outside64 for case {case_id}, module {module_id}, angle {angle}.")
+    return outside
+
+
 def outside64(adapter, prepared, mode, geometry=None):
     query, union, stencils, *rest = outside_geometry(adapter, prepared) if geometry is None else geometry
     output = adapter.core.decode(prepared.organization, query, intervention={"read_mode": mode})
@@ -91,6 +126,10 @@ def outside64(adapter, prepared, mode, geometry=None):
 
 def local_response(adapter, local, prepared, heat, local_points, mode, geometry=None):
     outside, counts = outside64(adapter, prepared, mode, geometry)
+    return local_response_from_outside(adapter, local, prepared, heat, local_points, outside), counts
+
+
+def local_response_from_outside(adapter, local, prepared, heat, local_points, outside):
     theta = torch.arange(64, device=outside.device, dtype=outside.dtype) * (2 * torch.pi / 64)
     angles = torch.stack((theta, theta.cos(), theta.sin()), -1).view(1, 1, 64, 3).expand(*outside.shape, 3)
     h = prescribed_h(prepared.structure, adapter.nx, adapter.ny)[:, None, :].expand_as(outside)
@@ -104,4 +143,4 @@ def local_response(adapter, local, prepared, heat, local_points, mode, geometry=
         case_id = ids[case] if isinstance(ids, (tuple, list)) else case
         module_id = int(prepared.scene_batch.module_ids[case, module])
         raise FloatingPointError(f"Nonfinite local response for case {case_id}, module {module_id}, angle {angle}, channel {channel}.")
-    return result, counts
+    return result

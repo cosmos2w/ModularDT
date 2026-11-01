@@ -10,7 +10,8 @@ from honf_runtime.compat import load_trusted_checkpoint
 from honf_runtime.unified_training import LossTerm
 from ..local_ports import FrozenThermalLocal
 from ..member_routing import ThermalDetailAnchoredMemberRoutingAdapter
-from ..thermal_coupling import local_response, outside_geometry, prepare_response, response_scene, transplant_widened_model
+from ..thermal_coupling import (local_response, local_response_from_outside, native_angle_view,
+    outside_from_native_output, outside_geometry, prepare_response, response_scene, transplant_widened_model)
 from .content_hypergraph_task import ThermalContentPredictions
 from .joint_member_routing_task import ThermalJointPairPredictions
 from .r13_6_member_routing_task import _build_thermal_member_routing_task
@@ -49,35 +50,41 @@ class ThermalResponseFeedbackTask(ThermalR138AnchoredMemberRoutingTask):
         del phase, epoch, temperature
         if kwargs or model is not self.model or execution_mode != model.architecture:
             raise ValueError("Unexpected Thermal response prediction request.")
-        first = model.prepare_native(scene.structure, receivers.fluid_xy, physical_heat=receivers.heat,
-            local_query_points=receivers.local_query_points, ntheta=receivers.ntheta, scene_key=scene.case_ids)
-        geometry = outside_geometry(model, first)
+        first64 = model.prepare_native(scene.structure, receivers.fluid_xy, physical_heat=receivers.heat,
+            local_query_points=receivers.local_query_points, ntheta=64, scene_key=scene.case_ids)
+        first = native_angle_view(first64, receivers.ntheta)
+        geometry = outside_geometry(model, first) if self.feedback and not model.training else None
         modes = ("full", "restricted") if model.training else ("restricted",)
-        initial, final, local0, local1, work = {}, {}, {}, {}, {"preparations": 1, "local_calls": 0, "port_decodes": 0, "port_geometry_builds": 1}
+        initial, final, local0, local1, work = {}, {}, {}, {}, {"preparations": 1, "local_calls": 0, "port_decodes": 0, "port_geometry_builds": int(geometry is not None)}
         work.update({f"stage0_prepare_{k}": int(v) for k, v in first.organization.work_counts.items()})
         for mode in modes:
-            with model.core.read_execution(mode):
-                native, counts, _ = model.apply_native_with_work_counts(first, receivers.heat)
-            initial[mode] = ThermalContentPredictions(first, native, work=counts)
-            work.update({f"stage0_{mode}_decode_{k}": int(v) for k, v in counts.items()})
-            local0[mode], counts = local_response(model, self.local_operator, first, receivers.heat, receivers.local_query_points, mode, geometry)
+            if model.training or not self.feedback:
+                with model.core.read_execution(mode):
+                    native, counts, raw = model.apply_native_with_work_counts(first, receivers.heat)
+                initial[mode] = ThermalContentPredictions(first, native, work=counts)
+                work.update({f"stage0_{mode}_decode_{k}": int(v) for k, v in counts.items()})
+                outside = outside_from_native_output(model, first64, raw)
+                local0[mode] = local_response_from_outside(model, self.local_operator, first, receivers.heat, receivers.local_query_points, outside)
+            else:
+                initial[mode] = ThermalContentPredictions(first, None, work={})
+                local0[mode], counts = local_response(model, self.local_operator, first, receivers.heat, receivers.local_query_points, mode, geometry)
+                work["port_decodes"] += 1
+                work.update({f"stage0_{mode}_{k}": int(v) for k, v in counts.items()})
             work["local_calls"] += 1
-            work["port_decodes"] += 1
-            work.update({f"stage0_{mode}_{k}": int(v) for k, v in counts.items()})
             if self.feedback:
-                second = prepare_response(model, first, local0[mode]["interface_pred"], self.response_mean, self.response_scale)
+                second64 = prepare_response(model, first64, local0[mode]["interface_pred"], self.response_mean, self.response_scale)
+                second = native_angle_view(second64, receivers.ntheta)
                 work["preparations"] += 1
                 work.update({f"stage1_{mode}_prepare_{k}": int(v) for k, v in second.organization.work_counts.items()})
             else:
                 second = first
             if self.feedback:
                 with model.core.read_execution(mode):
-                    native, counts, _ = model.apply_native_with_work_counts(second, receivers.heat)
+                    native, counts, raw = model.apply_native_with_work_counts(second, receivers.heat)
                 final[mode] = ThermalContentPredictions(second, native, work=counts)
-                local1[mode], port_counts = local_response(model, self.local_operator, second, receivers.heat, receivers.local_query_points, mode, geometry)
+                outside = outside_from_native_output(model, second64, raw)
+                local1[mode] = local_response_from_outside(model, self.local_operator, second, receivers.heat, receivers.local_query_points, outside)
                 work["local_calls"] += 1
-                work["port_decodes"] += 1
-                work.update({f"stage1_{mode}_{k}": int(v) for k, v in port_counts.items()})
             else:
                 final[mode], local1[mode] = initial[mode], local0[mode]
             if self.feedback:
@@ -91,6 +98,7 @@ class ThermalResponseFeedbackTask(ThermalR138AnchoredMemberRoutingTask):
         prediction.local0 = local0
         prediction.local1 = local1
         prediction.work = work
+        prediction.initial_heat = receivers.heat
         return prediction, {"work": work}
 
     def validation_metrics(self, predictions, targets, auxiliary_state):
@@ -191,6 +199,12 @@ class ThermalResponseFeedbackTask(ThermalR138AnchoredMemberRoutingTask):
         return self._terms(predictions, targets)
 
     def validation_loss_terms(self, predictions, targets, auxiliary_state, *, batch=None, arm=None):
+        if predictions.initial.native_main is None:
+            with self.model.core.read_execution("restricted"):
+                native, counts, _ = self.model.apply_native_with_work_counts(predictions.initial.native_prepared, predictions.initial_heat)
+            predictions.initial.native_main = native
+            predictions.initial.work = counts
+            predictions.work.update({f"stage0_restricted_decode_{k}": int(v) for k, v in counts.items()})
         return self._terms(predictions, targets)
 
     def loss_denominators(self, batches, phase="joint", arm=ARM_DETAIL):
