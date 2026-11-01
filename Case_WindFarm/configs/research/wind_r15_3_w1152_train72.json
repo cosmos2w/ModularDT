@@ -26,7 +26,7 @@
   "validation_queries": 4096,
   "validation_microbatch_size": 4,
   "execution": {
-    "monitor_every": 10,
+    "monitor_every": 100,
     "checkpoint_epochs": [
       100,
       150

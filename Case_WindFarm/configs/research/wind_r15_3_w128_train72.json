@@ -11,7 +11,7 @@
   "precision": "fp32",
   "optimizer_bias_norm_exclusion": true,
   "query_tile_size": 1024,
-  "microbatch_size": 1,
+  "microbatch_size": 12,
   "catalogue_cache_ram_bytes": 34359738368,
   "pilot_root": "HONF_Proj/Case_WindFarm/diagnostics/generated/shared_interaction_20261007/wind_pilot",
   "role_scale_cache_dir": "HONF_Proj/Case_WindFarm/diagnostics/generated/joint_regional_20261009/audit/train_role_scale_cache",
@@ -26,7 +26,7 @@
   "validation_queries": 4096,
   "validation_microbatch_size": 4,
   "execution": {
-    "monitor_every": 10,
+    "monitor_every": 100,
     "checkpoint_epochs": [
       100,
       150
