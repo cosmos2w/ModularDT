@@ -588,7 +588,8 @@ class ThermalContentHypergraphAdapter(nn.Module):
         if context_message_removal is not None:
             if (getattr(self.core, "schema", None) not in {
                     "interaction_reused_member_routing_v1", "interaction_reused_member_routing_v2",
-                    "interaction_reused_member_routing_v3", "interaction_reused_joint_member_routing_v1"}
+                    "interaction_reused_member_routing_v3", "interaction_reused_joint_member_routing_v1",
+                    "interaction_reused_detail_anchored_member_routing_v1"}
                     or forced_frontier is not None):
                 raise ValueError("Context-message removal requires a maintained interaction-reused member-routing core.")
             options = {"return_trace": True} if capture_context_trace else {}
