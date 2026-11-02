@@ -1,0 +1,145 @@
+{
+  "schema": "honf_thermal_research_run_v1",
+  "name": "thermal_r15_6_p64_grid192_train600_r14e5000_v1",
+  "dataset": {
+    "name": "thermal",
+    "data_path": "/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "manifest_path": "/data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json",
+    "base_recipe_path": "/home/wanglz/Desktop/src/ModularDT/src/config_core/forward/content_hypergraph/thermal_a2-h6_development.json"
+  },
+  "initialization": {
+    "source_kind": "thermal_port_response_explicit_transfer_v1",
+    "source_checkpoint": "/data2/wanglz/ModularDT/r14_20261029/train600/thermal_r14_detail_train600_v1/checkpoints/epoch_5000_model.pt",
+    "pretrained_weights": true,
+    "source_arm": "R14-Detail-LocalECover",
+    "source_parent_age": 5000,
+    "normalization_mode": "scratch_train600_stats",
+    "seed": 0
+  },
+  "optimizer": {
+    "kind": "fresh_adamw_from_config",
+    "schedule": "constant_config_lr",
+    "lr": 0.0001,
+    "weight_decay": 1e-05,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-08,
+    "gradient_clip": 1.0
+  },
+  "execution": {
+    "preferred_devices": [
+      "cuda:0"
+    ],
+    "precision": "fp32"
+  },
+  "storage": {
+    "output_root": "/data2/wanglz/ModularDT/r15_thermal_wind/r15_6/thermal/train600",
+    "max_output_bytes": 1073741824,
+    "max_peak_temporary_bytes": 1073741824,
+    "minimum_free_headroom_bytes": 107374182400,
+    "formal_forward_run_alias": true
+  },
+  "evaluation": {
+    "validation_split": "canonical_VAL89",
+    "representative_case_limit": 4,
+    "max_output_bytes": 268435456
+  },
+  "training": {
+    "membership": "full_train600",
+    "local_horizon": 100,
+    "first_segment_epochs": 100,
+    "optimizer_schedule_horizon": 100,
+    "effective_batch_size": 48,
+    "microbatch_cases": 24,
+    "primary_queries": 1024,
+    "seed": 0,
+    "monitor_every": 100,
+    "checkpoint_epochs": [
+      100
+    ],
+    "latest_every": 1,
+    "curve_every": 10,
+    "progress_enabled": true,
+    "wall_clock_budget_seconds": 600000,
+    "clean_save_reserve_seconds": 600,
+    "write_initial_artifacts": true,
+    "sampling_arm": "R13-3-Relative"
+  },
+  "objective": {
+    "native_weights": {
+      "flow/u": 0.125,
+      "flow/v": 0.125,
+      "flow/p": 0.125,
+      "flow/omega": 0.125,
+      "temperature/fluid": 0.16666666666666666,
+      "temperature/surface": 0.16666666666666666,
+      "temperature/material": 0.16666666666666666,
+      "q_proxy": 0.05
+    },
+    "native_weights_fixed": true,
+    "joint_fields": [
+      "u",
+      "v",
+      "p",
+      "temperature"
+    ],
+    "response_training_families": [],
+    "response_fit": false,
+    "organizer_objective": false,
+    "paired_full_restricted": true,
+    "guide_kl_weight": 0.0
+  },
+  "member_routing": {
+    "schema": "thermal_r14_detail_anchored_member_routing_v1",
+    "arm": "R14-Detail-LocalECover",
+    "model": {
+      "schema": "interaction_reused_detail_anchored_member_routing_v1",
+      "architecture": "R14-Detail-LocalECover",
+      "locator_mode": "local_e_cover",
+      "base_model_config": {
+        "schema": "content_hypergraph_core_v2",
+        "architecture": "A2-D",
+        "module_input_dim": 9,
+        "environment_input_dim": 6,
+        "operating_input_dim": 12,
+        "coordinate_dim": 2,
+        "query_input_dim": 0,
+        "output_dim": 4,
+        "context_dim": 128,
+        "num_heads": 4,
+        "context_depth": 2,
+        "local_hidden_dim": 128,
+        "dropout": 0.0,
+        "init_seed": 0
+      },
+      "input_dataset": "thermal",
+      "input_capability": "joint_prescribed_records_v1",
+      "retained_mass": 0.95,
+      "score_calibration": "inherited",
+      "query_tile_size": 1024,
+      "access_measure": "inventory_unit_total",
+      "ee_incidence_aggregation": "post_gate",
+      "ee_gate_mode": "relative_quadratic",
+      "ee_initial_tau": 1.4907824993133545
+    },
+    "health": {
+      "enabled": false
+    }
+  },
+  "r14_arm": "detail",
+  "thermal_port_response": {
+    "schema": "thermal_port_response_v1",
+    "enabled": true,
+    "arm": "P64",
+    "source_checkpoint": "/data2/wanglz/ModularDT/r14_20261029/train600/thermal_r14_detail_train600_v1/checkpoints/epoch_5000_model.pt",
+    "source_epoch": 5000,
+    "local_checkpoint": "Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0001_20260812_143809_thermal_disk_local/checkpoints/best_total.pt",
+    "environment_grid_nx_ny": [
+      24,
+      8
+    ],
+    "atlas_directory": "/data2/wanglz/ModularDT/relocated_workspace/HONF_Proj/diagnostics/generated/interactions/physical_response_atlas_20260926/families"
+  }
+}
