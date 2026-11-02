@@ -81,6 +81,7 @@ def test_driver_dispatch_and_signed_pressure_trace(monkeypatch):
     assert driver.load_probe_model('path','cpu') == ('port','payload')
     monkeypatch.setattr(driver,'select_query_rows_v1',lambda query,ids: SimpleNamespace(ids=ids))
     class Core:
+        query_tile_size=2
         def decode(self, organization, query, **kwargs):
             assert kwargs['intervention'] == {'read_mode':'full'}
             return SimpleNamespace(trace={'member_weights_M':torch.ones(1,len(query.ids),2),
@@ -91,3 +92,36 @@ def test_driver_dispatch_and_signed_pressure_trace(monkeypatch):
     assert selected.tolist()==[1,3] and weights[selected].tolist()==[-.25,.5]
     assert trace['member_weights_M'].shape == (1,2,2)
     with pytest.raises(ValueError): driver.capture_pressure_trace(SimpleNamespace(core=Core()),prepared,torch.zeros(4))
+
+
+def test_objective_query_capture_chunks_both_roles_in_requested_order(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+    import torch
+    path=Path(__file__).resolve().parents[2]/'tools/thermal_organization_transfer_probe.py'
+    spec=importlib.util.spec_from_file_location('thermal_transfer_chunk_test',path)
+    driver=importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
+    monkeypatch.setattr(driver,'select_query_rows_v1',lambda query,ids: SimpleNamespace(ids=ids))
+    class Core:
+        query_tile_size=3
+        def __init__(self): self.chunks=[]
+        def decode(self, organization, query, **kwargs):
+            assert len(query.ids) <= self.query_tile_size
+            assert kwargs['intervention'] == {'read_mode':'full'}
+            self.chunks.append(query.ids)
+            values=torch.tensor(query.ids, dtype=torch.float32)[None,:,None]
+            return SimpleNamespace(trace={'member_weights_M':values, 'member_weights_E':values+100})
+    core=Core();model=SimpleNamespace(core=core);prepared=SimpleNamespace(query_batch='queries',organization='org')
+    selected=torch.tensor([8,2,9,0,6,4,1])
+    query,trace=driver.capture_query_trace(model,prepared,selected)
+    assert query.ids==selected.tolist()
+    assert core.chunks==[[8,2,9],[0,6,4],[1]]
+    assert trace['member_weights_M'][0,:,0].tolist()==selected.tolist()
+    assert trace['member_weights_E'][0,:,0].tolist()==[108,102,109,100,106,104,101]
+    core.chunks.clear()
+    weights=torch.tensor([-.2,0.,.4,.8,0.,-.5,1.])
+    chosen,_,pressure=driver.capture_pressure_trace(model,prepared,weights)
+    assert chosen.tolist()==[0,2,3,5,6]
+    assert core.chunks==[[0,2,3],[5,6]]
+    assert pressure['member_weights_M'][0,:,0].tolist()==chosen.tolist()

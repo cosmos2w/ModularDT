@@ -27,17 +27,36 @@ def numpy(t):
     return t.detach().cpu().numpy()
 
 
+def capture_query_trace(model, prepared, selected):
+    """Capture coalesced full-mode M/E coefficients in saved query order."""
+    indices = selected.tolist()
+    if not indices:
+        raise ValueError("No objective query contribution")
+    tile_size = model.core.query_tile_size
+    if not isinstance(tile_size, int) or tile_size < 1:
+        raise ValueError("Model query tile size must be a positive integer")
+    query = select_query_rows_v1(prepared.query_batch, indices)
+    pieces = {"member_weights_M": [], "member_weights_E": []}
+    with torch.no_grad():
+        for start in range(0, len(indices), tile_size):
+            chunk = select_query_rows_v1(prepared.query_batch, indices[start:start + tile_size])
+            trace = model.core.decode(prepared.organization, chunk, return_trace=True,
+                                      intervention={"read_mode": "full"}).trace
+            if trace is None or any(key not in trace for key in pieces):
+                raise ValueError("Full coalesced query M/E trace is unavailable")
+            for key in pieces:
+                if trace[key].shape[1] != len(indices[start:start + tile_size]):
+                    raise ValueError("Query trace rows do not match the requested slice")
+                pieces[key].append(trace[key])
+    return query, {key: torch.cat(rows, dim=1) for key, rows in pieces.items()}
+
+
 def capture_pressure_trace(model, prepared, pressure_weights):
     """Capture actual full-mode access at signed native pressure-gradient queries."""
     selected = torch.nonzero(pressure_weights != 0).flatten()
     if not len(selected):
         raise ValueError("No pressure-objective native query contribution")
-    query = select_query_rows_v1(prepared.query_batch, selected.tolist())
-    with torch.no_grad():
-        trace = model.core.decode(prepared.organization, query, return_trace=True,
-                                  intervention={"read_mode": "full"}).trace
-    if trace is None or "member_weights_M" not in trace or "member_weights_E" not in trace:
-        raise ValueError("Full pressure query trace is unavailable")
+    query, trace = capture_query_trace(model, prepared, selected)
     return selected, query, trace
 
 
@@ -70,12 +89,7 @@ def extract_layout(model, record, rows, *, heat_scale, rng):
     if bool((weights < -1e-7).any()) or not bool((weights > 0).any()):
         raise ValueError('Objective gradient must give nonnegative native query weights')
     selected = torch.nonzero(weights > 0).flatten()
-    query = select_query_rows_v1(result.prepared.query_batch, selected.tolist())
-    with torch.no_grad():
-        trace = model.core.decode(result.prepared.organization, query, return_trace=True,
-                                  intervention={'read_mode':'full'}).trace
-    if trace is None or 'member_weights_M' not in trace:
-        raise ValueError('Full coalesced query M trace is unavailable')
+    query, trace = capture_query_trace(model, result.prepared, selected)
     org = result.prepared.organization
     mm = org.final_applied_context_stages['mm']['incidence'][0]
     em = org.final_applied_context_stages['em']['incidence'][0]
