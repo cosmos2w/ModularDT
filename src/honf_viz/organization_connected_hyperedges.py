@@ -42,7 +42,7 @@ def view_from_scene(scene: OrganizationScene) -> NativeHyperedgeView:
         scene.name, scene.C, scene.e_ids, scene.member_labels, scene.n_m,
         own_columns=scene.own_columns, module_connections=scene.gates.get("mm"),
         connection_provenance=scene.provenance.get("mm"),
-        metadata={**scene.identity(), "row_semantics": "native E-address restricted directory"},
+        metadata={**scene.identity(), "row_semantics": f"native E-address directory {scene.directory_key}"},
         layout=scene,
     )
 
@@ -405,7 +405,8 @@ def render_native_connectivity(
                 "abstract_panel_encodes_physical_geometry": False,
                 "layout_locator": locator,
             }
-            artifacts.append(_save(fig, output, stem, "Native hyperedges with connectivity", caption, evidence))
+            title = f"Native hyperedges with connectivity: {view.name}, page {page_index}"
+            artifacts.append(_save(fig, output, stem, title, caption, evidence))
     return artifacts
 
 
