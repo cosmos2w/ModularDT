@@ -40,6 +40,10 @@ def build(recipe, *, device):
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("thermal_port_response", {}).get("enabled", False):
+            from channelthermal.training.thermal_port_response_task import build_thermal_port_response_task
+
+            return build_thermal_port_response_task(recipe, arm=arm, device=device)
         if recipe.get("thermal_feedback", {}).get("enabled", False):
             from channelthermal.training.thermal_response_feedback_task import build_thermal_response_feedback_task
 
@@ -64,11 +68,16 @@ def engine_for(recipe, *, device, execution_horizon=None):
     horizon = int(policy["local_horizon"] if thermal else recipe["total_epochs"])
     checkpoints = policy.get("checkpoint_epochs", range(100, horizon + 1, 100))
     if execution_horizon is not None:
-        if (recipe.get("dataset") != "wind"
-                or recipe.get("schema") != "wind_relation_anchored_r15_2_v2"
+        wind_extension = (recipe.get("dataset") == "wind"
+                          and recipe.get("schema") == "wind_relation_anchored_r15_2_v2")
+        thermal_extension = (thermal and recipe.get("thermal_port_response", {}).get("schema") == "thermal_port_response_v1"
+                             and recipe["thermal_port_response"].get("arm") in ("P64", "R64")
+                             and policy.get("membership") == "full_train600"
+                             and horizon == 100 and execution_horizon == 500)
+        if (not (wind_extension or thermal_extension)
                 or type(execution_horizon) is not int
                 or execution_horizon <= horizon or execution_horizon % 100):
-            raise ValueError("Explicit Wind continuation must extend its execution horizon in 100-epoch milestones.")
+            raise ValueError("Unsupported explicit same-lineage horizon extension.")
         horizon = execution_horizon
         checkpoints = range(100, horizon + 1, 100)
     config = EngineConfig(
@@ -99,7 +108,7 @@ def main(argv=None):
     parser.add_argument("--stop-after", type=int)
     parser.add_argument("--resume", help="Same-run checkpoint selector, typically latest")
     parser.add_argument("--extend-horizon", action="store_true",
-                        help="Explicit Wind v2 same-run execution extension; preserve the saved recipe and optimizer schedule")
+                        help="Explicit supported same-run execution extension; preserve the saved recipe and optimizer schedule")
     parser.add_argument("--checkpoint", default="latest")
     args = parser.parse_args(argv)
     if args.extend_horizon and (args.command != "fit" or not args.resume or args.stop_after is None):

@@ -66,3 +66,25 @@ def test_extension_rejects_nonconstant_schedule_and_other_case_workloads():
         value["recipe"]["schema"] = "wind_relation_anchored_r15_3_v1"
     with pytest.raises(ValueError):
         _resume_identity_amendment(old, new, allow_horizon_extension=True)
+
+
+def test_thermal_candidate_extension_keeps_recipe_and_optimizer_contract():
+    old, new = identities()
+    for value in (old, new):
+        value['recipe'] = {'dataset': {'name': 'thermal'},
+                           'training': {'membership': 'full_train600'},
+                           'thermal_port_response': {'schema': 'thermal_port_response_v1', 'arm': 'P64'}}
+    old['engine_config'].update(total_epochs=100, checkpoint_epochs=[100])
+    new['engine_config'].update(total_epochs=500, checkpoint_epochs=[100, 200, 300, 400, 500])
+    receipt = _resume_identity_amendment(old, new, allow_horizon_extension=True)
+    assert receipt['kind'] == 'explicit_thermal_port_horizon_extension'
+    for value in (old, new):
+        value['recipe']['training']['membership'] = 'fixed25_train150_dev22'
+    with pytest.raises(ValueError):
+        _resume_identity_amendment(old, new, allow_horizon_extension=True)
+    for value in (old, new):
+        value['recipe']['training']['membership'] = 'full_train600'
+    for value in (old, new):
+        value['recipe']['thermal_port_response']['arm'] = 'C0'
+    with pytest.raises(ValueError):
+        _resume_identity_amendment(old, new, allow_horizon_extension=True)
