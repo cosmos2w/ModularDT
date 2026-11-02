@@ -372,6 +372,37 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                 "query_tile_size": new_sizes[0], "optimizer_schedule_unchanged": True,
                 "trajectory_note": "Only query partitioning changes; weights, moments, RNG, data, sampling, objective and activation checkpointing are retained. Floating-point reduction order can differ."}
     if allow_horizon_extension:
+        if saved.get("workflow") == "relation_anchored_case_training_v1":
+            old, new = (json.loads(json.dumps(value)) for value in (saved, current))
+            recipe = old.get("recipe", {})
+            before = old.get("engine_config", {}).get("total_epochs")
+            after = new.get("engine_config", {}).get("total_epochs")
+            schedules = old.get("optimizer_schedule_contract", [])
+            if (allow_microbatch_change or recipe.get("dataset") != "wind"
+                    or recipe.get("schema") != "wind_relation_anchored_r15_2_v2"
+                    or type(before) is not int or type(after) is not int
+                    or before < 1000 or before % 100 or after <= before or after % 100
+                    or old["engine_config"].get("checkpoint_epochs") != list(range(100, before + 1, 100))
+                    or new["engine_config"].get("checkpoint_epochs") != list(range(100, after + 1, 100))
+                    or not schedules):
+                raise ValueError(message)
+            for group in schedules:
+                schedule = group.get("schedule", {})
+                rate = schedule.get("peak_lr")
+                if (not isinstance(rate, (int, float)) or rate <= 0
+                        or schedule.get("final_lr") != rate
+                        or schedule.get("warmup_start_lr") != rate
+                        or schedule.get("warmup_epochs") != 0):
+                    raise ValueError(message)
+            amended = copy.deepcopy(old)
+            amended["engine_config"]["total_epochs"] = after
+            amended["engine_config"]["checkpoint_epochs"] = new["engine_config"]["checkpoint_epochs"]
+            if amended != new:
+                raise ValueError(message)
+            return {"kind": "explicit_relation_anchored_wind_horizon_extension",
+                    "previous_horizon": before, "execution_horizon": after,
+                    "optimizer_schedule_unchanged": True,
+                    "trajectory_note": "Only the engine horizon and future 100-epoch milestones change; original recipe, constant AdamW schedule, data, sampling and all other identity fields remain unchanged."}
         if saved.get("workflow") == "spatial_interaction_groups_joint_training_v1":
             if allow_microbatch_change:
                 raise ValueError(message)

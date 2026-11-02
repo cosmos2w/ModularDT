@@ -58,17 +58,26 @@ def build(recipe, *, device):
     raise ValueError(f"Unsupported dataset {recipe['dataset']!r}.")
 
 
-def engine_for(recipe, *, device):
+def engine_for(recipe, *, device, execution_horizon=None):
     thermal = isinstance(recipe.get("dataset"), dict) and recipe["dataset"].get("name") == "thermal"
     policy = recipe["training"] if thermal else recipe.get("execution", {})
     horizon = int(policy["local_horizon"] if thermal else recipe["total_epochs"])
+    checkpoints = policy.get("checkpoint_epochs", range(100, horizon + 1, 100))
+    if execution_horizon is not None:
+        if (recipe.get("dataset") != "wind"
+                or recipe.get("schema") != "wind_relation_anchored_r15_2_v2"
+                or type(execution_horizon) is not int
+                or execution_horizon <= horizon or execution_horizon % 100):
+            raise ValueError("Explicit Wind continuation must extend its execution horizon in 100-epoch milestones.")
+        horizon = execution_horizon
+        checkpoints = range(100, horizon + 1, 100)
     config = EngineConfig(
         seed=int(policy["seed"] if thermal else recipe.get("sampling_seed", recipe["seed"])),
         microbatch_cases=int(policy["microbatch_cases"] if thermal else recipe["microbatch_size"]),
         effective_cases=int(policy["effective_batch_size"] if thermal else recipe["effective_batch_size"]),
         total_epochs=horizon,
         monitor_every=int(policy.get("monitor_every", 100)),
-        checkpoint_epochs=tuple(policy.get("checkpoint_epochs", range(100, horizon + 1, 100))),
+        checkpoint_epochs=tuple(checkpoints),
         latest_every=int(policy.get("latest_every", 1)),
         curve_every=int(policy.get("curve_every", 10)),
         progress_enabled=bool(policy.get("progress_enabled", True)),
@@ -89,11 +98,16 @@ def main(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--stop-after", type=int)
     parser.add_argument("--resume", help="Same-run checkpoint selector, typically latest")
+    parser.add_argument("--extend-horizon", action="store_true",
+                        help="Explicit Wind v2 same-run execution extension; preserve the saved recipe and optimizer schedule")
     parser.add_argument("--checkpoint", default="latest")
     args = parser.parse_args(argv)
+    if args.extend_horizon and (args.command != "fit" or not args.resume or args.stop_after is None):
+        parser.error("--extend-horizon requires fit, --resume and --stop-after")
     recipe = json.loads(args.recipe.read_text())
     model, provider = build(recipe, device=args.device)
-    engine = engine_for(recipe, device=args.device)
+    engine = (engine_for(recipe, device=args.device, execution_horizon=args.stop_after)
+              if args.extend_horizon else engine_for(recipe, device=args.device))
     arm = (recipe["member_routing"]["arm"] if isinstance(recipe.get("dataset"), dict)
            else recipe["architecture"])
     identity = {"workflow": "relation_anchored_case_training_v1", "recipe": recipe}
@@ -110,7 +124,8 @@ def main(argv=None):
                               "preparation": provider.preparation_summary()},
                              sort_keys=True, default=str, allow_nan=False), flush=True)
         result = engine.fit(model, provider, args.output, identity=identity, arm=arm,
-                            stop_after=args.stop_after, resume_checkpoint=args.resume)
+                            stop_after=args.stop_after, resume_checkpoint=args.resume,
+                            allow_horizon_extension=args.extend_horizon)
     else:
         if args.output is None:
             parser.error("evaluate requires --output")

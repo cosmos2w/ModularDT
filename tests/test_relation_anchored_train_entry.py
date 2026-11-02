@@ -129,6 +129,33 @@ def test_wind_v2_recipe_has_one_physical_batch_per_effective_batch():
     assert engine.config.checkpoint_epochs == tuple(range(100, 1001, 100))
 
 
+def test_explicit_wind_execution_horizon_keeps_the_recipe_unchanged():
+    import copy
+    import json
+    import pytest
+
+    path = Path(__file__).resolve().parents[1] / "configs/research/wind_relation_anchored_r15_2_w2_train420_q8192_b24_full1000_v2.json"
+    recipe = json.loads(path.read_text())
+    before = copy.deepcopy(recipe)
+    engine = cli.engine_for(recipe, device="cpu", execution_horizon=2500)
+    assert recipe == before
+    assert engine.config.total_epochs == 2500
+    assert engine.config.checkpoint_epochs == tuple(range(100, 2501, 100))
+    assert engine.config.microbatch_cases == engine.config.effective_cases == 24
+    assert engine.config.monitor_every == 100 and engine.config.curve_every == 10
+    for horizon in (1000, 999, 2501):
+        with pytest.raises(ValueError):
+            cli.engine_for(recipe, device="cpu", execution_horizon=horizon)
+
+
+def test_cli_extension_requires_same_run_resume_before_building(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(cli, "build", lambda *args, **kwargs: pytest.fail("Invalid extension built a model"))
+    with pytest.raises(SystemExit):
+        cli.main(["fit", "--recipe", "run.json", "--output", "run", "--stop-after", "2500", "--extend-horizon"])
+
+
 def test_total_curves_include_weighted_port_terms(monkeypatch):
     import pytest
     from matplotlib.axes import Axes
