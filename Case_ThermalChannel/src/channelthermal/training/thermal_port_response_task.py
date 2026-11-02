@@ -318,6 +318,9 @@ class ThermalPortResponseTask(ThermalResponseFeedbackTask):
 
     def completed_training_epoch(self, model, engine, epoch, output, row):
         super().completed_training_epoch(model, engine, epoch, output, row)
+        if 'reader_epoch_context' in row:
+            row['reader_epoch_context']['absolute_training_epoch'] = self.source_parent_age + int(epoch)
+            row['reader_epoch_context']['additional_epochs_after_parent'] = int(epoch)
         if self.port_arm == 'R64':
             # The engine averages each named term over only updates where it
             # exists. Report its actual contribution averaged over all updates
