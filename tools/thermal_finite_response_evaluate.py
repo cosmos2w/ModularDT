@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate fixed R15-8 response holdouts from strict checkpoints and raw solves."""
+"""Evaluate fixed R15-8 FIT or response-holdout actions from saved raw solves."""
 from __future__ import annotations
 
 import argparse
@@ -29,7 +29,9 @@ ACTIONS = ('single_plus', 'single_minus', 'joint_plus', 'joint_minus')
 CHANNELS = ('u', 'v', 'p', 'omega', 'fluid_T', 'surface_T', 'material_T', 'q')
 
 
-def ledger_paths(ledger):
+def ledger_paths(ledger, role='response_holdout'):
+    if role not in ('fit', 'response_holdout'):
+        raise ValueError(f'Unsupported corpus role: {role}')
     started, finished = {}, {}
     for line in Path(ledger).read_text().splitlines():
         row = json.loads(line)
@@ -38,9 +40,9 @@ def ledger_paths(ledger):
     result = {}
     for attempt, start in started.items():
         end = finished.get(attempt, {})
-        if start.get('role') != 'response_holdout' or start.get('allocation') != 'edited': continue
+        if start.get('role') != role or start.get('allocation') != 'edited': continue
         key = (str(start['case_id']), start['action'])
-        if not end: raise ValueError(f'Unfinished holdout physical action: {key}')
+        if not end: raise ValueError(f'Unfinished {role} physical action: {key}')
         entry = result.setdefault(key, {'path': None, 'attempts': []})
         success = end.get('status') == 'converged' and end.get('serialization_status') == 'stored'
         entry['attempts'].append({'attempt': attempt, 'status': end.get('status'),
@@ -49,6 +51,27 @@ def ledger_paths(ledger):
             if entry['path'] is not None: raise ValueError(f'Duplicate successful fixed action: {key}')
             entry['path'] = end['raw_case_dir']
     return result
+
+
+def select_partition_cases(recipe, paths, role):
+    expected = {'fit': 48, 'response_holdout': 12}
+    if role not in expected:
+        raise ValueError(f'Unsupported corpus role: {role}')
+    selected = [case for case in recipe['cases'] if case['role'] == role]
+    ids = {str(case['case_id']) for case in selected}
+    if len(selected) != expected[role] or len(ids) != expected[role]:
+        raise ValueError(f'Expected {expected[role]} distinct fixed {role} families.')
+    other_ids = {str(case['case_id']) for case in recipe['cases'] if case['role'] != role}
+    if ids & other_ids:
+        raise ValueError('Corpus family roles overlap.')
+    cases = [case for case in selected if case['feasible']]
+    if not cases:
+        raise ValueError(f'No geometry-feasible {role} family remains.')
+    for case in cases:
+        for action in ACTIONS:
+            if (str(case['case_id']), action) not in paths:
+                raise ValueError(f'{role} action not yet attempted: {case["case_id"]}/{action}')
+    return selected, cases
 
 
 def as_numpy(value):
@@ -233,23 +256,19 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source-checkpoint',type=Path,required=True);p.add_argument('--checkpoint',action='append',default=[],metavar='ARM=PATH')
     p.add_argument('--recipe',type=Path,required=True);p.add_argument('--ledger',type=Path,required=True);p.add_argument('--resolution',type=Path,required=True)
+    p.add_argument('--partition', choices=('fit','response-holdout'), default='response-holdout',
+                   help='fixed original-TRAIN corpus role (default: response-holdout)')
     p.add_argument('--output',type=Path,required=True);p.add_argument('--device',default='cpu');args=p.parse_args()
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    # Floors are read and validated before any holdout outcome or corpus ledger.
+    # Floors are read and validated before any response outcome or corpus ledger.
     floors=json.loads(args.resolution.read_text())
     if not floors.get('source') or any(not math.isfinite(float(floors.get(k,0))) or float(floors[k]) <= 0 for k in ('J','P')):
         raise ValueError('A fixed TRAIN-derived source and positive J/P resolution floors are required.')
-    recipe=json.loads(args.recipe.read_text()); paths=ledger_paths(args.ledger)
-    selected=[c for c in recipe['cases'] if c['role']=='response_holdout']
-    if len(selected) != 12 or len({str(c['case_id']) for c in selected}) != 12:
-        raise ValueError('Expected the 12 distinct fixed response-holdout families.')
-    cases=[c for c in selected if c['feasible']]
-    if not cases: raise ValueError('No geometry-feasible holdout family remains.')
-    for case in cases:
-        for action in ACTIONS:
-            if (str(case['case_id']),action) not in paths: raise ValueError(f'Holdout action not yet attempted: {case["case_id"]}/{action}')
+    role = 'fit' if args.partition == 'fit' else 'response_holdout'
+    recipe=json.loads(args.recipe.read_text()); paths=ledger_paths(args.ledger, role)
+    selected,cases=select_partition_cases(recipe, paths, role)
     if args.output.exists(): raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
     checkpoints={'P64':args.source_checkpoint}
@@ -261,9 +280,12 @@ def main():
     source,local,source_payload=load_finite_response_source(args.source_checkpoint,device=args.device); source.eval();local.eval()
     training_ids=set(map(str,source_payload['experiment_identity']['provider_identity']['training_case_ids']))
     if any(str(c['case_id']) not in training_ids for c in selected):
-        raise ValueError('Response-holdout family is outside the saved original TRAIN membership.')
+        raise ValueError(f'{role} family is outside the saved original TRAIN membership.')
     representatives={str(c['case_id']) for c in (min(cases,key=lambda c:(c['module_count'],c['case_id'])),max(cases,key=lambda c:(c['module_count'],c['case_id'])))}
-    report={'recipe':str(args.recipe),'ledger':str(args.ledger),'floors':floors,'floor_path':str(args.resolution),'partition':'TRAIN-origin response-holdout; baselines are TRAIN600; edited labels excluded from fitting', 'representatives':sorted(representatives),
+    partition = ('TRAIN-origin response-holdout; baselines are TRAIN600; edited labels excluded from fitting'
+                 if role == 'response_holdout' else
+                 'TRAIN-origin FIT; baselines are TRAIN600; edited labels used in paired fitting; not independent TEST')
+    report={'recipe':str(args.recipe),'ledger':str(args.ledger),'floors':floors,'floor_path':str(args.resolution),'partition':partition, 'representatives':sorted(representatives),
         'units':'native dataset velocity, pressure, vorticity, temperature and heat-flux-proxy units',
         'masks':'native source and stencil validity; delta uses both endpoint masks; attached material/angles use original module order; q also requires outside validity',
         'trace_scope':'separate diagnostic preparations; G is actual applied gates; B is diagnostically reconstructed from captured scores/measures/gates with guarded reduction, not native kernel identity; full/restricted access rows retain original IDs; first 16 original union queries; no causal interpretation',
@@ -272,6 +294,9 @@ def main():
         'failed_attempts':[{'case_id':k[0],'action':k[1],**attempt} for k,v in paths.items() for attempt in v['attempts']
                            if attempt['status'] != 'converged' or attempt['serialization_status'] != 'stored'],
         'unavailable_actions':[{'case_id':k[0],'action':k[1]} for k,v in paths.items() if v['path'] is None], 'models':{}}
+    if role == 'fit':
+        report['partition_role'] = role
+    trace_partition = {'partition': partition} if role == 'fit' else {}
     matched_epoch=None
     for arm,path in checkpoints.items():
         for mode in ('full', 'restricted'):
@@ -295,7 +320,7 @@ def main():
                     if case_id in representatives:
                         traced_base=infer(model,local,braw,mode=mode,trace=True)
                         save_organization(args.output/f'{arm}_{mode}_{case_id}_baseline_trace.npz',traced_base,model,mode,
-                            metadata={'case':case_id,'action':'baseline','arm':arm,'checkpoint':str(path),
+                            metadata={**trace_partition,'case':case_id,'action':'baseline','arm':arm,'checkpoint':str(path),
                                       'epoch':saved_epoch,'learned_age':5100+(0 if arm=='P64' else saved_epoch)})
                         endpoint_rows[-1]['trace_minus_ordinary']={k:traced_base['model'][k]-base['model'][k] for k in ('J','P')}
                         repeated=infer(model,local,braw,mode=mode)
@@ -324,7 +349,7 @@ def main():
                         if case_id in representatives and action == ACTIONS[0]:
                             # Traced preparation is separately labelled and never used for scored results.
                             traced=infer(model,local,raw,mode=mode,trace=True); save_organization(args.output/f'{arm}_{mode}_{case_id}_{action}_trace.npz',traced,model,mode,
-                                metadata={'case':case_id,'action':action,'arm':arm,'checkpoint':str(path),
+                                metadata={**trace_partition,'case':case_id,'action':action,'arm':arm,'checkpoint':str(path),
                                           'epoch':saved_epoch,'learned_age':5100+(0 if arm=='P64' else saved_epoch)})
                             row['trace_minus_ordinary']={k:traced['model'][k]-edited['model'][k] for k in ('J','P')}
                             if arm=='C':

@@ -29,6 +29,8 @@ python tools/relation_anchored_train.py native --recipe A.json --checkpoint DATA
 
 Actual recipe, corpus, scale and checkpoint paths are required; the example placeholders do not define an experiment. Preserve optimizer/RNG/provider state, complete histories, latest/best states and declared milestones across resume. Initial and periodic loss curves include total TRAIN and validation panels, with validation pending before its scheduled result. Qualification and formal arms require sparse read-only monitoring under the applicable round plan.
 
+The response evaluator defaults to `--partition response-holdout`, using the 12 fixed original-TRAIN families whose edited labels were excluded from fitting. Use `--partition fit` to evaluate the 48 fixed FIT families and their existing edited solves; these edited labels entered paired training and this is an exposed fit diagnostic, not TEST. For example, pass the same `--source-checkpoint`, `--checkpoint ARM=PATH`, `--recipe`, `--ledger`, and TRAIN-derived `--resolution` paths with `--partition fit --output DATA2/fit_review`. Each invocation requires a new output directory. The fixed recipe membership and action attempts are checked without resampling, and the same original floors are used for both roles.
+
 ## Interpretation
 
 Compare A/B/C at shared completed horizons. Report direct predictor fields, frozen-local/port readouts, finite physical responses, actual applied organization and complete work/cost separately. A changing organization or successful autodifferentiation is not physical response verification. Positive pair-content gathers do not establish end-to-end acceleration; dense score and geometry preparation remain.

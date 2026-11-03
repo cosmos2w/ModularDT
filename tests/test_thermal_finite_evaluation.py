@@ -205,3 +205,39 @@ def test_holdout_retry_keeps_failed_attempt_and_uses_success(monkeypatch):
     monkeypatch.setattr(Path,'read_text',lambda self:'\n'.join(map(json.dumps,lines)))
     entry=ledger_paths('unused')[('5','single_plus')]
     assert entry['path']=='existing' and [row['status'] for row in entry['attempts']]==['failed','converged']
+
+
+def test_partition_ledger_isolates_fit_and_holdout_and_ignores_audits(tmp_path):
+    import json
+    from tools.thermal_finite_response_evaluate import ledger_paths
+    rows=[]
+    for attempt,role,allocation,case in ((1,'fit','edited','1'), (2,'response_holdout','edited','2'),
+                                          (3,'fit','tight_audit','1')):
+        rows.extend([{'event':'started','attempt':attempt,'role':role,'allocation':allocation,
+                      'case_id':case,'action':'single_plus'},
+                     {'event':'finished','attempt':attempt,'status':'converged',
+                      'serialization_status':'stored','raw_case_dir':f'raw{attempt}'}])
+    ledger=tmp_path/'ledger.jsonl';ledger.write_text('\n'.join(map(json.dumps,rows)))
+    assert set(ledger_paths(ledger))=={('2','single_plus')}
+    assert ledger_paths(ledger, 'fit')[('1','single_plus')]['path']=='raw1'
+    with pytest.raises(ValueError, match='Unsupported corpus role'):
+        ledger_paths(ledger, 'test')
+
+
+def test_partition_fixed_coverage_and_no_cross_role_duplicates():
+    from tools.thermal_finite_response_evaluate import ACTIONS, select_partition_cases
+    cases=[{'case_id':str(i),'role':'fit' if i<48 else 'response_holdout','feasible':True}
+           for i in range(60)]
+    paths={(case['case_id'],action):{} for case in cases for action in ACTIONS}
+    for role,count in (('fit',48),('response_holdout',12)):
+        selected,feasible=select_partition_cases({'cases':cases},paths,role)
+        assert len(selected)==len(feasible)==count
+        assert all(case['role']==role for case in selected)
+    incomplete=dict(paths);del incomplete[('0',ACTIONS[0])]
+    with pytest.raises(ValueError,match='action not yet attempted'):
+        select_partition_cases({'cases':cases},incomplete,'fit')
+    with pytest.raises(ValueError,match='48 distinct'):
+        select_partition_cases({'cases':cases[1:]},paths,'fit')
+    overlapping=cases+[{'case_id':'0','role':'response_holdout','feasible':True}]
+    with pytest.raises(ValueError,match='roles overlap'):
+        select_partition_cases({'cases':overlapping},paths,'fit')
