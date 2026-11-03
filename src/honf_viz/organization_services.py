@@ -112,11 +112,15 @@ def render_donor_services(scenes: list[OrganizationScene], output: Path, *,
             continue
         c_norm = _color_scale([s.shared[:, m["column_index"]] for s in scenes for m in members])
         single = len(scenes) == 1
+        narrow_comparison = len(scenes) == 2 and len(members) == 1
+        figsize = ((16, 9) if single else (9, 8.55) if narrow_comparison
+                   else (5.2 * len(members), 3.5 * len(scenes) + 1.55))
         fig, axes = plt.subplots(len(scenes), len(members),
-                                 figsize=(16, 9) if single else (5.2 * len(members), 3.5 * len(scenes) + 1.55),
+                                 figsize=figsize,
                                  squeeze=False)
-        fig.subplots_adjust(left=.055, right=.98, bottom=.20 if single else .16,
-                            top=.80 if single else .85, wspace=.18, hspace=.25)
+        fig.subplots_adjust(left=.14 if narrow_comparison else .055, right=.98, bottom=.20 if single else .16,
+                            top=.80 if single else .85, wspace=.18,
+                            hspace=.42 if narrow_comparison else .25)
         title = f"{role}-member services"
         fig.suptitle(title, fontsize=24 if single else 21, fontweight="bold", y=.975)
         panel_evidence = []
@@ -171,12 +175,12 @@ def render_donor_services(scenes: list[OrganizationScene], output: Path, *,
                    ncol=len(handles), frameon=False, fontsize=14 if single else 10)
         cax = fig.add_axes([.12, .075, .36, .018])
         cb = fig.colorbar(plt.cm.ScalarMappable(norm=c_norm, cmap=c_cmap), cax=cax, orientation="horizontal")
-        cb.set_label("Prepared directory weight · E services", fontsize=14 if single else 10)
+        cb.set_label("E directory weight" if narrow_comparison else "Prepared directory weight · E services", fontsize=14 if single else 10)
         cb.ax.tick_params(labelsize=12 if single else 10)
         if present_routes:
             gax = fig.add_axes([.61, .075, .27, .018])
             gb = fig.colorbar(plt.cm.ScalarMappable(norm=g_norm, cmap=g_cmap), cax=gax, orientation="horizontal")
-            gb.set_label("Actual contextual gate G · M receivers", fontsize=14 if single else 10)
+            gb.set_label("M contextual gate G" if narrow_comparison else "Actual contextual gate G · M receivers", fontsize=14 if single else 10)
             gb.ax.tick_params(labelsize=12 if single else 10)
         caption = (
             f"Matched {role} suppliers are selected by pooled nonself directory mass across all supplied models, "
