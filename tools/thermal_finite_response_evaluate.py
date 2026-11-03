@@ -23,6 +23,7 @@ from channelthermal.training.thermal_finite_evaluation import field_metrics, sum
 from channelthermal.training.thermal_finite_response_task import load_finite_response_checkpoint, load_finite_response_source
 from channelthermal.training.thermal_native_functionals import native_design_functionals
 from honf_forward_core.content_hypergraph.query_chunks_v1 import select_query_rows_v1
+from honf_forward_core.content_hypergraph.staged_attention_v2 import safe_masked_softmax
 
 ACTIONS = ('single_plus', 'single_minus', 'joint_plus', 'joint_minus')
 CHANNELS = ('u', 'v', 'p', 'omega', 'fluid_T', 'surface_T', 'material_T', 'q')
@@ -129,19 +130,73 @@ def metrics(one, other=None):
     return result
 
 
-def save_organization(outpath, result, model, mode):
-    org=result['prepared'].organization; values={}
+def _guarded_context_coefficients(snapshot, gate):
+    """Reconstruct contextual coefficients from a captured actual route."""
+    measure = snapshot.donor_measure.to(snapshot.raw_scores.dtype)
+    valid = measure > 0
+    safe = torch.where(valid, measure, torch.ones_like(measure))
+    allowed = snapshot.allowed & valid[:, None, :]
+    base = safe_masked_softmax(snapshot.raw_scores + safe.log()[:, None, None, :],
+                               allowed[:, None], dim=-1)
+    weighted = base * gate[:, None]
+    z = weighted.sum(-1, keepdim=True)
+    return weighted / (z + 1.e-3 * (1 - z).square())
+
+
+def _dense_directory(table, module_ids, environment_ids):
+    """Unpack the single-scene E rows without changing member identity."""
+    offsets = as_numpy(table.offsets)
+    members = as_numpy(table.member_index)
+    original = as_numpy(table.original_id)
+    roles = as_numpy(table.is_module).astype(bool)
+    weights = as_numpy(table.access_weight)
+    nm, ne = len(module_ids), len(environment_ids)
+    if offsets.shape != (1, ne + 1) or offsets[0, 0] != 0 or offsets[0, -1] != len(members):
+        raise ValueError('Organization export requires one complete packed E directory.')
+    result = np.zeros((ne, nm + ne), dtype=weights.dtype)
+    for row in range(ne):
+        start, stop = offsets[0, row:row+2]
+        index = members[start:stop]
+        if (np.any(index < 0) or np.any(index >= nm + ne) or len(np.unique(index)) != len(index)
+                or not np.array_equal(roles[start:stop], index < nm)):
+            raise ValueError('Packed E directory has invalid original-member slots.')
+        expected = np.concatenate((module_ids, environment_ids))[index]
+        if not np.array_equal(original[start:stop], expected):
+            raise ValueError('Packed E directory original IDs differ from the scene.')
+        result[row, index] = weights[start:stop]
+    return result
+
+
+def save_organization(outpath, result, model, mode, *, metadata=None):
+    prep=result['prepared']; org=prep.organization; scene=org.scene; values={}
+    if scene.module_coordinates.shape[0] != 1 or scene.environment_coordinates.shape[0] != 1:
+        raise ValueError('Organization figures require one original scene per export.')
+    module_ids=as_numpy(scene.module_ids[0]); environment_ids=as_numpy(scene.environment_ids[0])
+    values.update(module_xy=as_numpy(scene.module_coordinates[0]), environment_xy=as_numpy(scene.environment_coordinates[0]),
+        module_ids=module_ids, environment_ids=environment_ids,
+        module_mask=as_numpy(scene.module_mask[0]), environment_mask=as_numpy(scene.environment_mask[0]),
+        module_measure=as_numpy(scene.module_measure[0]), environment_measure=as_numpy(scene.environment_measure[0]),
+        module_characteristic_lengths=as_numpy(scene.module_characteristic_lengths[0]),
+        environment_characteristic_lengths=as_numpy(scene.environment_characteristic_lengths[0]))
+    structure=prep.structure
+    lx=float(structure['domain_length_x'].reshape(-1)[0]); ly=float(structure['domain_length_y'].reshape(-1)[0])
+    values['domain_bounds']=np.asarray([0., lx, 0., ly])
+    values['radius']=np.full(len(module_ids),float(structure['material_params'][0,5]))
     for directory_mode in ('full','restricted'):
         table=getattr(org.e_access_directory,directory_mode)
         for key in ('offsets','member_index','original_id','is_module','access_weight','applied_exchange','structural_self','measure'):
             values[directory_mode+'_'+key]=as_numpy(getattr(table,key))
+        values['C_'+directory_mode]=_dense_directory(table,module_ids,environment_ids)
     for cycle,stage in enumerate(org.context_stage_traces):
         for route in ('mm','em','ee','me'):
             snap=stage[route+'_native_route_snapshot']; prefix=f'cycle{cycle}_{route}_'
-            values[prefix+'G']=as_numpy(stage[route+'_applied_incidence']); values[prefix+'receiver_ids']=as_numpy(snap.destination_ids)
+            gate=stage[route+'_applied_incidence']
+            values[prefix+'G']=as_numpy(gate); values[prefix+'B']=as_numpy(_guarded_context_coefficients(snap,gate))
+            values[prefix+'raw_scores']=as_numpy(snap.raw_scores); values[prefix+'donor_measure']=as_numpy(snap.donor_measure)
+            values['context_cycle'+str(cycle)+'_'+route]=as_numpy(gate[0])
+            values[prefix+'receiver_ids']=as_numpy(snap.destination_ids)
             values[prefix+'donor_ids']=as_numpy(snap.donor_ids); values[prefix+'allowed']=as_numpy(snap.allowed)
-    values['module_ids']=as_numpy(org.scene.module_ids);values['environment_ids']=as_numpy(org.scene.environment_ids)
-    query=result['prepared'].query_batch
+    query=prep.query_batch
     selected=select_query_rows_v1(query,list(range(min(16,query.num_queries))))
     trace=model.core.decode(org,selected,return_trace=True,intervention={'read_mode':mode}).trace
     values['query_coordinates']=as_numpy(selected.coordinates)
@@ -153,6 +208,12 @@ def save_organization(outpath, result, model, mode):
     for key, value in result['reference'].items(): values['reference_'+key]=value
     for key, value in result['mask'].items(): values['mask_'+key]=value
     np.savez_compressed(outpath,**values)
+    provenance={'partition':'TRAIN-origin response-holdout', 'coordinate_units':'dataset length units',
+        'read_mode':mode, 'stage_provenance':'actual sequential contextual route gates, receiver <- donor',
+        'coefficient_provenance':'B reconstructed diagnostically from captured raw route scores, donor measures, allowed support and actual applied gates using guarded reduction; not a capture of native kernel arithmetic',
+        'route_provenance':'actual prepared E directory; C matrices are exact unpackings of packed original-member rows',
+        **(metadata or {})}
+    Path(outpath).with_suffix('.json').write_text(json.dumps(provenance,indent=2,allow_nan=False)+'\n')
 
 
 @contextmanager
@@ -202,7 +263,7 @@ def main():
     report={'recipe':str(args.recipe),'ledger':str(args.ledger),'floors':floors,'floor_path':str(args.resolution),'partition':'TRAIN-origin response-holdout; baselines are TRAIN600; edited labels excluded from fitting', 'representatives':sorted(representatives),
         'units':'native dataset velocity, pressure, vorticity, temperature and heat-flux-proxy units',
         'masks':'native source and stencil validity; delta uses both endpoint masks; attached material/angles use original module order; q also requires outside validity',
-        'trace_scope':'separate diagnostic preparations; G is applied gates, full/restricted access rows retain IDs and work; first 16 original union queries; no causal interpretation',
+        'trace_scope':'separate diagnostic preparations; G is actual applied gates; B is diagnostically reconstructed from captured scores/measures/gates with guarded reduction, not native kernel identity; full/restricted access rows retain original IDs; first 16 original union queries; no causal interpretation',
         'cost_scope':'native timing includes preparation, field decode and frozen local call; arm wall includes input loading, scoring and diagnostics, and excludes final JSON serialization; source load is included in total wall',
         'infeasible_families':[str(c['case_id']) for c in selected if not c['feasible']],
         'failed_attempts':[{'case_id':k[0],'action':k[1],**attempt} for k,v in paths.items() for attempt in v['attempts']
@@ -230,7 +291,9 @@ def main():
                     base=infer(model,local,braw,mode=mode); timings.append(base['seconds']); endpoint_rows.append({'case_id':case_id,'action':'baseline','model':base['model'],'physical':base['physical'],'fields':metrics(base)})
                     if case_id in representatives:
                         traced_base=infer(model,local,braw,mode=mode,trace=True)
-                        save_organization(args.output/f'{arm}_{mode}_{case_id}_baseline_trace.npz',traced_base,model,mode)
+                        save_organization(args.output/f'{arm}_{mode}_{case_id}_baseline_trace.npz',traced_base,model,mode,
+                            metadata={'case':case_id,'action':'baseline','arm':arm,'checkpoint':str(path),
+                                      'epoch':saved_epoch,'learned_age':5100+(0 if arm=='P64' else saved_epoch)})
                         endpoint_rows[-1]['trace_minus_ordinary']={k:traced_base['model'][k]-base['model'][k] for k in ('J','P')}
                         repeated=infer(model,local,braw,mode=mode)
                         heat_raw=copy.copy(braw);heat_raw['config']=copy.deepcopy(braw['config'])
@@ -256,7 +319,9 @@ def main():
                         rows.append(row);endpoint_rows.append({'case_id':case_id,'action':action,'model':edited['model'],'physical':edited['physical'],'fields':metrics(edited)})
                         if case_id in representatives and action == ACTIONS[0]:
                             # Traced preparation is separately labelled and never used for scored results.
-                            traced=infer(model,local,raw,mode=mode,trace=True); save_organization(args.output/f'{arm}_{mode}_{case_id}_{action}_trace.npz',traced,model,mode)
+                            traced=infer(model,local,raw,mode=mode,trace=True); save_organization(args.output/f'{arm}_{mode}_{case_id}_{action}_trace.npz',traced,model,mode,
+                                metadata={'case':case_id,'action':action,'arm':arm,'checkpoint':str(path),
+                                          'epoch':saved_epoch,'learned_age':5100+(0 if arm=='P64' else saved_epoch)})
                             row['trace_minus_ordinary']={k:traced['model'][k]-edited['model'][k] for k in ('J','P')}
                             if arm=='C':
                                 with disabled_pair_content(model):

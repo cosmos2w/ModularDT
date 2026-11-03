@@ -43,23 +43,78 @@ def test_unavailable_families_and_all_action_denominators_are_reported():
 
 def test_representative_query_trace_uses_requested_read_mode(monkeypatch):
     from tools import thermal_finite_response_evaluate as evaluator
+    from pathlib import Path
 
-    table = SimpleNamespace(**{name: torch.tensor([1]) for name in ('offsets', 'member_index', 'original_id',
-        'is_module', 'access_weight', 'applied_exchange', 'structural_self', 'measure')})
+    table = SimpleNamespace(offsets=torch.tensor([[0,2]]), member_index=torch.tensor([0,1]),
+        original_id=torch.tensor([1,2]),is_module=torch.tensor([True,False]),
+        access_weight=torch.tensor([.3,.7]),applied_exchange=torch.tensor([.3,.4]),
+        structural_self=torch.tensor([0.,.3]),measure=torch.tensor([1.,1.]))
+    scene=SimpleNamespace(module_ids=torch.tensor([[1]]),environment_ids=torch.tensor([[2]]),
+        module_coordinates=torch.tensor([[[1.,2.]]]),environment_coordinates=torch.tensor([[[2.,3.]]]),
+        module_mask=torch.tensor([[True]]),environment_mask=torch.tensor([[True]]),
+        module_measure=torch.tensor([[1.]]),environment_measure=torch.tensor([[2.]]),
+        module_characteristic_lengths=torch.ones((1,1,2)),environment_characteristic_lengths=torch.ones((1,1,2)))
     org = SimpleNamespace(e_access_directory=SimpleNamespace(full=table, restricted=table),
-                          context_stage_traces=[], scene=SimpleNamespace(module_ids=torch.tensor([[1]]),
-                          environment_ids=torch.tensor([[2]])))
+                          context_stage_traces=[], scene=scene)
     query = SimpleNamespace(num_queries=1, coordinates=torch.zeros(1, 1, 2), query_ids=torch.tensor([[3]]))
-    result = {'prepared': SimpleNamespace(organization=org, query_batch=query), 'prediction': {},
+    structure={'domain_length_x':torch.tensor([12.]),'domain_length_y':torch.tensor([6.]),
+               'material_params':torch.tensor([[0.,0.,0.,0.,0.,.45]])}
+    result = {'prepared': SimpleNamespace(organization=org, query_batch=query,structure=structure), 'prediction': {},
               'reference': {}, 'mask': {}}
     seen = []
     core = SimpleNamespace(decode=lambda org, q, return_trace, intervention:
                            (seen.append(intervention['read_mode']) or SimpleNamespace(trace={})))
     monkeypatch.setattr(evaluator, 'select_query_rows_v1', lambda query, rows: query)
-    monkeypatch.setattr(evaluator.np, 'savez_compressed', lambda *args, **kwargs: None)
+    exports=[]
+    monkeypatch.setattr(evaluator.np, 'savez_compressed', lambda *args, **kwargs: exports.append(kwargs))
+    monkeypatch.setattr(Path, 'write_text', lambda self, text: len(text))
     evaluator.save_organization('unused', result, SimpleNamespace(core=core), 'full')
     evaluator.save_organization('unused', result, SimpleNamespace(core=core), 'restricted')
     assert seen == ['full', 'restricted']
+    assert np.allclose(exports[0]['C_restricted'], [[.3,.7]])
+    assert exports[0]['module_xy'].tolist() == [[1.,2.]]
+    assert exports[0]['domain_bounds'].tolist() == [0.,12.,0.,6.]
+    # Exercise the maintained saved-scene loader without writing an artifact.
+    from honf_viz import organization_data
+    class Arrays(dict):
+        @property
+        def files(self): return list(self)
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+    monkeypatch.setattr(organization_data.np, 'load', lambda *args,**kwargs: Arrays(exports[0]))
+    monkeypatch.setattr(Path, 'read_text', lambda self: '{"case":"1","epoch":100}')
+    loaded=organization_data.load_scene('case',Path('unused.npz'))
+    assert loaded.m_ids == ('M1',) and loaded.e_ids == ('E2',)
+    assert np.allclose(loaded.C,[[.3,.7]]) and loaded.bounds == (0.,12.,0.,6.)
+
+
+def test_guarded_route_coefficient_handles_zero_measure_empty_and_closed_rows():
+    from tools.thermal_finite_response_evaluate import _guarded_context_coefficients
+    from honf_forward_core.continuous_joint.preparation import contextual_value_update
+    snap=SimpleNamespace(raw_scores=torch.tensor([[[[0.,0.,0.],[0.,0.,0.],[0.,0.,0.]]]]),
+        donor_measure=torch.tensor([[1.,3.,0.]]),
+        allowed=torch.tensor([[[True,True,True],[False,False,False],[True,True,True]]]))
+    gate=torch.tensor([[[.4,.8,1.],[0.,0.,0.],[0.,0.,0.]]])
+    result=_guarded_context_coefficients(snap,gate)
+    weighted=torch.tensor([.1,.6,0.]); z=weighted.sum()
+    assert torch.allclose(result[0,0,0],weighted/(z+.001*(1-z).square()))
+    assert torch.equal(result[0,0,1:],torch.zeros_like(result[0,0,1:]))
+    attention=SimpleNamespace(heads=1,head_width=1,width=1,output=torch.nn.Linear(1,1,bias=False))
+    query=torch.zeros((1,1,3,1)); key=torch.zeros((1,1,3,1)); value=torch.ones((1,1,3,1))
+    _,actual,_,_=contextual_value_update(attention,query,key,value,torch.zeros((1,1,3,3)),
+        snap.donor_measure,snap.allowed,torch.ones((1,3),dtype=torch.bool),lambda *args,**kwargs:gate,
+        route_name='mm',stage_identity='test',destination_ids=torch.tensor([[0,1,2]]),donor_ids=torch.tensor([[0,1,2]]))
+    assert torch.equal(result,actual)
+
+
+def test_unpacked_directory_preserves_original_id_and_rejects_mismatch():
+    from tools.thermal_finite_response_evaluate import _dense_directory
+    table=SimpleNamespace(offsets=torch.tensor([[0,2]]),member_index=torch.tensor([0,1]),
+        original_id=torch.tensor([7,11]),is_module=torch.tensor([True,False]),access_weight=torch.tensor([.2,.8]))
+    assert np.allclose(_dense_directory(table,np.array([7]),np.array([11])),[[.2,.8]])
+    table.original_id=torch.tensor([8,11])
+    with pytest.raises(ValueError,match='original IDs'):
+        _dense_directory(table,np.array([7]),np.array([11]))
 
 
 def test_intermodule_hull_is_input_defined_and_degenerate_cases_unavailable():
