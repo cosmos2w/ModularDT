@@ -21,6 +21,26 @@ def field_metrics(prediction, target, mask):
             'physical_mean': float(target[mask].mean())}
 
 
+def fieldwise_flow_diagnostics(baseline, repeated, heat_changed, mask):
+    """No-op and heat-null differences on each channel's own native units."""
+    base, repeat, heat = (np.asarray(x, dtype=np.float64) for x in (baseline, repeated, heat_changed))
+    mask = np.asarray(mask, dtype=bool)
+    if base.shape != repeat.shape or base.shape != heat.shape or base.ndim != 2 or base.shape[1] < 4 or mask.shape != base.shape[:1] or not mask.any():
+        raise ValueError('Flow diagnostics require aligned nonempty native fluid receivers.')
+    output = {}
+    for i, (name, units) in enumerate((('u','dataset velocity units'), ('v','dataset velocity units'),
+                                        ('p','dataset pressure units'), ('omega','dataset vorticity units'))):
+        values = {}
+        for label, other in (('zero_edit', repeat), ('heat_only', heat)):
+            diff = (other[mask, i] - base[mask, i])
+            if not np.isfinite(diff).all():
+                raise ValueError('Nonfinite prediction on a valid flow diagnostic receiver.')
+            values[label] = {'max_abs': float(np.max(np.abs(diff))),
+                             'rmse': float(np.sqrt(np.mean(diff * diff)))}
+        output[name] = {'units': units, 'valid_count': int(mask.sum()), **values}
+    return output
+
+
 def summarize_actions(rows, floors, *, family_ids=None):
     """Equal-family all-action and resolved metrics; retain no-resolution coverage."""
     result = {}

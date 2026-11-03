@@ -3,7 +3,7 @@ import pytest
 import torch
 from types import SimpleNamespace
 
-from channelthermal.training.thermal_finite_evaluation import field_metrics, summarize_actions, intermodule_fluid_mask, evaluate_native_panel
+from channelthermal.training.thermal_finite_evaluation import field_metrics, fieldwise_flow_diagnostics, summarize_actions, intermodule_fluid_mask, evaluate_native_panel
 
 
 def test_physical_mask_is_shared_and_empty_or_misaligned_is_rejected():
@@ -14,6 +14,19 @@ def test_physical_mask_is_shared_and_empty_or_misaligned_is_rejected():
         field_metrics([1.], [1.], [False])
     with pytest.raises(ValueError):
         field_metrics([1.], [1., 2.], [True, True])
+
+
+def test_flow_null_diagnostics_preserve_channel_units_and_mask():
+    base = np.zeros((2, 5)); repeat = base.copy(); heat = base.copy()
+    repeat[0, :4] = [1., 2., 3., 4.]
+    heat[0, :4] = [5., 6., 7., 8.]
+    heat[1, :4] = 1.e6
+    values = fieldwise_flow_diagnostics(base, repeat, heat, [True, False])
+    assert values['u']['heat_only']['rmse'] == 5.
+    assert values['v']['zero_edit']['max_abs'] == 2.
+    assert values['p']['units'] == 'dataset pressure units'
+    assert values['omega']['units'] == 'dataset vorticity units'
+    assert values['omega']['heat_only']['max_abs'] == 8.
 
 
 def test_equal_family_resolved_coverage_and_ordering():

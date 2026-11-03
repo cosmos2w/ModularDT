@@ -19,7 +19,7 @@ import torch
 from channelthermal.data.datasets import _local_disk_query_points
 from channelthermal.thermal_coupling import local_response_from_outside, outside_from_native_output
 from channelthermal.training.thermal_finite_corpus import load_raw_endpoint
-from channelthermal.training.thermal_finite_evaluation import field_metrics, summarize_actions
+from channelthermal.training.thermal_finite_evaluation import field_metrics, fieldwise_flow_diagnostics, summarize_actions
 from channelthermal.training.thermal_finite_response_task import load_finite_response_checkpoint, load_finite_response_source
 from channelthermal.training.thermal_native_functionals import native_design_functionals
 from honf_forward_core.content_hypergraph.query_chunks_v1 import select_query_rows_v1
@@ -302,8 +302,9 @@ def main():
                         heat_raw=copy.copy(braw);heat_raw['config']=copy.deepcopy(braw['config'])
                         heat_raw['config']['layout']['heat_powers'][0] += .01
                         heat=infer(model,local,heat_raw,mode=mode)
-                        endpoint_rows[-1]['diagnostics']={'zero_edit_max_abs_field_difference':float(np.max(np.abs(repeated['prediction']['field']-base['prediction']['field']))),
-                            'heat_only_delta_first_module':.01,'heat_only_max_abs_flow_difference':float(np.max(np.abs(heat['prediction']['field'][...,:4]-base['prediction']['field'][...,:4]))),
+                        diagnostic_mask = base['mask']['field'] & repeated['mask']['field'] & heat['mask']['field']
+                        endpoint_rows[-1]['diagnostics']={'heat_only_delta_first_module':.01,
+                            'fieldwise':fieldwise_flow_diagnostics(base['prediction']['field'], repeated['prediction']['field'], heat['prediction']['field'], diagnostic_mask),
                             'meaning':'same-model no-op and heat-to-flow-null diagnostics, without physical labels'}
                     for action in ACTIONS:
                         path_info=paths[(case_id,action)]
