@@ -595,7 +595,7 @@ This revision establishes the core and the case chapter structure. Case-specific
 
 ### Experimental R15-8 pair content
 
-On branch `ThermalWindUpdate`, the experimental `PairContentDetailAnchoredCore` extends the source at `bacdd1ca93e7813645847994a23257838c66abfe`; the implementation is the revision containing `interaction_reused_member_routing/pair_content.py`. This addendum does not change the historical definition or the default model. Its separate schema preserves the inherited configuration and stores the initialization seed.
+On branch `ThermalWindUpdate`, the experimental `PairContentDetailAnchoredCore` extends the source at `bacdd1ca93e7813645847994a23257838c66abfe`; the implementation is commit `b652df36cbac5b95f8aa933f39f520b7e06089d0` (`interaction_reused_member_routing/pair_content.py`). This addendum does not change the historical definition or the default model. Its separate schema preserves the inherited configuration and stores the initialization seed.
 
 For each actual contextual route, head and sequential stage, let $B_{ij}^h$ be the existing measure-aware, gate-weighted and guarded coefficient, $z_i,z_j$ the current receiver and donor states, and $\zeta_{ij}$ the existing signed domain-offset, distance and local-length descriptor. The experimental message is
 
