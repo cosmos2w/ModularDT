@@ -16,6 +16,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | [Frozen design evaluation](Frozen_Design_Evaluation.md) | Differentiable native case interfaces, exact preparation reuse and detached graph-guided proposals. |
 | [Thermal port and response adaptation](Thermal_Port_Response_Training.md) | One-pass C0/P64/R64 composition, saved response packs, strict source transfer and resume. |
 | [Thermal organization transfer probe](Thermal_Organization_Transfer_Probe.md) | Frozen field/gradient and original-ID organization controls for saved feasible edits. |
+| [Thermal frozen-predictor joint edits](Thermal_Joint_Edit_Study.md) | Matched original-member proposals, request-conditioned selection and bounded physical verification. |
 | [Wind native catalogue cache](Wind_Native_Catalogue_Cache.md) | Geometry/cache identity and native precision. |
 | [Root layout and compatibility](../Root_Layout_and_Compatibility.md) | Promoted paths, installation and old checkpoints. |
 
