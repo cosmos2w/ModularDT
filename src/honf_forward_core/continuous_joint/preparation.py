@@ -49,7 +49,9 @@ def context_plan_tensors(plan):
 
 def contextual_value_update(attention, query, key, value, geometry_bias,
                             donor_measure, allowed, destination_mask, policy, *,
-                            route_name, stage_identity, destination_ids, donor_ids):
+                            route_name, stage_identity, destination_ids, donor_ids,
+                            pair_content=None, destination_normalized=None,
+                            donor_normalized=None, geometry_features=None):
     """Apply b before a guarded native-measure reduction; no pair-value bank."""
     from ..content_hypergraph.staged_attention_v2 import safe_masked_softmax
 
@@ -57,6 +59,9 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
     selected = policy(scores, allowed, route_name, stage_identity=stage_identity,
                       destination_ids=destination_ids, donor_ids=donor_ids,
                       donor_measure=donor_measure)
+    if pair_content is not None and (isinstance(selected, (FrozenContextPlan, FrozenSDPAContextPlan))
+                                     or getattr(policy, "all_open", False)):
+        raise ValueError("Experimental pair content does not support frozen or all-open interventions.")
     if isinstance(selected,FrozenSDPAContextPlan):
         if selected.incidence.shape!=allowed.shape or selected.query.shape!=query.shape or selected.key.shape!=key.shape:
             raise ValueError('Frozen SDPA controls must match the native contextual axes.')
@@ -131,6 +136,10 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
             reduced = reduced + value.unsqueeze(0)[:0].sum()
     else:
         raise ValueError('Unknown contextual value execution backend.')
+    reduced = reduced.reshape(batch, receivers, attention.heads, attention.head_width)
+    if pair_content is not None:
+        reduced = reduced + pair_content(destination_normalized, donor_normalized,
+                                         geometry_features, coefficients, gates, allowed, donor_measure)
     reduced = reduced.reshape(batch, receivers, attention.width)
     # A projection bias belongs to the donor path. Split it equally across
     # heads, so its reduced coefficient is mean per-head message mass.

@@ -592,3 +592,13 @@ Each case chapter will define its physical problem and units, M/E/C contents, E 
 | Electro-thermal | Material/source/boundary patches, operating conditions and coupled output/observation definitions. | [Integration walkthrough](Case_ElectroThermal/docs/COWORKER_HANDOFF.md). |
 
 This revision establishes the core and the case chapter structure. Case-specific laws and results belong in their chapters; a Thermal-only port law or Wind-only background prescription remains case-owned.
+
+### Experimental R15-8 pair content
+
+On branch `ThermalWindUpdate`, the experimental `PairContentDetailAnchoredCore` extends the source at `bacdd1ca93e7813645847994a23257838c66abfe`; the implementation is the revision containing `interaction_reused_member_routing/pair_content.py`. This addendum does not change the historical definition or the default model. Its separate schema preserves the inherited configuration and stores the initialization seed.
+
+For each actual contextual route, head and sequential stage, let $B_{ij}^h$ be the existing measure-aware, gate-weighted and guarded coefficient, $z_i,z_j$ the current receiver and donor states, and $\zeta_{ij}$ the existing signed domain-offset, distance and local-length descriptor. The experimental message is
+
+$$\psi_{ij}^{h}=\left(P_h\operatorname{LN}_{q}(z_i)+Q_h\operatorname{LN}_{k}(z_j)\right)\odot\tanh(R_h\zeta_{ij}),\qquad m_i^h=\sum_j B_{ij}^h v_j^h+U_h\sum_j B_{ij}^h\psi_{ij}^h.$$
+
+The bias-free $P,Q,R$ have rank 8 and seeded nonzero initial weights; $U$ starts at zero. Positive eligible edges alone enter the pair-content reduction, before $U$ and the existing output projection. The applied gates, physical measures, guarded message mass, projection bias, padding, ordered exchanges and subsequent original-member query access remain those of the inherited model. Dense score and geometry computation remains; the edge gather does not establish end-to-end acceleration. Frozen-control and all-open contextual interventions are unsupported for this experimental model. This is an architectural hypothesis, not a physical force or an established improvement.

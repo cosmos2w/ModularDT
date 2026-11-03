@@ -186,7 +186,8 @@ class SpatialRouteAttentionV2(nn.Module):
                     applied_message_mass=destination.new_zeros(batch,query_count,self.heads))
             return update, attention, snapshot
 
-        q = self.query(self.query_norm(destination))
+        destination_normalized = self.query_norm(destination)
+        q = self.query(destination_normalized)
         donor_normalized = self.key_norm(donor)
         k = self.key(donor_normalized)
         v = self.value(donor_normalized)
@@ -278,7 +279,9 @@ class SpatialRouteAttentionV2(nn.Module):
                 self, q, k, v, geometry_bias, donor_measure, allowed,
                 destination_mask, value_policy, route_name=route_name,
                 stage_identity=stage_identity, destination_ids=destination_ids,
-                donor_ids=donor_ids)
+                donor_ids=donor_ids, pair_content=getattr(self, "pair_content", None),
+                destination_normalized=destination_normalized,
+                donor_normalized=donor_normalized, geometry_features=geometry_features)
             if native_snapshot is not None:
                 # Snapshot binds scores to their actual source-state stage;
                 # coefficients are exported separately, never recomputed afterward.
@@ -286,6 +289,8 @@ class SpatialRouteAttentionV2(nn.Module):
             exported = native_snapshot if native_snapshot is not None else snapshot
             return (update, weights if return_attention else None, exported) if exported is not None else (
                 update, weights if return_attention else None)
+        if getattr(self, "pair_content", None) is not None:
+            raise ValueError("Experimental pair content requires live contextual value policy.")
         attended = F.scaled_dot_product_attention(
             q,
             k,
