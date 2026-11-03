@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -108,3 +109,41 @@ def test_response_scales_are_bound_to_provider_and_checked_on_reload(monkeypatch
     monkeypatch.setattr(finite_task.Path, 'read_text', lambda self: '{"scale_by_action_class":{"single":{"J":9},"joint":{"J":3}}}')
     with pytest.raises(ValueError, match='scales differ'):
         finite_task.load_finite_response_checkpoint('run.pt')
+
+
+def test_teacher_work_is_read_from_children_after_pair_loss(monkeypatch):
+    from honf_runtime.unified_training import LossTerm
+    @dataclass(frozen=True)
+    class Target:
+        response_pack: object = None
+    baseline=SimpleNamespace(work={'preparations':1,'local_calls':2})
+    edited=SimpleNamespace(work={'preparations':1,'local_calls':2})
+    pair={'baseline':SimpleNamespace(targets=Target()),'edited':SimpleNamespace(targets=Target())}
+    prediction=SimpleNamespace(work={'preparations':3,'local_calls':6,
+        'response_baseline_preparations':1,'response_edited_preparations':1},
+        response_designs={'baseline':baseline,'edited':edited})
+    def parent_terms(self, pred, targets):
+        pred.work['teacher_local_calls']=1
+        return {'native':LossTerm(torch.tensor(1.),1)}
+    monkeypatch.setattr(finite_task.ThermalPortResponseTask,'_terms',parent_terms)
+    task=object.__new__(ThermalFiniteResponseTask);task.finite_spec={'arm':'A'}
+    before=task.work_counts(None,prediction,{})
+    assert before['total_teacher_local_calls']==0 and before['total_local_calls_including_teacher']==6
+    task._terms(prediction,Target(response_pack=pair))
+    after=task.work_counts(None,prediction,{})
+    assert after['teacher_local_calls']==1
+    assert after['response_baseline_teacher_local_calls']==after['response_edited_teacher_local_calls']==1
+    assert after['total_teacher_local_calls']==3 and after['total_local_calls_including_teacher']==9
+    assert after['preparations']==3 and after['local_calls']==6
+    assert after['response_baseline_preparations']==after['response_edited_preparations']==1
+
+
+def test_teacher_work_without_pair_or_teacher_call():
+    task=object.__new__(ThermalFiniteResponseTask)
+    prediction=SimpleNamespace(work={'preparations':1,'local_calls':1})
+    counts=task.work_counts(None,prediction,{})
+    assert counts['total_teacher_local_calls']==0 and counts['total_local_calls_including_teacher']==1
+    prediction.work['teacher_local_calls']=1
+    counts=task.work_counts(None,prediction,{})
+    assert counts['total_teacher_local_calls']==1 and counts['total_local_calls_including_teacher']==2
+    assert counts['response_baseline_teacher_local_calls']==counts['response_edited_teacher_local_calls']==0

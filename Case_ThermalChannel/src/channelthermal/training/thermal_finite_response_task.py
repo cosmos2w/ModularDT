@@ -206,6 +206,23 @@ class ThermalFiniteResponseTask(ThermalPortResponseTask):
                 result['finite/delta'] = 1
         return result
 
+    def work_counts(self, batch, predictions, auxiliary_state):
+        """Add teacher calls after loss evaluation has populated child work."""
+        counts = dict(super().work_counts(batch, predictions, auxiliary_state))
+        designs = getattr(predictions, 'response_designs', {})
+        teachers = int(counts.get('teacher_local_calls', 0))
+        for name in ('baseline', 'edited'):
+            child = designs.get(name)
+            child_work = getattr(child, 'work', None) or {}
+            child_teachers = int(child_work.get('teacher_local_calls', 0))
+            counts[f'response_{name}_teacher_local_calls'] = child_teachers
+            teachers += child_teachers
+        counts['total_teacher_local_calls'] = teachers
+        # The top-level local_calls already includes conditioned calls for both
+        # endpoints; only the separately executed teacher calls are added.
+        counts['total_local_calls_including_teacher'] = int(counts.get('local_calls', 0)) + teachers
+        return counts
+
     def loss_metadata(self):
         result = super().loss_metadata()
         result['finite/endpoint'] = {'panel': 'response', 'label': 'paired endpoint state',
