@@ -235,6 +235,8 @@ def main():
     p.add_argument('--recipe',type=Path,required=True);p.add_argument('--ledger',type=Path,required=True);p.add_argument('--resolution',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True);p.add_argument('--device',default='cpu');args=p.parse_args()
     torch.set_num_threads(1)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     # Floors are read and validated before any holdout outcome or corpus ledger.
     floors=json.loads(args.resolution.read_text())
     if not floors.get('source') or any(not math.isfinite(float(floors.get(k,0))) or float(floors[k]) <= 0 for k in ('J','P')):
@@ -255,7 +257,8 @@ def main():
         arm,path=item.split('=',1)
         if arm not in ('A','B','C') or arm in checkpoints: raise ValueError('Checkpoints must be uniquely named A/B/C.')
         checkpoints[arm]=Path(path)
-    start=time.perf_counter(); source,local,source_payload=load_finite_response_source(args.source_checkpoint,device=args.device); source.eval();local.eval()
+    start=time.perf_counter(); cpu_started=time.process_time()
+    source,local,source_payload=load_finite_response_source(args.source_checkpoint,device=args.device); source.eval();local.eval()
     training_ids=set(map(str,source_payload['experiment_identity']['provider_identity']['training_case_ids']))
     if any(str(c['case_id']) not in training_ids for c in selected):
         raise ValueError('Response-holdout family is outside the saved original TRAIN membership.')
@@ -336,6 +339,7 @@ def main():
                 'peak_allocated_gpu_bytes':torch.cuda.max_memory_allocated(torch.device(args.device)) if args.device.startswith('cuda') else None}
             (args.output/'response_evaluation.json').write_text(json.dumps(report,indent=2,allow_nan=False)+'\n')
     report['elapsed_seconds']=time.perf_counter()-start
+    report['total_cpu_seconds']=time.process_time()-cpu_started
     (args.output/'response_evaluation.json').write_text(json.dumps(report,indent=2,allow_nan=False)+'\n')
 
 

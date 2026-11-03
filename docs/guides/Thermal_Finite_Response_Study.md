@@ -16,7 +16,7 @@ Fixed action-class scales are equal-family FIT RMS values floored by the larger 
 
 ## Execution
 
-Use explicit physical GPU UUIDs through `CUDA_VISIBLE_DEVICES`, after checking current ownership. Use one fitting process per authorized device, TF32 disabled and a writable device-specific KeOps directory. Effective batch 48, physical microbatch 24 and 1024 primary fluid queries preserve the common primary stream. Pair initialization uses isolated RNG so C does not shift shared case/query draws.
+Use explicit physical GPU UUIDs through `CUDA_VISIBLE_DEVICES`, after checking current ownership. Use one fitting process per authorized device, TF32 disabled and a writable device-specific KeOps directory. Qualification uses physical microbatch 24; the formal recipes use microbatch 48, selected by the bounded real accumulated-objective comparison before formal fitting. Effective batch 48 and 1024 primary fluid queries preserve the common primary stream. Pair initialization uses isolated RNG so C does not shift shared case/query draws.
 
 Declare the formal optimizer horizon as 500 from the start and use the ordinary engine stop/resume interface for shared reviews; do not amend the optimizer schedule at epoch 100. For example:
 

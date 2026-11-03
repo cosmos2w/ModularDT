@@ -52,7 +52,7 @@
     "first_segment_epochs": 100,
     "optimizer_schedule_horizon": 500,
     "effective_batch_size": 48,
-    "microbatch_cases": 24,
+    "microbatch_cases": 48,
     "primary_queries": 1024,
     "seed": 0,
     "monitor_every": 100,
