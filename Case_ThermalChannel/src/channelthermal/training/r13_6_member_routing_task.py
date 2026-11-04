@@ -45,7 +45,8 @@ class _AnchoredPairedMemberRoutingTask(_PairedMemberRoutingTask):
 
         counts_by_mode = {
             "full": {str(name): int(value) for name, value in full_output.work_counts.items()},
-            "restricted": {str(name): int(value) for name, value in restricted_output.work_counts.items()},
+            "restricted": ({} if restricted_output is full_output else
+                           {str(name): int(value) for name, value in restricted_output.work_counts.items()}),
         }
         work = {
             "native_fluid_queries": int(prepared.fluid_xy.shape[0] * prepared.fluid_xy.shape[1]),
@@ -60,11 +61,11 @@ class _AnchoredPairedMemberRoutingTask(_PairedMemberRoutingTask):
             raise TypeError(f"{self.LINEAGE} paired decode shared work must be a mapping.")
         work.update({f"core_decode_joint_shared_{name}": int(value)
                      for name, value in shared_counts.items()})
+        full_native = native(full_output)
+        restricted_native = full_native if restricted_output is full_output else native(restricted_output)
         return ThermalJointPairPredictions(
-            ThermalContentPredictions(prepared, native(full_output), work=counts_by_mode["full"]),
-            ThermalContentPredictions(prepared, native(restricted_output), work=counts_by_mode["restricted"]),
-            work,
-        )
+            ThermalContentPredictions(prepared, full_native, work=counts_by_mode["full"]),
+            ThermalContentPredictions(prepared, restricted_native, work=counts_by_mode["restricted"]), work)
 
 
 def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_type,

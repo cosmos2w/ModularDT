@@ -3363,6 +3363,7 @@ class TrainingEngine:
         source_read_ordinary_update_index: int | None = None,
         source_read_primary_fine_rows: int | None = None,
         successful_step_recorder: Callable[[int, int, int], None] | None = None,
+        epoch_update_count: int | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, float], str | None]:
         planned = {
             name: _denominator(value)
@@ -3652,6 +3653,39 @@ class TrainingEngine:
                 weighted_auxiliary_norm=math.sqrt(auxiliary_squared_norm),
             )
             losses["source_read_auxiliary"] = float(auxiliary_loss.detach())
+        auxiliary_terms = getattr(provider, "auxiliary_update_terms", None)
+        if callable(auxiliary_terms):
+            if type(epoch_update_count) is not int or epoch_update_count < 1:
+                raise ValueError("Epoch-normalized auxiliary fitting requires the epoch update count.")
+            auxiliary_names = tuple(provider.auxiliary_loss_names)
+            if not auxiliary_names or set(auxiliary_names) & set(losses):
+                raise ValueError("Auxiliary loss names must be nonempty and distinct from native losses.")
+            # Explicit zeros preserve the mean over *all* native updates when
+            # auxiliary families are distributed sparsely through the epoch.
+            losses.update({name: 0.0 for name in auxiliary_names})
+            for terms, auxiliary_work in auxiliary_terms(
+                    model, epoch=epoch, update_index=update_index,
+                    update_count=epoch_update_count):
+                objective = None
+                for name, term in terms.items():
+                    if name not in auxiliary_names:
+                        raise ValueError(f"Undeclared auxiliary loss {name!r}.")
+                    denominator = _denominator(term.denominator)
+                    if (denominator <= 0 or not math.isfinite(float(term.weight))
+                            or not torch.is_tensor(term.numerator) or term.numerator.numel() != 1):
+                        raise ValueError("Auxiliary terms require a scalar numerator and positive denominator.")
+                    piece = term.numerator * (float(term.weight) / denominator)
+                    objective = piece if objective is None else objective + piece
+                    losses[name] += float(piece.detach())
+                if objective is None or not bool(torch.isfinite(objective.detach())):
+                    raise FloatingPointError("Empty or nonfinite auxiliary optimizer objective.")
+                objective.backward()
+                del objective, terms, term, piece
+                for name, value in auxiliary_work.items():
+                    numeric = float(value)
+                    if not math.isfinite(numeric):
+                        raise ValueError("Auxiliary work counts must be finite.")
+                    work[name] = work.get(name, 0.0) + numeric
         before_step = getattr(provider, "before_optimizer_step", None)
         if callable(before_step):
             before_step(model, optimizer, losses, work, epoch=epoch, update_index=update_index)
@@ -5145,6 +5179,8 @@ class TrainingEngine:
                             update_index=update_index, update_cases=update_cases,
                             sampling_dataset_id=sampling_dataset_id)
                         update_kwargs = {}
+                        if callable(getattr(provider, "auxiliary_update_terms", None)):
+                            update_kwargs["epoch_update_count"] = update_count
                         if source_read_manager is not None:
                             update_kwargs = {
                                 "source_read_ordinary_update_index": completed_updates + len(update_rows) + 1,

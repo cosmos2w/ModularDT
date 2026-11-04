@@ -13,6 +13,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | [Wind relation-anchored interface](../../Case_WindFarm/docs/relation_anchored.md) | Three-dimensional coverage, ragged turbine batches and native calibration. |
 | [Thermal port/local integration](Thermal_Port_Local_Integration.md) | One-pass angular ports, frozen local readout and strict checkpoint loading. |
 | [Physical response evaluation](Case_Response_Evaluation.md) | Fresh design preparation, physical-mask comparisons and resolved response metrics. |
+| [Thermal state-response research](Thermal_State_Response_Research.md) | Matched native/finite-response fitting, evidence-aware strength and the all-native read control. |
 | [Wind native catalogue cache](Wind_Native_Catalogue_Cache.md) | Geometry/cache identity and native precision. |
 | [Root layout and compatibility](../Root_Layout_and_Compatibility.md) | Promoted paths, installation and old checkpoints. |
 

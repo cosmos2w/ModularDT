@@ -38,6 +38,10 @@ def build(recipe, *, device):
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("thermal_state_response", {}).get("enabled", False):
+            from channelthermal.training.thermal_state_response_task import build_thermal_state_response_task
+
+            return build_thermal_state_response_task(recipe, arm=arm, device=device)
         if recipe.get("thermal_port_response", {}).get("enabled", False):
             from channelthermal.training.thermal_port_response_task import build_thermal_port_response_task
 

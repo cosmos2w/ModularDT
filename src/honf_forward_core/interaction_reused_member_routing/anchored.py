@@ -1036,11 +1036,25 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                                   (prepared.scene.environment_mask & (prepared.scene.environment_measure > 0)).sum(-1)), -1)
         eligible = scene_count[b].to(scores)
         entropy = torch.where(eligible > 1, entropy / eligible.clamp_min(2).log(), torch.zeros_like(entropy))
+        evidence = None
+        if hasattr(self, "evidence_strength"):
+            if self.score_calibration == "inherited":
+                evidence_mean, evidence_variance = means, variance
+            else:
+                conditional_evidence = prior / mass[group].clamp_min(tiny)
+                evidence_mean = self._segment_sum(conditional_evidence * scores, group, groups)
+                evidence_variance = self._segment_sum(
+                    conditional_evidence * (scores - evidence_mean[group]).square(), group, groups)
+            evidence = torch.stack((mass.log1p(), evidence_mean.asinh(), evidence_variance.log1p()), -1)
+            evidence = evidence.reshape(read_count, 2, 3)
         strength_parts, gate_parts = [], []
         for role_index, role in enumerate(("M", "E")):
             gate_input = torch.cat((qnorm[b, q], expectation[:, role_index, None], entropy[:, role_index, None]), -1)
             logits = self.typed_read_gates[role](gate_input)
-            strength_parts.append(read_probability(logits[:, 0] - logits[:, 1]) * (mass.reshape(read_count, 2)[:, role_index] > 0))
+            contrast = logits[:, 0] - logits[:, 1]
+            if evidence is not None:
+                contrast = contrast + (evidence[:, role_index] * self.evidence_strength[role]).sum(-1)
+            strength_parts.append(read_probability(contrast) * (mass.reshape(read_count, 2)[:, role_index] > 0))
             gate_parts.append(logits)
         strength = torch.stack(strength_parts, -1)
         if packed.get("suppress_module_values", False):
@@ -1118,11 +1132,18 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                      "anchored_applied_EE": prepared.anchored_applied_EE,
                      "context_M": contexts["M"], "context_E": contexts["E"], "joint_fields": fields}
             trace.update(self._directory_trace(prepared))
+            if getattr(self, "reader_capability", None) == "all_native":
+                trace["read_capability"] = "all_native"
+            if evidence is not None:
+                trace["anchor_read_strength_evidence"] = evidence
             for role_index, role in enumerate(("M", "E")):
                 rho = fields.new_zeros(query.batch_size, query.num_queries, query.anchor_indices.shape[-1])
                 rho = rho.index_put((b, q, k), strength[:, role_index])
                 trace[f"anchor_read_strength_{role}"] = rho
-                trace[f"member_read_strength_{role}"] = (rho * query.anchor_weights).sum(-1)
+                if getattr(self, "reader_capability", None) == "all_native":
+                    trace[f"member_read_strength_{role}"] = rho.sum(-1)
+                else:
+                    trace[f"member_read_strength_{role}"] = (rho * query.anchor_weights).sum(-1)
                 role_mask = um < prepared.scene.num_modules if role == "M" else um >= prepared.scene.num_modules
                 positions = role_mask.nonzero(as_tuple=False).flatten()
                 trace[f"member_score_union_indices_{role}"] = union_keys[positions]
