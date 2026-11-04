@@ -9,6 +9,10 @@ The [project README](../../README.md) introduces the six model families, equatio
 | [Query tiling](Query_Tiling.md) | Decoder speed/memory tradeoffs, testing on your own inputs and explicit resume scope. |
 | [Thermal development protocol](Thermal_Model_Development_Protocol.md) | Input-only membership, TRAIN-only normalization and fair epoch budgets. |
 | [Thermal relation-anchored training](Thermal_Relation_Anchored_Training.md) | Current public model selection, recipes and continuation. |
+| [Native case training](Case_Relation_Anchored_Training.md) | Wind and Thermal provider dispatch, native objectives and identity-preserving continuation. |
+| [Wind relation-anchored interface](../../Case_WindFarm/docs/relation_anchored.md) | Three-dimensional coverage, ragged turbine batches and native calibration. |
+| [Thermal port/local integration](Thermal_Port_Local_Integration.md) | One-pass angular ports, frozen local readout and strict checkpoint loading. |
+| [Physical response evaluation](Case_Response_Evaluation.md) | Fresh design preparation, physical-mask comparisons and resolved response metrics. |
 | [Wind native catalogue cache](Wind_Native_Catalogue_Cache.md) | Geometry/cache identity and native precision. |
 | [Root layout and compatibility](../Root_Layout_and_Compatibility.md) | Promoted paths, installation and old checkpoints. |
 

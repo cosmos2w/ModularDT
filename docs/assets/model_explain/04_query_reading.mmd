@@ -1,0 +1,11 @@
+flowchart TB
+    Q["Query q"] --> LOC["Neighbor addresses · continuous cover"]
+    LOC --> U["Union of accessible original members"]
+    U --> S["Score unique query/member pairs once"]
+    S --> ROW["Per-address calibration · role preferences"]
+    ROW --> COAL["Coalesce coefficients by original member"]
+    U --> MSG["Query-relative member messages"]
+    COAL --> RED["Weighted M/E reductions"]
+    MSG --> RED
+    RED --> Y["Joint field decoder"]
+    Q --> Y

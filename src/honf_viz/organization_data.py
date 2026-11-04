@@ -53,8 +53,13 @@ class OrganizationScene:
         return result
 
     def identity(self) -> dict:
+        case = self.metadata.get("case")
+        if case is None:
+            case = self.metadata.get("case_id")
+        if case is None and self.metadata.get("row") is not None:
+            case = f"row {self.metadata['row']}"
         return {"label": self.name, "source_npz": str(self.source),
-                "case": self.metadata.get("case"), "epoch": self.metadata.get("epoch"),
+                "case": case, "epoch": self.metadata.get("epoch"),
                 "partition": self.metadata.get("partition"),
                 "checkpoint": self.metadata.get("checkpoint"),
                 "directory_key": self.directory_key, "stage_provenance": self.provenance,

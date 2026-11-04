@@ -21,6 +21,7 @@ node_modules/
 /UpgradePlan
 /docs/reports
 /local_history
+/Model_Explain.zh-CN.md
 /.tmp_anchored_tests
 /HONF_Proj
 **/dataset_locations.local.json

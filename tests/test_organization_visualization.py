@@ -277,3 +277,25 @@ def test_overview_title_does_not_overlap_panel_headings(scene, monkeypatch, coun
     if count == 2:
         scenes.append(replace(scene, name="Active-domain relation-anchored"))
     overview.render_overview(scenes, Path("not-written"))
+
+
+def test_scene_identity_and_hyperedge_directory_match_saved_metadata(scene):
+    from honf_viz.organization_connected_hyperedges import view_from_scene
+    by_id = replace(scene, metadata={'case_id': '0258'}, directory_key='C_full')
+    assert by_id.identity()['case'] == '0258'
+    assert view_from_scene(by_id).metadata['row_semantics'] == 'native E-address directory C_full'
+    assert replace(scene, metadata={'row': 42}).identity()['case'] == 'row 42'
+
+
+def test_two_scene_single_member_services_render_with_room_for_labels(scene, monkeypatch):
+    captured = []
+    def save(fig, output, stem, title, caption, evidence):
+        fig.canvas.draw()
+        captured.append((fig.get_size_inches().tolist(), caption))
+        plt.close(fig)
+        return FigureArtifact(stem, title, caption, evidence)
+    monkeypatch.setattr(services, 'save_figure', save)
+    services.render_donor_services([scene, replace(scene, name='Model B')], Path('not-written'), per_role=1)
+    assert len(captured) == 2
+    assert all(size == [9., 8.55] for size, _ in captured)
+    assert all('Directory weights and G belong to distinct operations' in caption for _, caption in captured)

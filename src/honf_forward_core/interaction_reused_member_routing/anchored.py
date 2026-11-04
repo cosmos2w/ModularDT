@@ -848,9 +848,10 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         if weights.dtype != query.coordinates.dtype:
             raise ValueError("Anchor weights and query coordinates must share a floating dtype.")
         slots = indices.shape[-1]
+        max_cover = 8 if scene.coordinate_dim == 3 else 4
         if (slots < 1 or (self.locator_mode == "e_anchor" and slots != 1)
-                or (self.locator_mode == "local_e_cover" and slots > 4)):
-            raise ValueError("The E locator must supply one A anchor or at most four L anchors.")
+                or (self.locator_mode == "local_e_cover" and slots > max_cover)):
+            raise ValueError("The E locator exceeds the tensor-product cover for the scene dimension.")
         if not bool(torch.isfinite(weights).all()) or bool((weights < 0).any()):
             raise ValueError("Anchor weights must be finite and nonnegative.")
         query_mask = self._query_mask(query)

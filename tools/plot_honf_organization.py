@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import sys
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -91,12 +90,12 @@ def main() -> int:
     text = ["# Global HONF organization", "", "This gallery shows prepared scene-wide information organization. Query invocation is a separate supplementary view. Original member identities and weights are retained; all display selections and permutations are recorded in evidence.json.", "",
             "| Scene | Case | Partition | Epoch | Checkpoint |", "| --- | --- | --- | --- | --- |"]
     for scene in scenes:
-        meta = scene.metadata
+        meta = scene.identity()
         text.append(f"| {scene.name} | {meta.get('case', 'unspecified')} | {meta.get('partition', 'unspecified')} | {meta.get('epoch', 'unspecified')} | `{meta.get('checkpoint', 'not supplied')}` |")
     text.extend(["", "## Figure index", ""])
-    text.extend(f"- [{item.title}](#{re.sub(r'[^a-z0-9 -]', '', item.title.lower()).replace(' ', '-')})" for item in figures)
+    text.extend(f"- [{item.title}](#figure-{item.stem})" for item in figures)
     for item in figures:
-        text.extend(["", f"## {item.title}", "",
+        text.extend(["", f'<a id="figure-{item.stem}"></a>', "", f"## {item.title}", "",
                      f"![{item.title}](figures/{item.stem}.png)", "",
                      f"{item.caption} [PDF master](figures/{item.stem}.pdf)"])
     if not contextual:

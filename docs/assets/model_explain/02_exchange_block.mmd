@@ -1,0 +1,11 @@
+flowchart TB
+    IN["Block input · M and E"] --> RAW["Reinject original-record encodings"]
+    RAW --> MM["1 · M receives M"]
+    RAW --> E0["E state carried into exchange"]
+    MM --> EM["2 · E receives updated M"]
+    E0 --> EM
+    EM --> EE["3 · E receives E · E feed-forward"]
+    MM --> ME["4 · M receives updated E · M feed-forward"]
+    EE --> ME
+    ME --> NEXT["Next block or prepared members"]
+    EE --> NEXT

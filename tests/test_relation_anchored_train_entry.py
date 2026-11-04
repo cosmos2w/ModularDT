@@ -1,0 +1,104 @@
+"""Supported case dispatch and saved execution identities."""
+import copy
+import importlib.util
+import json
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
+import pytest
+
+_spec = importlib.util.spec_from_file_location(
+    "relation_anchored_train", Path(__file__).resolve().parents[1] / "tools/relation_anchored_train.py")
+cli = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cli)
+
+
+def wind_recipe():
+    return {"dataset": "wind", "seed": 42, "architecture": "relation_anchored",
+            "schema": "wind_relation_anchored_v1", "microbatch_size": 8,
+            "effective_batch_size": 24, "total_epochs": 100}
+
+
+def test_horizon_and_sampling_do_not_depend_on_physical_packing():
+    class Cases:
+        def identity_payload(self):
+            return {"dataset": "WindFarm", "subset_manifest_sha256": "same-membership"}
+
+        def epoch_cases(self, epoch, seed):
+            return tuple(range(72))
+
+    recipe = wind_recipe()
+    one = cli.engine_for(recipe, device="cpu")
+    other = cli.engine_for({**recipe, "microbatch_size": 4}, device="cpu")
+    assert one.epoch_case_order(Cases(), 1) == other.epoch_case_order(Cases(), 1)
+    assert one.config.total_epochs == 100
+    assert one.config.checkpoint_epochs == (100,)
+    assert one.config.sampling_version == "case_epoch_v1"
+    assert one.config.curve_every == 10
+
+
+def test_explicit_extension_preserves_recipe_and_rejects_other_scopes():
+    recipe = wind_recipe()
+    before = copy.deepcopy(recipe)
+    engine = cli.engine_for(recipe, device="cpu", execution_horizon=300)
+    assert recipe == before
+    assert engine.config.checkpoint_epochs == (100, 200, 300)
+    for horizon in (100, 99, 301):
+        with pytest.raises(ValueError):
+            cli.engine_for(recipe, device="cpu", execution_horizon=horizon)
+    with pytest.raises(ValueError):
+        cli.engine_for({**recipe, "schema": "wind_relation_anchored_r15_3_v1"},
+                       device="cpu", execution_horizon=300)
+
+
+def test_p64_dispatch_and_excluded_experiments(monkeypatch):
+    import sys
+
+    module = ModuleType("channelthermal.training.thermal_port_response_task")
+    calls = {}
+    expected = (object(), object())
+
+    def build(recipe, *, arm, device):
+        calls.update(arm=arm, device=device)
+        return expected
+
+    module.build_thermal_port_response_task = build
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    recipe = {"dataset": {"name": "thermal"}, "initialization": {"seed": 0},
+              "member_routing": {"arm": "R14-Detail-LocalECover"},
+              "thermal_port_response": {"enabled": True, "arm": "P64"}}
+    assert cli.build(recipe, device="cpu") == expected
+    assert calls == {"arm": "R14-Detail-LocalECover", "device": "cpu"}
+    for name in ("thermal_feedback", "thermal_finite_response", "local_expert"):
+        with pytest.raises(ValueError, match="research branch"):
+            cli.build({**recipe, name: {"enabled": True}}, device="cpu")
+
+
+def test_fit_preserves_same_run_resume_arguments(monkeypatch, capsys):
+    recipe = wind_recipe()
+    monkeypatch.setattr(Path, "read_text", lambda self: json.dumps(recipe))
+    model = object()
+    provider = SimpleNamespace(preparation_summary=lambda: {"catalogue_build_count": 0})
+    monkeypatch.setattr(cli, "build", lambda *args, **kwargs: (model, provider))
+    calls = {}
+
+    class Engine:
+        def fit(self, actual_model, actual_provider, output, **kwargs):
+            calls.update(model=actual_model, provider=actual_provider, output=output, **kwargs)
+            return {"completed_epoch": 100}
+
+    monkeypatch.setattr(cli, "engine_for", lambda *args, **kwargs: Engine())
+    assert cli.main(["fit", "--recipe", "run.json", "--output", "run",
+                     "--resume", "latest", "--stop-after", "100"]) == 0
+    assert calls["model"] is model and calls["provider"] is provider
+    assert calls["identity"]["recipe"] == recipe
+    assert calls["resume_checkpoint"] == "latest" and calls["stop_after"] == 100
+    preparation, result = map(json.loads, capsys.readouterr().out.splitlines())
+    assert preparation["preparation"]["catalogue_build_count"] == 0
+    assert result["completed_epoch"] == 100
+
+
+def test_invalid_extension_is_rejected_before_loading_inputs(monkeypatch):
+    monkeypatch.setattr(cli, "build", lambda *args, **kwargs: pytest.fail("invalid command built inputs"))
+    with pytest.raises(SystemExit):
+        cli.main(["fit", "--recipe", "run.json", "--output", "run", "--stop-after", "300", "--extend-horizon"])

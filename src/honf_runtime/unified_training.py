@@ -372,6 +372,47 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                 "query_tile_size": new_sizes[0], "optimizer_schedule_unchanged": True,
                 "trajectory_note": "Only query partitioning changes; weights, moments, RNG, data, sampling, objective and activation checkpointing are retained. Floating-point reduction order can differ."}
     if allow_horizon_extension:
+        if saved.get("workflow") == "relation_anchored_case_training_v1":
+            old, new = (json.loads(json.dumps(value)) for value in (saved, current))
+            recipe = old.get("recipe", {})
+            before = old.get("engine_config", {}).get("total_epochs")
+            after = new.get("engine_config", {}).get("total_epochs")
+            schedules = old.get("optimizer_schedule_contract", [])
+            wind_extension = (recipe.get("dataset") == "wind"
+                              and recipe.get("schema") in ("wind_relation_anchored_r15_2_v2", "wind_relation_anchored_v1")
+                              and type(before) is int and before >= (1000 if recipe.get("schema") == "wind_relation_anchored_r15_2_v2" else 100))
+            thermal = recipe.get("thermal_port_response", {})
+            thermal_extension = (isinstance(recipe.get("dataset"), dict)
+                                 and recipe["dataset"].get("name") == "thermal"
+                                 and thermal.get("schema") == "thermal_port_response_v1"
+                                 and thermal.get("arm") == "P64"
+                                 and recipe.get("training", {}).get("membership") == "full_train600"
+                                 and before == 100 and after == 500)
+            if (allow_microbatch_change or not (wind_extension or thermal_extension)
+                    or type(before) is not int or type(after) is not int
+                    or before % 100 or after <= before or after % 100
+                    or old["engine_config"].get("checkpoint_epochs") != list(range(100, before + 1, 100))
+                    or new["engine_config"].get("checkpoint_epochs") != list(range(100, after + 1, 100))
+                    or not schedules):
+                raise ValueError(message)
+            for group in schedules:
+                schedule = group.get("schedule", {})
+                rate = schedule.get("peak_lr")
+                if (not isinstance(rate, (int, float)) or rate <= 0
+                        or schedule.get("final_lr") != rate
+                        or schedule.get("warmup_start_lr") != rate
+                        or schedule.get("warmup_epochs") != 0):
+                    raise ValueError(message)
+            amended = copy.deepcopy(old)
+            amended["engine_config"]["total_epochs"] = after
+            amended["engine_config"]["checkpoint_epochs"] = new["engine_config"]["checkpoint_epochs"]
+            if amended != new:
+                raise ValueError(message)
+            return {"kind": ("explicit_thermal_port_horizon_extension" if thermal_extension else
+                             "explicit_relation_anchored_wind_horizon_extension"),
+                    "previous_horizon": before, "execution_horizon": after,
+                    "optimizer_schedule_unchanged": True,
+                    "trajectory_note": "Only the engine horizon and future 100-epoch milestones change; original recipe, constant AdamW schedule, data, sampling and all other identity fields remain unchanged."}
         if saved.get("workflow") == "spatial_interaction_groups_joint_training_v1":
             if allow_microbatch_change:
                 raise ValueError(message)
@@ -3705,6 +3746,8 @@ class TrainingEngine:
                         numerator = float(term.numerator.detach())
                         if not math.isfinite(weight) or not math.isfinite(numerator):
                             raise FloatingPointError(f"Validation loss {name!r} is nonfinite.")
+                        # Empty masks still declare the objective in this batch.
+                        loss_batch_counts[name] = loss_batch_counts.get(name, 0) + 1
                         if denominator == 0:
                             if numerator != 0.0:
                                 raise ValueError(f"Validation loss {name!r} has a nonzero numerator with no valid elements.")
@@ -3715,7 +3758,6 @@ class TrainingEngine:
                             raise ValueError(f"Validation objective weight for {name!r} changed across batches.")
                         aggregate["numerator"] += numerator
                         aggregate["denominator"] += denominator
-                        loss_batch_counts[name] = loss_batch_counts.get(name, 0) + 1
             if batch_count == 0:
                 raise ValueError("The task provider returned no exposed validation batches.")
             if any(count != batch_count for count in loss_batch_counts.values()):

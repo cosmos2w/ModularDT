@@ -75,7 +75,7 @@ WIND_CONTENT_ROLE_CACHE_RAM_BYTES = 2 * 1024**3
 WIND_CONTENT_ROLE_CACHE_DEVELOPMENT_BYTES = 32 * 1024**3
 WIND_CONTENT_ROLE_CACHE_FULL_BYTES = 128 * 1024**3
 WIND_SOURCE_READ_ROLE_CACHE_RAM_BYTES = 64 * 1024**3
-_WIND_CONTENT_CATALOGUE_CACHES: dict[tuple[str | None, int], NativeRoleCatalogueCache] = {}
+_WIND_CONTENT_CATALOGUE_CACHES: dict[tuple[str | None, int, bool], NativeRoleCatalogueCache] = {}
 _ROLE_INDEX = {name: index for index, name in enumerate(ROLE_NAMES)}
 
 
@@ -85,18 +85,19 @@ def _readonly_array(value: Any, dtype: Any = np.float32) -> np.ndarray:
     return result
 
 
-def _shared_read_only_catalogue_cache(max_ram_bytes: int = WIND_CONTENT_ROLE_CACHE_RAM_BYTES) -> NativeRoleCatalogueCache:
+def _shared_read_only_catalogue_cache(max_ram_bytes: int = WIND_CONTENT_ROLE_CACHE_RAM_BYTES, *, require_prebuilt: bool = False) -> NativeRoleCatalogueCache:
     if isinstance(max_ram_bytes, bool) or not isinstance(max_ram_bytes, int) or not 0 < max_ram_bytes <= 128 * 1024**3:
         raise ValueError("Wind catalogue cache RAM limit must be a positive integer no larger than 128 GiB.")
     persistent = training_catalogue_cache_directory()
     cache_path = None if persistent is None else str(Path(persistent).expanduser().resolve())
-    key = (cache_path, max_ram_bytes)
+    key = (cache_path, max_ram_bytes, require_prebuilt)
     cache = _WIND_CONTENT_CATALOGUE_CACHES.get(key)
     if cache is None:
         cache = NativeRoleCatalogueCache(
             persistent_dir=cache_path,
             max_cached_bytes=max_ram_bytes,
             read_only_persistent=True,
+            require_prebuilt=require_prebuilt,
         )
         _WIND_CONTENT_CATALOGUE_CACHES[key] = cache
     return cache
@@ -410,14 +411,16 @@ class WindContentHypergraphTask:
 
     def _catalogue_cache_identity(self) -> Mapping[str, Any]:
         persistent = self.catalogue_cache.persistent_dir
-        recipe = _native_role_catalogue_recipe()
+        from ..workflows.joint_forward import _legacy_native_role_catalogue_recipe
+        recipe = (_native_role_catalogue_recipe() if self.catalogue_cache.require_prebuilt
+                  else _legacy_native_role_catalogue_recipe())
         recipe_sha = hashlib.sha256(
             json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         return {
             "cache_recipe_sha256": recipe_sha,
             "persistent_directory": None if persistent is None else str(persistent.resolve()),
-            "policy": "read-only exact geometry reuse; bounded shared-RAM fallback; no disk writes",
+            "policy": ("mandatory prebuilt shared catalogue; exact numerical/geometry checks; no builds or disk writes" if self.catalogue_cache.require_prebuilt else "read-only exact geometry reuse; bounded shared-RAM fallback; no disk writes"),
             "max_ram_bytes": self.catalogue_cache.max_cached_bytes,
             "roles": list(ROLE_NAMES),
         }
@@ -492,7 +495,10 @@ class WindContentHypergraphTask:
         stream_validation: bool | None = None,
         track_samples: bool = True,
     ) -> TaskBatch:
-        if len(rows) == 0 or len(rows) > self.max_microbatch_cases:
+        limit = self.max_microbatch_cases
+        if validation and hasattr(self, "validation_microbatch_cases"):
+            limit = self.validation_microbatch_cases
+        if len(rows) == 0 or len(rows) > limit:
             raise ValueError("Wind content-hypergraph microbatch is empty or exceeds its declared case limit.")
         row_ids = tuple(int(value) for value in rows)
         if len(set(row_ids)) != len(row_ids):
@@ -718,7 +724,7 @@ class WindContentHypergraphTask:
         return self._make_batch(rows, key, validation=True, query_count=query_count)
 
     def validation_batches(self) -> Iterable[TaskBatch]:
-        return self.validation_batches_for(self.primary_queries)
+        return self.validation_batches_for(int(getattr(self, "validation_query_count", self.primary_queries)))
 
     def validation_batches_for(
         self,
@@ -729,7 +735,7 @@ class WindContentHypergraphTask:
         """Return deterministic DEV-only panels, including endpoint Q8192."""
         query_count = int(query_count)
         counts = _role_counts_for_query_count(query_count)
-        chunk_size = self.max_microbatch_cases if microbatch_size is None else int(microbatch_size)
+        chunk_size = int(getattr(self, "validation_microbatch_cases", self.max_microbatch_cases)) if microbatch_size is None else int(microbatch_size)
         if chunk_size < 1 or chunk_size > 24:
             raise ValueError("Wind validation microbatch size must lie in [1,24].")
         # Cache only the engine's default panel; explicit endpoint panels are
@@ -750,7 +756,7 @@ class WindContentHypergraphTask:
                 dataset_id=self.sampling_dataset_id,
             )
             batches.append(self._validation_batch(rows, key, query_count))
-        if query_count == self.primary_queries:
+        if query_count == int(getattr(self, "validation_query_count", self.primary_queries)):
             self._validation_cache[query_count] = tuple(batches)
         del counts
         return iter(batches)
@@ -2461,6 +2467,9 @@ def _build_wind_content_task(
     device: torch.device | str,
     *,
     schema_version: int,
+    role_scale_loader=None,
+    transform_loader=None,
+    require_prebuilt_catalogue=False,
 ) -> tuple[nn.Module, WindContentHypergraphTask]:
     if schema_version == 1:
         value, architecture, microbatch = _validate_recipe(recipe)
@@ -2577,7 +2586,8 @@ def _build_wind_content_task(
         )
         profile_id = JOINT_WIND_FULL_FOLLOWUP_PROFILE_ID
         train_layouts = manifest["train_layout_indices"]
-        normalizer, profile, transform_binding = _fit_or_load_formal_transforms(
+        load_transforms = _fit_or_load_formal_transforms if transform_loader is None else transform_loader
+        normalizer, profile, transform_binding = load_transforms(
             view=view,
             train_rows=np.asarray(train_rows, dtype=np.int64),
             train_layouts=train_layouts,
@@ -2602,13 +2612,14 @@ def _build_wind_content_task(
     # Five-role calibration belongs only to the native role objective. The
     # formal two-region source-read path standardizes with the bound velocity
     # normalizer and must neither require nor serialize the unused role cache.
-    catalogue_cache = _shared_read_only_catalogue_cache(int(value["catalogue_cache_ram_bytes"]))
+    catalogue_cache = _shared_read_only_catalogue_cache(int(value["catalogue_cache_ram_bytes"]), require_prebuilt=require_prebuilt_catalogue)
     if schema_version == 4:
         calibration = None
         cache_identity = None
         component_scales = None
     else:
-        calibration, cache_identity = _fit_or_load_role_scales(
+        loader = _fit_or_load_role_scales if role_scale_loader is None else role_scale_loader
+        calibration, cache_identity = loader(
             view=view,
             train_rows=np.asarray(train_rows, dtype=np.int64),
             train_layouts=train_layouts,
