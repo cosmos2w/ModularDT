@@ -494,13 +494,13 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
                 del pair, losses, terms, work
 
     def loss_metadata(self):
-        result = super().loss_metadata()
+        result = {}
         for name, label, weight in (
                 ('response/endpoint', 'paired endpoint state', '0.25'),
                 ('response/field_delta', 'aligned field response', '0.08'),
                 ('response/J_delta', 'material smooth-maximum response', '0.01'),
                 ('response/P_delta', 'pressure-drop response', '0.01')):
-            result[name] = {'panel': 'response', 'label': label, 'unit': 'scaled squared error',
+            result[name] = {'panel': 'physics', 'label': label, 'unit': 'scaled squared error',
                             'formula': 'equal FIT family and action mean; paired native reads where applicable',
                             'weight': weight}
         return result
