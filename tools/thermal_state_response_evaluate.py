@@ -31,11 +31,14 @@ def functional_label_path(section, role):
 
 
 def restore_model(recipe, run, checkpoint, device):
-    model, provider = build(recipe, device=device)
     path = resolve_checkpoint(run, checkpoint)
     saved = load_trusted_checkpoint(path, map_location='cpu')
     identity = saved['experiment_identity']
-    if identity['recipe'] != recipe or identity['provider_identity'] != dict(provider.identity_payload()):
+    if identity['recipe'] != recipe:
+        raise ValueError('The recipe differs from the saved run.')
+    model, provider = build(recipe, device=device,
+                            response_scales=identity['provider_identity']['response_scales'])
+    if identity['provider_identity'] != dict(provider.identity_payload()):
         raise ValueError('The recipe or native provider differs from the saved run.')
     model.load_state_dict(saved['model_state_dict'], strict=True)
     model.to(device)

@@ -96,3 +96,40 @@ def test_alignment_intersects_masks_per_channel():
     b.values, e.values = np.array([[1., 2.]]), np.array([[3., 4.]])
     b.valid_mask, e.valid_mask = np.array([[True, False]]), np.array([[True, True]])
     np.testing.assert_array_equal(align_role_values(b, e)['common_mask'], [[True, False]])
+
+
+def test_saved_scales_restore_exactly_without_refitting(monkeypatch):
+    import json
+    from channelthermal.training import thermal_state_response_task as task
+    scales = {name: {'scale': 0.45560681823737065, 'fit_rms': 0.45560681823737065,
+                     'floor': 0.01} for name in (*FIELD_ROLES, 'J', 'P')}
+    saved = json.loads(json.dumps(scales))
+    monkeypatch.setattr(task, 'ThermalResponseCorpus', lambda *args: object())
+    monkeypatch.setattr(task, 'load_saved_functional_responses', lambda *args, **kwargs: {})
+    def unexpected_fit(*args, **kwargs):
+        raise AssertionError('Checkpoint restoration must not refit scales')
+    monkeypatch.setattr(task, '_fit_native_response_scales', unexpected_fit)
+    provider = object.__new__(task.ThermalStateResponseTask)
+    provider.configure_state_response({'recipe_path': '/unused/recipe.json', 'ledger_path': '/unused/ledger'},
+                                      response_scales=saved)
+    assert provider.response_scales == saved
+    assert provider.response_scales is not saved
+    saved['flow/u']['scale'] = 99
+    assert provider.response_scales['flow/u']['scale'] == 0.45560681823737065
+
+
+@pytest.mark.parametrize('bad', [
+    lambda s: s.pop('J'),
+    lambda s: s['P'].update(scale=float('nan')),
+    lambda s: s['P'].update(scale=0),
+    lambda s: s['P'].update(scale=2),
+    lambda s: s['P'].update(fit_rms=-1),
+    lambda s: s['P'].update(extra=1),
+])
+def test_invalid_saved_scales_rejected(bad):
+    from channelthermal.training.thermal_state_response_task import _restore_response_scales
+    scales = {name: {'scale': 1.0, 'fit_rms': 1.0, 'floor': 0.01}
+              for name in (*FIELD_ROLES, 'J', 'P')}
+    bad(scales)
+    with pytest.raises(ValueError):
+        _restore_response_scales(scales)

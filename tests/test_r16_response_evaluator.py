@@ -61,15 +61,19 @@ def test_restore_requires_both_exact_identities_before_loading(monkeypatch, tmp_
         def to(self, device): return self
         def eval(self): return self
     model = Model()
-    provider = SimpleNamespace(identity_payload=lambda: {'membership': ['a']})
-    monkeypatch.setattr(evaluator, 'build', lambda recipe, device: (model, provider))
+    scales = {'fixed': 'saved objective constants'}
+    provider = SimpleNamespace(identity_payload=lambda: {'membership': ['a'], 'response_scales': scales})
+    def build(recipe, *, device, response_scales):
+        assert response_scales is scales
+        return model, provider
+    monkeypatch.setattr(evaluator, 'build', build)
     monkeypatch.setattr(evaluator, 'resolve_checkpoint', lambda run, checkpoint: tmp_path / 'checkpoint.pt')
-    saved = {'experiment_identity': {'recipe': {'key': 1}, 'provider_identity': {'membership': ['b']}},
+    saved = {'experiment_identity': {'recipe': {'key': 1}, 'provider_identity': {'membership': ['b'], 'response_scales': scales}},
              'model_state_dict': {}, 'epoch': 100}
     monkeypatch.setattr(evaluator, 'load_trusted_checkpoint', lambda *args, **kwargs: saved)
     with pytest.raises(ValueError, match='differs'):
         evaluator.restore_model({'key': 1}, tmp_path, 'latest', 'cpu')
     assert not model.loaded
-    saved['experiment_identity']['provider_identity'] = {'membership': ['a']}
+    saved['experiment_identity']['provider_identity'] = {'membership': ['a'], 'response_scales': scales}
     evaluator.restore_model({'key': 1}, tmp_path, 'latest', 'cpu')
     assert model.loaded

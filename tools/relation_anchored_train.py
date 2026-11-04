@@ -20,7 +20,7 @@ from honf_runtime.run_layout import resolve_checkpoint
 from honf_runtime.unified_training import EngineConfig, SamplingKey, SelectionPolicy, TrainingEngine
 
 
-def build(recipe, *, device):
+def build(recipe, *, device, response_scales=None):
     """Dispatch supported adapters while preserving their saved recipe schemas."""
     thermal = isinstance(recipe.get("dataset"), dict) and recipe["dataset"].get("name") == "thermal"
     unsupported = ("thermal_finite_response", "thermal_feedback", "local_expert", "local_ports")
@@ -41,7 +41,10 @@ def build(recipe, *, device):
         if recipe.get("thermal_state_response", {}).get("enabled", False):
             from channelthermal.training.thermal_state_response_task import build_thermal_state_response_task
 
-            return build_thermal_state_response_task(recipe, arm=arm, device=device)
+            options = {"arm": arm, "device": device}
+            if response_scales is not None:
+                options["response_scales"] = response_scales
+            return build_thermal_state_response_task(recipe, **options)
         if recipe.get("thermal_port_response", {}).get("enabled", False):
             from channelthermal.training.thermal_port_response_task import build_thermal_port_response_task
 
@@ -103,7 +106,19 @@ def main(argv=None):
     if args.command == "evaluate" and args.output is None:
         parser.error("evaluate requires --output")
     recipe = json.loads(args.recipe.read_text())
-    model, provider = build(recipe, device=args.device)
+    source_payload = None
+    if (recipe.get("thermal_state_response", {}).get("enabled")
+            and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
+        selector = args.checkpoint if args.command == "evaluate" else args.resume
+        source_payload = load_trusted_checkpoint(resolve_checkpoint(args.output, selector), map_location="cpu")
+        if source_payload["experiment_identity"]["recipe"] != recipe:
+            raise ValueError("The recipe differs from the saved run.")
+    options = {}
+    if source_payload is not None and recipe.get("thermal_state_response", {}).get("enabled"):
+        # Objective denominators are saved scientific state. Recomputing their
+        # last bits on another device must not change the restored objective.
+        options["response_scales"] = source_payload["experiment_identity"]["provider_identity"]["response_scales"]
+    model, provider = build(recipe, device=args.device, **options)
     engine = (engine_for(recipe, device=args.device, execution_horizon=args.stop_after)
               if args.extend_horizon else engine_for(recipe, device=args.device))
     arm = recipe["member_routing"]["arm"] if isinstance(recipe.get("dataset"), dict) else recipe["architecture"]
@@ -121,7 +136,8 @@ def main(argv=None):
                             stop_after=args.stop_after, resume_checkpoint=args.resume,
                             allow_horizon_extension=args.extend_horizon)
     else:
-        saved = load_trusted_checkpoint(resolve_checkpoint(args.output, args.checkpoint), map_location="cpu")
+        saved = (source_payload if source_payload is not None else
+                 load_trusted_checkpoint(resolve_checkpoint(args.output, args.checkpoint), map_location="cpu"))
         saved_identity = saved["experiment_identity"]
         if saved_identity["recipe"] != recipe or saved_identity["provider_identity"] != dict(provider.identity_payload()):
             raise ValueError("The recipe or native provider differs from the saved run.")

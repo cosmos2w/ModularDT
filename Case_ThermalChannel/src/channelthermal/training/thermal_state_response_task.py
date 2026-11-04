@@ -460,19 +460,41 @@ from .r13_8_anchored_task import (ThermalR138AnchoredMemberRoutingTask, ARM_DETA
 from .r13_6_member_routing_task import _build_thermal_member_routing_task
 
 
+def _restore_response_scales(scales):
+    """Restore the original loss denominators without device-dependent refitting."""
+    import copy
+    from numbers import Real
+
+    if not isinstance(scales, dict) or set(scales) != {*FIELD_ROLES, 'J', 'P'}:
+        raise ValueError('Saved response scales must contain exactly the ten native roles.')
+    for name, item in scales.items():
+        if not isinstance(item, dict) or set(item) != {'scale', 'fit_rms', 'floor'}:
+            raise ValueError(f'Invalid saved response scale fields for {name}.')
+        if any(isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value)
+               for value in item.values()):
+            raise ValueError(f'Nonfinite or nonnumeric saved response scale for {name}.')
+        if (item['scale'] <= 0 or item['floor'] <= 0 or item['fit_rms'] < 0
+                or item['scale'] != max(item['fit_rms'], item['floor'])):
+            raise ValueError(f'Inconsistent saved response scale for {name}.')
+    return copy.deepcopy(scales)
+
+
 class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
     """Fresh native state model with four FIT families of response per epoch."""
     auxiliary_loss_names = ('response/endpoint', 'response/field_delta', 'response/J_delta', 'response/P_delta')
 
-    def configure_state_response(self, spec):
+    def configure_state_response(self, spec, *, response_scales=None):
         self.response_spec = dict(spec)
         self.response_corpus = ThermalResponseCorpus(spec['recipe_path'], spec['ledger_path'])
         root = Path(spec['recipe_path']).parent.parent
         fit_labels = root / 'evidence/matched200/epoch200/fit/response_evaluation.json'
         self.response_labels = load_saved_functional_responses(fit_labels, self.response_corpus, role='fit')
-        repeatability = json.loads((root / 'evidence/train_resolution_candidates.json').read_text())['floors']
-        self.response_scales = _fit_native_response_scales(self, self.response_corpus, self.response_labels,
-                                                           repeatability, spec['functional_floors'])
+        if response_scales is None:
+            repeatability = json.loads((root / 'evidence/train_resolution_candidates.json').read_text())['floors']
+            self.response_scales = _fit_native_response_scales(self, self.response_corpus, self.response_labels,
+                                                               repeatability, spec['functional_floors'])
+        else:
+            self.response_scales = _restore_response_scales(response_scales)
 
     def auxiliary_update_terms(self, model, *, epoch, update_index, update_count):
         if update_count < 1:
@@ -522,7 +544,7 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
         return result
 
 
-def build_thermal_state_response_task(recipe, *, arm=ARM_DETAIL, device='cpu'):
+def build_thermal_state_response_task(recipe, *, arm=ARM_DETAIL, device='cpu', response_scales=None):
     """Build the maintained native task with fresh TRAIN normalizer and FIT data."""
     from ..data.datasets import H5Normalizer
     from .joint_task import _read_selected_cases
@@ -544,5 +566,5 @@ def build_thermal_state_response_task(recipe, *, arm=ARM_DETAIL, device='cpu'):
     provider._validation_index_by_id = {value: index for index, value in enumerate(val_ids)}
     provider.validation_scope = 'canonical89_exposed_original_test_excluding_0273'
     provider._validation_batches_cache = None
-    provider.configure_state_response(spec)
+    provider.configure_state_response(spec, response_scales=response_scales)
     return model, provider
