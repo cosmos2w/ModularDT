@@ -142,3 +142,39 @@ def test_invalid_extension_is_rejected_before_loading_inputs(monkeypatch):
     monkeypatch.setattr(cli, "build", lambda *args, **kwargs: pytest.fail("invalid command built inputs"))
     with pytest.raises(SystemExit):
         cli.main(["fit", "--recipe", "run.json", "--output", "run", "--stop-after", "300", "--extend-horizon"])
+
+
+@pytest.mark.parametrize('coefficient', [None, 0.])
+def test_response_resume_restores_saved_scales_and_keeps_exact_recipe(monkeypatch, coefficient):
+    response = {'enabled': True, 'schema': 'thermal_state_response_v1'}
+    if coefficient is not None:
+        response['finite_response_coefficient'] = coefficient
+    recipe = {'dataset': {'name': 'thermal'}, 'member_routing': {'arm': 'joint'},
+              'thermal_state_response': response}
+    scales = {'flow/u': {'scale': .45560681823737065, 'fit_rms': .45560681823737065, 'floor': .01}}
+    checkpoint = {'experiment_identity': {'recipe': copy.deepcopy(recipe),
+                                           'provider_identity': {'response_scales': scales}}}
+    monkeypatch.setattr(Path, 'read_text', lambda self: json.dumps(recipe))
+    monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: Path('/unused'))
+    monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: checkpoint)
+    captured = {}
+
+    def build(actual_recipe, *, device, response_scales):
+        captured.update(recipe=actual_recipe, scales=response_scales, device=device)
+        return object(), object()
+
+    class Engine:
+        def fit(self, model, provider, output, **kwargs):
+            assert kwargs['identity']['recipe'] == recipe
+            assert kwargs['resume_checkpoint'] == 'latest' and kwargs['stop_after'] == 200
+            return {'completed_epoch': 200}
+
+    monkeypatch.setattr(cli, 'build', build)
+    monkeypatch.setattr(cli, 'engine_for', lambda *args, **kwargs: Engine())
+    assert cli.main(['fit', '--recipe', 'run.json', '--output', 'run', '--resume', 'latest',
+                     '--stop-after', '200']) == 0
+    assert captured == {'recipe': recipe, 'scales': scales, 'device': 'cpu'}
+    checkpoint['experiment_identity']['recipe']['thermal_state_response']['finite_response_coefficient'] = .2
+    with pytest.raises(ValueError, match='recipe differs'):
+        cli.main(['fit', '--recipe', 'run.json', '--output', 'run', '--resume', 'latest',
+                  '--stop-after', '200'])

@@ -881,6 +881,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         row.get("arm") in ("R13-8-A-EAnchor", "R13-8-L-LocalECover", "R14-Detail-LocalECover") for row in history
     )
     paired_member_routing_run = joint_member_routing_run or anchored_member_routing_run
+    response_run = bool(provider_identity and provider_identity.get("thermal_state_response"))
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
                                       "R13-4-Full", "R13-4-Guide"}
@@ -1088,8 +1089,6 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         if masked_count < len(values):
             axis.plot(epochs, np.ma.masked_where(invalid, numeric), linestyle=linestyle,
                       marker=(marker if len(values) <= 100 else None), label=label, color=color)
-        elif len(values):
-            axis.set_ylim(1.0, 10.0)
         return masked_count
 
     names: set[str] = set()
@@ -1113,6 +1112,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         for name in group_names:
             color = colors[name]
             for source, series_label in (("train", "TRAIN"), ("validation", "HELD-OUT VALIDATION")):
+                response_weights = provider_identity.get("response_objective_weights", {}) if response_run else {}
+                if (source == "train" and name.startswith("response/")
+                        and response_weights.get(name.removeprefix("response/")) == 0):
+                    continue
                 points = [(int(row["epoch"]), value_at(row, name, source)) for row in history
                           if type(row.get("epoch")) is int and value_at(row, name, source) is not None]
                 if points:
@@ -1170,14 +1173,16 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         masked_count_total += plot_series(
             total_axis, [row["epoch"] for row in train_rows],
             [recorded_sum(row["train_losses"]) for row in train_rows],
-            label="TRAIN: recorded weighted sum", color="C0", marker=".")
+            label=("TRAIN: optimized total" if response_run else "TRAIN: recorded weighted sum"),
+            color="C0", marker=".")
     if validation_rows:
         masked_count_total += plot_series(
             total_axis, [row["epoch"] for row in validation_rows],
             [recorded_sum({"total": objective_at(row)["total"]})
              if "total" in objective_at(row) else recorded_sum(objective_at(row).get("terms"))
              for row in validation_rows],
-            label="VALIDATION: recorded total", color="C1", linestyle="--", marker="o")
+            label=("VALIDATION: native total" if response_run else "VALIDATION: recorded total"),
+            color="C1", linestyle="--", marker="o")
     else:
         pending = not any(isinstance(row.get("validation"), Mapping) and row["validation"] for row in history)
         total_axis.text(0.02, 0.10, "Validation: first review pending" if pending else
@@ -1191,7 +1196,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         if (matched and type(row.get("epoch")) is int
                 and (matched != set(row.get("train_losses", {})) or matched != set(objective.get("terms", {})))):
             comparable_rows.append((int(row["epoch"]), objective))
-    if comparable_rows:
+    if comparable_rows and not response_run:
         for key, label, color, style, marker in (
             ("training_matched_total", "TRAIN: shared-term subtotal", "C0", ":", "."),
             ("validation_matched_total", "VALIDATION: shared-term subtotal", "C1", ":", "o"),
@@ -1273,6 +1278,24 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             fontsize=8.9,
         )
     routing_axis.set_ylabel("Weighted loss contribution (dimensionless)")
+
+    # FIT delta diagnostics are unweighted equal-family/action means. They
+    # stay separate from the optimized terms, including when their coefficient
+    # is zero, and use endpoint predictions already produced by the provider.
+    diagnostic_names = sorted({name for row in history
+                               for name in row.get("train_diagnostics", {})})
+    if response_run and diagnostic_names:
+        routing_axis.clear()
+        diagnostic_labels = {"response/field_delta": "Field delta", "response/J_delta": "J delta",
+                             "response/P_delta": "P delta"}
+        for index, name in enumerate(diagnostic_names):
+            points = [(int(row["epoch"]), row["train_diagnostics"][name]) for row in history
+                      if type(row.get("epoch")) is int and name in row.get("train_diagnostics", {})]
+            masked_count_total += plot_series(
+                routing_axis, [point[0] for point in points], [point[1] for point in points],
+                label=f"FIT diagnostic: {diagnostic_labels.get(name, term_label(name))}", color=f"C{index % 10}")
+        routing_axis.set_xlabel("Completed epoch")
+        routing_axis.grid(alpha=0.25, which="both")
 
     selector_points = []
     for row in history:
@@ -1581,7 +1604,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                     for axis in visible_axes}
     # Concise labels keep definitions in the metadata sidecar. Work counters
     # remain in history/metadata rather than the default loss figure.
-    total_axis.set_title("Weighted loss totals (different reductions)")
+    total_axis.set_title("Optimized TRAIN and native validation totals" if response_run else
+                         "Weighted loss totals (different reductions)")
     total_axis.set_ylabel("Weighted loss")
     selector_axis.set_ylabel("Normalized MSE" if field_metric == "field_score" else "Selector metric")
     native_axis.set_title("Flow losses" if flow_names and thermal_names and len(native_names) > 5 else "Prediction losses")
@@ -1589,7 +1613,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         thermal_axis.set_title("Thermal losses")
     selector_axis.set_title((f"{joint_validation_label.capitalize()} field error" if joint_run else "Exposed validation field error") if field_metric == "field_score" else "Exposed validation selector")
     physics_axis.set_title("Physics and response losses")
-    routing_axis.set_title("Other objective losses")
+    routing_axis.set_title("FIT response diagnostics (unweighted)" if response_run and diagnostic_names else
+                           "Other objective losses")
     for axis in [native_axis, physics_axis, routing_axis] + ([thermal_axis] if flow_names and thermal_names and len(native_names) > 5 else []):
         axis.set_ylabel("Weighted loss")
         handles, labels = axis.get_legend_handles_labels()
@@ -1598,8 +1623,13 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             name = label.removeprefix("TRAIN: ").removeprefix("HELD-OUT VALIDATION: ")
             by_name.setdefault(name, handle)
         if by_name:
-            axis.legend(list(by_name.values()), list(by_name), ncol=2, fontsize=8, frameon=False,
-                        title="TRAIN: solid   VALIDATION: dashed", title_fontsize=8)
+            axis.legend(list(by_name.values()), list(by_name),
+                        ncol=(1 if axis is routing_axis and response_run and diagnostic_names else 2),
+                        fontsize=8, frameon=False,
+                        title=("Unweighted FIT diagnostics" if axis is routing_axis and response_run
+                               and diagnostic_names else "TRAIN: solid   VALIDATION: dashed"), title_fontsize=8)
+    if response_run and diagnostic_names:
+        routing_axis.set_ylabel("Unweighted scaled squared error")
     visible_axes = [axis for axis in visible_axes if data_present.get(axis, True)]
     for axis in list(figure.axes):
         if axis not in visible_axes:
@@ -1745,12 +1775,35 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                       loss_metadata and name in loss_metadata]
     if response_terms:
         metadata["panel_definitions"]["physics"] = (
-            "TRAIN includes the recorded paired endpoint and finite-response loss contributions; "
-            "the exposed native validation objective does not include response labels."
+            "TRAIN records weighted paired endpoint and finite-response loss contributions, including "
+            "zero for disabled response weights; exposed native validation has no response labels."
         )
         metadata["panel_definitions"]["routing"] = (
+            "Unweighted FIT response diagnostics use the same endpoint predictions and do not enter the "
+            "optimized total; no separately fitted routing penalty is present."
+            if diagnostic_names else
             "The reader and contextual organization receive gradients through native and response losses; "
             "no separately fitted routing penalty is present."
+        )
+    if response_run:
+        spec = provider_identity["thermal_state_response"]
+        coefficient = float(spec.get("finite_response_coefficient", 0.1))
+        default_weights = ({"endpoint": 0.25, "field_delta": 0.08, "J_delta": 0.01, "P_delta": 0.01}
+                           if coefficient == 0.1 else
+                           {"endpoint": 0.25, "field_delta": 0.8 * coefficient,
+                            "J_delta": 0.1 * coefficient, "P_delta": 0.1 * coefficient})
+        weights = dict(provider_identity.get("response_objective_weights", default_weights))
+        metadata["response_objective"] = {
+            "finite_response_coefficient": coefficient,
+            "component_weights": weights,
+            "training_total": "sum of recorded weighted native, endpoint and finite-response contributions",
+            "validation_total": "native validation terms only; excludes FIT endpoints and response labels",
+            "diagnostics": "unweighted equal-family/action FIT means, separate from optimized loss",
+        }
+        metadata["panel_definitions"]["weighted_loss_totals"] = (
+            "TRAIN is this arm's recorded optimized objective; VALIDATION is the common native objective "
+            "on the exposed panel. Their prediction paths and reductions differ; TRAIN totals from "
+            "different objective weights are not a shared model-quality metric."
         )
     if (provider_identity and provider_identity.get("thermal_state_response") and
             provider_identity.get("restricted_evaluation_execution") == "all_native"):
@@ -3709,6 +3762,14 @@ class TrainingEngine:
                     piece = term.numerator * (float(term.weight) / denominator)
                     objective = piece if objective is None else objective + piece
                     losses[name] += float(piece.detach())
+                diagnostic_values = getattr(provider, "auxiliary_diagnostic_values", None)
+                if callable(diagnostic_values):
+                    for name, value in diagnostic_values(terms, update_count=epoch_update_count).items():
+                        numeric = float(value)
+                        if not isinstance(name, str) or not name or not math.isfinite(numeric):
+                            raise ValueError("Auxiliary diagnostic names and values must be finite and nonempty.")
+                        key = f"__train_diagnostic__/{name}"
+                        work[key] = work.get(key, 0.0) + numeric
                 if objective is None or not bool(torch.isfinite(objective.detach())):
                     raise FloatingPointError("Empty or nonfinite auxiliary optimizer objective.")
                 objective.backward()
@@ -5228,6 +5289,9 @@ class TrainingEngine:
                             phase=phase, arm=arm, epoch=epoch, update_index=update_index,
                             **update_kwargs,
                         )
+                        diagnostic_prefix = "__train_diagnostic__/"
+                        diagnostics = {key[len(diagnostic_prefix):]: work.pop(key)
+                                       for key in list(work) if key.startswith(diagnostic_prefix)}
                         execution_metadata_reader = getattr(self, "take_last_update_execution_metadata", None)
                         execution_metadata = (
                             execution_metadata_reader() if callable(execution_metadata_reader) else None
@@ -5286,7 +5350,8 @@ class TrainingEngine:
                                 "update_index": update_index,
                                 "denominators": {name: float(value) for name, value in sorted(denominators.items())},
                             })
-                        update_row = {"losses": losses, "work": work, "case_count": len(update_cases),
+                        update_row = {"losses": losses, "work": work, "diagnostics": diagnostics,
+                                      "case_count": len(update_cases),
                                       "microbatch_count": successful_microbatch_count,
                                       "query_sampling_sha256": sampling_hash}
                         if oom_retry_attempts:
@@ -5344,6 +5409,16 @@ class TrainingEngine:
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                     "case_order_sha256": order_hash,
                 }
+                diagnostic_sums = _sum_mapping([item["diagnostics"] for item in update_rows])
+                if diagnostic_sums:
+                    # Updates without auxiliary exposure contribute zero: each
+                    # action's provider multiplier accounts for all updates.
+                    row["train_diagnostics"] = {
+                        name: value / len(update_rows) for name, value in diagnostic_sums.items()
+                    }
+                response_family_reader = getattr(provider, "response_epoch_family_ids", None)
+                if callable(response_family_reader):
+                    row["response_fit_family_ids"] = list(response_family_reader(epoch))
                 retry_attempts = sum(int(item.get("oom_retry_attempts", 0)) for item in update_rows)
                 if retry_attempts:
                     row["oom_retry_attempts"] = retry_attempts

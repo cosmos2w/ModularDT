@@ -18,6 +18,7 @@ def _capture_figures(monkeypatch, output: Path) -> list[dict[str, object]]:
         captured.append({
             "format": format,
             "yscales": [axis.get_yscale() for axis in figure.axes],
+            "ylimits": [axis.get_ylim() for axis in figure.axes],
             "titles": [axis.get_title() for axis in figure.axes],
             "labels": [[line.get_label() for line in axis.lines] for axis in figure.axes],
             "lines": [[line.get_ydata() for line in axis.lines] for axis in figure.axes],
@@ -415,3 +416,47 @@ def test_r16_response_and_reader_metadata_match_actual_objective(tmp_path, monke
     else:
         assert meta['training_objective_pairing']['full_loss_weight'] == .5
         assert 'joint95 restricted' in meta['prediction_path_comparison']
+
+
+@pytest.mark.parametrize('coefficient', [0., .1])
+def test_response_totals_and_unweighted_diagnostics_are_separate(tmp_path, monkeypatch, coefficient):
+    weights = {'endpoint': .25, 'field_delta': .08 if coefficient else 0.,
+               'J_delta': .01 if coefficient else 0., 'P_delta': .01 if coefficient else 0.}
+    losses = {'flow/u': 1., 'response/endpoint': .25,
+              'response/field_delta': 5. * weights['field_delta'],
+              'response/J_delta': 6. * weights['J_delta'],
+              'response/P_delta': 7. * weights['P_delta']}
+    diagnostics = {'response/field_delta': 5., 'response/J_delta': 6., 'response/P_delta': 7.}
+    history = [
+        {'epoch': 1, 'arm': 'R14-Detail-LocalECover', 'phase': 'joint',
+         'case_visits': 150, 'train_losses': losses, 'train_diagnostics': diagnostics},
+        {'epoch': 10, 'arm': 'R14-Detail-LocalECover', 'phase': 'joint',
+         'case_visits': 150, 'train_losses': losses, 'train_diagnostics': diagnostics,
+         'validation': {'field_score': .3, 'case_count': 89},
+         'validation_objective': {'terms': {'flow/u': .2}}},
+    ]
+    before = copy.deepcopy(history)
+    metadata = {name: {'panel': 'physics', 'label': name, 'weight': str(weights[name.split('/')[-1]])}
+                for name in losses if name.startswith('response/')}
+    identity = {'thermal_state_response': {'enabled': True, 'finite_response_coefficient': coefficient},
+                'response_objective_weights': weights, 'restricted_evaluation_execution': 'joint95'}
+    captured = _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history[:1], tmp_path, 'field_score', metadata, identity)
+    assert 'Validation: first review pending' in captured[0]['texts'][0]
+    captured.clear()
+    _render_loss_curves(history, tmp_path, 'field_score', metadata, identity)
+    figure = captured[0]
+    assert figure['labels'][0][:2] == ['TRAIN: optimized total', 'VALIDATION: native total']
+    assert np.allclose(figure['lines'][0][0], [sum(losses.values())] * 2)
+    assert np.allclose(figure['lines'][0][1], [.2])
+    diagnostic_panel = figure['titles'].index('FIT response diagnostics (unweighted)')
+    assert set(figure['labels'][diagnostic_panel]) == {
+        'FIT diagnostic: Field delta', 'FIT diagnostic: J delta', 'FIT diagnostic: P delta'}
+    objective_panel = figure['titles'].index('Physics and response losses')
+    assert figure['ylimits'][objective_panel][0] <= .25 <= figure['ylimits'][objective_panel][1]
+    assert all(r1 - r0 == 1 and c1 - c0 == 1 for r0, r1, c0, c1 in figure['cells'])
+    saved = json.loads((tmp_path / 'loss_curves_metadata.json').read_text())
+    assert saved['response_objective']['finite_response_coefficient'] == coefficient
+    assert saved['response_objective']['component_weights'] == weights
+    assert 'not a shared model-quality metric' in saved['panel_definitions']['weighted_loss_totals']
+    assert history == before

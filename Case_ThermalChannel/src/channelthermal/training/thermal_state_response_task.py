@@ -161,7 +161,27 @@ def fit_response_scales(families, state_scales, repeatability, functional_floors
     return result
 
 
-def response_loss_terms(endpoint_loss, field_losses, functional_losses, *, multiplier=1.0):
+def _response_coefficient(value):
+    """Validate the finite-response coefficient without changing legacy defaults."""
+    from numbers import Real
+
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value < 0:
+        raise ValueError('Finite-response coefficient must be finite and nonnegative.')
+    return float(value)
+
+
+def _response_objective_weights(coefficient):
+    # Keep historical constants exact: evaluating 0.1 * 0.8 instead would
+    # change their floating-point representation in existing training runs.
+    coefficient = _response_coefficient(coefficient)
+    if coefficient == .1:
+        return {'endpoint': .25, 'field_delta': .08, 'J_delta': .01, 'P_delta': .01}
+    return {'endpoint': .25, 'field_delta': .8 * coefficient,
+            'J_delta': .1 * coefficient, 'P_delta': .1 * coefficient}
+
+
+def response_loss_terms(endpoint_loss, field_losses, functional_losses, *, multiplier=1.0,
+                        finite_response_coefficient=.1):
     """Attach the common endpoint and finite-response weights to scalar losses.
 
     Inputs already average family/action and paired full/restricted views as
@@ -169,11 +189,15 @@ def response_loss_terms(endpoint_loss, field_losses, functional_losses, *, multi
     """
     if set(functional_losses) != {'J', 'P'}:
         raise ValueError('Both complete native functionals are required.')
+    weights = _response_objective_weights(finite_response_coefficient)
+    if finite_response_coefficient == 0:
+        field_losses = field_losses.detach()
+        functional_losses = {name: value.detach() for name, value in functional_losses.items()}
     return {
-        'response/endpoint': LossTerm(endpoint_loss, 1, .25 * multiplier),
-        'response/field_delta': LossTerm(field_losses, 1, .08 * multiplier),
-        'response/J_delta': LossTerm(functional_losses['J'], 1, .01 * multiplier),
-        'response/P_delta': LossTerm(functional_losses['P'], 1, .01 * multiplier),
+        'response/endpoint': LossTerm(endpoint_loss, 1, weights['endpoint'] * multiplier),
+        'response/field_delta': LossTerm(field_losses, 1, weights['field_delta'] * multiplier),
+        'response/J_delta': LossTerm(functional_losses['J'], 1, weights['J_delta'] * multiplier),
+        'response/P_delta': LossTerm(functional_losses['P'], 1, weights['P_delta'] * multiplier),
     }
 
 
@@ -342,11 +366,13 @@ def _equal_module_mean(error, mask):
     return per_module[active].mean()
 
 
-def predict_response_pair(provider, model, pair, scales, physical_delta, tau):
-    """Run full native endpoints and return differentiable common loss scalars.
+def predict_response_pair(provider, model, pair, scales, physical_delta, tau, *, response_grad=True):
+    """Run full native endpoints and return common loss scalars.
 
     Complete predicted J/P use each endpoint's own support; field deltas use
-    common support. The caller owns backward and may discard each action graph.
+    common support. When ``response_grad`` is false, response reductions are
+    detached diagnostics while endpoint losses keep their ordinary gradients.
+    The caller owns backward and may discard each action graph.
     """
     from .joint_member_routing_task import ThermalJointPairPredictions
     from ..native_functionals import native_design_functionals
@@ -374,36 +400,37 @@ def predict_response_pair(provider, model, pair, scales, physical_delta, tau):
         endpoint_losses.append(sum(float(provider.native_weights[n]) * v.mean()
             for branch, batch in ((base, base_batch), (edit, edit_batch))
             for n, v in provider._role_losses(branch, batch.targets).items()) / 2)
-        b, e = _field_components(base, base_batch), _field_components(edit, edit_batch)
-        weighted = []
-        for name in FIELD_ROLES:
-            bp, bt, bm = b[name]; ep, et, em = e[name]
-            if bp.shape != ep.shape or bt.shape != et.shape:
-                raise ValueError(f'Original response receiver shape changed for {name}.')
-            mask = bm & em
-            if not bool(mask.any()):
-                raise ValueError(f'No common physical response support for {name}.')
-            scale = float(scales[name]['scale'] if isinstance(scales[name], dict) else scales[name])
-            error = (ep - bp - (et - bt)) / scale
-            weighted.append(float(provider.native_weights[name]) * _equal_module_mean(error, mask))
-        field_losses.append(sum(weighted) / sum(float(provider.native_weights[n]) for n in FIELD_ROLES))
-        functions = []
-        for branch, batch, raw in ((base, base_batch, pair['raw_baseline']), (edit, edit_batch, pair['raw_edited'])):
-            material = branch.native_main['pred_internal_temperature'][..., 0]
-            pressure = branch.native_main['pred_field'][..., 2]
-            prep = branch.native_prepared
-            matmask = (prep.stencils['material'].valid.reshape(material.shape) & prep.source_present[..., None].bool()
-                       & torch.isfinite(batch.targets.material_targets))
-            fluidmask = (batch.targets.point_weights.bool() & prep.stencils['fluid'].valid.reshape(pressure.shape)
-                         & torch.isfinite(batch.targets.field_targets[..., 2]))
-            functions.append(native_design_functionals(material, matmask, pressure, fluidmask,
-                batch.receivers.fluid_xy[..., 0], raw['config']['domain']['lx'], tau))
-        losses = []
-        for index, name in enumerate(('J', 'P')):
-            scale = float(scales[name]['scale'] if isinstance(scales[name], dict) else scales[name])
-            losses.append(((functions[1][index] - functions[0][index] - physical_delta[name]) / scale).square())
-        j_losses.append(losses[0]); p_losses.append(losses[1])
-        observations.append({'baseline': b, 'edited': e, 'functionals': functions})
+        with torch.set_grad_enabled(torch.is_grad_enabled() and response_grad):
+            b, e = _field_components(base, base_batch), _field_components(edit, edit_batch)
+            weighted = []
+            for name in FIELD_ROLES:
+                bp, bt, bm = b[name]; ep, et, em = e[name]
+                if bp.shape != ep.shape or bt.shape != et.shape:
+                    raise ValueError(f'Original response receiver shape changed for {name}.')
+                mask = bm & em
+                if not bool(mask.any()):
+                    raise ValueError(f'No common physical response support for {name}.')
+                scale = float(scales[name]['scale'] if isinstance(scales[name], dict) else scales[name])
+                error = (ep - bp - (et - bt)) / scale
+                weighted.append(float(provider.native_weights[name]) * _equal_module_mean(error, mask))
+            field_losses.append(sum(weighted) / sum(float(provider.native_weights[n]) for n in FIELD_ROLES))
+            functions = []
+            for branch, batch, raw in ((base, base_batch, pair['raw_baseline']), (edit, edit_batch, pair['raw_edited'])):
+                material = branch.native_main['pred_internal_temperature'][..., 0]
+                pressure = branch.native_main['pred_field'][..., 2]
+                prep = branch.native_prepared
+                matmask = (prep.stencils['material'].valid.reshape(material.shape) & prep.source_present[..., None].bool()
+                           & torch.isfinite(batch.targets.material_targets))
+                fluidmask = (batch.targets.point_weights.bool() & prep.stencils['fluid'].valid.reshape(pressure.shape)
+                             & torch.isfinite(batch.targets.field_targets[..., 2]))
+                functions.append(native_design_functionals(material, matmask, pressure, fluidmask,
+                    batch.receivers.fluid_xy[..., 0], raw['config']['domain']['lx'], tau))
+            losses = []
+            for index, name in enumerate(('J', 'P')):
+                scale = float(scales[name]['scale'] if isinstance(scales[name], dict) else scales[name])
+                losses.append(((functions[1][index] - functions[0][index] - physical_delta[name]) / scale).square())
+            j_losses.append(losses[0]); p_losses.append(losses[1])
+            observations.append({'baseline': b, 'edited': e, 'functionals': functions})
     mean = lambda items: sum(items) / len(items)
     return {'endpoint': mean(endpoint_losses), 'field_delta': mean(field_losses),
             'J_delta': mean(j_losses), 'P_delta': mean(p_losses),
@@ -490,6 +517,9 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
 
     def configure_state_response(self, spec, *, response_scales=None):
         self.response_spec = dict(spec)
+        self.response_finite_response_coefficient = _response_coefficient(spec.get('finite_response_coefficient', .1))
+        self._response_epoch = None
+        self._response_epoch_families = []
         self.response_corpus = ThermalResponseCorpus(spec['recipe_path'], spec['ledger_path'])
         root = Path(spec['recipe_path']).parent.parent
         fit_labels = root / 'evidence/matched200/epoch200/fit/response_evaluation.json'
@@ -512,24 +542,43 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
             for action in ACTIONS:
                 pair = response_pair(self, self.response_corpus, family, action, role='fit')
                 losses = predict_response_pair(self, model, pair, self.response_scales,
-                    self.response_labels[(family, action)], self.response_spec['tau'])
+                    self.response_labels[(family, action)], self.response_spec['tau'],
+                    response_grad=self.response_finite_response_coefficient != 0)
                 terms = response_loss_terms(losses['endpoint'], losses['field_delta'],
-                    {'J': losses['J_delta'], 'P': losses['P_delta']}, multiplier=update_count / 16)
+                    {'J': losses['J_delta'], 'P': losses['P_delta']}, multiplier=update_count / 16,
+                    finite_response_coefficient=self.response_finite_response_coefficient)
                 work = dict(losses['work'])
                 work.update(response_actions=1, response_families=int(action == ACTIONS[0]))
+                if self._response_epoch != epoch:
+                    self._response_epoch, self._response_epoch_families = epoch, []
+                if action == ACTIONS[0] and family not in self._response_epoch_families:
+                    self._response_epoch_families.append(family)
                 yield terms, work
                 del pair, losses, terms, work
 
+    def response_epoch_family_ids(self, epoch):
+        """Return the families actually processed so far in the requested epoch."""
+        return tuple(self._response_epoch_families) if self._response_epoch == epoch else ()
+
+    def auxiliary_diagnostic_values(self, terms, *, update_count):
+        """Per-action diagnostics, normalized for the trainer's update mean."""
+        return {name: float(terms[name].numerator.detach()) * (update_count / 16)
+                for name in self.auxiliary_loss_names[1:]}
+
     def loss_metadata(self):
         result = {}
-        for name, label, weight in (
-                ('response/endpoint', 'paired endpoint state', '0.25'),
-                ('response/field_delta', 'aligned field response', '0.08'),
-                ('response/J_delta', 'material smooth-maximum response', '0.01'),
-                ('response/P_delta', 'pressure-drop response', '0.01')):
+        weights = _response_objective_weights(self.response_finite_response_coefficient)
+        for name, label, key in (
+                ('response/endpoint', 'paired endpoint state', 'endpoint'),
+                ('response/field_delta', 'aligned field response', 'field_delta'),
+                ('response/J_delta', 'material smooth-maximum response', 'J_delta'),
+                ('response/P_delta', 'pressure-drop response', 'P_delta')):
+            diagnostic_only = key != 'endpoint' and self.response_finite_response_coefficient == 0
+            if diagnostic_only:
+                label += ' (diagnostic only)'
             result[name] = {'panel': 'physics', 'label': label, 'unit': 'scaled squared error',
                             'formula': 'equal FIT family and action mean; paired native reads where applicable',
-                            'weight': weight}
+                            'weight': str(weights[key])}
         return result
 
     def identity_payload(self):
@@ -544,6 +593,8 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
         result['restricted_evaluation_execution'] = 'all_native' if all_native else 'joint95'
         result['joint_member_coverage'] = None if all_native else 0.95
         result['thermal_state_response'] = dict(self.response_spec)
+        if 'finite_response_coefficient' in self.response_spec:
+            result['response_objective_weights'] = _response_objective_weights(self.response_finite_response_coefficient)
         result['response_scales'] = self.response_scales
         result['response_fit_scope'] = 'original FIT48, all four actions; TRAIN-only state scales'
         return result
