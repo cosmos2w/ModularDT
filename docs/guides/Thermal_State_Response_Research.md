@@ -21,3 +21,19 @@ python tools/thermal_state_response_evaluate.py --recipe configs/research/therma
 Use the corresponding recipe and a distinct output directory for H1 and Q0. The response evaluator reports endpoint errors, common-support field-delta errors, complete functional changes, resolved sign/ordering counts and near-null errors with equal-family reductions. Optional `--families` selects a fixed explicit panel; `--save-fields` requires such a panel of at most four families. Work counts, measured total runtime, directory support and physical causality remain separate quantities.
 
 The authorized segmented comparison ends at epoch 1000 for each arm. Full-TRAIN600 experiments use separately named fresh lineages and TRAIN600-fitted normalization; segmented weights are not promoted. A formal recipe may retain a 2500-epoch schedule while execution stops at epoch 100. Continuing that lineage requires the user's later explicit instruction and the saved recipe/checkpoint; successful startup is not completion or evidence of design reliability. See the [run artifacts](Run_Artifacts_and_Monitoring.md), [Thermal protocol](Thermal_Model_Development_Protocol.md), [query tiling](Query_Tiling.md) and [physical response](Case_Response_Evaluation.md) guides for existing safeguards and interpretation.
+
+The selected full-population comparison uses [H0](../../configs/research/thermal_state_response_h0_train600.json) and [Q0](../../configs/research/thermal_state_response_q0_train600.json). These recipes declare fresh common initialization, TRAIN600 normalization and a 2500-epoch optimizer horizon. Their first execution stop is 100 epochs. Use distinct new output directories and the configured formal run aliases; do not load segmented weights into them.
+
+```bash
+python tools/relation_anchored_train.py fit --recipe configs/research/thermal_state_response_h0_train600.json --device cuda:0 --output /data2/wanglz/ModularDT/r16_1_thermal_20261104/train600/thermal_state_response_h0_train600_s0 --stop-after 100
+python tools/relation_anchored_train.py fit --recipe configs/research/thermal_state_response_q0_train600.json --device cuda:0 --output /data2/wanglz/ModularDT/r16_1_thermal_20261104/train600/thermal_state_response_q0_train600_s0 --stop-after 100
+python tools/thermal_state_response_native_evaluate.py --recipe configs/research/thermal_state_response_h0_train600.json --run /data2/wanglz/ModularDT/r16_1_thermal_20261104/train600/thermal_state_response_h0_train600_s0 --checkpoint latest --device cuda:0 --output /data2/wanglz/ModularDT/r16_1_thermal_20261104/evidence/formal_h0_native.json
+```
+
+`thermal_state_response_native_evaluate.py` uses complete native fluid, surface and material receiver populations and reports the maintained nine observables with equal-case means, p90, worst original IDs and module-count strata. Its optional `--export-cases` stores at most four explicitly named cases. TRAIN diagnostics require an explicit `--cases` panel and remain separate from canonical exposed VAL89.
+
+After the user's explicit continuation decision, the following command resumes the same formal lineage toward epoch 2500, using its saved objective scales, optimizer, RNG and sampling state. No `--extend-horizon` is needed because 2500 is already the saved recipe horizon. Substitute the Q0 recipe and run path for that separately selected control.
+
+```bash
+python tools/relation_anchored_train.py fit --recipe configs/research/thermal_state_response_h0_train600.json --device cuda:0 --output /data2/wanglz/ModularDT/r16_1_thermal_20261104/train600/thermal_state_response_h0_train600_s0 --stop-after 2500 --resume latest
+```

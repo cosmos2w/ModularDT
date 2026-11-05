@@ -866,7 +866,8 @@ def _diagnostic_age_branch_amendment(
 
 
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str,
-                        loss_metadata: Mapping[str, Mapping[str, str]] | None = None) -> None:
+                        loss_metadata: Mapping[str, Mapping[str, str]] | None = None,
+                        provider_identity: Mapping[str, Any] | None = None) -> None:
     """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -1740,6 +1741,37 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "train_work": "Exact core_decode_primary_query M/E selected-value and cheap-score row counters. Symlog display preserves zero selected-row evidence; row counts are not measured latency or executor savings.",
         })
         metadata["work_counter_definitions"].update(member_routing_work_definitions)
+    response_terms = [name for name in all_names if name.startswith("response/") and
+                      loss_metadata and name in loss_metadata]
+    if response_terms:
+        metadata["panel_definitions"]["physics"] = (
+            "TRAIN includes the recorded paired endpoint and finite-response loss contributions; "
+            "the exposed native validation objective does not include response labels."
+        )
+        metadata["panel_definitions"]["routing"] = (
+            "The reader and contextual organization receive gradients through native and response losses; "
+            "no separately fitted routing penalty is present."
+        )
+    if (provider_identity and provider_identity.get("thermal_state_response") and
+            provider_identity.get("restricted_evaluation_execution") == "all_native"):
+        for name in member_routing_native_terms & set(all_names):
+            metadata["term_definitions"][name]["formula"] = (
+                "TRAIN and validation use the all-native reader and the run's TRAIN-fitted normalizer; "
+                "TRAIN macro-update means and pooled validation reductions differ."
+            )
+        metadata["panel_definitions"].update({
+            "shared_name_loss_summary": "TRAIN and validation use the all-native reader; their reductions differ.",
+            "native_prediction": "Native flow, temperature, and q-proxy losses use one all-native read in TRAIN and validation.",
+            "train_work": "Recorded all-native work counters are execution counts, not latency or executor savings.",
+        })
+        metadata["training_objective_pairing"] = {
+            "training_loss": "one all-native native field read",
+            "validation_loss": "one all-native native field read",
+        }
+        metadata["prediction_path_comparison"] = (
+            "TRAIN and validation use the all-native reader; TRAIN averages macro-update means and validation pools valid elements."
+        )
+        metadata.pop("paired_work_series", None)
     _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"
@@ -5691,6 +5723,8 @@ class TrainingEngine:
                             self.selection.field_metric,
                             **({"loss_metadata": provider.loss_metadata()}
                                if callable(getattr(provider, "loss_metadata", None)) else {}),
+                            **({"provider_identity": provider_identity}
+                               if provider_identity.get("thermal_state_response") else {}),
                         )
                     finally:
                         restore_rng_state(curve_rng)

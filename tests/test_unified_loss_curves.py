@@ -391,3 +391,27 @@ def test_r13_5_full_train_history_uses_canonical_val89_label(tmp_path, monkeypat
     assert any("Exposed val89 field error" in title for title in captured[0]["titles"])
     metadata = json.loads((tmp_path / "loss_curves_metadata.json").read_text())
     assert metadata["validation_scope"] == "exposed canonical VAL89 joint inference; not an independent TEST result"
+
+
+@pytest.mark.parametrize('read_mode', ['joint95', 'all_native'])
+def test_r16_response_and_reader_metadata_match_actual_objective(tmp_path, monkeypatch, read_mode):
+    history = [{'epoch': 1, 'arm': 'R14-Detail-LocalECover', 'phase': 'joint', 'case_visits': 150,
+                'train_losses': {'flow/u': .2, 'response/endpoint': .1, 'response/J_delta': .01},
+                'validation': {'field_score': .3, 'case_count': 89}}]
+    before = copy.deepcopy(history)
+    loss_metadata = {name: {'panel': 'physics', 'label': name, 'unit': 'scaled loss'}
+                     for name in ('response/endpoint', 'response/J_delta')}
+    identity = {'thermal_state_response': {'enabled': True}, 'restricted_evaluation_execution': read_mode}
+    _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history, tmp_path, 'field_score', loss_metadata, identity)
+    meta = json.loads((tmp_path / 'loss_curves_metadata.json').read_text())
+    assert 'finite-response loss' in meta['panel_definitions']['physics']
+    assert 'response losses' in meta['panel_definitions']['routing']
+    assert history == before
+    if read_mode == 'all_native':
+        assert 'one all-native' in meta['training_objective_pairing']['training_loss']
+        assert 'all-native' in meta['term_definitions']['flow/u']['formula']
+        assert 'paired_work_series' not in meta
+    else:
+        assert meta['training_objective_pairing']['full_loss_weight'] == .5
+        assert 'joint95 restricted' in meta['prediction_path_comparison']
