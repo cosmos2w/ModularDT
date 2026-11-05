@@ -13,6 +13,46 @@ cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cli)
 
 
+@pytest.mark.parametrize("device,fraction", [("cpu", ".44"), ("cuda:0", "0"),
+                                            ("cuda:0", "1.1"), ("cuda:0", "nan")])
+def test_cuda_memory_limit_rejects_invalid_device_or_fraction(monkeypatch, device, fraction):
+    def unexpected(*args, **kwargs):
+        pytest.fail("Invalid allocator arguments must not initialize CUDA or build a model")
+
+    monkeypatch.setattr(cli.torch.cuda, "set_per_process_memory_fraction", unexpected)
+    monkeypatch.setattr(cli, "build", unexpected)
+    with pytest.raises(SystemExit) as error:
+        cli.main(["inspect", "--recipe", "unused.json", "--device", device,
+                  "--cuda-memory-fraction", fraction])
+    assert error.value.code == 2
+
+
+def test_cuda_memory_limit_preserves_science_and_targets_selected_device(monkeypatch):
+    recipe = {"dataset": {"name": "thermal"}, "member_routing": {"arm": "joint"},
+              "training": {"microbatch_cases": 24, "primary_queries": 1024}}
+    monkeypatch.setattr(Path, "read_text", lambda self: json.dumps(recipe))
+    events = []
+    monkeypatch.setattr(cli.torch.cuda, "set_per_process_memory_fraction",
+                        lambda fraction, *, device: events.append((fraction, device)))
+
+    def build(actual_recipe, *, device):
+        assert events == [(.44, "cuda:1")]
+        assert actual_recipe == recipe and device == "cuda:1"
+        return object(), object()
+
+    class Engine:
+        def fit(self, model, provider, output, **kwargs):
+            assert kwargs["identity"]["recipe"] == recipe
+            assert kwargs["resume_checkpoint"] == "latest" and kwargs["stop_after"] == 1000
+            return {"completed_epoch": 1000}
+
+    monkeypatch.setattr(cli, "build", build)
+    monkeypatch.setattr(cli, "engine_for", lambda *args, **kwargs: Engine())
+    assert cli.main(["fit", "--recipe", "same.json", "--device", "cuda:1",
+                     "--output", "same", "--resume", "latest", "--stop-after", "1000",
+                     "--cuda-memory-fraction", ".44"]) == 0
+
+
 def wind_recipe():
     return {"dataset": "wind", "seed": 42, "architecture": "relation_anchored",
             "schema": "wind_relation_anchored_v1", "microbatch_size": 8,

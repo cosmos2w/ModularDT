@@ -5319,8 +5319,13 @@ class TrainingEngine:
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
                     training_memory.update({
+                        "end_allocated_bytes": torch.cuda.memory_allocated(self.device),
+                        "end_reserved_bytes": torch.cuda.memory_reserved(self.device),
                         "peak_allocated_bytes": torch.cuda.max_memory_allocated(self.device),
                         "peak_reserved_bytes": torch.cuda.max_memory_reserved(self.device),
+                        "allocator_backend": torch.cuda.get_allocator_backend(),
+                        "allocator_config": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
+                        "allocator_memory_fraction": torch.cuda.get_per_process_memory_fraction(self.device),
                         "scope": "complete epoch including data transfer, forward, backward and optimizer; excludes monitoring",
                     })
                 train_seconds = time.perf_counter() - epoch_started

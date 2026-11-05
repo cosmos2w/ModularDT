@@ -98,6 +98,8 @@ def main(argv=None):
     parser.add_argument("--extend-horizon", action="store_true",
                         help="Explicit same-run extension; retain saved recipe and constant optimizer schedule")
     parser.add_argument("--checkpoint", default="latest")
+    parser.add_argument("--cuda-memory-fraction", type=float,
+                        help="Optional process-local CUDA allocator limit; does not change training populations")
     args = parser.parse_args(argv)
     if args.extend_horizon and (args.command != "fit" or not args.resume or args.stop_after is None):
         parser.error("--extend-horizon requires fit, --resume and --stop-after")
@@ -105,6 +107,10 @@ def main(argv=None):
         parser.error("fit requires --output and --stop-after")
     if args.command == "evaluate" and args.output is None:
         parser.error("evaluate requires --output")
+    if args.cuda_memory_fraction is not None:
+        if not 0 < args.cuda_memory_fraction <= 1 or torch.device(args.device).type != "cuda":
+            parser.error("--cuda-memory-fraction requires a CUDA device and a fraction in (0, 1]")
+        torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device=args.device)
     recipe = json.loads(args.recipe.read_text())
     source_payload = None
     if (recipe.get("thermal_state_response", {}).get("enabled")
