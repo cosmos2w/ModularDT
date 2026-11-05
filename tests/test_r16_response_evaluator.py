@@ -52,6 +52,61 @@ def test_field_summary_weights_families_equally():
     assert result['t']['response']['family_worst_id'] == 'b'
 
 
+def test_field_effect_ratio_uses_equal_family_averages_and_zero_coverage():
+    def row(family, error, effect):
+        return {'case_id': family, 'fields': {'t': {k: {'rmse': error, 'reference_rms': effect}
+                                                    for k in ('baseline', 'edited', 'response')}}}
+    result = evaluator.summarize_fields([row('a', 1, 0), row('a', 3, 2), row('b', 10, 4)])['t']['response']
+    assert result['equal_family_mean_rmse'] == 6
+    assert result['equal_family_mean_reference_rms'] == 2.5
+    assert result['equal_family_rmse_over_reference_rms'] == pytest.approx(2.4)
+    assert result['exact_zero_reference_actions'] == 1
+    assert result['reference_action_count'] == 3
+    null = evaluator.summarize_fields([row('a', 1, 0)])['t']['response']
+    assert null['equal_family_rmse_over_reference_rms'] is None
+
+
+def test_saved_action_stratifier_preserves_views_and_primary_exposure():
+    spec = importlib.util.spec_from_file_location('r16_stratifier', ROOT / 'tools/thermal_response_stratify.py')
+    stratifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stratifier)
+    def row(family, action, delta, effect):
+        metric = {'rmse': 1., 'reference_rms': effect}
+        return {'case_id': family, 'action': action,
+                'strata': {'represented_source_delta': delta, 'amplitude': .0675, 'module_count': 2},
+                'fields': {'t': {name: metric for name in ('baseline', 'edited', 'response')}},
+                'delta': {name: {'model': 1., 'physical': effect} for name in ('J', 'P')}}
+    rows = [row('seen', 'single_plus', 0., 0.), row('unseen', 'joint_minus', .1, 2.)]
+    result = stratifier.stratify({'role': 'response_holdout', 'checkpoint': 'saved', 'epoch': 1,
+                                 'functional_floors': {'J': .01, 'P': .01},
+                                 'views': {'restricted': {'actions': rows}, 'full': {'actions': rows}}}, ['seen'])
+    assert set(result['views']) == {'restricted', 'full'}
+    groups = result['views']['restricted']['strata']
+    assert groups['baseline_exposure']['primary_seen']['family_ids'] == ['seen']
+    assert groups['baseline_exposure']['primary_unseen']['family_ids'] == ['unseen']
+    assert groups['represented_source_change']['unchanged']['action_count'] == 1
+    assert groups['action_type']['joint']['fields']['t']['response']['equal_family_rmse_over_reference_rms'] == .5
+    assert groups['action_type']['single']['fields']['t']['response']['equal_family_rmse_over_reference_rms'] is None
+
+
+@pytest.mark.parametrize('size,expected', [(150, 'primary_unseen'), (600, 'primary_seen')])
+def test_exposure_uses_supplied_primary_membership(size, expected):
+    spec = importlib.util.spec_from_file_location('r16_stratifier_scope', ROOT / 'tools/thermal_response_stratify.py')
+    stratifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stratifier)
+    primary = [f'{i:04d}' for i in range(size)]
+    metric = {'rmse': 1., 'reference_rms': 1.}
+    row = {'case_id': '0500', 'action': 'single_plus',
+           'strata': {'represented_source_delta': 0., 'amplitude': .0675, 'module_count': 2},
+           'fields': {'t': {name: metric for name in ('baseline', 'edited', 'response')}},
+           'delta': {name: {'model': 1., 'physical': 1.} for name in ('J', 'P')}}
+    evaluation = {'role': 'response_holdout', 'checkpoint': 'saved', 'epoch': 1,
+                  'functional_floors': {'J': .01, 'P': .01}, 'views': {'restricted': {'actions': [row]}}}
+    result = stratifier.stratify(evaluation, primary)
+    assert result['primary_membership_count'] == size
+    assert result['views']['restricted']['strata']['baseline_exposure'][expected]['family_ids'] == ['0500']
+
+
 def test_restore_requires_both_exact_identities_before_loading(monkeypatch, tmp_path):
     class Model:
         loaded = False

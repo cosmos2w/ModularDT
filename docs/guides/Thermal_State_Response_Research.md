@@ -36,8 +36,30 @@ python tools/thermal_state_response_native_evaluate.py --recipe configs/research
 
 `thermal_state_response_native_evaluate.py` uses complete native fluid, surface and material receiver populations and reports the maintained nine observables with equal-case means, p90, worst original IDs and module-count strata. Its optional `--export-cases` stores at most four explicitly named cases. TRAIN diagnostics require an explicit `--cases` panel and remain separate from canonical exposed VAL89.
 
-After the user's explicit continuation decision, the following command resumes the same formal lineage toward epoch 2500, using its saved objective scales, optimizer, RNG and sampling state. No `--extend-horizon` is needed because 2500 is already the saved recipe horizon. Substitute the Q0 recipe and run path for that separately selected control.
+After the user's explicit continuation decision, the following command resumes the same H0 formal lineage toward epoch 2500, using its saved objective scales, optimizer, RNG and sampling state. No `--extend-horizon` is needed because 2500 is already the saved recipe horizon. The currently authorized H0 stop is 1000 and Q0 is closed; this longer command is a later-decision handoff.
 
 ```bash
 python tools/relation_anchored_train.py fit --recipe configs/research/thermal_state_response_h0_train600.json --device cuda:0 --output /data2/wanglz/ModularDT/r16_1_thermal_20261104/train600/thermal_state_response_h0_train600_s0 --stop-after 2500 --resume latest
 ```
+
+## Prescribed raster-area input comparison
+
+The follow-up retains the existing H0 TRAIN600 lineage as the baseline, with an explicitly authorized execution stop at 1000 total epochs inside its saved 2500-epoch schedule. Q0 is closed at its completed 100-epoch endpoint. Neither decision changes the saved recipes or promotes segmented weights.
+
+The [unchanged control](../../configs/research/thermal_state_response_area_control_train150.json) and [raster-area input](../../configs/research/thermal_state_response_raster_area_train150.json) are explicit forks of the same segmented H0 epoch-1000 checkpoint. Each adds 250 epochs, continuing absolute case/query and FIT-family sampling at epochs 1001–1250. The initialization section retains the original scratch origin; the separate `checkpoint_fork` declaration records the actual attachment. They are not fresh initializations and do not mutate the source lineage.
+
+The opt-in tenth M feature is owned raster cell area divided by continuous disk area. Source-precision prescribed configuration supplies cell-center geometry, original member ordering and overlap ownership; no solved field or target mask supplies the input. Existing nine M inputs, physical heating and continuous input measures retain their definitions. The descriptor is discrete and does not supply a physical shape derivative. There are still only two independent edit directions per family and no M1 response labels.
+
+The added feature occupies column 9 before positional features in the first M projection. Fork initialization inserts a zero weight column and zero columns in its AdamW first/second moments while preserving every common parameter, moment and the enclosing parameter's existing optimizer clock. Normalization, objective denominators, provider/RNG state and complete histories are inherited. Both children use the same extended constant learning-rate law; child checkpoint selection starts from child validations, with parent metrics retained as history. Exact same-run resume checks remain unchanged.
+
+```bash
+python tools/thermal_state_response_fork.py --recipe configs/research/thermal_state_response_area_control_train150.json --output /data2/wanglz/ModularDT/r16_1_thermal_20261104/segmented/h0_area_control_fork
+python tools/thermal_state_response_fork.py --recipe configs/research/thermal_state_response_raster_area_train150.json --output /data2/wanglz/ModularDT/r16_1_thermal_20261104/segmented/h0_raster_area_fork
+python tools/relation_anchored_train.py fit --recipe configs/research/thermal_state_response_raster_area_train150.json --device cuda:0 --output /data2/wanglz/ModularDT/r16_1_thermal_20261104/segmented/h0_raster_area_fork --resume latest --stop-after 1250
+```
+
+The fork command initializes an empty output directory and executes no training epochs. Use the corresponding control recipe/run for control fitting. Bind an available physical GPU explicitly as described above. The 1250 stop includes 1000 inherited epochs and 250 new epochs per child, or 500 new epochs in aggregate. Additional qualification epochs must be the beginning of these same unchanged trajectories, not extra fits.
+
+Field-response evaluation now retains physical reference RMS on the exact common mask and its error ratio, keeping absolute errors for exact-zero effects. `thermal_response_stratify.py` consumes saved action evaluations and the run identity; its `primary_seen`/`primary_unseen` groups refer to the supplied primary membership, so full TRAIN600 must not be mislabeled TRAIN150. It retains all actions, P95/full reads, endpoint/delta errors, scalar resolved signs/orderings, near-null errors and action/amplitude/module/source strata. A favorable FIT result alone cannot justify the conditional fresh full-TRAIN600 amended 100-epoch launch; use the held-out response and fidelity tradeoff.
+
+The [conditional amended formal recipe](../../configs/research/thermal_state_response_raster_area_train600.json) starts fresh and executes through epoch 100 only if that tradeoff earns the authorized launch. The builder constructs seed-matched fresh nine-feature parameters and inserts the zero input column; no trained checkpoint supplies those weights. Its TRAIN600 normalizer, heat and response scales match the ordinary fresh H0 procedure, with the same objective and FIT48 exposure. The separate H1 pressure-focused reassessment remains evaluation-only until its formal proposal is decided.

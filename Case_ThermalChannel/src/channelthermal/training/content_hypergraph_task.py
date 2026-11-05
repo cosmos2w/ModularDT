@@ -1193,6 +1193,7 @@ class ThermalContentHypergraphTask:
             if ids:
                 loaded.extend(_read_selected_cases(
                     self.data_path, ids, split=split, normalizer=normalizer, include_grid=True,
+                    include_raster_geometry=getattr(self.adapter.core, "module_input_dim", None) == 10,
                 ))
         order = {str(case_id): index for index, case_id in enumerate(case_ids)}
         loaded.sort(key=lambda case: order[str(case["case_id"])])

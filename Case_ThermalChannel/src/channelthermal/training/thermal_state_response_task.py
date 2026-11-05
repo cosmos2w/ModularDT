@@ -225,6 +225,11 @@ def _native_endpoint_batch(provider, original, raw, label, record=None):
         raise ValueError('Physical endpoints must preserve original module slots.')
     case['case_id'] = f'{family}:{label}'
     case['structure']['module_centers'][:count] = np.asarray(raw['config']['layout']['centers'], np.float32)
+    if 'raster_module_centers' in case['structure']:
+        from ..data.datasets import prescribed_raster_geometry
+        centers64, raster_geometry = prescribed_raster_geometry(raw['config'], case['structure']['module_present'])
+        case['structure']['raster_module_centers'] = centers64
+        case['structure']['raster_geometry'] = raster_geometry
     case['structure']['heat_powers'][:count] = np.asarray(raw['config']['layout']['heat_powers'], np.float32)
     case['steady_field'] = raw['field'].copy()
     case['module_mask'] = (~raw['fluid_mask']).astype(np.uint8)
@@ -561,7 +566,8 @@ def build_thermal_state_response_task(recipe, *, arm=ARM_DETAIL, device='cpu', r
     if len(val_ids) != 89:
         raise ValueError('Expected the canonical exposed VAL89 population.')
     normalizer = H5Normalizer({k: np.asarray(v, dtype=np.float32) for k, v in model.normalization_stats.items()})
-    provider.validation_cases = _read_selected_cases(provider.data_path, val_ids, split='test', normalizer=normalizer, include_grid=False)
+    provider.validation_cases = _read_selected_cases(provider.data_path, val_ids, split='test', normalizer=normalizer, include_grid=False,
+                                                    include_raster_geometry=model.core.module_input_dim == 10)
     provider.validation_case_ids = val_ids
     provider._validation_index_by_id = {value: index for index, value in enumerate(val_ids)}
     provider.validation_scope = 'canonical89_exposed_original_test_excluding_0273'

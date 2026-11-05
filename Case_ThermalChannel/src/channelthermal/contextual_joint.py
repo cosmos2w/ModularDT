@@ -29,6 +29,9 @@ class ThermalContextualJointAdapter(ThermalContentHypergraphAdapterV2):
         if heat_scale <= 0:
             raise ValueError("Prescribed heat scale must be positive and TRAIN-derived.")
         self.core = core if core is not None else ContextualOrganizationJointCore.from_config(dict(core_config))
+        if core is None and self.core.module_input_dim == 10:
+            with torch.no_grad():
+                self.core.module_encoder[0].weight[:, 9].zero_()
         self.nx, self.ny = int(nx), int(ny)
         self.environment_nx, self.environment_ny = int(environment_nx), int(environment_ny)
         self.normalization_stats = _stats_json(normalization_stats)
@@ -85,8 +88,28 @@ class ThermalContextualJointAdapter(ThermalContentHypergraphAdapterV2):
             value = torch.as_tensor(structure.get(name, 0.0), device=heat.device, dtype=heat.dtype)
             boundary.append(value.reshape(1).expand(heat.shape[0]).reshape(-1, 1) if value.numel() == 1
                             else value.reshape(heat.shape[0], 1))
+        module_features = torch.cat((scene.module_features, (heat / self.heat_scale)[..., None]), -1)
+        if self.core.module_input_dim == 10:
+            from .native_observations import prescribed_raster_area_ratio
+            if "raster_module_centers" not in structure or "raster_geometry" not in structure:
+                raise ValueError("The raster-area capability requires prescribed source-precision geometry.")
+            centers = torch.as_tensor(structure["raster_module_centers"], device=heat.device)
+            geometry = torch.as_tensor(structure["raster_geometry"], device=heat.device)
+            material = torch.as_tensor(structure["material_params"], device=heat.device,
+                                       dtype=scene.module_features.dtype)
+            if material.ndim == 1:
+                material = material[None].expand(heat.shape[0], -1)
+            if (centers.shape != scene.module_coordinates.shape
+                    or not torch.equal(centers.to(scene.module_coordinates)[scene.module_mask],
+                                       scene.module_coordinates[scene.module_mask])
+                    or geometry.shape != (heat.shape[0], 5)
+                    or not torch.equal(geometry[:, :2].to(scene.coordinate_scale), scene.coordinate_scale)
+                    or not torch.equal(geometry[:, 2].to(scene.module_features), material[:, 5])):
+                raise ValueError("Prescribed raster geometry differs from the current original-member scene.")
+            ratio = prescribed_raster_area_ratio(centers, scene.module_mask, geometry, nx=self.nx, ny=self.ny)
+            module_features = torch.cat((module_features, ratio.to(module_features)[..., None]), -1)
         return replace(scene,
-            module_features=torch.cat((scene.module_features, (heat / self.heat_scale)[..., None]), -1),
+            module_features=module_features,
             environment_features=torch.cat((raw[..., :2], raw[..., 4:]), -1),
             operating_features=torch.cat((operating[..., :10], *boundary), -1))
 

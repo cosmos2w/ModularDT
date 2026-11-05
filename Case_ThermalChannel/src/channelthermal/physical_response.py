@@ -42,7 +42,11 @@ def field_metrics(prediction, target, mask):
     if not mask.any() or not np.isfinite(prediction[mask]).all() or not np.isfinite(target[mask]).all():
         raise ValueError('A physical field comparison needs finite, valid receivers.')
     diff = prediction[mask] - target[mask]
-    return {'count': int(mask.sum()), 'rmse': float(np.sqrt(np.mean(diff * diff))),
+    rmse = float(np.sqrt(np.mean(diff * diff)))
+    reference_rms = float(np.sqrt(np.mean(target[mask] ** 2)))
+    return {'count': int(mask.sum()), 'rmse': rmse,
+            'reference_rms': reference_rms,
+            'rmse_over_reference_rms': rmse / reference_rms if reference_rms > 0 else None,
             'mae': float(np.mean(np.abs(diff))), 'prediction_mean': float(prediction[mask].mean()),
             'physical_mean': float(target[mask].mean())}
 

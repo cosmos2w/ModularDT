@@ -487,6 +487,9 @@ def _validate_inherited_provider_training_state(
 
 def _structure_only(structure: Mapping[str, Any]) -> dict[str, Any]:
     result = {key: structure[key] for key in CONTEXT_KEYS if key in structure}
+    for key in ("raster_module_centers", "raster_geometry"):
+        if key in structure:
+            result[key] = structure[key]
     required = {"module_centers", "module_present", "material_params"}
     if not required.issubset(result):
         raise ValueError("Thermal scene is missing prescribed geometry/material context.")

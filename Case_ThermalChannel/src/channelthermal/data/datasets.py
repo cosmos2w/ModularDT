@@ -46,6 +46,22 @@ GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES = (
 GLOBAL_INTERFACE_TARGET_NAMES = ("T_surface", "q_normal")
 
 
+def prescribed_raster_geometry(config: dict, module_present: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Extract source-precision prescribed disk geometry in original slot order."""
+    present = np.asarray(module_present) > 0.5
+    centers = np.asarray(config["layout"]["centers"], dtype=np.float64)
+    if not np.array_equal(np.flatnonzero(present), np.arange(len(centers))):
+        raise ValueError("Prescribed raster geometry requires the original contiguous M slots.")
+    domain = config["domain"]
+    padded = np.zeros((len(present), 2), dtype=np.float64)
+    padded[:len(centers)] = centers
+    geometry = np.asarray([domain["lx"], domain["ly"], domain["module_radius"],
+                           domain["nx"], domain["ny"]], dtype=np.float64)
+    if centers.shape != (int(present.sum()), 2) or not np.isfinite(padded).all() or not np.isfinite(geometry).all():
+        raise ValueError("Invalid prescribed raster geometry.")
+    return padded, geometry
+
+
 def _decode_scalar_string(value: Any) -> str:
     """Perform the decode scalar string operation used by this module."""
 
@@ -764,6 +780,7 @@ class GlobalChannelThermalDataset(Dataset):
         require_converged: bool = False,
         normalizer: Optional[H5Normalizer] = None,
         case_ids: Sequence[str] | None = None,
+        include_raster_geometry: bool = False,
     ):
         """Initialize GlobalChannelThermalDataset and its required state."""
 
@@ -776,6 +793,7 @@ class GlobalChannelThermalDataset(Dataset):
         self.seed = int(seed)
         self.epoch = 0
         self.include_grid = bool(include_grid)
+        self.include_raster_geometry = bool(include_raster_geometry)
         self.include_structure_targets = bool(include_structure_targets)
         self.require_converged = bool(require_converged)
         self._h5: Optional[h5py.File] = None
@@ -1122,6 +1140,15 @@ class GlobalChannelThermalDataset(Dataset):
             "local_module_params": local_module_params,
             "case_id": case_id,
         }
+        if self.include_raster_geometry:
+            if "case_config_json" not in group:
+                raise ValueError("Prescribed raster geometry is absent from the source case.")
+            config = json.loads(_decode_scalar_string(group["case_config_json"][()]))
+            centers64, raster_geometry = prescribed_raster_geometry(config, module_present)
+            if not np.array_equal(centers64.astype(np.float32)[module_present > 0.5], module_centers[module_present > 0.5]):
+                raise ValueError("Source raster geometry does not match the model's original M slots.")
+            sample["structure"]["raster_module_centers"] = centers64
+            sample["structure"]["raster_geometry"] = raster_geometry
         if structure_targets is not None:
             sample["structure_targets"] = structure_targets
         if self.include_grid:

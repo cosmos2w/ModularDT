@@ -29,6 +29,11 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
                 core = InteractionReusedMemberRoutingCore.from_config(dict(core_config))
             else:
                 core = anchored_core_from_config(core_config)
+            if core.module_input_dim == 10:
+                # A fresh opt-in feature starts neutral; checkpoint loading can
+                # subsequently restore a trained coefficient in this column.
+                with torch.no_grad():
+                    core.module_encoder[0].weight[:, 9].zero_()
         if getattr(core, "schema", None) != self.CORE_SCHEMA:
             raise ValueError(f"Thermal member-routing adapter requires {self.CORE_SCHEMA}.")
         super().__init__(normalization_stats, core=core, heat_scale=heat_scale, nx=nx, ny=ny,

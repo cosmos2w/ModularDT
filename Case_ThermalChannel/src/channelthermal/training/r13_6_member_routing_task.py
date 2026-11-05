@@ -68,6 +68,25 @@ class _AnchoredPairedMemberRoutingTask(_PairedMemberRoutingTask):
             ThermalContentPredictions(prepared, restricted_native, work=counts_by_mode["restricted"]), work)
 
 
+def _fresh_member_routing_adapter(adapter_type, stats, model_config, *, heat_scale, seed, device):
+    """Give a fresh raster-area model the same common initialization as nine inputs."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(int(seed))
+        if model_config["base_model_config"]["module_input_dim"] == 10:
+            from .state_response_fork import PROJECTION, insert_area_column
+
+            common_config = copy.deepcopy(model_config)
+            common_config["base_model_config"]["module_input_dim"] = 9
+            common = adapter_type(stats, core_config=common_config, heat_scale=heat_scale)
+            model = adapter_type(stats, core_config=model_config, heat_scale=heat_scale)
+            state = common.state_dict()
+            state[PROJECTION] = insert_area_column(state[PROJECTION])
+            model.load_state_dict(state, strict=True)
+        else:
+            model = adapter_type(stats, core_config=model_config, heat_scale=heat_scale)
+        return model.to(device)
+
+
 def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_type,
                                        variants, section_schema,
                                        source_kind, lineage,
@@ -98,9 +117,11 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
     normalizer = fit_global_normalizer(data_path, train_ids)
     training_cases = _read_selected_cases(
         data_path, train_ids, split="train", normalizer=normalizer, include_grid=False,
+        include_raster_geometry=model_config["base_model_config"]["module_input_dim"] == 10,
     )
     validation_cases = _read_selected_cases(
         data_path, validation_ids, split="test", normalizer=normalizer, include_grid=False,
+        include_raster_geometry=model_config["base_model_config"]["module_input_dim"] == 10,
     )
     heat_values = np.concatenate([
         np.asarray(case["structure"]["heat_powers"])[
@@ -108,11 +129,9 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
         ] for case in training_cases
     ])
     heat_scale = max(float(np.sqrt(np.mean(heat_values.astype(np.float64) ** 2))), 1e-6)
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(int(recipe["initialization"].get("seed", 0)))
-        model = variant["adapter"](
-            normalizer.stats, core_config=model_config, heat_scale=heat_scale,
-        ).to(device)
+    model = _fresh_member_routing_adapter(
+        variant["adapter"], normalizer.stats, model_config, heat_scale=heat_scale,
+        seed=recipe["initialization"].get("seed", 0), device=device)
     source_stat = data_path.stat()
     provider = task_type(
         model=model, training_cases=training_cases, validation_cases=validation_cases,

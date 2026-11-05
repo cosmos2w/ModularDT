@@ -102,6 +102,19 @@ def summarize_fields(rows):
                                    'family_p90_rmse': float(np.quantile(values, .9)),
                                    'family_worst_rmse': float(values.max()), 'family_worst_id': worst,
                                    'family_count': len(values)}
+            entries = [row['fields'][field][kind] for row in rows]
+            if all('reference_rms' in entry for entry in entries):
+                by_family = {}
+                for row in rows:
+                    by_family.setdefault(row['case_id'], []).append(row['fields'][field][kind]['reference_rms'])
+                effect = float(np.mean([np.mean(values) for values in by_family.values()]))
+                output[field][kind].update({
+                    'equal_family_mean_reference_rms': effect,
+                    'equal_family_rmse_over_reference_rms': float(values.mean()) / effect if effect > 0 else None,
+                    'exact_zero_reference_actions': sum(entry['reference_rms'] == 0 for entry in entries),
+                    'reference_action_count': len(entries),
+                    'relative_error_note': 'Ratio of equally weighted family-average RMSE to family-average reference RMS; zero reference gives null. No field resolution floor is assumed.',
+                })
     return output
 
 
