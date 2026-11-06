@@ -1831,6 +1831,14 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         temporary = output / f".loss_curves.{os.getpid()}.tmp.{suffix}"
         figure.savefig(temporary, format=suffix, dpi=140)
         os.replace(temporary, destination)
+        if len(history) == 1:
+            initial = output / f"loss_curves_initial.{suffix}"
+            if not initial.exists():
+                initial_temporary = output / f".loss_curves_initial.{os.getpid()}.tmp.{suffix}"
+                initial_temporary.write_bytes(destination.read_bytes())
+                os.replace(initial_temporary, initial)
+    if len(history) == 1 and not (output / "loss_curves_initial_metadata.json").exists():
+        _atomic_json(output / "loss_curves_initial_metadata.json", metadata)
     figure.clear()
 
 @dataclass(frozen=True)
