@@ -11,6 +11,18 @@ cd /home/wanglz/Desktop/src/ModularDT/Case_WindFarm/demo
 
 Open [Wind Lab](http://127.0.0.1:8765). The launcher builds the frontend and starts the Python inference server on localhost. It uses the existing `ModularDT` Conda environment and Node 26 installation. Set `HONF_DEMO_PYTHON`, `HONF_DEMO_NODE` or `HONF_DEMO_PORT` to override those machine paths. Dependencies, builds and caches stay beneath `/data2/wanglz/ModularDT/windfarm_sponsor_demo_20261105/`; source and the dependency lockfile remain here. The installation/build/cache budget is 700 MB, with an estimated 850 MB peak and a 500 GB free-space floor on DATA2. No datasets or checkpoints are copied.
 
+## Open from VS Code Remote
+
+Run this command in the active VS Code Remote integrated terminal, from any directory:
+
+```bash
+/home/wanglz/Desktop/src/ModularDT/Case_WindFarm/demo/open.sh
+```
+
+The script reuses a healthy server or starts one in `tmux` as `honf-wind-demo-8765`, waits for the metadata endpoint, and requests opening through VS Code's own remote browser helper. The server remains independent of the terminal. Use `--no-open` to print the address without opening a browser, or `--port 8766` to choose another port. To inspect a server started by this script, run `tmux attach -t honf-wind-demo-8765`.
+
+If no browser tab appears, use **Ports → Forward a Port → 8765 → Open in Browser**, using the displayed **Forwarded Address**. VS Code may choose a different local port. Browser opening requires the current VS Code terminal's IPC connection; an ordinary SSH terminal or an old tmux terminal may lack it. The script prints instructions in that case and keeps the server on localhost. See [VS Code's port-forwarding documentation](https://code.visualstudio.com/docs/remote/ssh#_temporarily-forwarding-a-port).
+
 ## Interaction
 
 - Drag the scene to orbit, use the wheel to zoom, and use the camera rail for top view, scene fitting or fullscreen.
