@@ -132,3 +132,36 @@ def test_restore_requires_both_exact_identities_before_loading(monkeypatch, tmp_
     saved['experiment_identity']['provider_identity'] = {'membership': ['a'], 'response_scales': scales}
     evaluator.restore_model({'key': 1}, tmp_path, 'latest', 'cpu')
     assert model.loaded
+
+
+@pytest.mark.parametrize('warm', [False, True])
+def test_literal_restore_uses_saved_source_scales_and_own_provider_state(monkeypatch, tmp_path, warm):
+    recipe = {'r16_4_warm_fork': {'arm': 'G'}} if warm else {'name': 'source'}
+    native = {'adapter_state': {'normalization_stats': {'std': [2.]}},
+              'source_binding': {'normalization_source': 'TRAIN-only fit_global_normalizer'},
+              'response_scales': {'J': 3.}}
+    saved = {'epoch': 100 if warm else 1000, 'experiment_identity': {'recipe': recipe, 'provider_identity': native},
+             'model_state_dict': {'weight': 'checkpoint tensor'}, 'provider_training_state': {'local': 4}}
+    class Model:
+        def load_state_dict(self, state, strict):
+            assert strict is True and state == saved['model_state_dict']
+        def to(self, device): return self
+        def eval(self): return self
+    class Provider:
+        def identity_payload(self): return native
+        def load_training_state_dict(self, state): self.loaded = state
+    provider = Provider()
+    def build(recipe_arg, *, device, **options):
+        assert recipe_arg == recipe and options['response_scales'] is native['response_scales']
+        if warm:
+            assert 'saved_adapter_state' not in options
+        else:
+            assert options['saved_adapter_state'] is native['adapter_state']
+            assert options['saved_normalization_source'] == 'TRAIN-only fit_global_normalizer'
+        return Model(), provider
+    literal = tmp_path / ('epoch_0100_model.pt' if warm else 'epoch_1000_model.pt')
+    monkeypatch.setattr(evaluator, 'build', build)
+    monkeypatch.setattr(evaluator, 'resolve_checkpoint', lambda run, selector: literal if selector == literal else None)
+    monkeypatch.setattr(evaluator, 'load_trusted_checkpoint', lambda path, **kwargs: saved if path == literal else None)
+    _, _, restored, path = evaluator.restore_model(recipe, tmp_path, literal, 'cpu')
+    assert restored is saved and path == literal and provider.loaded == {'local': 4}

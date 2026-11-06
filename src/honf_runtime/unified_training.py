@@ -5423,6 +5423,11 @@ class TrainingEngine:
                 if callable(response_action_reader):
                     row["response_action_ids"] = list(response_action_reader(epoch))
                     row["case_ids"] = [str(case) for case in ordered_cases]
+                fit_sampler_reader = getattr(provider, "fit_sampler_epoch", None)
+                if callable(fit_sampler_reader):
+                    fit_sampler_epoch = fit_sampler_reader(epoch)
+                    if fit_sampler_epoch != epoch:
+                        row["fit_sampler_epoch"] = fit_sampler_epoch
                 retry_attempts = sum(int(item.get("oom_retry_attempts", 0)) for item in update_rows)
                 if retry_attempts:
                     row["oom_retry_attempts"] = retry_attempts
@@ -5756,6 +5761,10 @@ class TrainingEngine:
                     }
                     if sampler_epoch != epoch:
                         sampler_state["absolute_sampling_epoch"] = sampler_epoch
+                    fit_sampler_reader = getattr(provider, "fit_sampler_epoch", None)
+                    if callable(fit_sampler_reader) and fit_sampler_reader(epoch) != epoch:
+                        sampler_state["fit_sampling_epoch"] = fit_sampler_reader(epoch)
+                        sampler_state["next_fit_sampling_epoch"] = fit_sampler_reader(epoch + 1)
                     payload = self._checkpoint_payload(model, optimizer, identity=sealed_identity, arm=arm, epoch=epoch,
                         history=history, best_field=best_field, best_guarded=best_guarded, sampler_state=sampler_state,
                         group_specs=optimizer_specs,

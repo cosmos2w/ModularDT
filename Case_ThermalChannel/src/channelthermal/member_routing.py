@@ -121,4 +121,13 @@ class ThermalDetailAnchoredMemberRoutingAdapter(ThermalAnchoredMemberRoutingAdap
     ARCHITECTURES = ("R14-Detail-LocalECover",)
 
 
-__all__ = ["ThermalAnchoredMemberRoutingAdapter", "ThermalDetailAnchoredMemberRoutingAdapter", "ThermalInteractionReusedMemberRoutingAdapter"]
+class ThermalHyperedgeNonlinearReadAdapter(ThermalAnchoredMemberRoutingAdapter):
+    """Thermal adapter for the opt-in nonlinear C/G hyperedge reader."""
+
+    SCHEMA = "thermal_interaction_reused_nonlinear_hyperedge_member_routing_adapter_v1"
+    CORE_SCHEMA = "interaction_reused_nonlinear_hyperedge_member_routing_v1"
+    ARCHITECTURES = ("R16-4-Hyperedge-LocalECover",)
+
+
+__all__ = ["ThermalAnchoredMemberRoutingAdapter", "ThermalDetailAnchoredMemberRoutingAdapter",
+           "ThermalHyperedgeNonlinearReadAdapter", "ThermalInteractionReusedMemberRoutingAdapter"]

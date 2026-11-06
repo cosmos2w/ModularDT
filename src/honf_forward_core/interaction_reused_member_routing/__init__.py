@@ -11,6 +11,7 @@ from .anchored import (
     compile_e_access_directory,
 )
 from .detail import DetailAnchoredMemberRoutingCore
+from .nonlinear_hyperedge import HyperedgeNonlinearReadCore
 
 
 def anchored_core_from_config(config):
@@ -23,6 +24,7 @@ def anchored_core_from_config(config):
     cores = {
         AnchoredMemberRoutingCore.schema: AnchoredMemberRoutingCore,
         DetailAnchoredMemberRoutingCore.schema: DetailAnchoredMemberRoutingCore,
+        HyperedgeNonlinearReadCore.schema: HyperedgeNonlinearReadCore,
     }
     core = cores.get(config.get("schema"))
     if core is None:
@@ -30,6 +32,6 @@ def anchored_core_from_config(config):
     return core.from_config(config)
 
 __all__ = ["InteractionJointOutput", "InteractionReusedMemberRoutingCore", "AnchoredMemberRoutingCore",
-           "DetailAnchoredMemberRoutingCore", "anchored_core_from_config",
+           "DetailAnchoredMemberRoutingCore", "HyperedgeNonlinearReadCore", "anchored_core_from_config",
            "EAccessDirectory", "EAccessRow", "PackedEAccessRows", "anchored_row_read",
            "blend_anchored_contexts", "compile_e_access_directory"]

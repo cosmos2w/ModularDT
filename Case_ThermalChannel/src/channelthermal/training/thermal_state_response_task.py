@@ -646,10 +646,16 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
         if row not in self._response_epoch_actions:
             self._response_epoch_actions.append(row)
 
+    def fit_sampler_epoch(self, local_epoch):
+        """Return the FIT family-selection age while preserving local bookkeeping."""
+        if type(local_epoch) is not int or local_epoch < 1:
+            raise ValueError('FIT sampler requires a positive local epoch.')
+        return local_epoch
+
     def auxiliary_update_terms(self, model, *, epoch, update_index, update_count):
         if update_count < 1:
             raise ValueError('Auxiliary response requires at least one native update.')
-        families = self.response_corpus.fit_families_for_epoch(epoch, self.seed)
+        families = self.response_corpus.fit_families_for_epoch(self.fit_sampler_epoch(epoch), self.seed)
         slots = np.linspace(0, update_count - 1, 4, dtype=int)
         for family, slot in zip(families, slots):
             if int(slot) != int(update_index):
@@ -758,7 +764,8 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
         return result
 
 
-def build_thermal_state_response_task(recipe, *, arm=ARM_DETAIL, device='cpu', response_scales=None):
+def build_thermal_state_response_task(recipe, *, arm=ARM_DETAIL, device='cpu', response_scales=None,
+                                      saved_adapter_state=None, saved_normalization_source=None):
     """Build the maintained native task with fresh TRAIN normalizer and FIT data."""
     from ..data.datasets import H5Normalizer
     from .joint_task import _read_selected_cases
@@ -768,7 +775,8 @@ def build_thermal_state_response_task(recipe, *, arm=ARM_DETAIL, device='cpu', r
     model, provider = _build_thermal_member_routing_task(recipe, arm=arm, device=device,
         task_type=ThermalStateResponseTask, variants={DETAIL_CORE_SCHEMA: {**_VARIANTS[DETAIL_CORE_SCHEMA], 'arm': arm}},
         section_schema=DETAIL_CONFIG_SCHEMA, source_kind=DETAIL_SOURCE_KIND,
-        lineage='Thermal state response', required_address_mode=None)
+        lineage='Thermal state response', required_address_mode=None,
+        saved_adapter_state=saved_adapter_state, saved_normalization_source=saved_normalization_source)
     # Development TRAIN150 membership does not imply DEV22 validation here.
     val_ids = tuple(case_id for case_id in provider.catalog_case_ids
                     if provider.case_split_by_id[case_id] == 'test' and case_id != '0273')

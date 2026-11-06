@@ -90,7 +90,8 @@ def _fresh_member_routing_adapter(adapter_type, stats, model_config, *, heat_sca
 def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_type,
                                        variants, section_schema,
                                        source_kind, lineage,
-                                       required_address_mode="ME"):
+                                       required_address_mode="ME", saved_adapter_state=None,
+                                       saved_normalization_source=None):
     """Build a versioned adapter and the shared native TRAIN/VAL provider."""
     recipe = copy.deepcopy(dict(config))
     section = recipe.get("member_routing", {})
@@ -114,7 +115,15 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
     )
     catalog_source, catalog = read_case_catalog(data_path)
     train_ids, validation_ids = _training_membership(recipe, catalog, manifest)
-    normalizer = fit_global_normalizer(data_path, train_ids)
+    if saved_adapter_state is None:
+        normalizer = fit_global_normalizer(data_path, train_ids)
+    else:
+        from ..data.datasets import H5Normalizer
+
+        stats = saved_adapter_state.get("normalization_stats")
+        if not isinstance(stats, Mapping) or not stats:
+            raise ValueError("Inherited adapter state must contain source normalization statistics.")
+        normalizer = H5Normalizer({key: np.asarray(value, dtype=np.float32) for key, value in stats.items()})
     training_cases = _read_selected_cases(
         data_path, train_ids, split="train", normalizer=normalizer, include_grid=False,
         include_raster_geometry=model_config["base_model_config"]["module_input_dim"] == 10,
@@ -123,12 +132,17 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
         data_path, validation_ids, split="test", normalizer=normalizer, include_grid=False,
         include_raster_geometry=model_config["base_model_config"]["module_input_dim"] == 10,
     )
-    heat_values = np.concatenate([
-        np.asarray(case["structure"]["heat_powers"])[
-            np.asarray(case["structure"]["module_present"]) > 0.5
-        ] for case in training_cases
-    ])
-    heat_scale = max(float(np.sqrt(np.mean(heat_values.astype(np.float64) ** 2))), 1e-6)
+    if saved_adapter_state is None:
+        heat_values = np.concatenate([
+            np.asarray(case["structure"]["heat_powers"])[
+                np.asarray(case["structure"]["module_present"]) > 0.5
+            ] for case in training_cases
+        ])
+        heat_scale = max(float(np.sqrt(np.mean(heat_values.astype(np.float64) ** 2))), 1e-6)
+    else:
+        heat_scale = float(saved_adapter_state["heat_scale"])
+        if not np.isfinite(heat_scale) or heat_scale <= 0:
+            raise ValueError("Inherited adapter heat scale must be finite and positive.")
     model = _fresh_member_routing_adapter(
         variant["adapter"], normalizer.stats, model_config, heat_scale=heat_scale,
         seed=recipe["initialization"].get("seed", 0), device=device)
@@ -143,7 +157,8 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
             "catalog_metadata_sha256": catalog_source["metadata_sha256"],
             "manifest_path": None if manifest_path is None else str(manifest_path),
             "manifest_sha256": manifest["manifest_sha256"],
-            "normalization_source": "TRAIN-only fit_global_normalizer",
+            "normalization_source": ("TRAIN-only fit_global_normalizer" if saved_adapter_state is None
+                                     else saved_normalization_source or "inherited source TRAIN600 adapter state"),
             "dataset_copy_created": False, "persistent_cache_created": False,
         },
     )

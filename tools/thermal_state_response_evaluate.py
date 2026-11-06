@@ -36,8 +36,12 @@ def restore_model(recipe, run, checkpoint, device):
     identity = saved['experiment_identity']
     if identity['recipe'] != recipe:
         raise ValueError('The recipe differs from the saved run.')
-    model, provider = build(recipe, device=device,
-                            response_scales=identity['provider_identity']['response_scales'])
+    native_identity = identity['provider_identity']
+    options = {'response_scales': native_identity['response_scales']}
+    if recipe.get('r16_4_warm_fork') is None and 'adapter_state' in native_identity:
+        options['saved_adapter_state'] = native_identity['adapter_state']
+        options['saved_normalization_source'] = native_identity['source_binding']['normalization_source']
+    model, provider = build(recipe, device=device, **options)
     if identity['provider_identity'] != dict(provider.identity_payload()):
         raise ValueError('The recipe or native provider differs from the saved run.')
     model.load_state_dict(saved['model_state_dict'], strict=True)
