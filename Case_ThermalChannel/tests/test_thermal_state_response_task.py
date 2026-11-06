@@ -331,3 +331,153 @@ def test_invalid_saved_scales_rejected(bad):
     bad(scales)
     with pytest.raises(ValueError):
         _restore_response_scales(scales)
+
+
+def action_manifest(tmp_path):
+    import json
+    counts = {'0006': 1, '0038': 1, '0081': 2, '0002': 3, '0169': 6, '0243': 12}
+    cases = [{'case_id': case, 'module_count': count, 'source_case_dir': '/baseline/' + case}
+             for case, count in counts.items()]
+    rows = []
+    for case, count in counts.items():
+        for direction in ('v0', 'v1'):
+            for amplitude in ('a0', 'a1'):
+                fitted = (direction, amplitude) != ('v1', 'a1')
+                if count == 1:
+                    fitted = (direction, amplitude) == ('v0', 'a0')
+                for sign in (1, -1):
+                    action = f'{case}_{direction}_{amplitude}_{sign}'
+                    rows.append({'case_id': case, 'action': action, 'kind': 'first_member',
+                        'cell': {'direction': direction, 'amplitude': amplitude}, 'sign': sign,
+                        'role': 'fit' if fitted else 'diagnostic', 'raw_case_dir': '/raw/' + action,
+                        'record_directory': '/records/' + action, 'physical_delta': {'J': 1., 'P': -2.}})
+    path = tmp_path / 'actions.json'
+    path.write_text(json.dumps({'schema': 'thermal_response_actions_v1', 'cases': cases, 'actions': rows}))
+    return path
+
+
+def test_explicit_action_roles_and_withheld_cells_cannot_enter_fitting(tmp_path):
+    import json
+    from channelthermal.training.thermal_state_response_task import ThermalActionCorpus
+    path = action_manifest(tmp_path)
+    corpus = ThermalActionCorpus(path)
+    key = ('0081', '0081_v1_a1_1')
+    assert corpus.action_entry(*key, role='diagnostic')['cell'] == {'direction': 'v1', 'amplitude': 'a1'}
+    with pytest.raises(ValueError, match='outside the requested role'):
+        corpus.action_entry(*key, role='fit')
+    assert corpus.physical_delta('0006', '0006_v0_a0_1', role='fit') == {'J': 1., 'P': -2.}
+    manifest = json.loads(path.read_text())
+    for kind, cell in [('first_member', {'direction': 'v1', 'amplitude': 'a1'}),
+                       ('second_member', {'direction': 'v0', 'amplitude': 'a0'}),
+                       ('joint_crossed', {'direction': 'v1', 'amplitude': 'a0'})]:
+        manifest['actions'][0].update(role='fit', kind=kind, cell=cell)
+        path.write_text(json.dumps(manifest))
+        with pytest.raises(ValueError, match='cannot be fitted'):
+            ThermalActionCorpus(path)
+
+
+def test_pilot_schedule_matches_exposure_preserves_rng_and_resumes_from_epoch(tmp_path):
+    from channelthermal.training.thermal_state_response_task import ThermalActionCorpus
+    path = action_manifest(tmp_path)
+    corpus, restored = ThermalActionCorpus(path), ThermalActionCorpus(path)
+    np.random.seed(42)
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state().clone()
+    visited = []
+    for epoch in range(1, 4):
+        control = corpus.pilot_actions_for_epoch('control', epoch)
+        coverage = corpus.pilot_actions_for_epoch('coverage', epoch)
+        assert len(control) == len(coverage) == 12
+        assert coverage == restored.pilot_actions_for_epoch('coverage', epoch)
+        assert [key for key in control if key[0] in ('0006', '0038')] == [
+            key for key in coverage if key[0] in ('0006', '0038')]
+        assert all(corpus.records[key]['cell'] == {'direction': 'v0', 'amplitude': 'a0'} for key in control)
+        visited.extend(coverage)
+    for family in ('0002', '0081', '0169', '0243'):
+        selected = [corpus.records[key] for key in visited if key[0] == family]
+        assert len(selected) == 6
+        assert {(row['cell']['direction'], row['cell']['amplitude']) for row in selected} == set(corpus.fit_cells)
+        assert {row['sign'] for row in selected} == {-1, 1}
+    assert torch.equal(torch_state, torch.get_rng_state())
+    actual_numpy_state = np.random.get_state()
+    assert numpy_state[0] == actual_numpy_state[0]
+    np.testing.assert_array_equal(numpy_state[1], actual_numpy_state[1])
+    assert numpy_state[2:] == actual_numpy_state[2:]
+
+
+@pytest.mark.parametrize('update_count', [1, 13])
+@pytest.mark.parametrize('arm', ['control', 'coverage'])
+def test_pilot_keeps_original_fit_mean_and_equal_per_action_weights(monkeypatch, tmp_path, update_count, arm):
+    from channelthermal.training import thermal_state_response_task as task
+    original = object.__new__(ThermalResponseCorpus)
+    original.cases = {str(i): {'role': 'fit', 'feasible': True} for i in range(48)}
+    pilot = task.ThermalActionCorpus(action_manifest(tmp_path))
+    provider = object.__new__(task.ThermalStateResponseTask)
+    provider.response_corpus, provider.response_pilot, provider.seed = original, pilot, 0
+    provider.response_spec = {'tau': 1., 'pilot': {'arm': arm, 'coefficient': .75}}
+    provider.response_scales = {}
+    provider.response_labels = {(family, action): {} for family in original.family_ids('fit') for action in ACTIONS}
+    provider.response_pilot_coefficient = .75
+    provider.response_finite_response_coefficient = .1
+    provider._response_epoch, provider._response_epoch_families, provider._response_epoch_actions = None, [], []
+    visits, parameter = [], torch.tensor(1., dtype=torch.float64, requires_grad=True)
+
+    def fake_pair(provider, corpus, family, action, *, role):
+        visits.append(('pilot' if corpus is pilot else 'original', family, action))
+        return visits[-1]
+
+    def fake_predict(provider, model, pair, scales, label, tau, **kwargs):
+        factor = 2 if pair[0] == 'pilot' else 1
+        value = parameter * factor
+        return {'endpoint': value, 'field_delta': value, 'J_delta': value, 'P_delta': value, 'work': {}}
+
+    monkeypatch.setattr(task, 'response_pair', fake_pair)
+    monkeypatch.setattr(task, 'predict_response_pair', fake_predict)
+    total, term_weights, diagnostics = 0., [], {}
+    for index in range(update_count):
+        for terms, _ in provider.auxiliary_update_terms(None, epoch=7, update_index=index, update_count=update_count):
+            total += sum(term.numerator * term.weight for term in terms.values()) / update_count
+            term_weights.append(next(iter(terms.values())).weight)
+            for name, value in provider.auxiliary_diagnostic_values(terms, update_count=update_count).items():
+                diagnostics[name] = diagnostics.get(name, 0.) + value / update_count
+    families = original.fit_families_for_epoch(7, 0)
+    assert [(family, action) for source, family, action in visits if source == 'original'] == [
+        (family, action) for family in families for action in ACTIONS]
+    assert [(family, action) for source, family, action in visits if source == 'pilot'] == list(
+        pilot.pilot_actions_for_epoch(arm, 7))
+    assert len(term_weights) == 28 and term_weights == pytest.approx([.25 * update_count / 16] * 28)
+    assert torch.autograd.grad(total, parameter)[0].item() == pytest.approx(.35 * (1 + .75 * 2))
+    assert diagnostics['response/field_delta'] == pytest.approx(1.)
+    assert diagnostics['response_pilot/field_delta'] == pytest.approx(2.)
+    rows = provider.response_epoch_action_ids(7)
+    assert len(rows) == 28 and len([row for row in rows if row['role'] == 'original_fit']) == 16
+    assert len([row for row in rows if row['role'] == f'pilot_{arm}']) == 12
+    assert provider.response_epoch_family_ids(7) == families
+    assert provider.response_epoch_action_ids(8) == ()
+
+
+def test_pilot_rejects_missing_saved_original_scales_before_refitting(monkeypatch):
+    from channelthermal.training import thermal_state_response_task as task
+    monkeypatch.setattr(task, 'ThermalResponseCorpus', lambda *args: pytest.fail('Do not read labels or refit scales.'))
+    provider = object.__new__(task.ThermalStateResponseTask)
+    with pytest.raises(ValueError, match='restore the original FIT'):
+        provider.configure_state_response({'pilot': {'arm': 'coverage', 'manifest_path': '/unused'}})
+
+
+def test_declared_original_scales_support_fresh_build_and_reject_resume_mismatch(monkeypatch):
+    import copy
+    from channelthermal.training import thermal_state_response_task as task
+    monkeypatch.setattr(task, 'ThermalResponseCorpus', lambda *args: object())
+    monkeypatch.setattr(task, 'load_saved_functional_responses', lambda *args, **kwargs: {})
+    monkeypatch.setattr(task, '_fit_native_response_scales', lambda *args: pytest.fail('Declared scales must not refit.'))
+    scales = {name: {'scale': 0.45560681823737065, 'fit_rms': 0.45560681823737065,
+                     'floor': 0.01} for name in (*FIELD_ROLES, 'J', 'P')}
+    spec = {'recipe_path': '/unused/recipe.json', 'ledger_path': '/unused/ledger', 'response_scales': scales}
+    provider = object.__new__(task.ThermalStateResponseTask)
+    provider.configure_state_response(spec)
+    assert provider.response_scales == scales and provider.response_scales is not scales
+    provider.configure_state_response(spec, response_scales=copy.deepcopy(scales))
+    mismatched = copy.deepcopy(scales)
+    mismatched['J'].update(scale=1., fit_rms=1.)
+    with pytest.raises(ValueError, match='differ from the recipe'):
+        provider.configure_state_response(spec, response_scales=mismatched)

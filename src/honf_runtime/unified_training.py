@@ -5419,6 +5419,10 @@ class TrainingEngine:
                 response_family_reader = getattr(provider, "response_epoch_family_ids", None)
                 if callable(response_family_reader):
                     row["response_fit_family_ids"] = list(response_family_reader(epoch))
+                response_action_reader = getattr(provider, "response_epoch_action_ids", None)
+                if callable(response_action_reader):
+                    row["response_action_ids"] = list(response_action_reader(epoch))
+                    row["case_ids"] = [str(case) for case in ordered_cases]
                 retry_attempts = sum(int(item.get("oom_retry_attempts", 0)) for item in update_rows)
                 if retry_attempts:
                     row["oom_retry_attempts"] = retry_attempts

@@ -560,6 +560,10 @@ def test_response_history_records_unweighted_exposure_and_exact_resume(tmp_path,
         def response_epoch_family_ids(self, epoch):
             return tuple(self.seen) if self.seen_epoch == epoch else ()
 
+        def response_epoch_action_ids(self, epoch):
+            return tuple({'case_id': family, 'action': f'action-{action}', 'role': 'original_fit'}
+                         for family in self.response_epoch_family_ids(epoch) for action in range(4))
+
     monkeypatch.setattr(runtime, '_render_loss_curves', lambda *args, **kwargs: None)
     engine = TrainingEngine(replace(_config(), training_mode='joint', progress_enabled=False), device='cpu')
     torch.manual_seed(3)
@@ -579,6 +583,10 @@ def test_response_history_records_unweighted_exposure_and_exact_resume(tmp_path,
     assert saved['experiment_identity']['provider_identity']['response_scales']['field']['scale'] == 2.
     for row in saved['history']:
         assert row['response_fit_family_ids'] == [f'family-{i}' for i in range(4)]
+        assert row['case_ids'] == [str(case) for case in engine.epoch_case_order(ResponseProvider(), row['epoch'])[0]]
+        assert row['response_action_ids'] == [
+            {'case_id': f'family-{family}', 'action': f'action-{action}', 'role': 'original_fit'}
+            for family in range(4) for action in range(4)]
         assert row['work_counts']['response_actions'] == 16
         assert row['work_counts']['response_families'] == 4
         assert row['train_losses']['response/field_delta'] == 0.

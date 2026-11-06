@@ -86,11 +86,97 @@ class ThermalResponseCorpus:
         return fit_response_scales(families, state_scales, repeatability, functional_floors)
 
     def action_record(self, family_id, action, *, role):
+        entry = self.action_entry(family_id, action, role=role)
+        return load_solve_record(entry['record_directory'])
+
+    def action_entry(self, family_id, action, *, role):
         family_id = str(family_id)
         if self.cases[family_id]['role'] != role or action not in ACTIONS:
             raise ValueError('Response action is outside the requested role.')
-        entry = self.records[(family_id, action)]
-        return load_solve_record(entry['record_directory'])
+        return self.records[(family_id, action)]
+
+
+class ThermalActionCorpus:
+    """Load explicit action records without changing the original FIT corpus.
+
+    Roles belong to actions, not layouts: one familiar layout may contain both
+    fitted and withheld edits. Geometry and observations use the same native
+    endpoint loader as the historical four-action corpus.
+    """
+
+    fit_cells = (('v0', 'a0'), ('v1', 'a0'), ('v0', 'a1'))
+
+    def __init__(self, manifest_path):
+        self.manifest_path = str(manifest_path)
+        manifest = json.loads(Path(manifest_path).read_text())
+        if manifest.get('schema') != 'thermal_response_actions_v1':
+            raise ValueError('Expected thermal_response_actions_v1 action manifest.')
+        self.cases, self.records = {}, {}
+        for case in manifest['cases']:
+            case_id = str(case['case_id'])
+            if case_id in self.cases or not case.get('source_case_dir'):
+                raise ValueError('Action layouts need unique IDs and baseline paths.')
+            self.cases[case_id] = case
+        for row in manifest['actions']:
+            key = (str(row['case_id']), row['action'])
+            if key[0] not in self.cases or key in self.records or not key[1]:
+                raise ValueError('Action records need unique IDs and an existing layout.')
+            if row['role'] not in ('fit', 'diagnostic'):
+                raise ValueError('Explicit actions require fit or diagnostic roles.')
+            if row['role'] == 'fit':
+                cell = row.get('cell') or {}
+                if (row.get('kind') != 'first_member'
+                        or (cell.get('direction'), cell.get('amplitude')) not in self.fit_cells):
+                    raise ValueError('Withheld cells, second-member and joint edits cannot be fitted.')
+            self.records[key] = row
+
+    def action_entry(self, family_id, action, *, role):
+        row = self.records[(str(family_id), action)]
+        if role not in ('fit', 'diagnostic') or row['role'] != role:
+            raise ValueError('Response action is outside the requested role.')
+        if not row.get('raw_case_dir') or not row.get('record_directory'):
+            raise ValueError('Response action has no completed physical record binding.')
+        return row
+
+    def action_record(self, family_id, action, *, role):
+        return load_solve_record(self.action_entry(family_id, action, role=role)['record_directory'])
+
+    def physical_delta(self, family_id, action, *, role):
+        row = self.action_entry(family_id, action, role=role)
+        labels = row.get('physical_delta', {})
+        if set(labels) != {'J', 'P'} or any(not math.isfinite(float(v)) for v in labels.values()):
+            raise ValueError('A fitted physical action requires finite native J/P deltas.')
+        return {name: float(labels[name]) for name in ('J', 'P')}
+
+    def pilot_actions_for_epoch(self, arm, epoch):
+        """Two signs per layout, with equal input-only exposure in both arms.
+
+        Single-member layouts always use v0/a0. In the coverage arm each other
+        layout cycles the three fitting cells with a stable layout offset.
+        Selection consumes no NumPy or Torch RNG and resumes from epoch alone.
+        """
+        if arm not in ('control', 'coverage') or int(epoch) != epoch or int(epoch) < 1:
+            raise ValueError('Pilot sampling requires control/coverage and a positive epoch.')
+        selected, multi_index = [], 0
+        for family, case in sorted(self.cases.items()):
+            count = case.get('module_count', len(case.get('member_ids', ())))
+            if count < 1:
+                raise ValueError('Pilot layout needs its original member count.')
+            cell = self.fit_cells[0]
+            if count > 1:
+                if arm == 'coverage':
+                    cell = self.fit_cells[(int(epoch) - 1 + multi_index) % len(self.fit_cells)]
+                multi_index += 1
+            for sign in (1, -1):
+                matches = [(key, row) for key, row in self.records.items()
+                           if key[0] == family and row['role'] == 'fit'
+                           and row.get('kind') == 'first_member' and row.get('sign') == sign
+                           and (row.get('cell', {}).get('direction'),
+                                row.get('cell', {}).get('amplitude')) == cell]
+                if len(matches) != 1:
+                    raise ValueError(f'Pilot needs one action for {family}/{cell}/{sign}.')
+                selected.append(matches[0][0])
+        return tuple(selected)
 
 
 def align_role_values(baseline, edited):
@@ -308,9 +394,7 @@ def response_pair(provider, corpus, family_id, action, *, role):
     from .thermal_response_raw import load_raw_endpoint
     family_id = str(family_id)
     case = corpus.cases[family_id]
-    if case['role'] != role or action not in ACTIONS:
-        raise ValueError('Requested response pair has a different corpus role.')
-    entry = corpus.records[(family_id, action)]
+    entry = corpus.action_entry(family_id, action, role=role)
     original = provider._load_native_cases([family_id])[0]
     raw_b = load_raw_endpoint(case['source_case_dir'])
     raw_e = load_raw_endpoint(entry['raw_case_dir'])
@@ -517,9 +601,18 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
 
     def configure_state_response(self, spec, *, response_scales=None):
         self.response_spec = dict(spec)
+        declared_scales = spec.get('response_scales')
+        if declared_scales is not None:
+            declared_scales = _restore_response_scales(declared_scales)
+            if response_scales is not None and _restore_response_scales(response_scales) != declared_scales:
+                raise ValueError('Restored response scales differ from the recipe denominators.')
+            response_scales = declared_scales
+        if spec.get('pilot') is not None and response_scales is None:
+            raise ValueError('Pilot supervision must restore the original FIT response scales.')
         self.response_finite_response_coefficient = _response_coefficient(spec.get('finite_response_coefficient', .1))
         self._response_epoch = None
         self._response_epoch_families = []
+        self._response_epoch_actions = []
         self.response_corpus = ThermalResponseCorpus(spec['recipe_path'], spec['ledger_path'])
         root = Path(spec['recipe_path']).parent.parent
         fit_labels = root / 'evidence/matched200/epoch200/fit/response_evaluation.json'
@@ -530,6 +623,28 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
                                                                repeatability, spec['functional_floors'])
         else:
             self.response_scales = _restore_response_scales(response_scales)
+        self.response_pilot = None
+        if spec.get('pilot') is not None:
+            pilot = spec['pilot']
+            if pilot.get('arm') not in ('control', 'coverage'):
+                raise ValueError('Pilot supervision requires a control or coverage arm.')
+            coefficient = _response_coefficient(pilot['coefficient'])
+            if coefficient <= 0:
+                raise ValueError('Pilot supervision coefficient must be positive.')
+            self.response_pilot = ThermalActionCorpus(pilot['manifest_path'])
+            self.response_pilot_coefficient = coefficient
+            self.auxiliary_loss_names = type(self).auxiliary_loss_names + tuple(
+                name.replace('response/', 'response_pilot/') for name in type(self).auxiliary_loss_names)
+
+    def _record_response_action(self, epoch, family, action, role):
+        if self._response_epoch != epoch:
+            self._response_epoch, self._response_epoch_families = epoch, []
+            self._response_epoch_actions = []
+        if not hasattr(self, '_response_epoch_actions'):
+            self._response_epoch_actions = []
+        row = {'case_id': str(family), 'action': action, 'role': role}
+        if row not in self._response_epoch_actions:
+            self._response_epoch_actions.append(row)
 
     def auxiliary_update_terms(self, model, *, epoch, update_index, update_count):
         if update_count < 1:
@@ -549,10 +664,31 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
                     finite_response_coefficient=self.response_finite_response_coefficient)
                 work = dict(losses['work'])
                 work.update(response_actions=1, response_families=int(action == ACTIONS[0]))
-                if self._response_epoch != epoch:
-                    self._response_epoch, self._response_epoch_families = epoch, []
+                self._record_response_action(epoch, family, action, 'original_fit')
                 if action == ACTIONS[0] and family not in self._response_epoch_families:
                     self._response_epoch_families.append(family)
+                yield terms, work
+                del pair, losses, terms, work
+        pilot = getattr(self, 'response_pilot', None)
+        if pilot is not None:
+            arm = self.response_spec['pilot']['arm']
+            selected = pilot.pilot_actions_for_epoch(arm, epoch)
+            slots = np.linspace(0, update_count - 1, len(selected), dtype=int)
+            for (family, action), slot in zip(selected, slots):
+                if int(slot) != int(update_index):
+                    continue
+                pair = response_pair(self, pilot, family, action, role='fit')
+                losses = predict_response_pair(self, model, pair, self.response_scales,
+                    pilot.physical_delta(family, action, role='fit'), self.response_spec['tau'],
+                    response_grad=self.response_finite_response_coefficient != 0)
+                terms = response_loss_terms(losses['endpoint'], losses['field_delta'],
+                    {'J': losses['J_delta'], 'P': losses['P_delta']},
+                    multiplier=self.response_pilot_coefficient * update_count / len(selected),
+                    finite_response_coefficient=self.response_finite_response_coefficient)
+                terms = {name.replace('response/', 'response_pilot/'): term for name, term in terms.items()}
+                work = dict(losses['work'])
+                work.update(response_pilot_actions=1)
+                self._record_response_action(epoch, family, action, f'pilot_{arm}')
                 yield terms, work
                 del pair, losses, terms, work
 
@@ -560,10 +696,17 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
         """Return the families actually processed so far in the requested epoch."""
         return tuple(self._response_epoch_families) if self._response_epoch == epoch else ()
 
+    def response_epoch_action_ids(self, epoch):
+        """Return the actual action IDs processed in this epoch, including pilot."""
+        return tuple(dict(row) for row in self._response_epoch_actions) if self._response_epoch == epoch else ()
+
     def auxiliary_diagnostic_values(self, terms, *, update_count):
         """Per-action diagnostics, normalized for the trainer's update mean."""
-        return {name: float(terms[name].numerator.detach()) * (update_count / 16)
-                for name in self.auxiliary_loss_names[1:]}
+        pilot_terms = next(iter(terms)).startswith('response_pilot/')
+        count = (len(self.response_pilot.pilot_actions_for_epoch(self.response_spec['pilot']['arm'], self._response_epoch))
+                 if pilot_terms else 16)
+        return {name: float(term.numerator.detach()) * (update_count / count)
+                for name, term in terms.items() if not name.endswith('/endpoint')}
 
     def loss_metadata(self):
         result = {}
@@ -579,6 +722,12 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
             result[name] = {'panel': 'physics', 'label': label, 'unit': 'scaled squared error',
                             'formula': 'equal FIT family and action mean; paired native reads where applicable',
                             'weight': str(weights[key])}
+        if getattr(self, 'response_pilot', None) is not None:
+            for name, item in tuple(result.items()):
+                result[name.replace('response/', 'response_pilot/')] = {
+                    **item, 'label': 'pilot ' + item['label'],
+                    'formula': 'equal auxiliary action mean, separately from original FIT mean',
+                    'weight': str(float(item['weight']) * self.response_pilot_coefficient)}
         return result
 
     def identity_payload(self):
@@ -597,6 +746,15 @@ class ThermalStateResponseTask(ThermalR138AnchoredMemberRoutingTask):
             result['response_objective_weights'] = _response_objective_weights(self.response_finite_response_coefficient)
         result['response_scales'] = self.response_scales
         result['response_fit_scope'] = 'original FIT48, all four actions; TRAIN-only state scales'
+        if getattr(self, 'response_pilot', None) is not None:
+            result['response_pilot_sampling'] = {
+                'arm': self.response_spec['pilot']['arm'],
+                'actions_per_epoch': len(self.response_pilot.pilot_actions_for_epoch(
+                    self.response_spec['pilot']['arm'], 1)),
+                'coefficient': self.response_pilot_coefficient,
+                'reduction': 'original FIT mean plus coefficient times separate equal pilot action mean',
+                'selection': 'epoch-derived three-cell cycle with stable multi-member layout offsets; M1 v0/a0',
+                'response_scales': 'restored original FIT48 only'}
         return result
 
 
