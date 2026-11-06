@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { directoryView, fieldColor, fieldValue, getFieldRange, sampleVelocity, sliceSampleCoordinates, traceStreamlines, validGrid } from './flowMath.js';
+import { directoryView, fieldColor, fieldValue, getFieldRange, sampleVelocity, selectSpatialLinks, sliceSampleCoordinates, traceStreamlines, validGrid } from './flowMath.js';
 import { buildOrganizationVenn } from './organizationVenn.js';
+import { clampTurbinePosition, domainLengthFromDrag, isPointerClick, withinDomain } from './designMath.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -78,16 +79,20 @@ function addGround(engine, domain) {
   for (let y = Math.ceil(min[1] / spacing) * spacing; y <= max[1] + 1e-6; y += spacing) {
     points.push(...toWorld(engine, [min[0], y, 0]), ...toWorld(engine, [max[0], y, 0]));
   }
-  group.add(segments(points, 0x279690, 0.3));
+  const grid = segments(points, 0x279690, 0.3);
+  group.add(grid);
   const corners = [[min[0], min[1], 0], [max[0], min[1], 0], [max[0], max[1], 0], [min[0], max[1], 0]].map((p) => toWorld(engine, p));
-  group.add(lineLoop(corners, 0x75b8ad, 0.55));
+  const border = lineLoop(corners, 0x75b8ad, 0.55);
+  group.add(border);
   const axisOrigin = [min[0], min[1], 0];
   const verticalGuide = Math.min(max[2], 1.5);
-  group.add(segments([
+  const axes = segments([
     ...toWorld(engine, axisOrigin), ...toWorld(engine, [max[0], min[1], 0]),
     ...toWorld(engine, axisOrigin), ...toWorld(engine, [min[0], max[1], 0]),
     ...toWorld(engine, axisOrigin), ...toWorld(engine, [min[0], min[1], verticalGuide]),
-  ], 0xa9d0cd, 0.6));
+  ], 0xa9d0cd, 0.6);
+  group.add(axes);
+  group.userData.paletteParts = { ground, grid, border, axes };
   const labelScale = Math.max(dx, dy) / 38;
   const labelSpecs = [
     ['X (D)', [(min[0] + max[0]) / 2, min[1] - spacing * 0.75, 0]],
@@ -155,6 +160,18 @@ function makeTurbine(engine, turbine) {
   const hit = new THREE.Mesh(new THREE.CylinderGeometry(Math.max(0.22, radius * 0.65), Math.max(0.22, radius * 0.65), hubHeight + radius * 0.6, 8), new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false }));
   hit.position.y = (hubHeight + radius * 0.6) / 2;
   actual.add(hit);
+  // Show the selected turbine's real geometry, not a synthetic rotor or position.
+  const outlines = [];
+  actual.traverse((part) => {
+    if (!part.isMesh || part === hit) return;
+    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(part.geometry), new THREE.LineBasicMaterial({ color: 0x8bdcff, depthTest: false }));
+    outline.visible = false;
+    outline.renderOrder = 5;
+    outline.raycast = () => {};
+    part.add(outline);
+    outlines.push(outline);
+  });
+  wrapper.userData.outlines = outlines;
   wrapper.traverse((object) => { object.userData.turbineId = turbine.id; });
   return wrapper;
 }
@@ -166,7 +183,51 @@ function updateSelection(engine, selected) {
     ring.material.color.set(active ? 0x80ffe4 : 0x64ddce);
     ring.material.opacity = active ? 1 : 0.5;
     ring.scale.setScalar(active ? 1.7 : 1);
+    for (const outline of turbine.userData.outlines) outline.visible = active;
   }
+}
+
+function updateDesignBounds(engine, lengths) {
+  if (!engine.domain || !engine.designOutline) return;
+  const original = [0, 1].map((axis) => engine.domain.max[axis] - engine.domain.min[axis]);
+  const scaleX = lengths[0] / original[0];
+  const scaleY = lengths[1] / original[1];
+  engine.ground.scale.set(scaleX, 1, scaleY);
+  engine.designOutline.scale.set(scaleX, 1, scaleY);
+  for (const handle of engine.designHandles.children) {
+    const { axis, direction } = handle.userData;
+    handle.position.set(axis === 0 ? direction * lengths[0] / 2 : 0, 0, axis === 1 ? direction * lengths[1] / 2 : 0);
+  }
+}
+
+function rebuildDesignHandles(engine) {
+  clearGroup(engine.design);
+  engine.designHandles = new THREE.Group();
+  engine.design.add(engine.designHandles);
+  engine.designOutline = null;
+  if (!engine.domain) return;
+  const lengths = [0, 1].map((axis) => engine.domain.max[axis] - engine.domain.min[axis]);
+  const [halfX, halfY] = lengths.map((length) => length / 2);
+  engine.designOutline = lineLoop([[-halfX, 0.04, -halfY], [halfX, 0.04, -halfY], [halfX, 0.04, halfY], [-halfX, 0.04, halfY]], 0x8bdcff, 0.95);
+  engine.design.add(engine.designOutline);
+  const size = clamp(Math.max(...lengths) / 80, 0.18, 0.38);
+  for (const axis of [0, 1]) for (const direction of [-1, 1]) {
+    const handle = new THREE.Group();
+    handle.userData = { axis, direction };
+    const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(size * 1.25, size * 1.25, 0.035, 24), new THREE.MeshBasicMaterial({ color: 0x5bb7dc, transparent: true, opacity: 0.55 }));
+    pedestal.position.y = 0.045;
+    handle.add(pedestal);
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(size, 18, 12), new THREE.MeshStandardMaterial({ color: 0x9be5ff, emissive: 0x145377, roughness: 0.35 }));
+    knob.position.y = size * 0.8;
+    handle.add(knob);
+    const label = memberLabel(axis === 0 ? 'X' : 'Y', '#c5efff', clamp(size * 1.6, 0.35, 0.65));
+    label.position.y = size * 2.4;
+    label.raycast = () => {};
+    handle.add(label);
+    handle.traverse((part) => { part.userData.designAxis = axis; part.userData.designDirection = direction; });
+    engine.designHandles.add(handle);
+  }
+  updateDesignBounds(engine, lengths);
 }
 
 function cameraView(engine, preset = 'perspective') {
@@ -207,8 +268,10 @@ function cameraView(engine, preset = 'perspective') {
 
 function rebuildScene(engine, scene, view, selected) {
   if (!scene?.domain?.min || !scene?.domain?.max) return;
+  engine.cancelInteraction?.();
   clearGroup(engine.ground);
   clearGroup(engine.turbines);
+  engine.ground.scale.set(1, 1, 1);
   engine.rotors = [];
   engine.domain = scene.domain;
   engine.exaggeration = clamp(Number(view.exaggeration) || 1, 0.25, 10);
@@ -219,11 +282,15 @@ function rebuildScene(engine, scene, view, selected) {
     if (Number.isFinite(turbine.x) && Number.isFinite(turbine.y)) engine.turbines.add(makeTurbine(engine, turbine));
   }
   updateSelection(engine, selected);
+  rebuildDesignHandles(engine);
+  applyMode(engine);
   const signature = [scene.id, ...scene.domain.min, ...scene.domain.max].join(':');
   if (engine.sceneSignature !== signature) {
+    const newScene = engine.sceneSignature === undefined || engine.sceneId !== scene.id;
     engine.sceneSignature = signature;
+    engine.sceneId = scene.id;
     engine.orgAutoFitted = false;
-    cameraView(engine, engine.cameraPreset);
+    if (newScene || view.mode !== 'design') cameraView(engine, engine.cameraPreset);
   }
 }
 
@@ -288,6 +355,7 @@ function organizationMode(engine) {
 
 function applyMode(engine) {
   const org = organizationMode(engine);
+  const design = engine.view.mode === 'design';
   const abstract = org && engine.view.organizationView === 'venn';
   if (abstract && !engine.abstractActive) {
     engine.physicalCamera = { position: engine.camera.position.clone(), target: engine.controls.target.clone(), near: engine.camera.near, far: engine.camera.far, minDistance: engine.controls.minDistance, maxDistance: engine.controls.maxDistance };
@@ -312,10 +380,28 @@ function applyMode(engine) {
   }
   engine.ground.visible = !abstract;
   engine.turbines.visible = !abstract;
-  engine.flow.visible = !org;
-  engine.slice.visible = !org;
+  engine.flow.visible = !org && !design;
+  engine.slice.visible = !org && !design;
+  engine.design.visible = design && engine.view.designSection === 'domain';
   // Keep the prior overlay behavior for callers without a mode selector.
-  engine.organization.visible = org || (!engine.view.mode && !!engine.view.organization);
+  engine.organization.visible = !design && (org || (!engine.view.mode && !!engine.view.organization));
+  const background = design ? 0x0c192b : 0x071720;
+  engine.renderer.setClearColor(background, 1);
+  engine.renderer.domElement.setAttribute('aria-label', design
+    ? (engine.view.designSection === 'domain' ? 'Wind farm design: drag X or Y handles to resize the domain' : 'Wind farm design: edit turbine locations on the floor')
+    : 'Interactive three-dimensional wind farm and reconstructed flow');
+  engine.world.fog.color.setHex(background);
+  const parts = engine.ground.userData.paletteParts;
+  if (parts) {
+    parts.ground.material.color.setHex(design ? 0x18344b : 0x0c252b);
+    parts.ground.material.opacity = design ? 0.72 : 0.38;
+    parts.grid.material.color.setHex(design ? 0x769ab4 : 0x279690);
+    parts.grid.material.opacity = design ? 0.55 : 0.3;
+    parts.border.material.color.setHex(design ? 0x9ac7df : 0x75b8ad);
+    parts.border.material.opacity = design ? 0.84 : 0.55;
+    parts.axes.material.color.setHex(design ? 0xc0d8e8 : 0xa9d0cd);
+    parts.axes.material.opacity = design ? 0.75 : 0.6;
+  }
 }
 
 function fitWorldPoints(engine, coordinates, preset = null) {
@@ -433,7 +519,9 @@ function rebuildOrganization(engine, scene) {
     applyMode(engine);
     return;
   }
-  const { anchors, rows, links, missing } = data;
+  const { anchors, rows, missing } = data;
+  const filtered = selectSpatialLinks(data, { mode: engine.view.organizationLinks });
+  const { links } = filtered;
   const fullRowIds = organization.selection?.selected_anchor_ids || rows.map((row) => row.id);
   const palette = new Map(fullRowIds.map((id, i) => [String(id), ADDRESS_COLORS[i % ADDRESS_COLORS.length]]));
   const selectedRowIds = new Set(rows.map((row) => String(row.id)));
@@ -536,10 +624,11 @@ function rebuildOrganization(engine, scene) {
     engine.organization.add(label);
   }
   engine.onOrganizationSummary?.({
+    ...filtered.summary,
     shownRows: rows.length,
     totalRows: organization.selection?.total_rows ?? anchors.length,
     rowIds: rows.map((row) => row.id),
-    positiveMembers: links.length + missing,
+    positiveMembers: filtered.summary.totalLinks + missing,
     drawnMembers: links.length,
     selfMembers: selfIds.size,
     missingMembers: missing,
@@ -629,11 +718,11 @@ function updateStreaks(engine, time) {
 }
 
 /** Render only supplied model predictions; coordinates are rotor diameters. */
-export default function FlowScene({ scene, result, view = {}, fieldRange = null, selected = null, onSelect, onDraggingChange, onTurbineMove, onOrganizationSummary, cameraPreset = 'perspective', cameraRevision = 0, onReady }) {
+export default function FlowScene({ scene, result, view = {}, fieldRange = null, selected = null, domainLimits, onSelect, onDraggingChange, onTurbineAdd, onTurbineMove, onTurbineDelete, onDomainChange, onOrganizationSummary, cameraPreset = 'perspective', cameraRevision = 0, onReady }) {
   const hostRef = useRef(null);
   const engineRef = useRef(null);
-  const callbacksRef = useRef({ onSelect, onDraggingChange, onTurbineMove, onOrganizationSummary, onReady });
-  callbacksRef.current = { onSelect, onDraggingChange, onTurbineMove, onOrganizationSummary, onReady };
+  const callbacksRef = useRef({ domainLimits, onSelect, onDraggingChange, onTurbineAdd, onTurbineMove, onTurbineDelete, onDomainChange, onOrganizationSummary, onReady });
+  callbacksRef.current = { domainLimits, onSelect, onDraggingChange, onTurbineAdd, onTurbineMove, onTurbineDelete, onDomainChange, onOrganizationSummary, onReady };
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -665,12 +754,13 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
     world.add(light);
     const engine = {
       renderer, world, camera, controls,
-      ground: new THREE.Group(), turbines: new THREE.Group(), slice: new THREE.Group(), flow: new THREE.Group(), organization: new THREE.Group(),
+      ground: new THREE.Group(), turbines: new THREE.Group(), slice: new THREE.Group(), flow: new THREE.Group(), organization: new THREE.Group(), design: new THREE.Group(),
+      designHandles: new THREE.Group(), designOutline: null,
       rotors: [], paths: [], view: {}, scene: null, domain: null, result: null, exaggeration: 1, cx: 0, cy: 0,
       cameraPreset: 'perspective', moving: null, orgPulses: null, range: null,
       onOrganizationSummary: (summary) => callbacksRef.current.onOrganizationSummary?.(summary),
     };
-    world.add(engine.ground, engine.turbines, engine.flow, engine.slice, engine.organization);
+    world.add(engine.ground, engine.turbines, engine.flow, engine.slice, engine.organization, engine.design);
     engineRef.current = engine;
     const resize = () => {
       const width = Math.max(1, host.clientWidth);
@@ -694,67 +784,118 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
       pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
       raycaster.setFromCamera(pointer, camera);
     };
-    const pointerDown = (event) => {
-      if (event.button !== 0 || engine.abstractActive) return;
-      setPointer(event);
-      const hit = raycaster.intersectObjects(engine.turbines.children, true).find((item) => item.object.userData.turbineId !== undefined);
-      down = { x: event.clientX, y: event.clientY, id: hit?.object.userData.turbineId };
-      if (!hit || engine.view.tool !== 'move') return;
-      let turbine = hit.object;
-      while (turbine.parent && turbine.parent !== engine.turbines) turbine = turbine.parent;
-      if (turbine.parent !== engine.turbines || !raycaster.ray.intersectPlane(dragPlane, intersection)) return;
-      drag = { id: turbine.userData.turbineId, turbine, x: turbine.position.x, y: turbine.position.z, dx: turbine.position.x - intersection.x, dy: turbine.position.z - intersection.z };
-      engine.flow.visible = false;
-      engine.slice.visible = false;
-      engine.organization.visible = false;
+    const clearInteraction = (restore = true) => {
+      if (drag) {
+        const active = drag;
+        drag = null;
+        if (restore && active.kind === 'turbine') {
+          active.turbine.position.x = active.x;
+          active.turbine.position.z = active.y;
+        } else if (restore && active.kind === 'domain') {
+          updateDesignBounds(engine, active.lengths);
+        }
+        controls.enabled = true;
+        if (renderer.domElement.hasPointerCapture(active.pointerId)) renderer.domElement.releasePointerCapture(active.pointerId);
+        callbacksRef.current.onDraggingChange?.(false);
+      }
+      down = null;
+      renderer.domElement.style.cursor = engine.view.mode === 'design' && engine.view.tool === 'add' ? 'crosshair' : '';
+      applyMode(engine);
+    };
+    engine.cancelInteraction = () => clearInteraction(true);
+    const startDrag = (event, active) => {
+      drag = { ...active, pointerId: event.pointerId };
       controls.enabled = false;
       renderer.domElement.setPointerCapture(event.pointerId);
-      callbacksRef.current.onSelect?.(drag.id);
+      renderer.domElement.style.cursor = 'grabbing';
       callbacksRef.current.onDraggingChange?.(true);
       event.stopImmediatePropagation();
       event.preventDefault();
     };
+    const pointerDown = (event) => {
+      if (event.button !== 0 || engine.abstractActive || !engine.domain) return;
+      setPointer(event);
+      if (engine.view.mode === 'design' && engine.view.designSection === 'domain') {
+        const hit = raycaster.intersectObjects(engine.designHandles.children, true).find((item) => item.object.userData.designAxis !== undefined);
+        if (hit && raycaster.ray.intersectPlane(dragPlane, intersection)) {
+          const axis = hit.object.userData.designAxis;
+          const direction = hit.object.userData.designDirection;
+          const lengths = [0, 1].map((index) => engine.domain.max[index] - engine.domain.min[index]);
+          const limits = callbacksRef.current.domainLimits?.[axis] || [0.1, 100];
+          startDrag(event, { kind: 'domain', axis, direction, lengths, limits: [...limits], start: axis === 0 ? intersection.x : intersection.z, value: lengths[axis] });
+          return;
+        }
+      }
+      const hit = raycaster.intersectObjects(engine.turbines.children, true).find((item) => item.object.userData.turbineId !== undefined);
+      down = { x: event.clientX, y: event.clientY, id: hit?.object.userData.turbineId, pointerId: event.pointerId };
+      if (engine.view.mode === 'design' && engine.view.designSection !== 'layout') return;
+      if (!hit || engine.view.tool !== 'move') return;
+      let turbine = hit.object;
+      while (turbine.parent && turbine.parent !== engine.turbines) turbine = turbine.parent;
+      if (turbine.parent !== engine.turbines || !raycaster.ray.intersectPlane(dragPlane, intersection)) return;
+      engine.flow.visible = false;
+      engine.slice.visible = false;
+      engine.organization.visible = false;
+      callbacksRef.current.onSelect?.(turbine.userData.turbineId);
+      startDrag(event, { kind: 'turbine', id: turbine.userData.turbineId, turbine, x: turbine.position.x, y: turbine.position.z, dx: turbine.position.x - intersection.x, dy: turbine.position.z - intersection.z });
+    };
     const pointerMove = (event) => {
-      if (!drag || !engine.domain || engine.abstractActive) return;
+      if (!drag || event.pointerId !== drag.pointerId || !engine.domain || engine.abstractActive) return;
       setPointer(event);
       if (raycaster.ray.intersectPlane(dragPlane, intersection)) {
-        drag.turbine.position.x = clamp(intersection.x + drag.dx, engine.domain.min[0] - engine.cx, engine.domain.max[0] - engine.cx);
-        drag.turbine.position.z = clamp(intersection.z + drag.dy, engine.domain.min[1] - engine.cy, engine.domain.max[1] - engine.cy);
+        if (drag.kind === 'domain') {
+          const coordinate = drag.axis === 0 ? intersection.x : intersection.z;
+          drag.value = domainLengthFromDrag(drag.lengths[drag.axis], drag.start, coordinate, drag.direction, drag.limits);
+          const preview = [...drag.lengths];
+          preview[drag.axis] = drag.value;
+          updateDesignBounds(engine, preview);
+        } else {
+          const [x, y] = clampTurbinePosition(engine.domain, intersection.x + drag.dx + engine.cx, intersection.z + drag.dy + engine.cy);
+          drag.turbine.position.x = x - engine.cx;
+          drag.turbine.position.z = y - engine.cy;
+        }
       }
       event.preventDefault();
     };
     const pointerUp = (event) => {
-      if (engine.abstractActive) {
-        if (drag) callbacksRef.current.onDraggingChange?.(false);
-        drag = null;
-        down = null;
-        controls.enabled = true;
+      if (drag) {
+        if (event.pointerId !== drag.pointerId) return;
+        const active = drag;
+        const cancelled = event.type !== 'pointerup' || engine.abstractActive;
+        const changed = active.kind === 'domain'
+          ? Math.abs(active.value - active.lengths[active.axis]) > 1e-5
+          : Math.hypot(active.turbine.position.x - active.x, active.turbine.position.z - active.y) > 1e-5;
+        const commit = active.kind === 'domain' ? callbacksRef.current.onDomainChange : callbacksRef.current.onTurbineMove;
+        clearInteraction(cancelled || !changed || !commit);
+        if (!cancelled && changed && commit) {
+          if (active.kind === 'domain') commit(active.axis, active.value);
+          else commit(active.id, active.turbine.position.x + engine.cx, active.turbine.position.z + engine.cy);
+        }
+        event.preventDefault();
         return;
       }
-      if (drag) {
-        const { id, turbine, x, y } = drag;
-        controls.enabled = true;
-        drag = null;
-        if (event.type === 'pointercancel') {
-          turbine.position.x = x;
-          turbine.position.z = y;
-        }
-        if (Math.hypot(turbine.position.x - x, turbine.position.z - y) > 1e-5) {
-          callbacksRef.current.onTurbineMove?.(id, turbine.position.x + engine.cx, turbine.position.z + engine.cy);
-        } else {
-          applyMode(engine);
-        }
-        callbacksRef.current.onDraggingChange?.(false);
-        event.preventDefault();
-      } else if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) < 4 && down.id !== undefined) {
-        callbacksRef.current.onSelect?.(down.id);
+      if (!down || event.pointerId !== down.pointerId || event.type !== 'pointerup' || engine.abstractActive || !isPointerClick(down, { x: event.clientX, y: event.clientY })) {
+        down = null;
+        return;
       }
+      const designLayout = engine.view.mode === 'design' && engine.view.designSection === 'layout';
+      if (designLayout && engine.view.tool === 'delete' && down.id !== undefined) {
+        callbacksRef.current.onTurbineDelete?.(down.id);
+      } else if (designLayout && engine.view.tool === 'add' && down.id === undefined) {
+        setPointer(event);
+        if (raycaster.ray.intersectPlane(dragPlane, intersection)) {
+          const x = intersection.x + engine.cx;
+          const y = intersection.z + engine.cy;
+          if (withinDomain(engine.domain, x, y)) callbacksRef.current.onTurbineAdd?.(...clampTurbinePosition(engine.domain, x, y));
+        }
+      } else if (down.id !== undefined) callbacksRef.current.onSelect?.(down.id);
       down = null;
     };
     renderer.domElement.addEventListener('pointerdown', pointerDown, true);
     renderer.domElement.addEventListener('pointermove', pointerMove);
     renderer.domElement.addEventListener('pointerup', pointerUp);
     renderer.domElement.addEventListener('pointercancel', pointerUp);
+    renderer.domElement.addEventListener('lostpointercapture', pointerUp);
     let frame;
     let previous = performance.now();
     let elapsed = 0;
@@ -780,8 +921,10 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
       renderer.domElement.removeEventListener('pointermove', pointerMove);
       renderer.domElement.removeEventListener('pointerup', pointerUp);
       renderer.domElement.removeEventListener('pointercancel', pointerUp);
+      renderer.domElement.removeEventListener('lostpointercapture', pointerUp);
+      engine.cancelInteraction?.();
       controls.dispose();
-      for (const group of [engine.ground, engine.turbines, engine.slice, engine.flow, engine.organization]) clearGroup(group);
+      for (const group of [engine.ground, engine.turbines, engine.slice, engine.flow, engine.organization, engine.design]) clearGroup(group);
       renderer.dispose();
       renderer.domElement.remove();
       engineRef.current = null;
@@ -826,17 +969,30 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
     const engine = engineRef.current;
     if (!engine) return;
     engine.view = view;
+    engine.cancelInteraction?.();
+    engine.renderer.domElement.style.cursor = view.mode === 'design' && view.designSection === 'layout' && view.tool === 'add' ? 'crosshair' : '';
+  }, [view.mode, view.tool, view.designSection]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (engine && view.mode === 'design' && view.designSection === 'domain') cameraView(engine, 'fit');
+  }, [view.mode, view.designSection]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.view = view;
     engine.controls.mouseButtons.LEFT = view.tool === 'pan' ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
     applyMode(engine);
     rebuildOrganization(engine, scene);
-  }, [view.playing, view.tool, view.organization, view.mode, view.organizationView]);
+  }, [view.playing, view.tool, view.organization, view.mode, view.designSection, view.organizationView]);
 
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
     engine.view = view;
     rebuildOrganization(engine, scene);
-  }, [view.organizationAddress]);
+  }, [view.organizationAddress, view.organizationLinks]);
 
   useEffect(() => { if (engineRef.current) updateSelection(engineRef.current, selected); }, [selected]);
   useEffect(() => {

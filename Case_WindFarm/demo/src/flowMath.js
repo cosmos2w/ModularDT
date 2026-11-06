@@ -218,6 +218,80 @@ export function directoryView(organization, scene, address = null) {
   return { anchors, rows, links, missing };
 }
 
+// Select only what is drawn in the spatial view. The original rows and weights
+// remain available to the model and to the exact-membership Venn view.
+export function selectSpatialLinks(data, { mode = 'focused' } = {}) {
+  const displayMode = mode === 'all' ? 'all' : 'focused';
+  const targetMass = 0.95;
+  const selected = new Set();
+  const indexedRows = new Map();
+  data.links.forEach((link, index) => {
+    const key = String(link.receiverId);
+    if (!indexedRows.has(key)) indexedRows.set(key, []);
+    indexedRows.get(key).push({ link, index });
+  });
+
+  let fullMass = 0;
+  let shownMass = 0;
+  let availableMass = 0;
+  const rowSummaries = data.rows.map((row) => {
+    const candidates = indexedRows.get(String(row.id)) || [];
+    const members = row.members.filter((member) => member.weight > 0 && ['M', 'E'].includes(member.role));
+    const rowFullMass = members.reduce((sum, member) => sum + member.weight, 0);
+    const rowAvailableMass = candidates.reduce((sum, item) => sum + item.link.weight, 0);
+    let rowSelectedMass = 0;
+
+    // Preserve all positive M memberships and the actual positive own-E entry.
+    for (const item of candidates) {
+      if (displayMode === 'all' || item.link.donorRole === 'M' || item.link.isSelf) {
+        selected.add(item.index);
+        rowSelectedMass += item.link.weight;
+      }
+    }
+    if (displayMode === 'focused') {
+      const optional = candidates.filter((item) => !selected.has(item.index))
+        .sort((a, b) => b.link.weight - a.link.weight || a.index - b.index);
+      for (const item of optional) {
+        if (rowSelectedMass >= targetMass * rowAvailableMass) break;
+        selected.add(item.index);
+        rowSelectedMass += item.link.weight;
+      }
+    }
+
+    const omittedMembers = candidates.filter((item) => !selected.has(item.index)).map(({ link }) => ({
+      role: link.donorRole, id: link.donorId, weight: link.weight,
+    }));
+    fullMass += rowFullMass;
+    availableMass += rowAvailableMass;
+    shownMass += rowSelectedMass;
+    return {
+      receiverId: row.id,
+      totalLinks: candidates.length,
+      shownLinks: candidates.length - omittedMembers.length,
+      omittedLinks: omittedMembers.length,
+      missingLinks: members.length - candidates.length,
+      retainedMass: rowFullMass > 0 ? rowSelectedMass / rowFullMass : null,
+      availableRetainedMass: rowAvailableMass > 0 ? rowSelectedMass / rowAvailableMass : null,
+      omittedMembers,
+    };
+  });
+  const links = data.links.filter((_, index) => selected.has(index));
+  return {
+    links,
+    summary: {
+      mode: displayMode,
+      targetMass,
+      totalLinks: data.links.length,
+      shownLinks: links.length,
+      omittedLinks: data.links.length - links.length,
+      missingLinks: data.missing,
+      retainedMass: fullMass > 0 ? shownMass / fullMass : null,
+      availableRetainedMass: availableMass > 0 ? shownMass / availableMass : null,
+      rows: rowSummaries,
+    },
+  };
+}
+
 // Midpoint integration uses the reconstructed velocity, with seeds around each
 // actual rotor and a sparse upstream context. Distance and step size are in D.
 export function traceStreamlines(grid, turbines = []) {

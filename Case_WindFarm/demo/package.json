@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "test": "node src/flowMath.test.js && node src/organizationVenn.test.js",
+    "test": "node src/flowMath.test.js && node src/organizationVenn.test.js && node src/designMath.test.js && node src/scientificPlotMath.test.js",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

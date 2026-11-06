@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIELD_SPECS, directoryView, fieldColor, fieldValue, getFieldRange, referenceProfileUx, sampleVelocity, sliceSampleCoordinates, traceStreamlines, validGrid } from './flowMath.js';
+import { FIELD_SPECS, directoryView, fieldColor, fieldValue, getFieldRange, referenceProfileUx, sampleVelocity, selectSpatialLinks, sliceSampleCoordinates, traceStreamlines, validGrid } from './flowMath.js';
 
 function makeGrid(field) {
   const axes = { x: [-2, 0, 3], y: [0, 1, 5], z: [0, 2, 6] };
@@ -98,4 +98,68 @@ test('hyperedge display preserves original identities, self membership and tiny 
   assert.ok(selected.links.find(link => link.donorId === 2).isSelf);
   assert.equal(directoryView(organization, scene).links.length, 4);
   assert.equal(JSON.stringify(organization), before);
+});
+
+test('focused spatial view retains 95% of each row and preserves positive M and own-E members', () => {
+  const scene = { turbines: [{ id: 7, x: 2, y: 3, z: 0.875 }] };
+  const organization = { kind: 'e_anchor_directory', anchors: [
+    { id: 2, position: [0, 0, 1], members: [
+      { role: 'M', id: 7, weight: 1e-12 },
+      { role: 'E', id: 2, weight: 2e-12 },
+      { role: 'E', id: 9, weight: 0.7 },
+      { role: 'E', id: 10, weight: 0.26 },
+      { role: 'E', id: 11, weight: 0.025 },
+      { role: 'E', id: 12, weight: 0.015 },
+    ] },
+    { id: 9, position: [1, 0, 1], members: [
+      { role: 'M', id: 7, weight: 0.5 },
+      { role: 'E', id: 9, weight: 0.1 },
+      { role: 'E', id: 2, weight: 0.2 },
+      { role: 'E', id: 10, weight: 0.16 },
+      { role: 'E', id: 11, weight: 0.04 },
+    ] },
+    ...[10, 11, 12].map((id) => ({ id, position: [id, 0, 1] })),
+  ] };
+  const data = directoryView(organization, scene);
+  const before = JSON.stringify({ organization, data });
+  const focused = selectSpatialLinks(data, { mode: 'focused' });
+  assert.deepEqual(focused.links.map(({ receiverId, donorId }) => [receiverId, donorId]), [
+    [2, 7], [2, 2], [2, 9], [2, 10], [9, 7], [9, 9], [9, 2], [9, 10],
+  ]);
+  assert.equal(focused.summary.totalLinks, 11);
+  assert.equal(focused.summary.shownLinks, 8);
+  assert.equal(focused.summary.omittedLinks, 3);
+  assert.equal(focused.summary.missingLinks, 0);
+  assert.ok(focused.summary.rows.every((row) => row.retainedMass >= 0.95));
+  assert.deepEqual(focused.summary.rows[0].omittedMembers, [
+    { role: 'E', id: 11, weight: 0.025 }, { role: 'E', id: 12, weight: 0.015 },
+  ]);
+  assert.deepEqual(focused.summary.rows[1].omittedMembers, [{ role: 'E', id: 11, weight: 0.04 }]);
+  assert.ok(Math.abs(focused.summary.retainedMass - (1.92 + 3e-12) / (2 + 3e-12)) < 1e-12);
+
+  const all = selectSpatialLinks(data, { mode: 'all' });
+  assert.notEqual(all.links, data.links);
+  assert.deepEqual(all.links, data.links);
+  assert.ok(all.links.every((link, index) => link === data.links[index]));
+  assert.equal(all.summary.omittedLinks, 0);
+  assert.equal(all.summary.retainedMass, 1);
+  assert.equal(JSON.stringify({ organization, data }), before);
+});
+
+test('spatial mass coverage accounts for members with unresolved coordinates', () => {
+  const organization = { kind: 'e_anchor_directory', anchors: [
+    { id: 2, position: [0, 0, 1], members: [
+      { role: 'M', id: 7, weight: 0.5 },
+      { role: 'E', id: 2, weight: 0.25 },
+      { role: 'E', id: 404, weight: 0.25 },
+    ] },
+  ] };
+  const data = directoryView(organization, { turbines: [{ id: 7, x: 0, y: 0, z: 1 }] });
+  const { links, summary } = selectSpatialLinks(data, { mode: 'focused' });
+  assert.equal(links.length, 2);
+  assert.equal(summary.missingLinks, 1);
+  assert.equal(summary.rows[0].missingLinks, 1);
+  assert.equal(summary.omittedLinks, 0);
+  assert.equal(summary.retainedMass, 0.75);
+  assert.equal(summary.availableRetainedMass, 1);
 });

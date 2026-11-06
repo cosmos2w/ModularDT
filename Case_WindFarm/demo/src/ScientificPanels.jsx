@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { FIELD_SPECS, fieldColor, fieldValue, sampleVelocity, validGrid } from './flowMath.js';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Expand, RotateCcw, Scan } from 'lucide-react';
+import { FIELD_SPECS, fieldColor, validGrid } from './flowMath.js';
+import { cropPanel, panView, plotRectangle, samplePanel, zoomView } from './scientificPlotMath.js';
 import './scientificPanels.css';
 
-const CANVAS_WIDTH = 540;
 const DEFAULT_RANGE = { min: 0, max: 12 };
+const DEFAULT_VIEW = { zoom: 1, x: 0.5, y: 0.5 };
 const SPECS = [
   { name: 'XY', axis: 'z', fixed: 2, horizontal: 0, vertical: 1 },
   { name: 'XZ', axis: 'y', fixed: 1, horizontal: 0, vertical: 2 },
@@ -46,97 +48,6 @@ export function panelGeometry(scene, grid, spec) {
   };
 }
 
-// Equal physical distances have equal display lengths, including vertical
-// sections. A maximum height only reduces the plot width for tall domains.
-function plotRectangle(panel) {
-  const availableWidth = CANVAS_WIDTH - 72;
-  const horizontalSpan = panel.horizontalBounds[1] - panel.horizontalBounds[0];
-  const verticalSpan = panel.verticalBounds[1] - panel.verticalBounds[0];
-  const scale = Math.min(availableWidth / horizontalSpan, 350 / verticalSpan);
-  const width = horizontalSpan * scale;
-  const height = verticalSpan * scale;
-  return { left: 58 + (availableWidth - width) / 2, top: 15, width, height };
-}
-
-// Exclude a sample if any positive-weight interpolation corner is outside the
-// fluid mask. The same mask applies to displayed predictions and their RMSE.
-function validMaskSample(grid, point) {
-  const mask = grid.fluid_mask;
-  const axes = [grid.axes.x, grid.axes.y, grid.axes.z];
-  const [nx, ny, nz] = grid.shape;
-  const shape = [nx, ny, nz];
-  const corners = axes.map((axis, dimension) => {
-    let low = 0;
-    let high = shape[dimension] - 1;
-    while (high - low > 1) {
-      const middle = (low + high) >> 1;
-      if (axis[middle] <= point[dimension]) low = middle;
-      else high = middle;
-    }
-    const weight = (point[dimension] - axis[low]) / (axis[high] - axis[low]);
-    return [[low, 1 - weight], [high, weight]];
-  });
-  for (const [ix, wx] of corners[0]) for (const [iy, wy] of corners[1]) for (const [iz, wz] of corners[2]) {
-    if (wx * wy * wz > 1e-12 && !mask[(ix * ny + iy) * nz + iz]) return false;
-  }
-  return true;
-}
-
-// Every value used for the colors, isolines, and RMSE is sampled at the same
-// physical point. A reference-bearing map shows only paired valid samples.
-export function samplePanel(grid, panel, field, range) {
-  if (!panel.available || !validGrid(grid) || !Number.isFinite(range?.min) || !Number.isFinite(range?.max)) return null;
-  const rectangle = plotRectangle(panel);
-  const width = Math.max(2, Math.min(160, Math.ceil(rectangle.width / 2.5)));
-  const height = Math.max(2, Math.min(120, Math.ceil(width * rectangle.height / rectangle.width)));
-  const pixels = new Uint8ClampedArray(width * height * 4);
-  const values = new Float64Array(width * height);
-  values.fill(NaN);
-  const hasReference = grid.reference_velocity?.length === grid.velocity.length;
-  const mask = grid.fluid_mask;
-  const partialMask = mask?.length === grid.velocity.length / 3 && mask.some((value) => !value);
-  let squaredError = 0;
-  let referenceCount = 0;
-  let sampleCount = 0;
-  let minimum = Infinity;
-  let maximum = -Infinity;
-  for (let row = 0; row < height; row += 1) for (let column = 0; column < width; column += 1) {
-    const point = [0, 0, 0];
-    point[panel.fixed] = panel.coordinate;
-    point[panel.horizontal] = panel.horizontalBounds[0] + column / (width - 1) * (panel.horizontalBounds[1] - panel.horizontalBounds[0]);
-    point[panel.vertical] = panel.verticalBounds[1] - row / (height - 1) * (panel.verticalBounds[1] - panel.verticalBounds[0]);
-    if (partialMask && !validMaskSample(grid, point)) continue;
-    const velocity = sampleVelocity(grid, point);
-    if (!velocity) continue;
-    const predicted = fieldValue(velocity, field, point, grid);
-    if (!Number.isFinite(predicted)) continue;
-    let referenceValue;
-    if (hasReference) {
-      const reference = sampleVelocity(grid, point, grid.reference_velocity);
-      referenceValue = reference && fieldValue(reference, field, point, grid);
-      if (!Number.isFinite(referenceValue)) continue;
-    }
-    const index = row * width + column;
-    const offset = index * 4;
-    const color = fieldColor(predicted, range, field);
-    for (let channel = 0; channel < 3; channel += 1) pixels[offset + channel] = Math.round(255 * color[channel]);
-    pixels[offset + 3] = 255;
-    values[index] = predicted;
-    sampleCount += 1;
-    minimum = Math.min(minimum, predicted);
-    maximum = Math.max(maximum, predicted);
-    if (hasReference) {
-      squaredError += (predicted - referenceValue) ** 2;
-      referenceCount += 1;
-    }
-  }
-  if (!sampleCount) return null;
-  return {
-    rectangle, width, height, pixels, values, minimum, maximum, referenceCount,
-    rmse: referenceCount ? Math.sqrt(squaredError / referenceCount) : null,
-  };
-}
-
 // Marching squares works in sample coordinates. Invalid/masked corners skip a
 // cell; ambiguous saddles use the bilinear asymptotic decider.
 function drawContours(context, sampled, range) {
@@ -146,8 +57,23 @@ function drawContours(context, sampled, range) {
   if (!(high > low)) return;
   const xScale = rectangle.width / (width - 1);
   const yScale = rectangle.height / (height - 1);
+  // Reuse the color samples for isolines; a bounded contour mesh avoids
+  // repeating large marching-squares work during continuous pointer movement.
+  const stride = Math.max(1, Math.ceil(Math.sqrt(width * height / 7000)));
   const vertices = [[0, 0], [1, 0], [1, 1], [0, 1]];
   const edges = [[0, 1], [1, 2], [2, 3], [3, 0]];
+  const cells = [];
+  for (let row = 0; row < height - 1; row += stride) for (let column = 0; column < width - 1; column += stride) {
+    const nextRow = Math.min(row + stride, height - 1);
+    const nextColumn = Math.min(column + stride, width - 1);
+    let fluid = true;
+    for (let y = row; y <= nextRow && fluid; y += 1) for (let x = column; x <= nextColumn; x += 1) {
+      if (!Number.isFinite(values[y * width + x])) { fluid = false; break; }
+    }
+    if (fluid) cells.push({ row, column, dx: nextColumn - column, dy: nextRow - row,
+      corners: [values[row * width + column], values[row * width + nextColumn],
+        values[nextRow * width + nextColumn], values[nextRow * width + column]] });
+  }
   context.save();
   context.beginPath();
   context.rect(rectangle.left, rectangle.top, rectangle.width, rectangle.height);
@@ -159,18 +85,15 @@ function drawContours(context, sampled, range) {
   for (let levelIndex = 1; levelIndex <= 10; levelIndex += 1) {
     const level = low + (high - low) * levelIndex / 11;
     context.beginPath();
-    for (let row = 0; row < height - 1; row += 1) for (let column = 0; column < width - 1; column += 1) {
-      const corners = [values[row * width + column], values[row * width + column + 1],
-        values[(row + 1) * width + column + 1], values[(row + 1) * width + column]];
-      if (!corners.every(Number.isFinite)) continue;
+    for (const { row, column, dx, dy, corners } of cells) {
       const intersections = [];
       for (let edge = 0; edge < edges.length; edge += 1) {
         const [a, b] = edges[edge];
         if ((corners[a] < level) === (corners[b] < level)) continue;
         const fraction = (level - corners[a]) / (corners[b] - corners[a]);
         intersections[edge] = [
-          column + vertices[a][0] + fraction * (vertices[b][0] - vertices[a][0]),
-          row + vertices[a][1] + fraction * (vertices[b][1] - vertices[a][1]),
+          column + dx * (vertices[a][0] + fraction * (vertices[b][0] - vertices[a][0])),
+          row + dy * (vertices[a][1] + fraction * (vertices[b][1] - vertices[a][1])),
         ];
       }
       const present = intersections.map((point, edge) => point && edge).filter((edge) => edge !== undefined);
@@ -187,7 +110,7 @@ function drawContours(context, sampled, range) {
         const tolerance = Number.EPSILON * 16 * Math.max(1, Math.abs(f[0] * f[2]), Math.abs(f[1] * f[3]));
         if (Math.abs(determinant) <= tolerance) {
           const denominator = f[0] - f[1] + f[2] - f[3];
-          const saddle = denominator ? [column + (f[0] - f[3]) / denominator, row + (f[0] - f[1]) / denominator] : [column + 0.5, row + 0.5];
+          const saddle = denominator ? [column + dx * (f[0] - f[3]) / denominator, row + dy * (f[0] - f[1]) / denominator] : [column + dx * 0.5, row + dy * 0.5];
           intersections.forEach((point) => segment(point, saddle));
         } else {
           const pairs = determinant > 0 ? [[0, 1], [2, 3]] : [[0, 3], [1, 2]];
@@ -200,9 +123,15 @@ function drawContours(context, sampled, range) {
   context.restore();
 }
 
-function drawPanel(canvas, panel, sampled, scene, range, error) {
+function drawPanel(canvas, panel, sampled, scene, range, error, size) {
+  const pixelRatio = size.pixelRatio;
+  const pixelWidth = Math.max(1, Math.round(size.width * pixelRatio));
+  const pixelHeight = Math.max(1, Math.round(size.height * pixelRatio));
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
   const context = canvas.getContext('2d');
-  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, size.width, size.height);
   if (!sampled) return;
   const { rectangle, width, height, pixels } = sampled;
   const buffer = document.createElement('canvas');
@@ -236,10 +165,10 @@ function drawPanel(canvas, panel, sampled, scene, range, error) {
       context.beginPath();
       context.moveTo(x, y1);
       context.lineTo(x, y2);
-      context.lineWidth = 5;
+      context.lineWidth = 3;
       context.strokeStyle = 'rgba(19, 42, 48, 0.8)';
       context.stroke();
-      context.lineWidth = 2;
+      context.lineWidth = 1.2;
       context.strokeStyle = '#eff9f5';
       context.stroke();
     }
@@ -247,53 +176,51 @@ function drawPanel(canvas, panel, sampled, scene, range, error) {
   }
 
   context.strokeStyle = '#819ba1';
-  context.lineWidth = 1.3;
+  context.lineWidth = 0.7;
   context.beginPath();
   context.moveTo(rectangle.left, rectangle.top);
   context.lineTo(rectangle.left, rectangle.top + rectangle.height);
   context.lineTo(rectangle.left + rectangle.width, rectangle.top + rectangle.height);
   context.stroke();
   context.fillStyle = '#a9bfc2';
-  context.strokeStyle = '#819ba1';
-  context.font = '20px system-ui, sans-serif';
-  context.lineWidth = 1;
+  context.font = '10px system-ui, sans-serif';
   for (const fraction of [0, 0.5, 1]) {
     const x = rectangle.left + fraction * rectangle.width;
     const y = rectangle.top + (1 - fraction) * rectangle.height;
     context.beginPath();
     context.moveTo(x, rectangle.top + rectangle.height);
-    context.lineTo(x, rectangle.top + rectangle.height + 5);
-    context.moveTo(rectangle.left - 5, y);
+    context.lineTo(x, rectangle.top + rectangle.height + 3);
+    context.moveTo(rectangle.left - 3, y);
     context.lineTo(rectangle.left, y);
     context.stroke();
     context.textAlign = fraction === 0 ? 'left' : fraction === 1 ? 'right' : 'center';
     context.textBaseline = 'top';
-    context.fillText(labelNumber(panel.horizontalBounds[0] + fraction * (panel.horizontalBounds[1] - panel.horizontalBounds[0]), 1), x, rectangle.top + rectangle.height + 7);
+    context.fillText(labelNumber(panel.horizontalBounds[0] + fraction * (panel.horizontalBounds[1] - panel.horizontalBounds[0]), 1), x, rectangle.top + rectangle.height + 4);
     context.textAlign = 'right';
     context.textBaseline = 'middle';
-    context.fillText(labelNumber(panel.verticalBounds[0] + fraction * (panel.verticalBounds[1] - panel.verticalBounds[0]), 1), rectangle.left - 9, y);
+    context.fillText(labelNumber(panel.verticalBounds[0] + fraction * (panel.verticalBounds[1] - panel.verticalBounds[0]), 1), rectangle.left - 5, y);
   }
   context.textAlign = 'center';
   context.textBaseline = 'middle';
-  context.fillText(`${'XYZ'[panel.horizontal]} / D`, rectangle.left + rectangle.width / 2, rectangle.top + rectangle.height + 40);
+  context.fillText(`${'XYZ'[panel.horizontal]} / D`, rectangle.left + rectangle.width / 2, rectangle.top + rectangle.height + 26);
   context.save();
-  context.translate(14, rectangle.top + rectangle.height / 2);
+  context.translate(8, rectangle.top + rectangle.height / 2);
   context.rotate(-Math.PI / 2);
   context.fillText(`${'XYZ'[panel.vertical]} / D`, 0, 0);
   context.restore();
 
-  // Keep the measurement on the reconstruction itself without a backplate.
+  // The visible annotation refers to the displayed crop and paired fluid samples.
   context.save();
   context.textAlign = 'right';
   context.textBaseline = 'top';
-  context.font = '600 18px system-ui, sans-serif';
+  context.font = '600 10px system-ui, sans-serif';
   context.lineWidth = 3;
-  context.strokeStyle = 'rgba(12, 29, 35, 0.8)';
+  context.strokeStyle = 'rgba(12, 29, 35, 0.85)';
   context.fillStyle = '#f0f7f4';
-  const textX = rectangle.left + rectangle.width - 7;
-  const textY = rectangle.top + 6;
-  context.strokeText(error, textX, textY, rectangle.width - 14);
-  context.fillText(error, textX, textY, rectangle.width - 14);
+  const textX = rectangle.left + rectangle.width - 4;
+  const textY = rectangle.top + 4;
+  context.strokeText(error, textX, textY, Math.max(1, rectangle.width - 8));
+  context.fillText(error, textX, textY, Math.max(1, rectangle.width - 8));
   context.restore();
 }
 
@@ -306,28 +233,109 @@ function colorbarGradient(range, field) {
   return `linear-gradient(90deg, ${colors.join(',')})`;
 }
 
-function Panel({ scene, grid, field, range, spec, onPlaneSelect }) {
-  const canvas = useRef(null);
+const Panel = memo(function Panel({ scene, grid, field, range, spec, onPlaneSelect, onFocus, focused, view, onViewChange }) {
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const dragRef = useRef(null);
+  const frameRef = useRef(null);
+  const viewRef = useRef(view);
+  const [size, setSize] = useState({ width: 0, height: 0, pixelRatio: 1 });
   const panel = useMemo(() => panelGeometry(scene, grid, spec), [scene, grid, spec]);
-  const sampled = useMemo(() => samplePanel(grid, panel, field, range), [grid, panel, field, range]);
+  const cropped = useMemo(() => panel.available ? cropPanel(panel, view) : panel, [panel, view]);
+  const rectangle = useMemo(() => panel.available && size.width > 0 && size.height > 0 ? plotRectangle(panel, size.width, size.height) : null, [panel, size.width, size.height]);
+  const sampled = useMemo(() => samplePanel(grid, cropped, field, range, rectangle, size.pixelRatio), [grid, cropped, field, range, rectangle, size.pixelRatio]);
+  const gradient = useMemo(() => colorbarGradient(range, field), [range, field]);
   const unit = FIELD_SPECS[field]?.unit || 'm/s';
   const error = sampled?.rmse == null ? 'Reference error unavailable' : `RMSE ${sampled.rmse.toPrecision(3)} ${unit}`;
-  const canvasHeight = sampled ? Math.ceil(sampled.rectangle.top + sampled.rectangle.height + 52) : 120;
-  useEffect(() => { if (canvas.current) drawPanel(canvas.current, panel, sampled, scene, range, error); }, [panel, sampled, scene, range, error]);
-  return <button type="button" className="scientific-panel" disabled={!sampled}
-    aria-label={`${panel.title}, ${error}; show this section in 3D`}
-    onClick={() => onPlaneSelect?.({ axis: panel.axis, position: panel.position })}>
-    <span className="scientific-panel-title">{panel.title}</span>
-    <span className="scientific-canvas-wrap"><canvas ref={canvas} width={CANVAS_WIDTH} height={canvasHeight} aria-hidden="true"/></span>
-    {sampled && <span className="scientific-scale" aria-hidden="true">
-      <span>{scaleNumber(range.min)}</span><span className="scientific-colorbar" style={{ background: colorbarGradient(range, field) }}/><span>{scaleNumber(range.max)} {unit}</span>
-    </span>}
-  </button>;
-}
+  viewRef.current = view;
 
-export default function ScientificPanels({ scene, result, field = 'speed', range = DEFAULT_RANGE, onPlaneSelect }) {
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return undefined;
+    const measure = () => {
+      const bounds = wrap.getBoundingClientRect();
+      const width = Math.round(bounds.width);
+      const height = Math.round(bounds.height);
+      const pixelRatio = window.devicePixelRatio || 1;
+      setSize(previous => previous.width === width && previous.height === height && previous.pixelRatio === pixelRatio ? previous : { width, height, pixelRatio });
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(wrap);
+    window.addEventListener('resize', measure);
+    measure();
+    return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
+  }, []);
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas && size.width && size.height) drawPanel(canvas, cropped, sampled, scene, range, error, size);
+  }, [cropped, sampled, scene, range, error, size]);
+  useEffect(() => () => { if (frameRef.current !== null) cancelAnimationFrame(frameRef.current); }, []);
+
+  const queueView = next => {
+    if (next.zoom === viewRef.current.zoom && next.x === viewRef.current.x && next.y === viewRef.current.y) return;
+    viewRef.current = next;
+    if (frameRef.current !== null) return;
+    frameRef.current = requestAnimationFrame(() => { frameRef.current = null; onViewChange(spec.name, viewRef.current); });
+  };
+  const wheelRef = useRef(null);
+  wheelRef.current = event => {
+    if (!sampled || !rectangle) return;
+    const bounds = canvasRef.current.getBoundingClientRect();
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    if (x < rectangle.left || x > rectangle.left + rectangle.width || y < rectangle.top || y > rectangle.top + rectangle.height) return;
+    event.preventDefault();
+    queueView(zoomView(viewRef.current, viewRef.current.zoom * Math.exp(-event.deltaY * 0.0015), (x - rectangle.left) / rectangle.width, (y - rectangle.top) / rectangle.height));
+  };
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const onWheel = event => wheelRef.current?.(event);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, []);
+  const pointerDown = event => {
+    if (event.button !== 0 || !sampled) return;
+    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, view: viewRef.current, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const pointerMove = event => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !rectangle) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (Math.hypot(dx, dy) > 3) drag.moved = true;
+    if (drag.moved) queueView(panView(drag.view, dx, dy, rectangle));
+  };
+  const pointerEnd = event => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (!drag.moved && event.type === 'pointerup') onFocus(spec.name);
+  };
+  const resetView = () => {
+    if (frameRef.current !== null) { cancelAnimationFrame(frameRef.current); frameRef.current = null; }
+    viewRef.current = DEFAULT_VIEW;
+    onViewChange(spec.name, DEFAULT_VIEW);
+  };
+  return <article className={`scientific-panel ${focused ? 'is-focused' : ''}`}>
+    <div className="scientific-panel-heading"><span className="scientific-panel-title">{panel.title}</span><div className="scientific-panel-controls">
+      <button type="button" onClick={resetView} aria-label={`Reset view ${spec.name}`} title="Reset view"><RotateCcw size={13}/></button>
+      <button type="button" disabled={!panel.available} onClick={() => onPlaneSelect?.({ axis: panel.axis, position: panel.position })} aria-label={`Show in 3D: ${spec.name}`} title="Show in 3D"><Scan size={13}/><span>3D</span></button>
+      {!focused && <button type="button" disabled={!panel.available} onClick={() => onFocus(spec.name)} aria-label={`Expand map: ${spec.name}`} title="Expand map"><Expand size={13}/></button>}
+    </div></div>
+    <div ref={wrapRef} className="scientific-canvas-wrap"><canvas ref={canvasRef} style={{ visibility: sampled ? 'visible' : 'hidden' }} aria-label={`Expand map: ${spec.name}`} role="button" tabIndex={panel.available ? 0 : -1}
+      data-sample-width={sampled?.width || 0} data-sample-height={sampled?.height || 0} data-zoom={view.zoom} data-crop={panel.available ? [...cropped.horizontalBounds, ...cropped.verticalBounds].join(',') : ''} data-rmse={sampled?.rmse ?? ''}
+      onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
+      onKeyDown={event => { if (sampled && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onFocus(spec.name); } }}/>{!sampled && <span className="scientific-unavailable">Section unavailable</span>}</div>
+    <div className="scientific-scale"><span>{scaleNumber(range.min)}</span><span className="scientific-colorbar" style={{ background: gradient }}/><span>{scaleNumber(range.max)} {unit}</span></div>
+  </article>;
+});
+
+export default function ScientificPanels({ scene, result, field = 'speed', range, onPlaneSelect, fullscreen, focused, onFocus, views, onViewChange }) {
   const grid = result?.grid;
-  return <section className="scientific-panels" aria-label="Scientific flow sections">
-    {SPECS.map((spec) => <Panel key={spec.name} scene={scene} grid={grid} field={field} range={range} spec={spec} onPlaneSelect={onPlaneSelect}/>)}
-  </section>;
+  const displayRange = range || DEFAULT_RANGE;
+  return <div className={`scientific-panels ${fullscreen ? 'is-grid' : ''} ${focused ? 'has-focus' : ''}`} aria-label="Scientific flow sections">
+    {SPECS.map(spec => <Panel key={spec.name} scene={scene} grid={grid} field={field} range={displayRange} spec={spec} onPlaneSelect={onPlaneSelect} onFocus={onFocus} focused={focused === spec.name} view={views[spec.name]} onViewChange={onViewChange}/>)}
+  </div>;
 }

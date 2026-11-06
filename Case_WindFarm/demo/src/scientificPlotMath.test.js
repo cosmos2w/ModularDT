@@ -1,0 +1,45 @@
+import assert from 'node:assert/strict';
+import { cropPanel, panView, plotRectangle, samplePanel, zoomView } from './scientificPlotMath.js';
+import { sampleVelocity } from './flowMath.js';
+
+const initial = { zoom: 1, x: 0.5, y: 0.5 };
+const zoomed = zoomView(initial, 2, 0.75, 0.25);
+assert.deepEqual(zoomed, { zoom: 2, x: 0.625, y: 0.625 });
+assert.deepEqual(zoomView(zoomed, 1, 0.75, 0.25), initial, 'zooming back out restores the full domain');
+assert.deepEqual(panView(zoomed, 10000, -10000, { width: 200, height: 100 }), { zoom: 2, x: 0.25, y: 0.25 });
+const axes = { x: [0, 1, 2], y: [0, 1, 2], z: [0, 1, 2] };
+const velocity = [];
+const reference_velocity = [];
+const fluid_mask = [];
+for (const x of axes.x) for (const y of axes.y) for (const z of axes.z) {
+  velocity.push(x + 2 * y + 0.5 * z, y, z);
+  reference_velocity.push(0, y, z);
+  fluid_mask.push(!(x === 0 && y === 0 && z === 1));
+}
+const grid = { axes, shape: [3, 3, 3], bounds: { min: [0, 0, 0], max: [2, 2, 2] }, velocity, reference_velocity, fluid_mask };
+const panel = { available: true, fixed: 2, horizontal: 0, vertical: 1, coordinate: 1, horizontalBounds: [0, 2], verticalBounds: [0, 2] };
+const cropped = cropPanel(panel, zoomed);
+assert.deepEqual(cropped.horizontalBounds, [0.75, 1.75]);
+assert.deepEqual(cropped.verticalBounds, [0.75, 1.75]);
+const range = { min: 0, max: 10 };
+const smallRect = plotRectangle(panel, 150, 150);
+const largeRect = plotRectangle(panel, 500, 500);
+const small = samplePanel(grid, panel, 'ux', range, smallRect, 1);
+const full = samplePanel(grid, panel, 'ux', range, largeRect, 1);
+const crop = samplePanel(grid, cropped, 'ux', range, largeRect, 1);
+assert.ok(full.width > small.width && full.height > small.height);
+assert.ok(full.width * full.height <= 128000);
+assert.equal(full.pixels[((full.height - 1) * full.width) * 4 + 3], 0, 'the masked physical corner remains transparent');
+assert.ok(Number.isNaN(full.values[(full.height - 1) * full.width]), 'masked samples cannot enter the metric');
+assert.ok(crop.referenceCount > 0 && crop.rmse > full.rmse, 'RMSE follows the visible crop');
+const values = [...crop.values].filter(Number.isFinite);
+const recomputed = Math.sqrt(values.reduce((sum, value) => sum + value ** 2, 0) / values.length);
+assert.ok(Math.abs(crop.rmse - recomputed) < 1e-12, 'RMSE uses the plotted paired samples');
+const firstPoint = [cropped.horizontalBounds[0], cropped.verticalBounds[1], panel.coordinate];
+assert.ok(Math.abs(crop.values[0] - sampleVelocity(grid, firstPoint)[0]) < 1e-12, 'samples agree with grid interpolation');
+const noReference = samplePanel({ ...grid, reference_velocity: undefined }, cropped, 'ux', range, smallRect, 1);
+assert.equal(noReference.rmse, null, 'missing reference is reported unavailable');
+const profileGrid = { ...grid, reference_profile: { z_D: [0, 2], velocity_mps: [[10, 0, 0], [12, 0, 0]] } };
+const deficit = samplePanel(profileGrid, cropped, 'deficit', { min: 0, max: 12 }, smallRect, 1);
+assert.ok(Math.abs(deficit.values[0] - (11 - sampleVelocity(grid, firstPoint)[0])) < 1e-12, 'deficit uses the physical reference profile');
+console.log('Scientific plot math checks passed.');
