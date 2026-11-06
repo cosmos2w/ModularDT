@@ -31,6 +31,8 @@ node_modules/
 /Case_*/artifacts/*
 !/Case_*/artifacts/README.md
 /Case_WindFarm/Dataset/derived/
+/Case_WindFarm/demo/node_modules
+/Case_WindFarm/demo/dist
 
 # Training and numerical outputs
 Data_Saved/

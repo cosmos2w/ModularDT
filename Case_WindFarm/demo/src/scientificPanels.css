@@ -1,0 +1,8 @@
+.scientific-panels{display:grid;gap:8px;min-width:0}
+.scientific-panel{display:block;min-width:0;width:100%;padding:8px 8px 5px;text-align:left;color:#d5e7ee;background:#102631;border:1px solid #355361;border-radius:7px;cursor:pointer}
+.scientific-panel:focus-visible{outline:2px solid #82eed9;outline-offset:2px}
+.scientific-panel:disabled{cursor:default;opacity:.8}
+.scientific-panel-title{display:block;font-size:11px;line-height:1.25;font-weight:600;color:#d7ebec;white-space:nowrap}
+.scientific-canvas-wrap{display:block;position:relative;margin-top:4px;overflow:hidden}
+.scientific-canvas-wrap canvas{display:block;width:100%;height:auto}
+.scientific-panel-error{position:absolute;left:5px;bottom:3px;max-width:calc(100% - 10px);padding:2px 4px;color:#163b46;background:#e3efedeb;border-left:2px solid #397f78;font-size:9px;line-height:1.25;white-space:nowrap}

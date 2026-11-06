@@ -106,3 +106,7 @@ anisotropic domain.
 See `Dataset/PHYSICS_AND_DATA.md` for the array schemas, physical units,
 case categories, integrity checks, and visualisation conventions.  Generated
 tables, figures, derived arrays, and the local path map are not committed.
+
+## Interactive Wind Lab
+
+[Wind Lab](demo/README.md) is the local sponsor demo for the saved full-data HONF checkpoint: editable 3D turbine layouts, joint velocity reconstruction, movable sections, animated steady-field streamlines and actual prepared M/E organization. Start it with `demo/run.sh` and open `http://127.0.0.1:8765`. It uses the existing model and dataset without copying them.
