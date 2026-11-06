@@ -20,7 +20,8 @@ from honf_runtime.run_layout import resolve_checkpoint
 from honf_runtime.unified_training import EngineConfig, SamplingKey, SelectionPolicy, TrainingEngine
 
 
-def build(recipe, *, device, response_scales=None, saved_adapter_state=None, saved_normalization_source=None):
+def build(recipe, *, device, response_scales=None, saved_adapter_state=None, saved_normalization_source=None,
+          resume_payload=None):
     """Dispatch supported adapters while preserving their saved recipe schemas."""
     thermal = isinstance(recipe.get("dataset"), dict) and recipe["dataset"].get("name") == "thermal"
     unsupported = ("thermal_finite_response", "thermal_feedback", "local_expert", "local_ports")
@@ -38,6 +39,16 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("r16_5_warm_fork") is not None:
+            from channelthermal.training.r16_5_warm_fork import build_thermal_r16_5_warm_fork_task
+
+            model, provider = build_thermal_r16_5_warm_fork_task(
+                recipe, arm=arm, device=device, resume_payload=resume_payload, response_scales=response_scales)
+            # A fresh fork owns its own RNG; a resume restores its saved RNG in fit.
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
         if recipe.get("r16_4_warm_fork") is not None:
             from channelthermal.training.r16_4_warm_fork import build_thermal_r16_4_warm_fork_task
 
@@ -80,9 +91,11 @@ def engine_for(recipe, *, device, execution_horizon=None):
         wind_extension = (recipe.get("dataset") == "wind" and recipe.get("schema") in
                           ("wind_relation_anchored_r15_2_v2", "wind_relation_anchored_v1"))
         port = recipe.get("thermal_port_response", {})
+        r16_5_arm = recipe.get("r16_5_decision", {}).get("arm")
         thermal_extension = (thermal and port.get("schema") == "thermal_port_response_v1"
                              and port.get("arm") == "P64" and policy.get("membership") == "full_train600"
-                             and horizon == 100 and execution_horizon == 500)
+                             and horizon == 100 and execution_horizon == 500
+                             and (recipe.get("r16_5_warm_fork") is None or r16_5_arm == "PDeltaD"))
         if (not (wind_extension or thermal_extension) or type(execution_horizon) is not int
                 or execution_horizon <= horizon or execution_horizon % 100):
             raise ValueError("Unsupported explicit same-lineage horizon extension.")
@@ -99,7 +112,11 @@ def engine_for(recipe, *, device, execution_horizon=None):
         training_mode="joint", write_initial_artifacts=bool(policy.get("write_initial_artifacts", True)),
     )
     engine_type = TrainingEngine
-    if thermal and recipe.get("r16_4_warm_fork") is not None:
+    if thermal and recipe.get("r16_5_warm_fork") is not None:
+        from channelthermal.training.r16_5_warm_fork import ThermalR165WarmForkEngine
+
+        engine_type = ThermalR165WarmForkEngine
+    elif thermal and recipe.get("r16_4_warm_fork") is not None:
         from channelthermal.training.r16_4_warm_fork import ThermalR164WarmForkEngine
 
         engine_type = ThermalR164WarmForkEngine
@@ -144,7 +161,9 @@ def main(argv=None):
         # Objective denominators are saved scientific state. Recomputing their
         # last bits on another device must not change the restored objective.
         options["response_scales"] = source_payload["experiment_identity"]["provider_identity"]["response_scales"]
-        if recipe.get("r16_4_warm_fork") is None:
+        if recipe.get("r16_5_warm_fork") is not None:
+            options["resume_payload"] = source_payload
+        elif recipe.get("r16_4_warm_fork") is None:
             native_identity = source_payload["experiment_identity"]["provider_identity"]
             options["saved_adapter_state"] = native_identity["adapter_state"]
             options["saved_normalization_source"] = native_identity["source_binding"]["normalization_source"]

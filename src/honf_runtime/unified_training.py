@@ -3608,6 +3608,10 @@ class TrainingEngine:
             terms = provider.loss_terms(predictions, batch.targets, phase, auxiliary_state)
             if not isinstance(terms, Mapping):
                 raise TypeError("loss_terms must return a mapping of names to LossTerm values.")
+            native_diagnostic = getattr(provider, "diagnose_native_training_terms", None)
+            if callable(native_diagnostic):
+                native_diagnostic(model, terms, planned, epoch=epoch,
+                                  update_index=update_index, update_count=epoch_update_count)
             objective: torch.Tensor | None = None
             for name, term in terms.items():
                 if name not in planned:
