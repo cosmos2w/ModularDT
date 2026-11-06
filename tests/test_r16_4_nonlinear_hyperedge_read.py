@@ -83,6 +83,8 @@ def _direct_rows(model, prepared, query, read_mode):
 @pytest.mark.parametrize("read_mode", ["full", "restricted"])
 def test_nonzero_residual_matches_direct_row_equation_and_gradients(mode, read_mode):
     _, model, scene, query = _case(mode)
+    # Force several row accumulation chunks even in this small scene.
+    model._row_reduction_chunk_size = 3
     with torch.no_grad():
         model.hyperedge_read.output.weight.copy_(
             torch.linspace(-0.08, 0.07, model.hyperedge_read.output.weight.numel()).reshape_as(
@@ -291,6 +293,7 @@ def test_paired_mode_reuses_unique_values_and_matches_separate_gradient():
 def test_grouped_paired_checkpoint_supports_spatial_derivative_gradients():
     _, model, scene, query = _case("G")
     model.train(); model.query_tile_size = 2
+    model._row_reduction_chunk_size = 3
     with torch.no_grad():
         model.hyperedge_read.output.weight.fill_(.04)
     reference = copy.deepcopy(model)
@@ -315,3 +318,35 @@ def test_grouped_paired_checkpoint_supports_spatial_derivative_gradients():
         assert (a is None) == (b is None), name
         if a is not None:
             torch.testing.assert_close(a, b, rtol=5e-8, atol=5e-9, msg=name)
+
+
+def test_multichunk_checkpoint_spatial_derivatives_match_direct_rows():
+    _, model, scene, query = _case("G")
+    model.train(); model.query_tile_size = 2; model._row_reduction_chunk_size = 3
+    with torch.no_grad():
+        model.hyperedge_read.output.weight.fill_(.04)
+    reference = copy.deepcopy(model)
+
+    def objective(net, direct):
+        coordinates = query.coordinates.detach().clone().requires_grad_()
+        weight = coordinates[..., 0].sigmoid()
+        local = replace(query, coordinates=coordinates,
+                        anchor_weights=torch.stack((weight, 1 - weight), -1))
+        prepared = net.prepare(scene)
+        fields = (_direct_rows(net, prepared, local, "restricted") if direct else
+                  net.decode(prepared, local, intervention={"read_mode": "restricted"}).joint_fields)
+        spatial = torch.autograd.grad(fields[..., 3].sum(), coordinates, create_graph=True)[0]
+        return spatial.square().sum(), coordinates
+
+    actual, coordinates = objective(model, False)
+    expected, direct_coordinates = objective(reference, True)
+    torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-11)
+    params, ref_params = dict(model.named_parameters()), dict(reference.named_parameters())
+    names = tuple(params)
+    gradients = torch.autograd.grad(actual, [params[n] for n in names] + [coordinates], allow_unused=True)
+    expected_gradients = torch.autograd.grad(expected, [ref_params[n] for n in names] + [direct_coordinates],
+                                             allow_unused=True)
+    for name, left, right in zip(names + ("coordinates",), gradients, expected_gradients):
+        assert (left is None) == (right is None), name
+        if left is not None:
+            torch.testing.assert_close(left, right, rtol=5e-8, atol=5e-9, msg=name)

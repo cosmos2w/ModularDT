@@ -132,7 +132,10 @@ class HyperedgeNonlinearReadCore(DetailAnchoredMemberRoutingCore):
                 subset = member_positions[start:start + self._row_reduction_chunk_size]
                 value_index = lookup[start:start + self._row_reduction_chunk_size]
                 coefficient = probabilities[subset] * strength[rid[subset], role_index]
-                rows = rows.index_add(0, rid[subset], values[value_index] * coefficient[:, None])
+                # The row buffer starts at zero and is not consumed until all
+                # chunks are accumulated. Mutating it avoids copying every
+                # row-by-width buffer once for each incidence chunk.
+                rows.index_add_(0, rid[subset], values[value_index] * coefficient[:, None])
         else:
             member_positions = member_positions[:0]
         pairs = member_positions.numel()
