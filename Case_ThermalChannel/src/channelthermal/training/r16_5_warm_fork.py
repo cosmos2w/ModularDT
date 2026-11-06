@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,22 @@ SOURCE_AGE = 5100
 SOURCE_KIND = 'thermal_r16_5_p64_weight_only_v1'
 FORK_SCHEMA = 'thermal_r16_5_p64_warm_fork_v1'
 DECISION_SCHEMA = 'thermal_r16_5_decision_v1'
+
+
+def configure_r16_5_execution(recipe, *, device):
+    """Select the declared replay-safe policy before any CUDA initialization."""
+    execution = recipe.get('execution', {})
+    keys = ('deterministic_algorithms', 'cublas_workspace_config')
+    if all(key not in execution for key in keys):
+        return  # Historical, pre-repair lineage.
+    workspace = execution.get('cublas_workspace_config')
+    if execution.get('deterministic_algorithms') is not True or workspace != ':4096:8':
+        raise ValueError('R16-5 deterministic execution requires the declared cuBLAS workspace.')
+    if (torch.device(device).type == 'cuda' and torch.cuda.is_initialized()
+            and os.environ.get('CUBLAS_WORKSPACE_CONFIG') != workspace):
+        raise RuntimeError('Set CUBLAS_WORKSPACE_CONFIG before initializing CUDA for R16-5 replay.')
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = workspace
+    torch.use_deterministic_algorithms(True)
 
 
 def _source_initialization():
@@ -139,6 +156,9 @@ def make_warm_fork_recipe(p64, h0, research_metadata, *, arm, name, output_root,
     recipe['storage']['output_root'] = str(output_root)
     recipe['storage']['formal_forward_run_alias'] = membership == 'full_train600'
     recipe['initialization'] = _source_initialization()
+    # Scalar-VJP replay needs the same numerical path on its original and
+    # replayed full fields. Both comparison arms use this execution policy.
+    recipe['execution'].update(deterministic_algorithms=True, cublas_workspace_config=':4096:8')
     recipe['training'].update(membership=membership, local_horizon=local_horizon,
                               first_segment_epochs=first_segment_epochs, checkpoint_epochs=[local_horizon],
                               wall_clock_budget_seconds=wall_clock_budget_seconds,
@@ -167,6 +187,11 @@ def validate_source_and_recipe(source, recipe, p64, h0):
         first_segment_epochs=training['first_segment_epochs'],
         wall_clock_budget_seconds=training['wall_clock_budget_seconds'],
         clean_save_reserve_seconds=training['clean_save_reserve_seconds'])
+    # Keep the completed pre-repair qualification lineages readable. New
+    # recipes always declare deterministic execution explicitly.
+    if all(key not in recipe['execution'] for key in ('deterministic_algorithms', 'cublas_workspace_config')):
+        expected['execution'].pop('deterministic_algorithms')
+        expected['execution'].pop('cublas_workspace_config')
     if recipe != expected:
         raise ValueError('R16-5 recipe differs from the derived P64 plus original FIT recipe.')
     if source is not None and (source.get('epoch') != 100 or source.get('current_epoch') != 100
@@ -205,6 +230,7 @@ class ThermalR165WarmForkEngine(TrainingEngine):
 def build_thermal_r16_5_warm_fork_task(recipe, *, arm=None, device='cpu', resume_payload=None,
                                        response_scales=None):
     """Build a literal P64 fork, or reconstruct an existing fork from its own state."""
+    configure_r16_5_execution(recipe, device=device)
     from .r16_5_decision_task import ThermalR165DecisionTask
 
     p64, h0 = _read_identity(P64_IDENTITY), _read_identity(H0_IDENTITY)
@@ -263,6 +289,10 @@ def build_thermal_r16_5_warm_fork_task(recipe, *, arm=None, device='cpu', resume
     provider.source_parent_age = SOURCE_AGE
     provider.configure_state_response(recipe['thermal_state_response'], response_scales=references['response_scales'])
     provider.configure_decision(recipe['r16_5_decision'])
+    if recipe['execution'].get('deterministic_algorithms') is True:
+        provider.r16_5_execution = {
+            'deterministic_algorithms': torch.are_deterministic_algorithms_enabled(),
+            'cublas_workspace_config': os.environ.get('CUBLAS_WORKSPACE_CONFIG')}
     provider.r16_5_source_tensor_inventory = initialize_shared_weights(
         model, (source if resume_payload is None else resume_payload)['model_state_dict'])
     if (list(provider.response_corpus.family_ids('fit')) != references['h0_provider']['response_training_family_ids']

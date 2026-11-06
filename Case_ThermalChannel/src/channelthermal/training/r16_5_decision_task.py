@@ -480,6 +480,8 @@ class ThermalR165DecisionTask(ThermalPortResponseTask, ThermalStateResponseTask)
             'replay': 'one full-field endpoint scalar VJP at a time; original RNG restored'}
         result['r16_5_source_tensor_inventory'] = copy.deepcopy(
             getattr(self, 'r16_5_source_tensor_inventory', {}))
+        if hasattr(self, 'r16_5_execution'):
+            result['r16_5_execution'] = copy.deepcopy(self.r16_5_execution)
         return result
 
     def completed_training_epoch(self, model, engine, epoch, output, row):

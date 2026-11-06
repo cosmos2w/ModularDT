@@ -20,9 +20,19 @@ from honf_runtime.run_layout import resolve_checkpoint
 from honf_runtime.unified_training import EngineConfig, SamplingKey, SelectionPolicy, TrainingEngine
 
 
+def configure_r16_5_execution(recipe, *, device):
+    """Select the declared replay-safe policy before any CUDA initialization."""
+    if recipe.get("r16_5_warm_fork") is None:
+        return
+    from channelthermal.training.r16_5_warm_fork import configure_r16_5_execution as configure
+
+    configure(recipe, device=device)
+
+
 def build(recipe, *, device, response_scales=None, saved_adapter_state=None, saved_normalization_source=None,
           resume_payload=None):
     """Dispatch supported adapters while preserving their saved recipe schemas."""
+    configure_r16_5_execution(recipe, device=device)
     thermal = isinstance(recipe.get("dataset"), dict) and recipe["dataset"].get("name") == "thermal"
     unsupported = ("thermal_finite_response", "thermal_feedback", "local_expert", "local_ports")
     if any(recipe.get(name, {}).get("enabled", False) for name in unsupported):
@@ -144,11 +154,13 @@ def main(argv=None):
         parser.error("fit requires --output and --stop-after")
     if args.command == "evaluate" and args.output is None:
         parser.error("evaluate requires --output")
-    if args.cuda_memory_fraction is not None:
-        if not 0 < args.cuda_memory_fraction <= 1 or torch.device(args.device).type != "cuda":
-            parser.error("--cuda-memory-fraction requires a CUDA device and a fraction in (0, 1]")
-        torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device=args.device)
+    if (args.cuda_memory_fraction is not None
+            and (not 0 < args.cuda_memory_fraction <= 1 or torch.device(args.device).type != "cuda")):
+        parser.error("--cuda-memory-fraction requires a CUDA device and a fraction in (0, 1]")
     recipe = json.loads(args.recipe.read_text())
+    configure_r16_5_execution(recipe, device=args.device)
+    if args.cuda_memory_fraction is not None:
+        torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device=args.device)
     source_payload = None
     if (recipe.get("thermal_state_response", {}).get("enabled")
             and (args.command == "evaluate" or (args.command == "fit" and args.resume))):

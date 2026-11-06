@@ -4,7 +4,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import relation_anchored_train
 import torch
+from channelthermal.training import r16_5_warm_fork
 from channelthermal.training.r13_8_anchored_task import ARM_DETAIL
 from channelthermal.training.r16_5_warm_fork import (
     SOURCE_AGE,
@@ -82,6 +84,17 @@ def test_literal_p64_and_h0_recipe_sources_and_research_receipt():
         assert result['optimizer'] == p64['recipe']['optimizer']
         assert result['thermal_port_response'] == p64['recipe']['thermal_port_response']
         assert result['r16_5_decision']['research_scales'] == metadata['research_scales']
+        assert result['execution']['deterministic_algorithms'] is True
+        assert result['execution']['cublas_workspace_config'] == ':4096:8'
+    # The saved pre-repair recipes remain reconstructible as historical lineages.
+    historical = copy.deepcopy(control)
+    historical['execution'].pop('deterministic_algorithms')
+    historical['execution'].pop('cublas_workspace_config')
+    validate_source_and_recipe(source, historical, p64, h0)
+    changed = copy.deepcopy(control)
+    changed['execution']['cublas_workspace_config'] = ':16:8'
+    with pytest.raises(ValueError, match='differs from the derived'):
+        validate_source_and_recipe(source, changed, p64, h0)
     changed = copy.deepcopy(control)
     changed['objective']['native_weights']['flow/u'] *= 2
     with pytest.raises(ValueError, match='differs from the derived'):
@@ -98,6 +111,65 @@ def test_literal_p64_and_h0_recipe_sources_and_research_receipt():
     changed_h0['provider_identity']['adapter_state']['heat_scale'] *= 2
     with pytest.raises(ValueError, match='heat_scale'):
         recipe(p64, changed_h0, metadata)
+
+
+def test_r16_5_execution_is_set_before_cuda_memory_limit(monkeypatch, tmp_path):
+    config = {'r16_5_warm_fork': {}, 'execution': {'deterministic_algorithms': True,
+                                                     'cublas_workspace_config': ':4096:8'}}
+    recipe_file = tmp_path / 'recipe.json'
+    recipe_file.write_text(json.dumps(config))
+    monkeypatch.delenv('CUBLAS_WORKSPACE_CONFIG', raising=False)
+    monkeypatch.setattr(torch.cuda, 'is_initialized', lambda: False)
+    enabled = []
+    monkeypatch.setattr(torch, 'use_deterministic_algorithms', lambda value: enabled.append(value))
+
+    def set_fraction(fraction, *, device):
+        import os
+        assert os.environ['CUBLAS_WORKSPACE_CONFIG'] == ':4096:8'
+        assert enabled == [True]
+        assert (fraction, device) == (.5, 'cuda:0')
+
+    class ReachedBuild(Exception):
+        pass
+
+    def stop_at_build(*args, **kwargs):
+        raise ReachedBuild
+
+    monkeypatch.setattr(torch.cuda, 'set_per_process_memory_fraction', set_fraction)
+    monkeypatch.setattr(relation_anchored_train, 'build', stop_at_build)
+    with pytest.raises(ReachedBuild):
+        relation_anchored_train.main(['inspect', '--recipe', str(recipe_file), '--device', 'cuda:0',
+                                      '--cuda-memory-fraction', '.5'])
+
+
+def test_r16_5_execution_refuses_a_late_incompatible_cuda_workspace(monkeypatch):
+    config = {'r16_5_warm_fork': {}, 'execution': {'deterministic_algorithms': True,
+                                                     'cublas_workspace_config': ':4096:8'}}
+    monkeypatch.delenv('CUBLAS_WORKSPACE_CONFIG', raising=False)
+    monkeypatch.setattr(torch.cuda, 'is_initialized', lambda: True)
+    with pytest.raises(RuntimeError, match='before initializing CUDA'):
+        relation_anchored_train.configure_r16_5_execution(config, device='cuda:0')
+
+
+def test_direct_fork_builder_sets_policy_before_reading_sources(monkeypatch):
+    config = {'execution': {'deterministic_algorithms': True, 'cublas_workspace_config': ':4096:8'}}
+    monkeypatch.delenv('CUBLAS_WORKSPACE_CONFIG', raising=False)
+    monkeypatch.setattr(torch.cuda, 'is_initialized', lambda: False)
+    enabled = []
+    monkeypatch.setattr(torch, 'use_deterministic_algorithms', lambda value: enabled.append(value))
+
+    class ReachedSource(Exception):
+        pass
+
+    def stop_at_source(path):
+        import os
+        assert os.environ['CUBLAS_WORKSPACE_CONFIG'] == ':4096:8'
+        assert enabled == [True]
+        raise ReachedSource
+
+    monkeypatch.setattr(r16_5_warm_fork, '_read_identity', stop_at_source)
+    with pytest.raises(ReachedSource):
+        r16_5_warm_fork.build_thermal_r16_5_warm_fork_task(config, device='cuda:0')
 
 
 def test_complete_tensor_inventory_shape_and_dtype_are_strict():
