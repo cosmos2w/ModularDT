@@ -992,7 +992,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         return values[batch, slot], {}
 
     def _read_packed(self, prepared, query, qstates, qnorm, packed, union_keys, raw, *, return_trace,
-                     value_cache=None, physical_value_counts=None, intervention=None):
+                     value_cache=None, physical_value_counts=None, intervention=None, projection_cache=None):
         """Calibrate and normalize each located row/role, then coalesce values."""
         reads, rid = packed["reads"], packed["read_id"]
         read_count, groups = len(reads), 2 * len(reads)
@@ -1119,7 +1119,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             contexts[role] = context.reshape(query.batch_size, query.num_queries, self.context_dim)
             if row_contexts is not None:
                 row_contexts[role], row_counts = self._hyperedge_role_rows(
-                    role, packed, union_index, value_positions, selected_values, probabilities, strength)
+                    role, packed, union_index, value_positions, selected_values, probabilities, strength,
+                    projection_cache=projection_cache, physical_value_counts=physical_value_counts)
                 counts.update(row_counts)
             memberships = packed["is_module"] if role == "M" else ~packed["is_module"]
             counts[f"query_anchor_member_pairs_{role}"] = memberships.sum().detach()
@@ -1197,11 +1198,12 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         outputs = {}
         share_values = len(read_modes) > 1 and getattr(self, "_share_paired_selected_values", False)
         value_cache = {} if share_values else None
+        projection_cache = {} if share_values and getattr(self, "_uses_hyperedge_rows", False) else None
         for mode in read_modes:
             fields, trace, counts = self._read_packed(prepared, query, qstates, qnorm, packed[mode],
                                                      union_keys, raw, return_trace=return_trace,
                                                      value_cache=value_cache, physical_value_counts=shared,
-                                                     intervention=controls)
+                                                     intervention=controls, projection_cache=projection_cache)
             outputs[mode] = (fields, trace, counts)
         return outputs, shared
 

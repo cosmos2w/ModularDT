@@ -39,15 +39,17 @@ class HyperedgeNonlinearReadCore(DetailAnchoredMemberRoutingCore):
     _HYPEREDGE_COUNT_KEYS = (
         "query_hyperedge_active_address_rows", "query_hyperedge_row_reduction_pairs_M",
         "query_hyperedge_row_reduction_pairs_E", "query_hyperedge_row_reduction_channels_M",
-        "query_hyperedge_row_reduction_channels_E", "query_hyperedge_hidden_rows",
+        "query_hyperedge_row_reduction_channels_E", "query_hyperedge_value_projection_pairs_M",
+        "query_hyperedge_value_projection_pairs_E", "query_hyperedge_value_projection_macs_M",
+        "query_hyperedge_value_projection_macs_E", "query_hyperedge_hidden_rows",
         "query_hyperedge_hidden_activations", "query_hyperedge_input_projection_macs",
         "query_hyperedge_output_projection_rows", "query_hyperedge_output_projection_macs",
     )
     _ANCHOR_COUNT_KEYS = DetailAnchoredMemberRoutingCore._ANCHOR_COUNT_KEYS + _HYPEREDGE_COUNT_KEYS
     _additional_decode_count_keys = (DetailAnchoredMemberRoutingCore._additional_decode_count_keys
                                      + _HYPEREDGE_COUNT_KEYS)
-    # Bounds the temporary incidence-by-context tensor within each query tile.
-    _row_reduction_chunk_size = 4096
+    # 16,384 x 32 has the prior 4,096 x 128 incidence-temporary element bound.
+    _row_reduction_chunk_size = 16384
 
     def __init__(self, base_model_config: Mapping[str, Any], *, hyperedge_mode: str, **kwargs):
         if hyperedge_mode not in ("C", "G"):
@@ -116,9 +118,38 @@ class HyperedgeNonlinearReadCore(DetailAnchoredMemberRoutingCore):
         merged = {**current, **source}
         self.load_state_dict(merged, strict=True)
 
-    def _hyperedge_role_rows(self, role, packed, union_index, positions, values, probabilities, strength):
-        """Reduce each role's actual incidences, without a scene-sized incidence/value tensor."""
-        rows = values.new_zeros((len(packed["reads"]), self.context_dim))
+    def _hyperedge_role_rows(self, role, packed, union_index, positions, values, probabilities, strength,
+                             *, projection_cache=None, physical_value_counts=None):
+        """Project selected nonlinear messages once, then reduce actual rows in 32 channels."""
+        weight = self.hyperedge_read.weight_M if role == "M" else self.hyperedge_read.weight_E
+        projected_count = positions.numel()
+        cached = None if projection_cache is None else projection_cache.get(role)
+        if cached is None:
+            projected = F.linear(values, weight)
+            if projection_cache is not None:
+                projection_cache[role] = (positions, projected)
+        else:
+            old_positions, old_projected = cached
+            lookup = torch.searchsorted(old_positions, positions)
+            if old_positions.numel():
+                safe = lookup.clamp_max(old_positions.numel() - 1)
+                found = (lookup < old_positions.numel()) & (old_positions[safe] == positions)
+                projected = old_projected[safe]
+            else:
+                found = torch.zeros_like(positions, dtype=torch.bool)
+                projected = old_projected.new_zeros((positions.numel(), 32)) + old_projected.sum() * 0
+            missing = (~found).nonzero(as_tuple=False).flatten()
+            projected_count = missing.numel()
+            if projected_count:
+                projected = projected.index_copy(0, missing, F.linear(values[missing], weight))
+        projection_counts = {f"query_hyperedge_value_projection_pairs_{role}": projected_count,
+                             f"query_hyperedge_value_projection_macs_{role}": projected_count * self.context_dim * 32}
+        if projection_cache is not None:
+            for name, value in projection_counts.items():
+                physical_value_counts[name] = physical_value_counts.get(name, 0) + value
+            projection_counts = {}
+        # Preserve a differentiable zero for an empty role, as in W @ 0.
+        rows = projected.new_zeros((len(packed["reads"]), 32)) + projected.sum() * 0
         member_positions = (packed["is_module"] if role == "M" else ~packed["is_module"]).nonzero(
             as_tuple=False).flatten()
         if positions.numel() and member_positions.numel():
@@ -135,12 +166,13 @@ class HyperedgeNonlinearReadCore(DetailAnchoredMemberRoutingCore):
                 # The row buffer starts at zero and is not consumed until all
                 # chunks are accumulated. Mutating it avoids copying every
                 # row-by-width buffer once for each incidence chunk.
-                rows.index_add_(0, rid[subset], values[value_index] * coefficient[:, None])
+                rows.index_add_(0, rid[subset], projected[value_index] * coefficient[:, None])
         else:
             member_positions = member_positions[:0]
         pairs = member_positions.numel()
         return rows, {f"query_hyperedge_row_reduction_pairs_{role}": pairs,
-                      f"query_hyperedge_row_reduction_channels_{role}": pairs * self.context_dim}
+                      f"query_hyperedge_row_reduction_channels_{role}": pairs * 32,
+                      **projection_counts}
 
     def _hyperedge_correction(self, query, packed, contexts, row_contexts, intervention, *, return_trace):
         collapse = intervention.get("collapse_hyperedge_rows", False)
@@ -156,10 +188,12 @@ class HyperedgeNonlinearReadCore(DetailAnchoredMemberRoutingCore):
             collapsed = {role: self._segment_sum(row_contexts[role] * weights[:, None], flat_query,
                                                   batch_queries).reshape(query.batch_size, query.num_queries, -1)
                          for role in ("M", "E")}
-            hidden = self.hyperedge_read.hidden(collapsed["M"], collapsed["E"])
+            bias = self.hyperedge_read.bias
+            hidden = F.silu(collapsed["M"] + collapsed["E"] + bias) - F.silu(bias)
             hidden_rows = batch_queries
         else:
-            row_hidden = self.hyperedge_read.hidden(row_contexts["M"], row_contexts["E"])
+            bias = self.hyperedge_read.bias
+            row_hidden = F.silu(row_contexts["M"] + row_contexts["E"] + bias) - F.silu(bias)
             hidden = self._segment_sum(row_hidden * weights[:, None], flat_query, batch_queries)
             hidden = hidden.reshape(query.batch_size, query.num_queries, 32)
             hidden_rows = len(reads)
@@ -168,7 +202,8 @@ class HyperedgeNonlinearReadCore(DetailAnchoredMemberRoutingCore):
             "query_hyperedge_active_address_rows": len(reads),
             "query_hyperedge_hidden_rows": hidden_rows,
             "query_hyperedge_hidden_activations": hidden_rows * 32,
-            "query_hyperedge_input_projection_macs": hidden_rows * 2 * self.context_dim * 32,
+            "query_hyperedge_input_projection_macs": (hidden_rows * 2 * self.context_dim * 32
+                                                       if self.hyperedge_mode == "C" else 0),
             "query_hyperedge_output_projection_rows": batch_queries,
             "query_hyperedge_output_projection_macs": batch_queries * self.context_dim * 32,
         }
@@ -177,7 +212,8 @@ class HyperedgeNonlinearReadCore(DetailAnchoredMemberRoutingCore):
             trace = {"hyperedge_read_mode": self.hyperedge_mode,
                      "hyperedge_rows_collapsed": collapse, "hyperedge_correction": correction}
             if row_contexts is not None:
-                trace.update({f"hyperedge_row_context_{role}": row_contexts[role] for role in ("M", "E")})
+                trace["hyperedge_row_context_space"] = "role_value_projection_before_silu"
+                trace.update({f"hyperedge_row_projected_{role}": row_contexts[role] for role in ("M", "E")})
         return correction, counts, trace
 
 

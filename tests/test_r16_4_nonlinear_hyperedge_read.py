@@ -1,6 +1,6 @@
 """Direct row equations and strict C/G integration for the R16-4 read."""
 import copy
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import pytest
 import torch
@@ -28,12 +28,12 @@ def _case(mode):
     return old, model, scene, query
 
 
-def _direct_rows(model, prepared, query, read_mode):
+def _direct_rows(model, prepared, query, read_mode, *, capture_row_variables=False):
     """Literal original-member reads, independent of packed coalescing."""
     states = model._query_states(prepared, query)
     normalized = model._routing_features(states)
     table = getattr(prepared.e_access_directory, read_mode)
-    batch_fields = []
+    batch_fields, row_variables = [], []
     for b in range(query.batch_size):
         fields = []
         for q in range(query.num_queries):
@@ -62,6 +62,7 @@ def _direct_rows(model, prepared, query, read_mode):
                                                normalized[b, q][None], model.typed_read_gates[role], count,
                                                torch.ones(1, dtype=torch.bool),
                                                score_calibration=model.score_calibration)
+                    row_variables.append((result.strength, result.probabilities, result.context[0]))
                     row_context[role] = result.context[0]
                     blended[role] = blended[role] + weight * row_context[role]
                 residual = model.hyperedge_read
@@ -76,7 +77,8 @@ def _direct_rows(model, prepared, query, read_mode):
             trunk = model.member_router.joint_trunk(fused) + F.linear(row_hidden, model.hyperedge_read.output.weight)
             fields.append(model.member_router.joint_head(trunk) * query.query_mask[b, q])
         batch_fields.append(torch.stack(fields))
-    return torch.stack(batch_fields)
+    fields = torch.stack(batch_fields)
+    return (fields, row_variables) if capture_row_variables else fields
 
 
 @pytest.mark.parametrize("mode", ["C", "G"])
@@ -96,9 +98,18 @@ def test_nonzero_residual_matches_direct_row_equation_and_gradients(mode, read_m
                        anchor_weights=query.anchor_weights.detach().clone().requires_grad_())
     actual_query, direct_query = local_query(), local_query()
     prepared, direct_prepared = model.prepare(scene), reference.prepare(scene)
-    actual = model.decode(prepared, actual_query, intervention={"read_mode": read_mode})
-    expected = _direct_rows(reference, direct_prepared, direct_query, read_mode)
+    actual = model.decode(prepared, actual_query, intervention={"read_mode": read_mode}, return_trace=True)
+    expected, row_variables = _direct_rows(reference, direct_prepared, direct_query, read_mode,
+                                           capture_row_variables=True)
     torch.testing.assert_close(actual.joint_fields, expected, rtol=1e-10, atol=1e-11)
+    torch.testing.assert_close(actual.joint_fields.square().sum(), expected.square().sum(), rtol=1e-10, atol=1e-11)
+    if mode == "G":
+        assert actual.trace["hyperedge_row_context_space"] == "role_value_projection_before_silu"
+        for role_index, role in enumerate(("M", "E")):
+            weight = reference.hyperedge_read.weight_M if role == "M" else reference.hyperedge_read.weight_E
+            expected_rows = torch.stack([F.linear(value[2], weight) for value in row_variables[role_index::2]])
+            torch.testing.assert_close(actual.trace[f"hyperedge_row_projected_{role}"],
+                                       expected_rows, rtol=1e-10, atol=1e-11)
     names = ("hyperedge_read.weight_M", "hyperedge_read.weight_E", "hyperedge_read.bias",
              "hyperedge_read.output.weight", "typed_read_gates.M.0.weight", "member_router.member_E.0.weight",
              "query_value.M.weight", "relative_value.E.weight")
@@ -108,13 +119,65 @@ def test_nonzero_residual_matches_direct_row_equation_and_gradients(mode, read_m
     targets = [parameters[n] for n in names] + [actual_query.coordinates, actual_query.anchor_weights, source]
     expected_targets = [direct_parameters[n] for n in names] + [direct_query.coordinates,
                                                                 direct_query.anchor_weights, source_direct]
-    gradients = torch.autograd.grad(actual.joint_fields.square().sum(), targets, allow_unused=True)
-    direct_gradients = torch.autograd.grad(expected.square().sum(), expected_targets, allow_unused=True)
-    for name, got, wanted in zip(names + ("coordinates", "lambda", "prior"), gradients, direct_gradients):
+    probabilities = [(index, value[1]) for index, value in enumerate(row_variables) if value[1].requires_grad]
+    gradients = torch.autograd.grad(actual.joint_fields.square().sum(), targets + [
+        actual.trace["anchor_read_strength"], actual.trace["anchor_read_probabilities"]], allow_unused=True)
+    direct_gradients = torch.autograd.grad(expected.square().sum(), expected_targets + [
+        value[0] for value in row_variables] + [value for _, value in probabilities], allow_unused=True)
+    base_count = len(targets)
+    for name, got, wanted in zip(names + ("coordinates", "lambda", "prior"),
+                                  gradients[:base_count], direct_gradients[:base_count]):
         assert (got is None) == (wanted is None), name
         if got is not None:
             torch.testing.assert_close(got, wanted, rtol=2e-8, atol=2e-9, msg=name)
-    assert all(g is not None and torch.isfinite(g).all() and g.abs().sum() > 0 for g in gradients)
+    assert all(g is not None and torch.isfinite(g).all() and g.abs().sum() > 0 for g in gradients[:base_count])
+    direct_strengths = torch.stack([g.reshape(()) for g in
+                                    direct_gradients[base_count:base_count + len(row_variables)]]).reshape(-1, 2)
+    torch.testing.assert_close(gradients[base_count], direct_strengths, rtol=2e-8, atol=2e-9)
+    direct_probabilities = torch.zeros_like(gradients[base_count + 1])
+    rid = actual.trace["anchor_read_member_read_index"]
+    is_module = actual.trace["anchor_read_is_module"]
+    for (index, _), grad in zip(probabilities, direct_gradients[base_count + len(row_variables):]):
+        mask = (rid == index // 2) & (is_module == (index % 2 == 0))
+        direct_probabilities[mask] = grad.reshape(-1)
+    torch.testing.assert_close(gradients[base_count + 1], direct_probabilities, rtol=2e-8, atol=2e-9)
+
+
+@pytest.mark.parametrize("read_mode", ["full", "restricted"])
+def test_float32_projected_rows_match_canonical_fields_loss_and_gradients(read_mode):
+    _, model, scene, query = _case("G")
+    model = model.float()
+    model._row_reduction_chunk_size = 3
+    with torch.no_grad():
+        model.hyperedge_read.output.weight.copy_(
+            torch.linspace(-.08, .07, model.hyperedge_read.output.weight.numel()).reshape_as(
+                model.hyperedge_read.output.weight))
+        model.hyperedge_read.bias.copy_(torch.linspace(-.2, .15, 32))
+    reference = copy.deepcopy(model)
+    scene = replace(scene, **{f.name: value.float() for f in fields(scene)
+                              if torch.is_tensor(value := getattr(scene, f.name)) and value.is_floating_point()})
+    def local_query():
+        return replace(query, coordinates=query.coordinates.detach().float().requires_grad_(),
+                       anchor_weights=query.anchor_weights.detach().float().requires_grad_())
+    actual_query, direct_query = local_query(), local_query()
+    prepared, direct_prepared = model.prepare(scene), reference.prepare(scene)
+    actual = model.decode(prepared, actual_query, intervention={"read_mode": read_mode}).joint_fields
+    expected = _direct_rows(reference, direct_prepared, direct_query, read_mode)
+    actual_loss, expected_loss = actual.square().sum(), expected.square().sum()
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=3e-7)
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=2e-5, atol=3e-7)
+    names = ("hyperedge_read.weight_M", "hyperedge_read.weight_E", "hyperedge_read.bias",
+             "hyperedge_read.output.weight", "typed_read_gates.M.0.weight", "query_value.M.weight")
+    params, ref_params = dict(model.named_parameters()), dict(reference.named_parameters())
+    targets = [params[n] for n in names] + [actual_query.coordinates, actual_query.anchor_weights,
+                                           getattr(prepared.e_access_directory, read_mode).access_weight]
+    ref_targets = [ref_params[n] for n in names] + [direct_query.coordinates, direct_query.anchor_weights,
+                                                    getattr(direct_prepared.e_access_directory, read_mode).access_weight]
+    gradients = torch.autograd.grad(actual_loss, targets)
+    expected_gradients = torch.autograd.grad(expected_loss, ref_targets)
+    for name, actual_grad, expected_grad in zip(names + ("coordinates", "lambda", "prior"),
+                                                gradients, expected_gradients):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-4, atol=2e-6, msg=name)
 
 
 @pytest.mark.parametrize("mode", ["C", "G"])
@@ -180,11 +243,12 @@ def test_grouped_permutation_lambda_empty_roles_masks_and_collapse():
     masked = replace(query, query_mask=mask, anchor_indices=anchors, anchor_weights=weights)
     output = model.decode(prepared, masked, intervention={"access_intervention": "self_only"}, return_trace=True)
     assert output.joint_fields[0, 0].eq(0).all()
-    assert output.trace["hyperedge_row_context_M"].eq(0).all()
+    assert output.trace["hyperedge_row_projected_M"].eq(0).all()
+    assert output.trace["hyperedge_row_context_space"] == "role_value_projection_before_silu"
     assert output.work_counts["query_hyperedge_row_reduction_pairs_M"] == 0
     for role in ("M", "E"):
         assert output.work_counts[f"query_hyperedge_row_reduction_channels_{role}"] == (
-            output.work_counts[f"query_hyperedge_row_reduction_pairs_{role}"] * model.context_dim)
+            output.work_counts[f"query_hyperedge_row_reduction_pairs_{role}"] * 32)
     assert output.work_counts["query_hyperedge_active_address_rows"] == int((weights > 0).sum())
     removed_id = int(scene.module_ids[0, 0])
     removed = model.decode(prepared, query, intervention={"access_intervention": "remove_member",
@@ -220,8 +284,8 @@ def test_empty_actual_rows_are_exactly_zero_with_nonzero_bias():
     prepared.e_access_directory = replace(directory, full=empty(directory.full), restricted=empty(directory.restricted))
     prepared._anchored_directory_versions = model._directory_versions(prepared.e_access_directory)
     out = model.decode(prepared, query, return_trace=True)
-    assert out.trace["hyperedge_row_context_M"].eq(0).all()
-    assert out.trace["hyperedge_row_context_E"].eq(0).all()
+    assert out.trace["hyperedge_row_projected_M"].eq(0).all()
+    assert out.trace["hyperedge_row_projected_E"].eq(0).all()
     assert out.trace["hyperedge_correction"].eq(0).all()
     assert out.work_counts["query_hyperedge_row_reduction_pairs_M"] == 0
     assert out.work_counts["query_hyperedge_row_reduction_pairs_E"] == 0
@@ -244,7 +308,7 @@ def test_row_values_do_not_disappear_when_lambda_blend_underflows():
         weights[..., 0] = 1 - weight; weights[..., 1] = weight
         out = model.decode(prepared, replace(query, anchor_weights=weights), return_trace=True)
         second = out.trace["anchor_read_indices"][:, 2] == 1
-        results.append(out.trace["hyperedge_row_context_E"][second])
+        results.append(out.trace["hyperedge_row_projected_E"][second])
     assert results[0].abs().sum() > 0
     torch.testing.assert_close(results[0], results[1], rtol=0, atol=0)
     assert out.work_counts["query_relative_value_pairs_E"] > out.work_counts["query_anchor_coalesced_value_pairs_E"]
@@ -288,6 +352,13 @@ def test_paired_mode_reuses_unique_values_and_matches_separate_gradient():
         key = f"query_relative_value_pairs_{role}"
         assert actual[2][key] == direct[0].work_counts[key]
         assert actual[0].work_counts[key] == actual[1].work_counts[key] == 0
+        projected = f"query_hyperedge_value_projection_pairs_{role}"
+        macs = f"query_hyperedge_value_projection_macs_{role}"
+        assert actual[2][projected] == actual[2][key]
+        assert actual[2][macs] == actual[2][projected] * model.context_dim * 32
+        assert actual[0].work_counts[projected] == actual[1].work_counts[projected] == 0
+        assert direct[0].work_counts[projected] == direct[0].work_counts[key]
+        assert direct[1].work_counts[projected] == direct[1].work_counts[key]
 
 
 def test_grouped_paired_checkpoint_supports_spatial_derivative_gradients():
