@@ -4,6 +4,14 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const maskCache = new WeakMap();
 const paletteCache = new Map();
 
+// More isolines and a finer (still bounded) mesh accompany enlarged maps.
+export function contourSettings(rectangle, { fullscreen = false, focused = false } = {}) {
+  if (focused) return { levels: 28, cellBudget: 32000, lineWidth: 0.8 };
+  if (fullscreen) return { levels: 20, cellBudget: 24000, lineWidth: 0.9 };
+  if ((rectangle?.width || 0) >= 440) return { levels: 16, cellBudget: 14000, lineWidth: 1 };
+  return { levels: 8, cellBudget: 7000, lineWidth: 1.1 };
+}
+
 // The axes and the plotted data use the same physical aspect ratio at any size.
 export function plotRectangle(panel, canvasWidth, canvasHeight) {
   const availableWidth = Math.max(1, canvasWidth - 47);

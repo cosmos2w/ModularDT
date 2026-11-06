@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cropPanel, panView, plotRectangle, samplePanel, zoomView } from './scientificPlotMath.js';
+import { contourSettings, cropPanel, panView, plotRectangle, samplePanel, zoomView } from './scientificPlotMath.js';
 import { sampleVelocity } from './flowMath.js';
 
 const initial = { zoom: 1, x: 0.5, y: 0.5 };
@@ -24,6 +24,12 @@ assert.deepEqual(cropped.verticalBounds, [0.75, 1.75]);
 const range = { min: 0, max: 10 };
 const smallRect = plotRectangle(panel, 150, 150);
 const largeRect = plotRectangle(panel, 500, 500);
+const sidebarContours = contourSettings(smallRect);
+const expandedContours = contourSettings(largeRect);
+const fullscreenContours = contourSettings(largeRect, { fullscreen: true });
+const focusedContours = contourSettings(largeRect, { fullscreen: true, focused: true });
+assert.deepEqual([sidebarContours.levels, expandedContours.levels, fullscreenContours.levels, focusedContours.levels], [8, 16, 20, 28]);
+assert.ok(focusedContours.cellBudget > sidebarContours.cellBudget && focusedContours.cellBudget <= 32000, 'enlarged maps refine contours within a fixed work budget');
 const small = samplePanel(grid, panel, 'ux', range, smallRect, 1);
 const full = samplePanel(grid, panel, 'ux', range, largeRect, 1);
 const crop = samplePanel(grid, cropped, 'ux', range, largeRect, 1);

@@ -53,7 +53,7 @@ function ErrorReadout({ result, dirty, view }) {
     }
     return count ? Math.sqrt(sum / count) : null;
   }, [result, view.field, view.slice, view.sliceAxis, view.slicePosition]);
-  if (!result || dirty || displayedError === null) return <span className="error-readout">Reference error unavailable{result && !dirty ? ' · edited scene' : ''}</span>;
+  if (!result || dirty || displayedError === null) return null;
   return <span className="error-readout">{view.slice ? 'Slice' : 'Volume'} {FIELD_SPECS[view.field].label} RMSE {formatError(displayedError)} m/s</span>;
 }
 
@@ -79,6 +79,12 @@ export default function App() {
   const [cameraRevision, setCameraRevision] = useState(0);
   const requestId = useRef(0);
   const caseRequestId = useRef(0);
+  const sceneRef = useRef(null);
+  const qualityRef = useRef('standard');
+  const mounted = useRef(true);
+  const caseController = useRef(null);
+  const activeReconstruction = useRef(false);
+  const pendingReconstruction = useRef(null);
   const reconstructionTimer = useRef(null);
   const sceneKey = signature(scene);
   const dirty = `${sceneKey}:${quality}` !== resultKey;
@@ -88,47 +94,96 @@ export default function App() {
 
   const updateView = (key, value) => setView(previous => ({ ...previous, [key]: value }));
   const changeMode = mode => setView(previous => ({ ...previous, mode, organization: mode === 'organization', tool: 'orbit', organizationView: mode === 'organization' && previous.mode !== mode ? 'spatial' : previous.organizationView, organizationAddress: mode === 'organization' && previous.mode !== mode ? null : previous.organizationAddress }));
-  const updateScene = useCallback(change => {
+  const invalidateReconstruction = useCallback(() => {
     requestId.current += 1;
-    setError('');
-    setScene(previous => typeof change === 'function' ? change(previous) : change);
+    pendingReconstruction.current = null;
+    clearTimeout(reconstructionTimer.current);
   }, []);
+  const updateScene = useCallback(change => {
+    const previous = sceneRef.current;
+    const next = typeof change === 'function' ? change(previous) : change;
+    if (next === previous) return;
+    sceneRef.current = next;
+    invalidateReconstruction();
+    setError('');
+    setScene(next);
+  }, [invalidateReconstruction]);
+
+  const updateQuality = useCallback(next => {
+    if (next === qualityRef.current) return;
+    qualityRef.current = next;
+    invalidateReconstruction();
+    setError('');
+    setQuality(next);
+  }, [invalidateReconstruction]);
 
   const loadCase = useCallback(async caseId => {
     const id = ++caseRequestId.current;
-    requestId.current += 1;
-    setLoadingCase(true); setError(''); setResult(null); setSelected(null);
+    caseController.current?.abort();
+    const controller = new AbortController();
+    caseController.current = controller;
+    invalidateReconstruction();
+    setLoadingCase(true); setError(''); setResult(null); setResultKey(''); setSelected(null);
     try {
-      const next = await getJSON(`/api/cases/${encodeURIComponent(caseId)}`);
+      const next = await getJSON(`/api/cases/${encodeURIComponent(caseId)}`, { signal: controller.signal });
       if (id !== caseRequestId.current) return;
+      sceneRef.current = next;
       setOriginal(copy(next)); setScene(next);
     } catch (failure) { if (id === caseRequestId.current) setError(failure.message); }
-    finally { if (id === caseRequestId.current) setLoadingCase(false); }
-  }, []);
+    finally {
+      if (id === caseRequestId.current) {
+        caseController.current = null;
+        setLoadingCase(false);
+      }
+    }
+  }, [invalidateReconstruction]);
 
   useEffect(() => {
+    mounted.current = true;
     let live = true;
-    getJSON('/api/meta').then(data => {
+    const controller = new AbortController();
+    getJSON('/api/meta', { signal: controller.signal }).then(data => {
       if (!live) return;
       setMeta(data);
       loadCase(data.defaults?.case_id ?? data.cases?.[0]?.id);
     }).catch(failure => { if (live) setError(failure.message); });
-    return () => { live = false; };
-  }, [loadCase]);
+    return () => {
+      live = false;
+      mounted.current = false;
+      controller.abort();
+      caseRequestId.current += 1;
+      caseController.current?.abort();
+      invalidateReconstruction();
+    };
+  }, [invalidateReconstruction, loadCase]);
 
-  const reconstruct = useCallback(async () => {
-    if (!scene) return;
-    clearTimeout(reconstructionTimer.current);
-    const id = ++requestId.current;
-    const key = `${signature(scene)}:${quality}`;
-    setBusy(true); setError('');
+  // A disconnected fetch does not stop server inference, so let the active request finish.
+  const runPendingReconstruction = useCallback(async function runPendingReconstruction() {
+    if (activeReconstruction.current || !pendingReconstruction.current || !mounted.current) return;
+    const { scene: requestedScene, quality: requestedQuality, id, key } = pendingReconstruction.current;
+    pendingReconstruction.current = null;
+    activeReconstruction.current = true;
+    setBusy(true);
     try {
-      const next = await getJSON('/api/reconstruct', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ case_id: scene.id, turbines: scene.turbines, domain: scene.domain, wind: scene.wind, resolution: RESOLUTIONS[quality] }) });
-      if (id !== requestId.current) return;
-      setResult(next); setResultKey(key);
-    } catch (failure) { if (id === requestId.current) setError(failure.message); }
-    finally { if (id === requestId.current) setBusy(false); }
-  }, [scene, quality]);
+      const next = await getJSON('/api/reconstruct', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ case_id: requestedScene.id, turbines: requestedScene.turbines, domain: requestedScene.domain, wind: requestedScene.wind, resolution: RESOLUTIONS[requestedQuality] }) });
+      if (mounted.current && id === requestId.current) { setResult(next); setResultKey(key); }
+    } catch (failure) { if (mounted.current && id === requestId.current) setError(failure.message); }
+    finally {
+      activeReconstruction.current = false;
+      if (mounted.current) {
+        if (pendingReconstruction.current) void runPendingReconstruction();
+        else setBusy(false);
+      }
+    }
+  }, []);
+
+  const reconstruct = useCallback(() => {
+    if (!scene || loadingCase) return;
+    clearTimeout(reconstructionTimer.current);
+    pendingReconstruction.current = { scene, quality, id: ++requestId.current, key: `${signature(scene)}:${quality}` };
+    setError('');
+    void runPendingReconstruction();
+  }, [scene, quality, loadingCase, runPendingReconstruction]);
 
   useEffect(() => {
     if (!scene || loadingCase) return;
@@ -228,7 +283,7 @@ export default function App() {
       {chosen && <div className="selected-turbine"><div className="control-row"><span>Turbine {chosen.id}</span><button className="text-button" onClick={() => setSelected(null)} aria-label="Deselect turbine"><X size={13}/></button></div><div className="coordinate-inputs">{['x', 'y'].map(axis => <label key={axis}>{axis.toUpperCase()}<input aria-label={`Turbine ${axis.toUpperCase()}`} type="number" value={Number(chosen[axis].toFixed(2))} step="0.1" onChange={event => moveTurbine(chosen.id, axis === 'x' ? Number(event.target.value) : chosen.x, axis === 'y' ? Number(event.target.value) : chosen.y)}/></label>)}</div></div>}
       <button className="reconstruct-button" disabled={!scene || loadingCase || busy} onClick={reconstruct}>{busy ? <LoaderCircle className="spin" size={17}/> : <Play size={16} fill="currentColor"/>}{busy ? 'Reconstructing' : 'Reconstruct'}{!busy && <ArrowUpRight size={17}/>}</button>
       <button className="advanced-button" onClick={() => setAdvanced(value => !value)} aria-expanded={advanced}><Settings2 size={14}/>Display settings<ChevronDown size={13} className={advanced ? 'flipped' : ''}/></button>
-      {advanced && <div className="advanced-controls"><Range label="Vertical scale" value={view.exaggeration} min={0.5} max={5} step={0.1} unit="×" onChange={value => updateView('exaggeration', value)}/><label className="control-row">Resolution<select aria-label="Resolution" value={quality} onChange={event => setQuality(event.target.value)}><option value="draft">Quick</option><option value="standard">Standard</option><option value="fine">Fine</option></select></label></div>}
+      {advanced && <div className="advanced-controls"><Range label="Vertical scale" value={view.exaggeration} min={0.5} max={5} step={0.1} unit="×" onChange={value => updateView('exaggeration', value)}/><label className="control-row">Resolution<select aria-label="Resolution" value={quality} onChange={event => updateQuality(event.target.value)}><option value="draft">Quick</option><option value="standard">Standard</option><option value="fine">Fine</option></select></label></div>}
     </aside>
 
     <main className="workspace" aria-label="Three-dimensional flow workspace" style={{ '--science-width': `${mapsLayout.width}px`, '--science-half': `${mapsLayout.width / 2}px` }}>
@@ -237,7 +292,7 @@ export default function App() {
       {view.mode === 'design' && <ModuleDesignPanel scene={scene} view={view} selected={selected} domainLimits={domainLimits} onSectionChange={section => setView(previous => ({ ...previous, designSection: section, tool: 'orbit' }))} onToolChange={tool => updateView('tool', tool)} onDomainChange={changeDomain} onDeleteSelected={() => deleteTurbine(selected)}/>}
       {view.mode === 'field' && <section className="field-panel" aria-label="Physical quantity panel"><div className="field-panel-title"><h2>Physical field</h2><span>m/s</span></div><div className="field-options">{Object.entries(FIELD_SPECS).map(([key, spec]) => <button key={key} aria-label={`${FIELD_NAMES[key]} (${spec.label})`} aria-pressed={view.field === key} className={view.field === key ? 'selected' : ''} onClick={() => updateView('field', key)} title={spec.description}><span>{FIELD_NAMES[key]}</span><strong>{spec.label}</strong><i style={{ background: `linear-gradient(90deg,${spec.colors.join(',')})` }}/></button>)}</div><div className="field-scale-heading">Color scale</div><div className="segmented contrast-options"><button className={view.contrast === 'wake' ? 'selected' : ''} onClick={() => updateView('contrast', 'wake')}>Wake focus</button><button className={view.contrast === 'global' ? 'selected' : ''} onClick={() => updateView('contrast', 'global')}>Full range</button></div><span className="scale-status">{fieldRange.scope === 'pending' ? 'Awaiting field' : fieldRange.percentiles ? 'Rotor-band scale · 2–98%' : 'Full field scale'}</span></section>}
       {view.mode === 'organization' && <div className="organization-inspector"><div className="segmented organization-view-options"><button className={vennMode ? 'selected' : ''} onClick={() => setView(previous => ({ ...previous, organizationView: 'venn', organizationAddress: null, tool: 'orbit' }))}>Venn sets</button><button className={!vennMode ? 'selected' : ''} onClick={() => setView(previous => ({ ...previous, organizationView: 'spatial', organizationAddress: null }))}>Spatial links</button></div><label htmlFor="hyperedge-select">{vennMode ? 'Native hyperedges' : 'E-address hyperedge'}</label><select id="hyperedge-select" value={view.organizationAddress ?? 'auto'} onChange={event => updateView('organizationAddress', event.target.value === 'auto' ? null : Number(event.target.value))}><option value="auto">{vennMode ? 'Automatic selection' : 'All representative rows'}</option>{availableRows.map(row => <option key={row.id} value={row.id}>E{row.id} ← M/E members</option>)}</select>{vennMode && <div className="venn-row-badges">{organizationSummary?.rowIds?.map(id => <span key={id}>h(E{id})</span>)}</div>}{vennMode && organizationSummary?.selection && <span className="venn-coverage" title="Directory profiles within L2 distance 0.5 of a displayed row; at most three example sets.">{Math.round(organizationSummary.selection.coverage * 100)}% profile coverage{organizationSummary.selection.budgetLimited ? ' · 3-set cap' : ''}</span>}{!vennMode && <><div className="segmented organization-link-options"><button className={view.organizationLinks === 'focused' ? 'selected' : ''} onClick={() => updateView('organizationLinks', 'focused')}>Focused links</button><button className={view.organizationLinks === 'all' ? 'selected' : ''} onClick={() => updateView('organizationLinks', 'all')}>All links</button></div><span className="link-coverage">{organizationSummary?.shownLinks ?? '—'} / {organizationSummary?.totalLinks ?? '—'} members · {organizationSummary?.retainedMass == null ? '—' : (100 * organizationSummary.retainedMass).toFixed(1)}% weight</span></>}<span><i className="m-swatch"/>M turbines<i className="e-swatch"/>E environment</span></div>}
-      <div className="scene-viewport"><FlowScene scene={scene} result={visibleResult} fieldRange={fieldRange} view={view} domainLimits={domainLimits} onDomainChange={changeDomain} onTurbineAdd={addTurbine} onTurbineDelete={deleteTurbine} onTurbineMove={moveTurbine} onSelect={setSelected} onDraggingChange={setDragging} onOrganizationSummary={setOrganizationSummary} selected={selected} cameraPreset={cameraPreset} cameraRevision={cameraRevision}/></div>
+      <div className="scene-viewport"><FlowScene scene={scene} result={visibleResult} fieldRange={fieldRange} view={view} suspended={mapsLayout.fullscreen} domainLimits={domainLimits} onDomainChange={changeDomain} onTurbineAdd={addTurbine} onTurbineDelete={deleteTurbine} onTurbineMove={moveTurbine} onSelect={setSelected} onDraggingChange={setDragging} onOrganizationSummary={setOrganizationSummary} selected={selected} cameraPreset={cameraPreset} cameraRevision={cameraRevision}/></div>
       <ScientificWorkspace scene={scene} result={visibleResult} field={view.field} range={fieldRange} onLayoutChange={setMapsLayout} onPlaneSelect={({ axis, position }) => setView(previous => ({ ...previous, mode: 'field', organization: false, tool: 'orbit', slice: true, sliceAxis: axis, slicePosition: position }))}/>
       {view.mode !== 'design' && (!scene || (dirty && !error)) && <div className="canvas-loading" aria-live="polite"><LoaderCircle className="spin" size={19}/><span>{scene ? 'Reconstructing flow' : 'Loading checkpoint'}</span></div>}
       {error && <div className="error-toast" role="alert"><span>{error}</span><button onClick={reconstruct}>Retry</button></div>}

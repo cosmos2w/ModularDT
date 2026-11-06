@@ -7,20 +7,28 @@ import { clampTurbinePosition, domainLengthFromDrag, isPointerClick, withinDomai
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-function clearGroup(group) {
+function clearGroup(group, disposeSpriteGeometry = false) {
+  const geometries = new Set();
+  const materials = new Set();
+  const textures = new Set();
   while (group.children.length) {
     const object = group.children[0];
     group.remove(object);
     object.traverse((part) => {
-      part.geometry?.dispose();
-      const materials = Array.isArray(part.material) ? part.material : [part.material];
-      for (const material of materials) {
+      // Three.js sprites share one geometry across every label. Releasing it
+      // during a group rebuild forces labels in other groups to upload again.
+      if (part.geometry && (!part.isSprite || disposeSpriteGeometry)) geometries.add(part.geometry);
+      const partMaterials = Array.isArray(part.material) ? part.material : [part.material];
+      for (const material of partMaterials) {
         if (!material) continue;
-        material.map?.dispose();
-        material.dispose();
+        materials.add(material);
+        if (material.map) textures.add(material.map);
       }
     });
   }
+  for (const texture of textures) texture.dispose();
+  for (const material of materials) material.dispose();
+  for (const geometry of geometries) geometry.dispose();
 }
 
 function sprite(text, scale = 1) {
@@ -307,8 +315,7 @@ function rebuildSlice(engine) {
   if (!view.slice || !validGrid(grid) || !engine.domain) return;
   const range = engine.range;
   if (!range) return;
-  const deficitRange = getFieldRange(grid, 'deficit', { contrast: view.contrast, turbines: engine.scene?.turbines });
-  const deficitScale = Math.max(0.25, deficitRange?.max || 0);
+  const deficitScale = engine.deficitScale;
   const sampling = sliceSampleCoordinates(grid, view.sliceAxis, view.slicePosition);
   const [countA, countB] = sampling.shape;
   const vertices = [];
@@ -326,7 +333,7 @@ function rebuildSlice(engine) {
     // Opacity shows the actual positive profile-relative deficit; the color
     // remains the selected physical field on its shared, labeled scale.
     const strength = Number.isFinite(deficit) ? clamp(deficit / deficitScale, 0, 1) : 0;
-    const alpha = 0.08 + 0.54 * strength * strength * (3 - 2 * strength);
+    const alpha = 0.13 + 0.67 * strength * (2 - strength);
     colors.push(...(isValid ? [...vertexColor(value, range, view.field), alpha] : [0, 0, 0, 0]));
   }
   for (let j = 0; j < countB - 1; j += 1) for (let i = 0; i < countA - 1; i += 1) {
@@ -338,7 +345,6 @@ function rebuildSlice(engine) {
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
   geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
   geometry.setIndex(indices);
-  geometry.computeVertexNormals();
   const material = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 1, side: THREE.DoubleSide, depthWrite: false });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.renderOrder = 2;
@@ -641,7 +647,17 @@ function updateOrganizationPulses(engine, time) {
   if (!engine.orgPulses || !engine.organization.visible) return;
   const { paths, geometry } = engine.orgPulses;
   const positions = geometry.getAttribute('position');
-  paths.forEach((path, i) => positions.setXYZ(i, ...curveAt(path, (time * 0.14 + i * 0.173) % 1)));
+  for (let i = 0; i < paths.length; i += 1) {
+    const path = paths[i];
+    const t = (time * 0.14 + i * 0.173) % 1;
+    const a = (1 - t) * (1 - t);
+    const b = 2 * t * (1 - t);
+    const c = t * t;
+    positions.setXYZ(i,
+      path.start[0] * a + path.control[0] * b + path.end[0] * c,
+      path.start[1] * a + path.control[1] * b + path.end[1] * c,
+      path.start[2] * a + path.control[2] * b + path.end[2] * c);
+  }
   positions.needsUpdate = true;
 }
 
@@ -661,20 +677,27 @@ function rebuildLines(engine) {
     const { positions, colors } = linesByKind[kind];
     const selectedValues = path.map((item) => fieldValue(item.velocity, view.field, item.position, result.grid));
     if (!selectedValues.every(Number.isFinite)) continue;
+    const pathPositions = new Float32Array(path.length * 3);
+    const pathColors = new Float32Array(path.length * 3);
+    for (let i = 0; i < path.length; i += 1) {
+      pathPositions.set(toWorld(engine, path[i].position), i * 3);
+      pathColors.set(vertexColor(selectedValues[i], range, view.field), i * 3);
+    }
     for (let i = 1; i < path.length; i += 1) {
       for (const index of [i - 1, i]) {
-        const item = path[index];
-        positions.push(...toWorld(engine, item.position));
-        colors.push(...vertexColor(selectedValues[index], range, view.field));
+        const offset = index * 3;
+        positions.push(pathPositions[offset], pathPositions[offset + 1], pathPositions[offset + 2]);
+        colors.push(pathColors[offset], pathColors[offset + 1], pathColors[offset + 2]);
       }
     }
     for (let streak = 0; streak < 2; streak += 1) {
-      const sample = path[Math.floor(path.length * (streak + 1) / 3)];
-      movingPositions.push(...toWorld(engine, sample.position), ...toWorld(engine, sample.position));
-      const color = vertexColor(fieldValue(sample.velocity, view.field, sample.position, result.grid), range, view.field);
-      movingColors.push(...color, ...color);
+      const offset = Math.floor(path.length * (streak + 1) / 3) * 3;
+      const x = pathPositions[offset], y = pathPositions[offset + 1], z = pathPositions[offset + 2];
+      const r = pathColors[offset], g = pathColors[offset + 1], b = pathColors[offset + 2];
+      movingPositions.push(x, y, z, x, y, z);
+      movingColors.push(r, g, b, r, g, b);
     }
-    engine.movingPaths.push(path);
+    engine.movingPaths.push({ positions: pathPositions, colors: pathColors, length: path.length });
   }
   for (const [kind, { positions, colors }] of Object.entries(linesByKind)) {
     if (!positions.length) continue;
@@ -695,30 +718,30 @@ function rebuildLines(engine) {
 }
 
 function updateStreaks(engine, time) {
-  if (!engine.moving) return;
+  if (!engine.moving || !engine.flow.visible) return;
   const positions = engine.moving.getAttribute('position');
   const colors = engine.moving.getAttribute('color');
-  const range = engine.range;
   let vertex = 0;
-  engine.movingPaths.forEach((path, pathIndex) => {
+  for (let pathIndex = 0; pathIndex < engine.movingPaths.length; pathIndex += 1) {
+    const path = engine.movingPaths[pathIndex];
     for (let streak = 0; streak < 2; streak += 1) {
       const offset = (time * 0.085 + pathIndex * 0.137 + streak * 0.5) % 1;
       const end = Math.max(1, Math.min(path.length - 1, Math.floor(offset * (path.length - 1))));
       const start = Math.max(0, end - 3);
-      for (const index of [start, end]) {
-        const point = toWorld(engine, path[index].position);
-        positions.setXYZ(vertex, ...point);
-        if (range) colors.setXYZ(vertex, ...vertexColor(fieldValue(path[index].velocity, engine.view.field, path[index].position, engine.result.grid), range, engine.view.field));
+      for (let endpoint = 0; endpoint < 2; endpoint += 1) {
+        const index = (endpoint ? end : start) * 3;
+        positions.setXYZ(vertex, path.positions[index], path.positions[index + 1], path.positions[index + 2]);
+        colors.setXYZ(vertex, path.colors[index], path.colors[index + 1], path.colors[index + 2]);
         vertex += 1;
       }
     }
-  });
+  }
   positions.needsUpdate = true;
   colors.needsUpdate = true;
 }
 
 /** Render only supplied model predictions; coordinates are rotor diameters. */
-export default function FlowScene({ scene, result, view = {}, fieldRange = null, selected = null, domainLimits, onSelect, onDraggingChange, onTurbineAdd, onTurbineMove, onTurbineDelete, onDomainChange, onOrganizationSummary, cameraPreset = 'perspective', cameraRevision = 0, onReady }) {
+export default function FlowScene({ scene, result, view = {}, fieldRange = null, selected = null, domainLimits, onSelect, onDraggingChange, onTurbineAdd, onTurbineMove, onTurbineDelete, onDomainChange, onOrganizationSummary, cameraPreset = 'perspective', cameraRevision = 0, onReady, suspended = false }) {
   const hostRef = useRef(null);
   const engineRef = useRef(null);
   const callbacksRef = useRef({ domainLimits, onSelect, onDraggingChange, onTurbineAdd, onTurbineMove, onTurbineDelete, onDomainChange, onOrganizationSummary, onReady });
@@ -757,7 +780,7 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
       ground: new THREE.Group(), turbines: new THREE.Group(), slice: new THREE.Group(), flow: new THREE.Group(), organization: new THREE.Group(), design: new THREE.Group(),
       designHandles: new THREE.Group(), designOutline: null,
       rotors: [], paths: [], view: {}, scene: null, domain: null, result: null, exaggeration: 1, cx: 0, cy: 0,
-      cameraPreset: 'perspective', moving: null, orgPulses: null, range: null,
+      cameraPreset: 'perspective', moving: null, orgPulses: null, range: null, deficitScale: 0.25, suspended,
       onOrganizationSummary: (summary) => callbacksRef.current.onOrganizationSummary?.(summary),
     };
     world.add(engine.ground, engine.turbines, engine.flow, engine.slice, engine.organization, engine.design);
@@ -896,15 +919,18 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
     renderer.domElement.addEventListener('pointerup', pointerUp);
     renderer.domElement.addEventListener('pointercancel', pointerUp);
     renderer.domElement.addEventListener('lostpointercapture', pointerUp);
-    let frame;
+    let frame = null;
+    let running = true;
     let previous = performance.now();
     let elapsed = 0;
     const animate = (now) => {
+      frame = null;
+      if (!running || document.hidden || engine.suspended) return;
       const dt = Math.min((now - previous) / 1000, 0.05);
       previous = now;
       if (engine.view.playing !== false) {
         elapsed += dt;
-        for (const rotor of engine.rotors) rotor.rotation.z -= dt * 0.55;
+        if (engine.turbines.visible) for (const rotor of engine.rotors) rotor.rotation.z -= dt * 0.55;
         updateStreaks(engine, elapsed);
         updateOrganizationPulses(engine, elapsed);
       }
@@ -912,10 +938,23 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
       renderer.render(world, camera);
       frame = requestAnimationFrame(animate);
     };
-    frame = requestAnimationFrame(animate);
+    const visibilityChange = () => {
+      if (document.hidden || engine.suspended) {
+        if (frame !== null) cancelAnimationFrame(frame);
+        frame = null;
+      } else if (running && frame === null) {
+        previous = performance.now();
+        frame = requestAnimationFrame(animate);
+      }
+    };
+    engine.updateVisibility = visibilityChange;
+    document.addEventListener('visibilitychange', visibilityChange);
+    visibilityChange();
     callbacksRef.current.onReady?.();
     return () => {
-      cancelAnimationFrame(frame);
+      running = false;
+      document.removeEventListener('visibilitychange', visibilityChange);
+      if (frame !== null) cancelAnimationFrame(frame);
       observer.disconnect();
       renderer.domElement.removeEventListener('pointerdown', pointerDown, true);
       renderer.domElement.removeEventListener('pointermove', pointerMove);
@@ -924,8 +963,9 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
       renderer.domElement.removeEventListener('lostpointercapture', pointerUp);
       engine.cancelInteraction?.();
       controls.dispose();
-      for (const group of [engine.ground, engine.turbines, engine.slice, engine.flow, engine.organization, engine.design]) clearGroup(group);
+      for (const group of [engine.ground, engine.turbines, engine.slice, engine.flow, engine.organization, engine.design]) clearGroup(group, true);
       renderer.dispose();
+      renderer.forceContextLoss();
       renderer.domElement.remove();
       engineRef.current = null;
     };
@@ -934,65 +974,79 @@ export default function FlowScene({ scene, result, view = {}, fieldRange = null,
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
+    engine.suspended = suspended;
+    engine.updateVisibility();
+  }, [suspended]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
     engine.view = view;
     engine.scene = scene;
+    engine.result = result;
+  }, [scene, result, view]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
     rebuildScene(engine, scene, view, selected);
-    rebuildSlice(engine);
-    rebuildLines(engine);
-    rebuildOrganization(engine, scene);
   }, [scene, view.exaggeration]);
 
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
-    engine.view = view;
-    engine.result = result;
     engine.paths = validGrid(result?.grid) ? traceStreamlines(result.grid, scene?.turbines) : [];
+  }, [result, scene?.turbines]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
     engine.range = fieldRange || getFieldRange(result?.grid, view.field, { contrast: view.contrast, turbines: scene?.turbines });
-    engine.flow.visible = true;
-    engine.slice.visible = true;
+  }, [result, view.field, view.contrast, fieldRange, scene?.turbines]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    const range = getFieldRange(result?.grid, 'deficit', { contrast: view.contrast, turbines: scene?.turbines });
+    engine.deficitScale = Math.max(0.25, range?.max || 0);
+  }, [result, view.contrast, scene?.turbines]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
     rebuildSlice(engine);
+  }, [scene, result, view.exaggeration, view.field, view.contrast, view.slice, view.sliceAxis, view.slicePosition, fieldRange]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
     rebuildLines(engine);
+  }, [scene, result, view.exaggeration, view.field, view.contrast, view.streamlines, fieldRange]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
     rebuildOrganization(engine, scene);
-  }, [result]);
+  }, [scene, result, view.exaggeration, view.mode, view.organizationView, view.organizationAddress, view.organizationLinks]);
 
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
-    engine.view = view;
-    engine.range = fieldRange || getFieldRange(engine.result?.grid, view.field, { contrast: view.contrast, turbines: scene?.turbines });
-    rebuildSlice(engine);
-    rebuildLines(engine);
-  }, [view.field, view.contrast, view.slice, view.sliceAxis, view.slicePosition, view.streamlines, fieldRange]);
-
-  useEffect(() => {
-    const engine = engineRef.current;
-    if (!engine) return;
-    engine.view = view;
     engine.cancelInteraction?.();
     engine.renderer.domElement.style.cursor = view.mode === 'design' && view.designSection === 'layout' && view.tool === 'add' ? 'crosshair' : '';
+    engine.controls.mouseButtons.LEFT = view.tool === 'pan' ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
   }, [view.mode, view.tool, view.designSection]);
+
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    applyMode(engine);
+  }, [view.organization, view.mode, view.designSection, view.organizationView]);
 
   useEffect(() => {
     const engine = engineRef.current;
     if (engine && view.mode === 'design' && view.designSection === 'domain') cameraView(engine, 'fit');
   }, [view.mode, view.designSection]);
-
-  useEffect(() => {
-    const engine = engineRef.current;
-    if (!engine) return;
-    engine.view = view;
-    engine.controls.mouseButtons.LEFT = view.tool === 'pan' ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
-    applyMode(engine);
-    rebuildOrganization(engine, scene);
-  }, [view.playing, view.tool, view.organization, view.mode, view.designSection, view.organizationView]);
-
-  useEffect(() => {
-    const engine = engineRef.current;
-    if (!engine) return;
-    engine.view = view;
-    rebuildOrganization(engine, scene);
-  }, [view.organizationAddress, view.organizationLinks]);
 
   useEffect(() => { if (engineRef.current) updateSelection(engineRef.current, selected); }, [selected]);
   useEffect(() => {

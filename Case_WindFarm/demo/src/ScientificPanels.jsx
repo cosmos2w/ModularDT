@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Expand, RotateCcw, Scan } from 'lucide-react';
 import { FIELD_SPECS, fieldColor, validGrid } from './flowMath.js';
-import { cropPanel, panView, plotRectangle, samplePanel, zoomView } from './scientificPlotMath.js';
+import { contourSettings, cropPanel, panView, plotRectangle, samplePanel, zoomView } from './scientificPlotMath.js';
 import './scientificPanels.css';
 
 const DEFAULT_RANGE = { min: 0, max: 12 };
@@ -50,7 +50,7 @@ export function panelGeometry(scene, grid, spec) {
 
 // Marching squares works in sample coordinates. Invalid/masked corners skip a
 // cell; ambiguous saddles use the bilinear asymptotic decider.
-function drawContours(context, sampled, range) {
+function drawContours(context, sampled, range, contours) {
   const { rectangle, width, height, values } = sampled;
   const low = Math.max(sampled.minimum, range.min);
   const high = Math.min(sampled.maximum, range.max);
@@ -59,7 +59,7 @@ function drawContours(context, sampled, range) {
   const yScale = rectangle.height / (height - 1);
   // Reuse the color samples for isolines; a bounded contour mesh avoids
   // repeating large marching-squares work during continuous pointer movement.
-  const stride = Math.max(1, Math.ceil(Math.sqrt(width * height / 7000)));
+  const stride = Math.max(1, Math.ceil(Math.sqrt(width * height / contours.cellBudget)));
   const vertices = [[0, 0], [1, 0], [1, 1], [0, 1]];
   const edges = [[0, 1], [1, 2], [2, 3], [3, 0]];
   const cells = [];
@@ -79,11 +79,11 @@ function drawContours(context, sampled, range) {
   context.rect(rectangle.left, rectangle.top, rectangle.width, rectangle.height);
   context.clip();
   context.strokeStyle = 'rgba(220, 231, 229, 0.48)';
-  context.lineWidth = 1.3;
+  context.lineWidth = contours.lineWidth;
   context.lineCap = 'round';
   context.lineJoin = 'round';
-  for (let levelIndex = 1; levelIndex <= 10; levelIndex += 1) {
-    const level = low + (high - low) * levelIndex / 11;
+  for (let levelIndex = 1; levelIndex <= contours.levels; levelIndex += 1) {
+    const level = low + (high - low) * levelIndex / (contours.levels + 1);
     context.beginPath();
     for (const { row, column, dx, dy, corners } of cells) {
       const intersections = [];
@@ -123,7 +123,7 @@ function drawContours(context, sampled, range) {
   context.restore();
 }
 
-function drawPanel(canvas, panel, sampled, scene, range, error, size) {
+function drawPanel(canvas, panel, sampled, scene, range, error, size, contours) {
   const pixelRatio = size.pixelRatio;
   const pixelWidth = Math.max(1, Math.round(size.width * pixelRatio));
   const pixelHeight = Math.max(1, Math.round(size.height * pixelRatio));
@@ -147,7 +147,7 @@ function drawPanel(canvas, panel, sampled, scene, range, error, size) {
   const yStep = rectangle.height / (height - 1);
   context.drawImage(buffer, rectangle.left - xStep / 2, rectangle.top - yStep / 2, rectangle.width + xStep, rectangle.height + yStep);
   context.restore();
-  drawContours(context, sampled, range);
+  drawContours(context, sampled, range, contours);
 
   if (panel.name === 'XY') {
     const [xmin, xmax] = panel.horizontalBounds;
@@ -209,7 +209,8 @@ function drawPanel(canvas, panel, sampled, scene, range, error, size) {
   context.fillText(`${'XYZ'[panel.vertical]} / D`, 0, 0);
   context.restore();
 
-  // The visible annotation refers to the displayed crop and paired fluid samples.
+  // Only paired reference samples receive an error annotation.
+  if (!error) return;
   context.save();
   context.textAlign = 'right';
   context.textBaseline = 'top';
@@ -233,7 +234,7 @@ function colorbarGradient(range, field) {
   return `linear-gradient(90deg, ${colors.join(',')})`;
 }
 
-const Panel = memo(function Panel({ scene, grid, field, range, spec, onPlaneSelect, onFocus, focused, view, onViewChange }) {
+const Panel = memo(function Panel({ scene, grid, field, range, spec, onPlaneSelect, onFocus, fullscreen, focused, view, onViewChange }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -243,10 +244,11 @@ const Panel = memo(function Panel({ scene, grid, field, range, spec, onPlaneSele
   const panel = useMemo(() => panelGeometry(scene, grid, spec), [scene, grid, spec]);
   const cropped = useMemo(() => panel.available ? cropPanel(panel, view) : panel, [panel, view]);
   const rectangle = useMemo(() => panel.available && size.width > 0 && size.height > 0 ? plotRectangle(panel, size.width, size.height) : null, [panel, size.width, size.height]);
+  const contours = useMemo(() => contourSettings(rectangle, { fullscreen, focused }), [rectangle, fullscreen, focused]);
   const sampled = useMemo(() => samplePanel(grid, cropped, field, range, rectangle, size.pixelRatio), [grid, cropped, field, range, rectangle, size.pixelRatio]);
   const gradient = useMemo(() => colorbarGradient(range, field), [range, field]);
   const unit = FIELD_SPECS[field]?.unit || 'm/s';
-  const error = sampled?.rmse == null ? 'Reference error unavailable' : `RMSE ${sampled.rmse.toPrecision(3)} ${unit}`;
+  const error = sampled?.rmse == null ? null : `RMSE ${sampled.rmse.toPrecision(3)} ${unit}`;
   viewRef.current = view;
 
   useEffect(() => {
@@ -267,8 +269,8 @@ const Panel = memo(function Panel({ scene, grid, field, range, spec, onPlaneSele
   }, []);
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
-    if (canvas && size.width && size.height) drawPanel(canvas, cropped, sampled, scene, range, error, size);
-  }, [cropped, sampled, scene, range, error, size]);
+    if (canvas && size.width && size.height) drawPanel(canvas, cropped, sampled, scene, range, error, size, contours);
+  }, [cropped, sampled, scene, range, error, size, contours]);
   useEffect(() => () => { if (frameRef.current !== null) cancelAnimationFrame(frameRef.current); }, []);
 
   const queueView = next => {
@@ -325,7 +327,7 @@ const Panel = memo(function Panel({ scene, grid, field, range, spec, onPlaneSele
       {!focused && <button type="button" disabled={!panel.available} onClick={() => onFocus(spec.name)} aria-label={`Expand map: ${spec.name}`} title="Expand map"><Expand size={13}/></button>}
     </div></div>
     <div ref={wrapRef} className="scientific-canvas-wrap"><canvas ref={canvasRef} style={{ visibility: sampled ? 'visible' : 'hidden' }} aria-label={`Expand map: ${spec.name}`} role="button" tabIndex={panel.available ? 0 : -1}
-      data-sample-width={sampled?.width || 0} data-sample-height={sampled?.height || 0} data-zoom={view.zoom} data-crop={panel.available ? [...cropped.horizontalBounds, ...cropped.verticalBounds].join(',') : ''} data-rmse={sampled?.rmse ?? ''}
+      data-sample-width={sampled?.width || 0} data-sample-height={sampled?.height || 0} data-contour-levels={contours.levels} data-zoom={view.zoom} data-crop={panel.available ? [...cropped.horizontalBounds, ...cropped.verticalBounds].join(',') : ''} data-rmse={sampled?.rmse ?? ''}
       onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
       onKeyDown={event => { if (sampled && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onFocus(spec.name); } }}/>{!sampled && <span className="scientific-unavailable">Section unavailable</span>}</div>
     <div className="scientific-scale"><span>{scaleNumber(range.min)}</span><span className="scientific-colorbar" style={{ background: gradient }}/><span>{scaleNumber(range.max)} {unit}</span></div>
@@ -336,6 +338,6 @@ export default function ScientificPanels({ scene, result, field = 'speed', range
   const grid = result?.grid;
   const displayRange = range || DEFAULT_RANGE;
   return <div className={`scientific-panels ${fullscreen ? 'is-grid' : ''} ${focused ? 'has-focus' : ''}`} aria-label="Scientific flow sections">
-    {SPECS.map(spec => <Panel key={spec.name} scene={scene} grid={grid} field={field} range={displayRange} spec={spec} onPlaneSelect={onPlaneSelect} onFocus={onFocus} focused={focused === spec.name} view={views[spec.name]} onViewChange={onViewChange}/>)}
+    {SPECS.map(spec => <Panel key={spec.name} scene={scene} grid={grid} field={field} range={displayRange} spec={spec} onPlaneSelect={onPlaneSelect} onFocus={onFocus} fullscreen={fullscreen} focused={focused === spec.name} view={views[spec.name]} onViewChange={onViewChange}/>)}
   </div>;
 }
