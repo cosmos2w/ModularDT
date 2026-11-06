@@ -5,6 +5,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | Guide | Purpose |
 | --- | --- |
 | [Global organization visualization](Global_Hypergraph_Organization_Visualization.md) | Actual relation provenance, three standard views and saved-evidence plotting. |
+| [Dataset and checkpoint web demos](Dataset_Checkpoint_Web_Demo/README.md) | Desktop scientific demos from saved models: data/API boundaries, 3D fields, scientific maps, physical editing, learned organization, launch and resource lifetime. |
 | [Run artifacts and monitoring](Run_Artifacts_and_Monitoring.md) | Complete histories, meaningful loss panels, selectors and old layouts. |
 | [Query tiling](Query_Tiling.md) | Decoder speed/memory tradeoffs, testing on your own inputs and explicit resume scope. |
 | [Thermal development protocol](Thermal_Model_Development_Protocol.md) | Input-only membership, TRAIN-only normalization and fair epoch budgets. |

@@ -2,6 +2,8 @@
 
 A local, sponsor-facing desktop 3D workbench for the saved full-data WindFarm HONF model. The browser renders actual joint velocity predictions with movable sections, integrated streamlines, editable turbine layouts and the model's prepared organization. Three standard scientific maps beside the 3D view show the hub-height XY plane and two orthogonal vertical sections, with physical coordinates, a shared velocity scale and errors from their displayed reference samples.
 
+For the development method and adaptation to other datasets/checkpoints, see the [reusable web-demo guide](../../docs/guides/Dataset_Checkpoint_Web_Demo/README.md).
+
 ## Start
 
 ```bash
