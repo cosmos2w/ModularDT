@@ -261,6 +261,12 @@ def _accumulate_gradients(store, term, groups):
 
 
 def _gradient_report(buffers, groups):
+    buffers = dict(buffers)
+    for combined, components in (('state', ('native', 'port')),
+                                 ('response', ('endpoint', 'delta', 'decision'))):
+        names = set().union(*(buffers[key] for key in components))
+        buffers[combined] = {name: sum(buffers[key][name] for key in components if name in buffers[key])
+                             for name in names}
     report = {}
     for group, named in groups.items():
         names = [name for name, _ in named]
@@ -269,7 +275,10 @@ def _gradient_report(buffers, groups):
             norms[term] = math.sqrt(sum(float(values[n].double().square().sum())
                                         for n in names if n in values))
         cosines = {}
-        for first, second in (('endpoint', 'delta'), ('endpoint', 'decision'), ('delta', 'decision')):
+        for first, second in (('endpoint', 'delta'), ('endpoint', 'decision'), ('delta', 'decision'),
+                              ('native', 'delta'), ('native', 'decision'), ('port', 'delta'),
+                              ('port', 'decision'), ('state', 'delta'), ('state', 'decision'),
+                              ('state', 'response')):
             den = norms[first] * norms[second]
             dot = sum(float((buffers[first][n].double() * buffers[second][n].double()).sum())
                       for n in names if n in buffers[first] and n in buffers[second])
@@ -392,8 +401,9 @@ class ThermalR165DecisionTask(ThermalPortResponseTask, ThermalStateResponseTask)
                     finite_response_coefficient=.1)
                 if snapshot:
                     _accumulate_gradients(self._snapshot_buffers['endpoint'],
-                                          .25 * losses['endpoint'] / 4, self._snapshot_groups)
-                    delta = (.08 * losses['field_delta'] + .01 * losses['J_delta'] + .01 * losses['P_delta']) / 4
+                                          .25 * losses['endpoint'] * update_count / 16, self._snapshot_groups)
+                    delta = ((.08 * losses['field_delta'] + .01 * losses['J_delta'] + .01 * losses['P_delta'])
+                             * update_count / 16)
                     _accumulate_gradients(self._snapshot_buffers['delta'], delta, self._snapshot_groups)
                 if self.decision_spec['arm'] == 'PDeltaD':
                     observations = losses['observations']
@@ -437,7 +447,8 @@ class ThermalR165DecisionTask(ThermalPortResponseTask, ThermalStateResponseTask)
                         self._decision_replay_difference[key] = max(
                             self._decision_replay_difference.get(key, 0.), float(difference[view, channel]))
                 if snapshot:
-                    _accumulate_gradients(self._snapshot_buffers['decision'], surrogate, self._snapshot_groups)
+                    _accumulate_gradients(self._snapshot_buffers['decision'], surrogate * update_count / 4,
+                                          self._snapshot_groups)
                 terms = {}
                 for name, weight in DECISION_WEIGHTS.items():
                     actual = pooled[name] if index == 0 else pooled[name] * 0
@@ -497,7 +508,8 @@ class ThermalR165DecisionTask(ThermalPortResponseTask, ThermalStateResponseTask)
             row['decision_training']['gradient_snapshot'] = {
                 'family_id': self._snapshot_family,
                 'selection': 'first input-selected ordinary FIT family of this epoch',
-                'scope': 'family endpoint/delta/decision, separate native and port gradients for its native update',
+                'scope': 'actual weighted family endpoint/delta/decision contributions and native/port gradients '
+                         'for the same native update; state=native+port, response=endpoint+delta+decision',
                 'groups': _gradient_report(self._snapshot_buffers, self._snapshot_groups)}
 
 

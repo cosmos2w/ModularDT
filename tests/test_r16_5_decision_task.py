@@ -334,9 +334,15 @@ def test_native_and_port_gradient_snapshots_preserve_accumulated_gradients():
     assert all(report[group]['norms']['port'] > 0 for group in groups)
     assert all(report[group]['norms']['decision'] == 0 for group in groups)
     assert all(report[group]['cosines']['endpoint_vs_decision'] is None for group in groups)
+    objective = .25 * a + .025 * b
+    task._accumulate_gradients(provider._snapshot_buffers['delta'], -objective, groups)
+    conflict = task._gradient_report(provider._snapshot_buffers, groups)
+    for group in groups:
+        assert conflict[group]['cosines']['state_vs_delta'] == pytest.approx(-1.)
+        assert conflict[group]['cosines']['state_vs_response'] == pytest.approx(-1.)
+        assert conflict[group]['norms']['response'] == pytest.approx(conflict[group]['norms']['state'])
     for p in params:
         torch.testing.assert_close(p.grad, torch.full_like(p, 9.))
-    objective = .25 * a + .025 * b
     expected = torch.autograd.grad(objective, params, retain_graph=True)
     objective.backward()
     for p, grad in zip(params, expected):
