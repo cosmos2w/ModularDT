@@ -1,6 +1,14 @@
 // The API returns x-major, z-fast physical velocity vectors on explicit axes.
 // Keep all interpolation and path integration in the physical D coordinate frame.
-export const FIELD_COLORS = ['#103b86', '#087bc1', '#19d3dd', '#65e6ad', '#f1e399'];
+export const FIELD_SPECS = {
+  speed: { label: '|U|', unit: 'm/s', colors: ['#081a42', '#135ca2', '#19a9c5', '#74d8bd', '#f5c66a'], diverging: false, description: 'Velocity magnitude' },
+  ux: { label: 'Ux', unit: 'm/s', colors: ['#171b4d', '#365cac', '#4fa5d3', '#c3d9dc', '#eaa268'], diverging: false, description: 'Downstream velocity' },
+  uy: { label: 'Uy', unit: 'm/s', colors: ['#15559a', '#68b0cf', '#e6edef', '#e6a070', '#aa3b35'], diverging: true, description: 'Crosswind velocity' },
+  uz: { label: 'Uz', unit: 'm/s', colors: ['#15559a', '#68b0cf', '#e6edef', '#e6a070', '#aa3b35'], diverging: true, description: 'Vertical velocity' },
+  deficit: { label: 'Ux deficit', unit: 'm/s', colors: ['#1b588f', '#77b8ce', '#e8edeb', '#eeac6e', '#b63c33'], diverging: true, description: 'Training profile Ux(z) − reconstructed Ux' },
+};
+// Kept as the speed palette for callers that do not select a field.
+export const FIELD_COLORS = FIELD_SPECS.speed.colors;
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -16,34 +24,97 @@ export function validGrid(grid) {
     && grid.velocity?.length === shape[0] * shape[1] * shape[2] * 3;
 }
 
-export function fieldValue(vector, field) {
+// The saved model adds this same TRAIN-only profile to its predicted residual.
+// Match its piecewise-linear interpolation and endpoint clamping exactly.
+export function referenceProfileUx(grid, z) {
+  const profile = grid?.reference_profile;
+  const heights = profile?.z_D;
+  const values = profile?.velocity_mps;
+  if (!Number.isFinite(z) || !Array.isArray(heights) || !heights.length || !Array.isArray(values) || values.length !== heights.length) return NaN;
+  if (z <= heights[0]) return values[0]?.[0] ?? NaN;
+  const last = heights.length - 1;
+  if (z >= heights[last]) return values[last]?.[0] ?? NaN;
+  let left = 0;
+  let right = last;
+  while (right - left > 1) {
+    const middle = (left + right) >> 1;
+    if (heights[middle] <= z) left = middle;
+    else right = middle;
+  }
+  const fraction = (z - heights[left]) / (heights[right] - heights[left]);
+  return values[left][0] + fraction * (values[right][0] - values[left][0]);
+}
+
+export function fieldValue(vector, field, point, grid) {
+  if (field === 'deficit') return referenceProfileUx(grid, point?.[2]) - vector[0];
   if (field === 'ux') return vector[0];
   if (field === 'uy') return vector[1];
   if (field === 'uz') return vector[2];
   return Math.hypot(vector[0], vector[1], vector[2]);
 }
 
-export function getFieldRange(grid, field = 'speed') {
+function percentile(sorted, p) {
+  const position = (sorted.length - 1) * p;
+  const low = Math.floor(position);
+  const fraction = position - low;
+  return sorted[low] + fraction * (sorted[Math.ceil(position)] - sorted[low]);
+}
+
+// Wake contrast is a display scale computed from real samples near the rotors:
+// x = -0.5..8 D downstream, |y-y_t| <= 1.5 D and |z-z_hub| <= 0.65 D.
+// Values and metrics are never clipped or changed, only the displayed colors.
+export function getFieldRange(grid, field = 'speed', options = {}) {
   if (!validGrid(grid)) return null;
   const values = grid.velocity;
+  const turbines = (options.turbines || []).filter((turbine) => [turbine.x, turbine.y, turbine.z].every(Number.isFinite));
+  const focused = options.contrast === 'wake' && turbines.length > 0;
+  const local = [];
   let min = Infinity;
   let max = -Infinity;
-  for (let i = 0; i < values.length; i += 3) {
-    const value = fieldValue([values[i], values[i + 1], values[i + 2]], field);
+  let finiteCount = 0;
+  const [nx, ny, nz] = grid.shape;
+  for (let ix = 0; ix < nx; ix += 1) for (let iy = 0; iy < ny; iy += 1) for (let iz = 0; iz < nz; iz += 1) {
+    const point = [grid.axes.x[ix], grid.axes.y[iy], grid.axes.z[iz]];
+    const offset = ((ix * ny + iy) * nz + iz) * 3;
+    const value = fieldValue([values[offset], values[offset + 1], values[offset + 2]], field, point, grid);
     if (Number.isFinite(value)) {
       min = Math.min(min, value);
       max = Math.max(max, value);
+      finiteCount += 1;
+      if (focused && turbines.some((turbine) => point[0] >= turbine.x - 0.5 && point[0] <= turbine.x + 8
+        && Math.abs(point[1] - turbine.y) <= 1.5 && Math.abs(point[2] - turbine.z) <= 0.65)) local.push(value);
     }
   }
-  return Number.isFinite(min) ? { min, max } : null;
+  if (!Number.isFinite(min)) return null;
+  let lower = min;
+  let upper = max;
+  const useFocus = local.length >= 8;
+  if (useFocus) {
+    local.sort((a, b) => a - b);
+    lower = percentile(local, 0.02);
+    upper = percentile(local, 0.98);
+  }
+  if (FIELD_SPECS[field]?.diverging) {
+    const extent = Math.max(Math.abs(lower), Math.abs(upper));
+    lower = -extent;
+    upper = extent;
+  }
+  return {
+    min: lower, max: upper, clipped: min < lower || max > upper,
+    percentiles: useFocus ? [2, 98] : null,
+    scope: useFocus ? 'near-turbine rotor band' : 'full grid',
+    sampleCount: useFocus ? local.length : finiteCount,
+  };
 }
 
-export function fieldColor(value, range) {
-  const t = clamp((value - range.min) / (range.max - range.min || 1), 0, 1) * (FIELD_COLORS.length - 1);
-  const index = Math.min(FIELD_COLORS.length - 2, Math.floor(t));
+export function fieldColor(value, range, field = 'speed') {
+  const palette = FIELD_SPECS[field]?.colors || FIELD_COLORS;
+  const scaled = range.max === range.min ? 0.5 : clamp((value - range.min) / (range.max - range.min), 0, 1);
+  const t = scaled * (palette.length - 1);
+  const index = Math.min(palette.length - 2, Math.floor(t));
   const fraction = t - index;
-  const a = FIELD_COLORS[index];
-  const b = FIELD_COLORS[index + 1];
+  const a = palette[index];
+  const b = palette[index + 1];
   return [1, 3, 5].map((start) => {
     const c1 = parseInt(a.slice(start, start + 2), 16);
     const c2 = parseInt(b.slice(start, start + 2), 16);
@@ -147,22 +218,32 @@ export function directoryView(organization, scene, address = null) {
   return { anchors, rows, links, missing };
 }
 
-// Midpoint integration follows the model vector direction, using deterministic
-// seeds inside the sampled volume. Step size is in physical D, not elapsed time.
-export function traceStreamlines(grid, hubHeight = 0.875) {
+// Midpoint integration uses the reconstructed velocity, with seeds around each
+// actual rotor and a sparse upstream context. Distance and step size are in D.
+export function traceStreamlines(grid, turbines = []) {
   if (!validGrid(grid)) return [];
   const axes = ['x', 'y', 'z'].map((name) => grid.axes[name]);
   const min = axes.map((axis) => axis[0]);
   const max = axes.map((axis) => axis[axis.length - 1]);
   const span = max.map((v, i) => v - min[i]);
-  const step = Math.max(0.08, Math.min(span[0], span[1]) / 72);
+  const step = clamp(span[0] / 160, 0.08, 0.18);
   const paths = [];
-  const heights = [...new Set([hubHeight - 0.4, hubHeight, hubHeight + 0.4].map((z) => clamp(z, min[2] + 0.025 * span[2], max[2] - 0.025 * span[2])))];
-  const xFractions = [0.025, 0.40];
-  for (const xf of xFractions) for (const height of heights) for (let yi = 0; yi < 13; yi += 1) {
-    const p = [min[0] + span[0] * xf, min[1] + span[1] * (yi + 0.5) / 13, height];
+  const members = Array.isArray(turbines) ? turbines.filter((turbine) => [turbine.x, turbine.y, turbine.z].every(Number.isFinite)) : [];
+  const hubHeight = members.length ? members.reduce((sum, turbine) => sum + turbine.z, 0) / members.length : 0.875;
+  const seeds = [];
+  for (let yi = 0; yi < 7; yi += 1) {
+    seeds.push({ point: [min[0] + span[0] * 0.01, min[1] + span[1] * (yi + 0.5) / 7, clamp(hubHeight, min[2], max[2])], kind: 'background', distance: 24 });
+  }
+  for (const turbine of members) {
+    const diameter = Number.isFinite(turbine.rotor_diameter) ? turbine.rotor_diameter : 1;
+    for (const y of [-0.32, 0, 0.32]) for (const z of [-0.32, 0, 0.32]) {
+      seeds.push({ point: [turbine.x + 0.12 * diameter, turbine.y + y * diameter, turbine.z + z * diameter], kind: 'rotor', distance: 12 * diameter });
+    }
+  }
+  for (const seed of seeds) {
+    const p = [...seed.point];
     const path = [];
-    for (let k = 0; k < 120; k += 1) {
+    for (let k = 0; k < Math.ceil(seed.distance / step); k += 1) {
       const v = sampleVelocity(grid, p);
       if (!v) break;
       const magnitude = Math.hypot(...v);
@@ -175,7 +256,10 @@ export function traceStreamlines(grid, hubHeight = 0.875) {
       if (midMagnitude < 1e-8) break;
       for (let i = 0; i < 3; i += 1) p[i] += step * vm[i] / midMagnitude;
     }
-    if (path.length > 5) paths.push(path);
+    if (path.length > 5) {
+      path.kind = seed.kind;
+      paths.push(path);
+    }
   }
   return paths;
 }

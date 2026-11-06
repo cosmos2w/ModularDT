@@ -169,27 +169,32 @@ class Demo:
         coordinates = scene.environment_coordinates[0].detach().cpu().numpy()
         selected = set(np.linspace(0, len(coordinates) - 1, min(12, len(coordinates)), dtype=int).tolist())
         anchors = []
+        directory_rows = []
         for i, position in enumerate(coordinates):
             anchor = {"id": i, "position": position.tolist()}
+            row = directory.full.row(0, i)
+            ids = row.original_id.cpu().tolist()
+            is_module = row.is_module.cpu().tolist()
+            weights = row.access_weight.cpu().tolist()
+            exchange = row.applied_exchange.cpu().tolist()
+            self_access = row.structural_self.cpu().tolist()
+            members = [
+                {"role": "M" if is_m else "E", "id": int(member_id),
+                 "weight": float(weight), "exchange": float(gate), "self": float(own)}
+                for member_id, is_m, weight, gate, own in zip(ids, is_module, weights, exchange, self_access)
+            ]
+            directory_rows.append({"id": i, "members": members})
             if i in selected:
-                row = directory.full.row(0, i)
-                ids = row.original_id.cpu().tolist()
-                is_module = row.is_module.cpu().tolist()
-                weights = row.access_weight.cpu().tolist()
-                exchange = row.applied_exchange.cpu().tolist()
-                self_access = row.structural_self.cpu().tolist()
-                anchor["members"] = [
-                    {"role": "M" if is_m else "E", "id": int(member_id),
-                     "weight": float(weight), "exchange": float(gate), "self": float(own)}
-                    for member_id, is_m, weight, gate, own in zip(ids, is_module, weights, exchange, self_access)
-                ]
+                anchor["members"] = members
             anchors.append(anchor)
         return {
             "kind": "e_anchor_directory", "read_mode": "full", "retained_mass": 1.0,
             "anchors": anchors,
+            "directory_rows": directory_rows,
             "selection": {
                 "selected_anchor_ids": sorted(selected), "shown_rows": len(selected),
                 "total_rows": len(coordinates),
+                "available_rows": len(directory_rows),
                 "description": "Every positive original M/E member in 12 evenly selected full-directory rows is shown.",
             },
             "provenance": {
@@ -284,6 +289,11 @@ class Demo:
                 "order": "x-major, z-fast, then component", "velocity": prediction.reshape(-1).tolist(),
                 "reference_velocity": reference.reshape(-1).tolist() if reference is not None else None,
                 "fluid_mask": [True] * len(coords) if unchanged else None,
+                "reference_profile": {
+                    "z_D": model.transforms.background_profile.bin_centers_D.tolist(),
+                    "velocity_mps": model.transforms.background_profile.values_mps.tolist(),
+                    "source": "checkpoint training vertical profile",
+                },
             },
             "organization": organization, "errors": errors,
             "provenance": {

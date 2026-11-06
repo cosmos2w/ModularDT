@@ -2,14 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, ArrowUpRight, Box, ChevronDown, CircleHelp, Crosshair, Expand, Layers3, LoaderCircle, Minus, MousePointer2, Move, Network, Pause, Play, Plus, RotateCcw, Settings2, Wind, X } from 'lucide-react';
 import FlowScene from './FlowScene.jsx';
 import ScientificPanels from './ScientificPanels.jsx';
-import { FIELD_COLORS, getFieldRange, sampleVelocity, sliceSampleCoordinates } from './flowMath.js';
+import { FIELD_SPECS, fieldValue, getFieldRange, sampleVelocity, sliceSampleCoordinates } from './flowMath.js';
 
-const INITIAL_VIEW = { mode: 'field', organizationAddress: null, field: 'speed', streamlines: true, slice: true, sliceAxis: 'z', slicePosition: 0.14, organization: false, exaggeration: 2.8, playing: true, tool: 'orbit' };
+const INITIAL_VIEW = { mode: 'field', organizationView: 'venn', organizationAddress: null, field: 'speed', contrast: 'wake', streamlines: true, slice: true, sliceAxis: 'z', slicePosition: 0.14, organization: false, exaggeration: 2.8, playing: true, tool: 'orbit' };
 const RESOLUTIONS = { draft: [28, 20, 12], standard: [40, 28, 16], fine: [56, 32, 16] };
 const copy = value => structuredClone(value);
 const signature = scene => JSON.stringify(scene && [scene.id, scene.turbines, scene.domain, scene.wind]);
 const format = value => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
 const formatError = value => Number.isFinite(Number(value)) ? Number(value).toPrecision(3) : '—';
+const FIELD_NAMES = { speed: 'Speed', ux: 'Downstream', uy: 'Crosswind', uz: 'Vertical', deficit: 'Deficit' };
 
 async function getJSON(url, options) {
   const response = await fetch(url, options);
@@ -28,36 +29,30 @@ function Range({ label, value, min, max, step = 1, onChange, unit = '', ...props
 }
 
 function ErrorReadout({ result, dirty, view }) {
-  const errors = result?.errors;
-  const displayedErrors = useMemo(() => {
+  const displayedError = useMemo(() => {
     const grid = result?.grid;
     if (!grid?.reference_velocity) return null;
-    const referenceGrid = { ...grid, velocity: grid.reference_velocity };
-    const sum = [0, 0, 0, 0];
-    let count = 0;
-    const accumulate = (prediction, reference) => {
+    let sum = 0, count = 0;
+    const accumulate = (prediction, reference, point) => {
       if (!prediction || !reference) return;
-      for (let i = 0; i < 3; i += 1) sum[i] += (prediction[i] - reference[i]) ** 2;
-      sum[3] += (Math.hypot(...prediction) - Math.hypot(...reference)) ** 2;
+      const difference = fieldValue(prediction, view.field, point, grid) - fieldValue(reference, view.field, point, grid);
+      if (!Number.isFinite(difference)) return;
+      sum += difference ** 2;
       count += 1;
     };
     if (view.slice) {
-      for (const point of sliceSampleCoordinates(grid, view.sliceAxis, view.slicePosition).coordinates) accumulate(sampleVelocity(grid, point), sampleVelocity(referenceGrid, point));
+      for (const point of sliceSampleCoordinates(grid, view.sliceAxis, view.slicePosition).coordinates) accumulate(sampleVelocity(grid, point), sampleVelocity(grid, point, grid.reference_velocity), point);
     } else {
-      for (let i = 0; i < grid.velocity.length; i += 3) accumulate(grid.velocity.slice(i, i + 3), grid.reference_velocity.slice(i, i + 3));
+      for (let i = 0; i < grid.velocity.length; i += 3) {
+        const index = i / 3, [, ny, nz] = grid.shape;
+        const point = [grid.axes.x[Math.floor(index / (ny * nz))], grid.axes.y[Math.floor(index / nz) % ny], grid.axes.z[index % nz]];
+        accumulate(grid.velocity.slice(i, i + 3), grid.reference_velocity.slice(i, i + 3), point);
+      }
     }
-    return count ? sum.map(value => Math.sqrt(value / count)) : null;
-  }, [result, view.slice, view.sliceAxis, view.slicePosition]);
-  if (!result || dirty) return <span className="error-readout">Reference error unavailable</span>;
-  if (displayedErrors) return <span className="error-readout">{view.slice ? 'Slice' : 'Volume'} RMSE |U| {formatError(displayedErrors[3])} / Ux {formatError(displayedErrors[0])} / Uy {formatError(displayedErrors[1])} / Uz {formatError(displayedErrors[2])} m/s</span>;
-  if (!errors || errors.available === false) return <span className="error-readout">Reference error unavailable · edited scene</span>;
-  if (errors.components) return <span className="error-readout">Volume RMSE {Object.entries(errors.components).map(([name, values]) => `${name} ${formatError(values.rmse_m_s)}`).join(' / ')} m/s</span>;
-  const rmse = errors.rmse_m_s || errors.rmse || errors.fieldwise_rmse_m_s;
-  const rel = errors.relative_l2 || errors.fieldwise_relative_l2;
-  const values = rmse || rel;
-  if (!values) return <span className="error-readout">Reference error unavailable</span>;
-  const entries = Array.isArray(values) ? ['Ux', 'Uy', 'Uz'].map((name, i) => [name, values[i]]) : Object.entries(values);
-  return <span className="error-readout">{rmse ? 'RMSE' : 'Relative L2'} {entries.map(([name, value]) => `${name} ${format(value)}`).join(' / ')}{rmse ? ' m/s' : ''}</span>;
+    return count ? Math.sqrt(sum / count) : null;
+  }, [result, view.field, view.slice, view.sliceAxis, view.slicePosition]);
+  if (!result || dirty || displayedError === null) return <span className="error-readout">Reference error unavailable{result && !dirty ? ' · edited scene' : ''}</span>;
+  return <span className="error-readout">{view.slice ? 'Slice' : 'Volume'} {FIELD_SPECS[view.field].label} RMSE {formatError(displayedError)} m/s</span>;
 }
 
 export default function App() {
@@ -69,6 +64,7 @@ export default function App() {
   const [view, setView] = useState(INITIAL_VIEW);
   const [selected, setSelected] = useState(null);
   const [dragging, setDragging] = useState(false);
+  const [organizationSummary, setOrganizationSummary] = useState(null);
   const [quality, setQuality] = useState('standard');
   const [busy, setBusy] = useState(false);
   const [loadingCase, setLoadingCase] = useState(false);
@@ -88,10 +84,7 @@ export default function App() {
   const chosen = scene?.turbines.find(turbine => turbine.id === selected);
 
   const updateView = (key, value) => setView(previous => ({ ...previous, [key]: value }));
-  const changeMode = mode => setView(previous => {
-    const ids = result?.organization?.selection?.selected_anchor_ids || [];
-    return { ...previous, mode, organization: mode === 'organization', organizationAddress: previous.organizationAddress ?? ids[Math.floor(ids.length / 2)] ?? null };
-  });
+  const changeMode = mode => setView(previous => ({ ...previous, mode, organization: mode === 'organization', tool: mode === 'organization' && previous.organizationView === 'venn' ? 'orbit' : previous.tool }));
   const updateScene = useCallback(change => {
     requestId.current += 1;
     setError('');
@@ -171,9 +164,11 @@ export default function App() {
   };
 
   const fieldRange = useMemo(() => {
-    const range = getFieldRange(visibleResult?.grid, view.field);
-    return range ? [range.min, range.max] : [0, 12];
-  }, [visibleResult, view.field]);
+    return getFieldRange(visibleResult?.grid, view.field, { contrast: view.contrast, turbines: scene?.turbines }) || { min: 0, max: 12, clipped: false, scope: 'pending' };
+  }, [visibleResult, view.field, view.contrast, scene?.turbines]);
+  const fieldSpec = FIELD_SPECS[view.field];
+  const vennMode = view.organizationView === 'venn';
+  const availableRows = vennMode ? visibleResult?.organization?.directory_rows || [] : visibleResult?.organization?.anchors?.filter(anchor => anchor.members) || [];
 
   const directions = meta?.controls?.wind_direction_deg?.options || [270, 285, 300];
   const status = error ? 'Attention needed' : loadingCase ? 'Loading scene' : busy || (dirty && scene) ? 'Reconstructing' : result ? 'Model ready' : 'Loading model';
@@ -210,17 +205,18 @@ export default function App() {
     <main className="workspace" aria-label="Three-dimensional flow workspace">
       <div className="workspace-heading"><h1>Wind, revealed.</h1><p>{view.mode === 'organization' ? 'Learned M/E organization' : 'Three-dimensional flow reconstruction'}</p></div>
       <div className="mode-switch" role="tablist" aria-label="Visualization mode"><button role="tab" aria-selected={view.mode === 'field'} onClick={() => changeMode('field')}><Wind size={15}/>Flow field</button><button role="tab" aria-selected={view.mode === 'organization'} onClick={() => changeMode('organization')}><Network size={15}/>Learned hypergraph</button></div>
-      {view.mode === 'organization' && <div className="organization-inspector"><label htmlFor="hyperedge-select">E-address hyperedge</label><select id="hyperedge-select" value={view.organizationAddress ?? 'all'} onChange={event => updateView('organizationAddress', event.target.value === 'all' ? null : Number(event.target.value))}><option value="all">All representative rows</option>{result?.organization?.selection?.selected_anchor_ids?.map(id => <option key={id} value={id}>E{id} ← M/E members</option>)}</select><span><i className="m-swatch"/>M turbines<i className="e-swatch"/>E environment</span></div>}
-      <div className="scene-viewport"><FlowScene scene={scene} result={visibleResult} view={view} onTurbineMove={moveTurbine} onSelect={setSelected} onDraggingChange={setDragging} selected={selected} cameraPreset={cameraPreset} cameraRevision={cameraRevision}/></div>
+      {view.mode === 'field' && <section className="field-panel" aria-label="Physical quantity panel"><div className="field-panel-title"><h2>Physical field</h2><span>m/s</span></div><div className="field-options">{Object.entries(FIELD_SPECS).map(([key, spec]) => <button key={key} aria-label={`${FIELD_NAMES[key]} (${spec.label})`} aria-pressed={view.field === key} className={view.field === key ? 'selected' : ''} onClick={() => updateView('field', key)} title={spec.description}><span>{FIELD_NAMES[key]}</span><strong>{spec.label}</strong><i style={{ background: `linear-gradient(90deg,${spec.colors.join(',')})` }}/></button>)}</div><div className="field-scale-heading">Color scale</div><div className="segmented contrast-options"><button className={view.contrast === 'wake' ? 'selected' : ''} onClick={() => updateView('contrast', 'wake')}>Wake focus</button><button className={view.contrast === 'global' ? 'selected' : ''} onClick={() => updateView('contrast', 'global')}>Full range</button></div><span className="scale-status">{fieldRange.scope === 'pending' ? 'Awaiting field' : fieldRange.percentiles ? 'Rotor-band scale · 2–98%' : 'Full field scale'}</span></section>}
+      {view.mode === 'organization' && <div className="organization-inspector"><div className="segmented organization-view-options"><button className={vennMode ? 'selected' : ''} onClick={() => setView(previous => ({ ...previous, organizationView: 'venn', organizationAddress: null, tool: 'orbit' }))}>Venn sets</button><button className={!vennMode ? 'selected' : ''} onClick={() => setView(previous => ({ ...previous, organizationView: 'spatial', organizationAddress: null }))}>Spatial links</button></div><label htmlFor="hyperedge-select">{vennMode ? 'Native hyperedges' : 'E-address hyperedge'}</label><select id="hyperedge-select" value={view.organizationAddress ?? 'auto'} onChange={event => updateView('organizationAddress', event.target.value === 'auto' ? null : Number(event.target.value))}><option value="auto">{vennMode ? 'Automatic selection' : 'All representative rows'}</option>{availableRows.map(row => <option key={row.id} value={row.id}>E{row.id} ← M/E members</option>)}</select>{vennMode && <div className="venn-row-badges">{organizationSummary?.rowIds?.map(id => <span key={id}>h(E{id})</span>)}</div>}{vennMode && organizationSummary?.selection && <span className="venn-coverage" title="Directory profiles within L2 distance 0.5 of a displayed row; at most three example sets.">{Math.round(organizationSummary.selection.coverage * 100)}% profile coverage{organizationSummary.selection.budgetLimited ? ' · 3-set cap' : ''}</span>}<span><i className="m-swatch"/>M turbines<i className="e-swatch"/>E environment</span></div>}
+      <div className="scene-viewport"><FlowScene scene={scene} result={visibleResult} fieldRange={fieldRange} view={view} onTurbineMove={moveTurbine} onSelect={setSelected} onDraggingChange={setDragging} onOrganizationSummary={setOrganizationSummary} selected={selected} cameraPreset={cameraPreset} cameraRevision={cameraRevision}/></div>
       <ScientificPanels scene={scene} result={visibleResult} field={view.field} range={fieldRange} onPlaneSelect={({ axis, position }) => setView(previous => ({ ...previous, mode: 'field', organization: false, slice: true, sliceAxis: axis, slicePosition: position }))}/>
       {(!scene || (dirty && !error)) && <div className="canvas-loading" aria-live="polite"><LoaderCircle className="spin" size={19}/><span>{scene ? 'Reconstructing flow' : 'Loading checkpoint'}</span></div>}
       {error && <div className="error-toast" role="alert"><span>{error}</span><button onClick={reconstruct}>Retry</button></div>}
       <div className="canvas-tools" role="toolbar" aria-label="Camera and editing tools">
         <IconButton title="Orbit view" active={view.tool === 'orbit'} onClick={() => updateView('tool', 'orbit')}><MousePointer2 size={20}/></IconButton>
-        <IconButton title="Move turbine" active={view.tool === 'move'} onClick={() => updateView('tool', 'move')}><Move size={20}/></IconButton>
+        <IconButton title="Move turbine" disabled={view.mode === 'organization' && vennMode} active={view.tool === 'move'} onClick={() => updateView('tool', 'move')}><Move size={20}/></IconButton>
         <div className="tool-separator"/>
         <IconButton title="Perspective view" active={cameraPreset === 'perspective'} onClick={() => { setCameraPreset('perspective'); setCameraRevision(value => value + 1); }}><Box size={20}/></IconButton>
-        <IconButton title="Top view" active={cameraPreset === 'top'} onClick={() => { setCameraPreset('top'); setCameraRevision(value => value + 1); }}><Layers3 size={20}/></IconButton>
+        <IconButton title="Top view" disabled={view.mode === 'organization' && vennMode} active={cameraPreset === 'top' && !(view.mode === 'organization' && vennMode)} onClick={() => { setCameraPreset('top'); setCameraRevision(value => value + 1); }}><Layers3 size={20}/></IconButton>
         <IconButton title="Fit scene" onClick={() => { setCameraPreset('fit'); setCameraRevision(value => value + 1); }}><Crosshair size={20}/></IconButton>
         <div className="tool-separator"/>
         <IconButton title="Fullscreen" onClick={() => document.fullscreenElement ? document.exitFullscreen?.() : document.documentElement.requestFullscreen?.()}><Expand size={20}/></IconButton>
@@ -228,7 +224,7 @@ export default function App() {
 
       {view.mode === 'field' && view.slice && <div className="slice-inspector"><span>Section</span><div className="segmented">{[['z', 'XY'], ['y', 'XZ'], ['x', 'YZ']].map(([axis, name]) => <button key={axis} className={view.sliceAxis === axis ? 'selected' : ''} onClick={() => updateView('sliceAxis', axis)}>{name}</button>)}</div><input aria-label="Section position" type="range" min="0" max="1" step="0.01" value={view.slicePosition} onChange={event => updateView('slicePosition', Number(event.target.value))}/><output>{visibleResult?.grid ? format(sliceSampleCoordinates(visibleResult.grid, view.sliceAxis, view.slicePosition)?.fixedCoordinate) : '—'} D</output></div>}
 
-      <div className="field-legend"><div><select aria-label="Physical field" value={view.field} onChange={event => updateView('field', event.target.value)}><option value="speed">|U|</option><option value="ux">Ux</option><option value="uy">Uy</option><option value="uz">Uz</option></select><span>m/s</span></div><div className="colorbar" style={{ background: `linear-gradient(90deg,${FIELD_COLORS.join(',')})` }}/><div className="legend-ticks"><span>{format(fieldRange[0])}</span><span>{format(fieldRange[1])}</span></div></div>
+      {view.mode === 'field' && <div className="field-legend"><div><span>{fieldSpec.label}</span><span>m/s</span></div><div className="colorbar" style={{ background: `linear-gradient(90deg,${fieldSpec.colors.join(',')})` }}/><div className="legend-ticks"><span>{format(fieldRange.min)}</span><span>{format(fieldRange.max)}</span></div></div>}
 
       {view.mode === 'field' ? <div className="view-dock" role="toolbar" aria-label="Flow display">
         <button className="play-button" aria-label={view.playing ? 'Pause animation' : 'Play animation'} onClick={() => updateView('playing', !view.playing)}>{view.playing ? <Pause size={17} fill="currentColor"/> : <Play size={17} fill="currentColor"/>}</button>
@@ -239,11 +235,11 @@ export default function App() {
         <div className="dock-separator"/>
         <button className="dock-toggle" onClick={() => changeMode('organization')}><Network size={19}/><span>See structure</span></button>
       </div> : <div className="view-dock organization-dock"><button className="play-button" aria-label={view.playing ? 'Pause animation' : 'Play animation'} onClick={() => updateView('playing', !view.playing)}>{view.playing ? <Pause size={17} fill="currentColor"/> : <Play size={17} fill="currentColor"/>}</button><div className="dock-separator"/><span>{scene?.turbines.length ?? '—'} M <small>turbines</small></span><div className="dock-separator"/><span>{result?.organization?.anchors?.length ?? '—'} E <small>environment</small></span><Network size={20}/></div>}
-      <div className="field-evidence">{view.mode === 'field' ? <ErrorReadout result={visibleResult} dirty={dirty} view={view}/> : <span className="error-readout">Full directory · {view.organizationAddress === null ? visibleResult?.organization?.selection.shown_rows ?? '—' : 1}/{visibleResult?.organization?.selection.total_rows ?? '—'} E-address hyperedges · all positive members</span>}<span className="mask-note">Z ×{view.exaggeration.toFixed(1)}{view.mode === 'organization' ? ' · schematic links' : visibleResult?.errors ? ' · native fluid reference' : ''}</span></div>
+      <div className="field-evidence">{view.mode === 'field' ? <ErrorReadout result={visibleResult} dirty={dirty} view={view}/> : <span className="error-readout">Native directory · {organizationSummary?.shownRows ?? '—'}/{visibleResult?.organization?.selection.total_rows ?? '—'} native hyperedges · all positive members</span>}<span className="mask-note">{view.mode === 'organization' && vennMode ? 'Exact set intersections · abstract coordinates' : `Z ×${view.exaggeration.toFixed(1)}${view.mode === 'organization' ? ' · schematic links' : visibleResult?.errors ? ' · native fluid reference' : ''}`}</span></div>
     </main>
 
     <footer className="statusbar"><span><Activity size={13}/>{timing === undefined ? 'Inference —' : `Inference ${Math.round(timing)} ms`}</span><span>Epoch {epoch}</span><span>{meta?.checkpoint?.training_cases ?? 420} training cases</span><span className={edited ? 'edited-label' : ''}>{edited ? 'Edited scene · model exploration' : 'Dataset scene'}</span><span className="status-hint">Drag to orbit · Scroll to zoom</span></footer>
 
-    {info && <div className="modal-backdrop" onClick={() => setInfo(false)}><section className="info-modal" role="dialog" aria-modal="true" aria-labelledby="model-title" onClick={event => event.stopPropagation()}><div className="panel-title"><h2 id="model-title">Model & data</h2><IconButton title="Close model information" onClick={() => setInfo(false)}><X size={18}/></IconButton></div><dl><dt>Checkpoint</dt><dd>{meta?.checkpoint?.run}</dd><dt>Training</dt><dd>Full population · {meta?.checkpoint?.training_cases ?? 420} cases · epoch {epoch}</dd><dt>Prediction</dt><dd>Joint Ux, Uy, Uz · m/s</dd><dt>Coordinates</dt><dd>Rotor diameter D = 80 m</dd><dt>Inflow</dt><dd>9 m/s profile · 270°, 285°, 300°</dd><dt>Organization</dt><dd>Actual prepared M/E memberships</dd></dl><p>Edited scenes have no CFD reference; inflow speed is fixed by the saved model. Direction selects the trained direction category in the current layout frame.</p><p>Animated particles trace the reconstructed steady velocity field.</p></section></div>}
+    {info && <div className="modal-backdrop" onClick={() => setInfo(false)}><section className="info-modal" role="dialog" aria-modal="true" aria-labelledby="model-title" onClick={event => event.stopPropagation()}><div className="panel-title"><h2 id="model-title">Model & data</h2><IconButton title="Close model information" onClick={() => setInfo(false)}><X size={18}/></IconButton></div><dl><dt>Checkpoint</dt><dd>{meta?.checkpoint?.run}</dd><dt>Training</dt><dd>Full population · {meta?.checkpoint?.training_cases ?? 420} cases · epoch {epoch}</dd><dt>Prediction</dt><dd>Joint Ux, Uy, Uz · m/s</dd><dt>Coordinates</dt><dd>Rotor diameter D = 80 m</dd><dt>Inflow</dt><dd>9 m/s profile · 270°, 285°, 300°</dd><dt>Organization</dt><dd>Actual prepared M/E directory memberships</dd><dt>Venn display</dt><dd>Exact intersections · abstract coordinates · at most 3 representative sets</dd></dl><p>Edited scenes have no CFD reference; inflow speed is fixed by the saved model. Direction selects the trained direction category in the current layout frame.</p><p>Downstream deficit uses the checkpoint training profile at each height. Wake focus clips colors to rotor-band percentiles; values and RMSE are unchanged.</p><p>Venn arrows show prepared M-to-E directory access, with schematic curves. Animated particles trace the reconstructed steady velocity field.</p></section></div>}
   </div>;
 }

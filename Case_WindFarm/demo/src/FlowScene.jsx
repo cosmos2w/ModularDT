@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { directoryView, fieldColor, fieldValue, getFieldRange, sampleVelocity, sliceSampleCoordinates, traceStreamlines, validGrid } from './flowMath.js';
+import { buildOrganizationVenn } from './organizationVenn.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -170,6 +171,10 @@ function updateSelection(engine, selected) {
 
 function cameraView(engine, preset = 'perspective') {
   if (!engine.domain) return;
+  if (engine.abstractActive && engine.orgBounds?.length) {
+    fitWorldPoints(engine, engine.orgBounds, ['perspective', 'fit', 'top'].includes(preset) ? 'venn' : preset);
+    return;
+  }
   const { min, max } = engine.domain;
   const dx = max[0] - min[0];
   const dy = max[1] - min[1];
@@ -222,8 +227,8 @@ function rebuildScene(engine, scene, view, selected) {
   }
 }
 
-function vertexColor(value, range) {
-  const rgb = fieldColor(value, range);
+function vertexColor(value, range, field) {
+  const rgb = fieldColor(value, range, field);
   const c = new THREE.Color().setRGB(...rgb, THREE.SRGBColorSpace);
   return [c.r, c.g, c.b];
 }
@@ -233,8 +238,10 @@ function rebuildSlice(engine) {
   const { result, view } = engine;
   const grid = result?.grid;
   if (!view.slice || !validGrid(grid) || !engine.domain) return;
-  const range = getFieldRange(grid, view.field);
+  const range = engine.range;
   if (!range) return;
+  const deficitRange = getFieldRange(grid, 'deficit', { contrast: view.contrast, turbines: engine.scene?.turbines });
+  const deficitScale = Math.max(0.25, deficitRange?.max || 0);
   const sampling = sliceSampleCoordinates(grid, view.sliceAxis, view.slicePosition);
   const [countA, countB] = sampling.shape;
   const vertices = [];
@@ -245,8 +252,15 @@ function rebuildSlice(engine) {
     const p = sampling.coordinates[j * countA + i];
     const v = sampleVelocity(grid, p);
     vertices.push(...toWorld(engine, p));
-    valid.push(!!v);
-    colors.push(...(v ? vertexColor(fieldValue(v, view.field), range) : [0, 0, 0]));
+    const value = v && fieldValue(v, view.field, p, grid);
+    const deficit = v && fieldValue(v, 'deficit', p, grid);
+    const isValid = v && Number.isFinite(value);
+    valid.push(!!isValid);
+    // Opacity shows the actual positive profile-relative deficit; the color
+    // remains the selected physical field on its shared, labeled scale.
+    const strength = Number.isFinite(deficit) ? clamp(deficit / deficitScale, 0, 1) : 0;
+    const alpha = 0.08 + 0.54 * strength * strength * (3 - 2 * strength);
+    colors.push(...(isValid ? [...vertexColor(value, range, view.field), alpha] : [0, 0, 0, 0]));
   }
   for (let j = 0; j < countB - 1; j += 1) for (let i = 0; i < countA - 1; i += 1) {
     const k = j * countA + i;
@@ -255,15 +269,15 @@ function rebuildSlice(engine) {
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
-  const material = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.40, side: THREE.DoubleSide, depthWrite: false });
+  const material = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 1, side: THREE.DoubleSide, depthWrite: false });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.renderOrder = 2;
   engine.slice.add(mesh);
   const edge = [0, countA - 1, countA * countB - 1, countA * (countB - 1)].map((index) => toWorld(engine, sampling.coordinates[index]));
-  engine.slice.add(lineLoop(edge, 0x67f1dc, 0.72));
+  engine.slice.add(lineLoop(edge, 0x67f1dc, 0.22));
 }
 
 const ADDRESS_COLORS = [0x78f5d0, 0x65d5f4, 0xa5efdc, 0x40d7b8, 0x7bb9f5, 0x83e2ca, 0x4fb7ce, 0xb6f6e9, 0x55e5d6, 0x90c7f0, 0xb6e4c6, 0x6ac4c2];
@@ -274,21 +288,43 @@ function organizationMode(engine) {
 
 function applyMode(engine) {
   const org = organizationMode(engine);
+  const abstract = org && engine.view.organizationView === 'venn';
+  if (abstract && !engine.abstractActive) {
+    engine.physicalCamera = { position: engine.camera.position.clone(), target: engine.controls.target.clone(), near: engine.camera.near, far: engine.camera.far, minDistance: engine.controls.minDistance, maxDistance: engine.controls.maxDistance };
+    engine.abstractActive = true;
+    engine.orgAutoFitted = false;
+  } else if (!abstract && engine.abstractActive) {
+    const saved = engine.physicalCamera;
+    engine.abstractActive = false;
+    engine.orgAutoFitted = false;
+    engine.orgBounds = null;
+    if (saved) {
+      engine.camera.position.copy(saved.position);
+      engine.controls.target.copy(saved.target);
+      engine.camera.near = saved.near;
+      engine.camera.far = saved.far;
+      engine.camera.updateProjectionMatrix();
+      engine.controls.minDistance = saved.minDistance;
+      engine.controls.maxDistance = saved.maxDistance;
+      engine.controls.update();
+    }
+    engine.physicalCamera = null;
+  }
+  engine.ground.visible = !abstract;
+  engine.turbines.visible = !abstract;
   engine.flow.visible = !org;
   engine.slice.visible = !org;
   // Keep the prior overlay behavior for callers without a mode selector.
   engine.organization.visible = org || (!engine.view.mode && !!engine.view.organization);
 }
 
-function fitOrganization(engine, scene, data) {
-  if (engine.orgAutoFitted || !organizationMode(engine) || !data.anchors.length) return;
-  const points = data.anchors.map((anchor) => new THREE.Vector3(...toWorld(engine, anchor.position)));
-  for (const turbine of scene?.turbines || []) {
-    if ([turbine.x, turbine.y, turbine.z].every(Number.isFinite)) points.push(new THREE.Vector3(...toWorld(engine, [turbine.x, turbine.y, turbine.z])));
-  }
+function fitWorldPoints(engine, coordinates, preset = null) {
+  const points = coordinates.map((point) => new THREE.Vector3(...point));
+  if (!points.length) return;
   const bounds = new THREE.Box3().setFromPoints(points);
   const center = bounds.getCenter(new THREE.Vector3());
-  const direction = engine.camera.position.clone().sub(engine.controls.target).normalize();
+  const presets = { top: [0.001, 1, 0.001], front: [0, 0.23, 1.35], side: [1.35, 0.23, 0], perspective: [0.9, 0.68, 1.04], venn: [0, 0.0151, 1] };
+  const direction = preset && presets[preset] ? new THREE.Vector3(...presets[preset]).normalize() : engine.camera.position.clone().sub(engine.controls.target).normalize();
   const right = new THREE.Vector3().crossVectors(engine.camera.up, direction).normalize();
   const up = new THREE.Vector3().crossVectors(direction, right).normalize();
   const tanVertical = Math.tan(engine.camera.fov * Math.PI / 360);
@@ -302,8 +338,21 @@ function fitOrganization(engine, scene, data) {
   distance = Math.max(distance * 1.16, engine.controls.minDistance);
   engine.controls.target.copy(center);
   engine.camera.position.copy(center).addScaledVector(direction, distance);
+  engine.camera.near = Math.max(distance / 5000, 0.001);
+  engine.camera.far = Math.max(distance * 12, 100);
+  engine.camera.updateProjectionMatrix();
+  engine.controls.minDistance = Math.min(engine.controls.minDistance, distance * 0.08);
   engine.controls.maxDistance = Math.max(engine.controls.maxDistance, distance * 1.5);
   engine.controls.update();
+}
+
+function fitOrganization(engine, scene, data) {
+  if (engine.orgAutoFitted || !organizationMode(engine) || !data.anchors.length) return;
+  const points = data.anchors.map((anchor) => toWorld(engine, anchor.position));
+  for (const turbine of scene?.turbines || []) {
+    if ([turbine.x, turbine.y, turbine.z].every(Number.isFinite)) points.push(toWorld(engine, [turbine.x, turbine.y, turbine.z]));
+  }
+  fitWorldPoints(engine, points);
   engine.orgAutoFitted = true;
 }
 
@@ -361,6 +410,23 @@ function rebuildOrganization(engine, scene) {
   clearGroup(engine.organization);
   engine.orgPulses = null;
   const organization = engine.result?.organization;
+  if (organizationMode(engine) && engine.view.organizationView === 'venn') {
+    const venn = buildOrganizationVenn({ THREE, organization, scene, selectedAddress: engine.view.organizationAddress, toWorld: (point) => toWorld(engine, point) });
+    applyMode(engine);
+    if (venn) {
+      engine.organization.add(venn.group);
+      engine.orgBounds = venn.anchors;
+      engine.onOrganizationSummary?.(venn.summary);
+      if (!engine.orgAutoFitted) {
+        fitWorldPoints(engine, venn.anchors, 'venn');
+        engine.orgAutoFitted = true;
+      }
+    } else {
+      engine.orgBounds = null;
+      engine.onOrganizationSummary?.(null);
+    }
+    return;
+  }
   const data = directoryView(organization, scene, engine.view.organizationAddress);
   if (!engine.domain || !data) {
     engine.onOrganizationSummary?.(null);
@@ -493,37 +559,47 @@ function updateOrganizationPulses(engine, time) {
 function rebuildLines(engine) {
   clearGroup(engine.flow);
   engine.moving = null;
+  engine.movingPaths = [];
   const { result, view, paths } = engine;
   if (!view.streamlines || !validGrid(result?.grid) || !engine.domain || !paths.length) return;
-  const range = getFieldRange(result.grid, view.field);
+  const range = engine.range;
   if (!range) return;
-  const positions = [];
-  const colors = [];
+  const linesByKind = { background: { positions: [], colors: [] }, rotor: { positions: [], colors: [] } };
   const movingPositions = [];
   const movingColors = [];
   for (const path of paths) {
+    const kind = path.kind === 'background' ? 'background' : 'rotor';
+    const { positions, colors } = linesByKind[kind];
+    const selectedValues = path.map((item) => fieldValue(item.velocity, view.field, item.position, result.grid));
+    if (!selectedValues.every(Number.isFinite)) continue;
     for (let i = 1; i < path.length; i += 1) {
-      for (const item of [path[i - 1], path[i]]) {
+      for (const index of [i - 1, i]) {
+        const item = path[index];
         positions.push(...toWorld(engine, item.position));
-        colors.push(...vertexColor(fieldValue(item.velocity, view.field), range));
+        colors.push(...vertexColor(selectedValues[index], range, view.field));
       }
     }
     for (let streak = 0; streak < 2; streak += 1) {
       const sample = path[Math.floor(path.length * (streak + 1) / 3)];
       movingPositions.push(...toWorld(engine, sample.position), ...toWorld(engine, sample.position));
-      const color = vertexColor(fieldValue(sample.velocity, view.field), range);
+      const color = vertexColor(fieldValue(sample.velocity, view.field, sample.position, result.grid), range, view.field);
       movingColors.push(...color, ...color);
     }
+    engine.movingPaths.push(path);
   }
-  const lineGeometry = new THREE.BufferGeometry();
-  lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  lineGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  const lines = new THREE.LineSegments(lineGeometry, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.35, depthWrite: false }));
-  engine.flow.add(lines);
+  for (const [kind, { positions, colors }] of Object.entries(linesByKind)) {
+    if (!positions.length) continue;
+    const lineGeometry = new THREE.BufferGeometry();
+    lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    lineGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    const lines = new THREE.LineSegments(lineGeometry, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: kind === 'background' ? 0.15 : 0.44, depthWrite: false }));
+    engine.flow.add(lines);
+  }
+  if (!movingPositions.length) return;
   const streakGeometry = new THREE.BufferGeometry();
   streakGeometry.setAttribute('position', new THREE.Float32BufferAttribute(movingPositions, 3).setUsage(THREE.DynamicDrawUsage));
   streakGeometry.setAttribute('color', new THREE.Float32BufferAttribute(movingColors, 3).setUsage(THREE.DynamicDrawUsage));
-  const streaks = new THREE.LineSegments(streakGeometry, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95, depthWrite: false }));
+  const streaks = new THREE.LineSegments(streakGeometry, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.82, depthWrite: false }));
   streaks.renderOrder = 3;
   engine.flow.add(streaks);
   engine.moving = streakGeometry;
@@ -535,7 +611,7 @@ function updateStreaks(engine, time) {
   const colors = engine.moving.getAttribute('color');
   const range = engine.range;
   let vertex = 0;
-  engine.paths.forEach((path, pathIndex) => {
+  engine.movingPaths.forEach((path, pathIndex) => {
     for (let streak = 0; streak < 2; streak += 1) {
       const offset = (time * 0.085 + pathIndex * 0.137 + streak * 0.5) % 1;
       const end = Math.max(1, Math.min(path.length - 1, Math.floor(offset * (path.length - 1))));
@@ -543,7 +619,7 @@ function updateStreaks(engine, time) {
       for (const index of [start, end]) {
         const point = toWorld(engine, path[index].position);
         positions.setXYZ(vertex, ...point);
-        if (range) colors.setXYZ(vertex, ...vertexColor(fieldValue(path[index].velocity, engine.view.field), range));
+        if (range) colors.setXYZ(vertex, ...vertexColor(fieldValue(path[index].velocity, engine.view.field, path[index].position, engine.result.grid), range, engine.view.field));
         vertex += 1;
       }
     }
@@ -553,7 +629,7 @@ function updateStreaks(engine, time) {
 }
 
 /** Render only supplied model predictions; coordinates are rotor diameters. */
-export default function FlowScene({ scene, result, view = {}, selected = null, onSelect, onDraggingChange, onTurbineMove, onOrganizationSummary, cameraPreset = 'perspective', cameraRevision = 0, onReady }) {
+export default function FlowScene({ scene, result, view = {}, fieldRange = null, selected = null, onSelect, onDraggingChange, onTurbineMove, onOrganizationSummary, cameraPreset = 'perspective', cameraRevision = 0, onReady }) {
   const hostRef = useRef(null);
   const engineRef = useRef(null);
   const callbacksRef = useRef({ onSelect, onDraggingChange, onTurbineMove, onOrganizationSummary, onReady });
@@ -590,7 +666,7 @@ export default function FlowScene({ scene, result, view = {}, selected = null, o
     const engine = {
       renderer, world, camera, controls,
       ground: new THREE.Group(), turbines: new THREE.Group(), slice: new THREE.Group(), flow: new THREE.Group(), organization: new THREE.Group(),
-      rotors: [], paths: [], view: {}, domain: null, result: null, exaggeration: 1, cx: 0, cy: 0,
+      rotors: [], paths: [], view: {}, scene: null, domain: null, result: null, exaggeration: 1, cx: 0, cy: 0,
       cameraPreset: 'perspective', moving: null, orgPulses: null, range: null,
       onOrganizationSummary: (summary) => callbacksRef.current.onOrganizationSummary?.(summary),
     };
@@ -619,7 +695,7 @@ export default function FlowScene({ scene, result, view = {}, selected = null, o
       raycaster.setFromCamera(pointer, camera);
     };
     const pointerDown = (event) => {
-      if (event.button !== 0) return;
+      if (event.button !== 0 || engine.abstractActive) return;
       setPointer(event);
       const hit = raycaster.intersectObjects(engine.turbines.children, true).find((item) => item.object.userData.turbineId !== undefined);
       down = { x: event.clientX, y: event.clientY, id: hit?.object.userData.turbineId };
@@ -639,7 +715,7 @@ export default function FlowScene({ scene, result, view = {}, selected = null, o
       event.preventDefault();
     };
     const pointerMove = (event) => {
-      if (!drag || !engine.domain) return;
+      if (!drag || !engine.domain || engine.abstractActive) return;
       setPointer(event);
       if (raycaster.ray.intersectPlane(dragPlane, intersection)) {
         drag.turbine.position.x = clamp(intersection.x + drag.dx, engine.domain.min[0] - engine.cx, engine.domain.max[0] - engine.cx);
@@ -648,6 +724,13 @@ export default function FlowScene({ scene, result, view = {}, selected = null, o
       event.preventDefault();
     };
     const pointerUp = (event) => {
+      if (engine.abstractActive) {
+        if (drag) callbacksRef.current.onDraggingChange?.(false);
+        drag = null;
+        down = null;
+        controls.enabled = true;
+        return;
+      }
       if (drag) {
         const { id, turbine, x, y } = drag;
         controls.enabled = true;
@@ -709,6 +792,7 @@ export default function FlowScene({ scene, result, view = {}, selected = null, o
     const engine = engineRef.current;
     if (!engine) return;
     engine.view = view;
+    engine.scene = scene;
     rebuildScene(engine, scene, view, selected);
     rebuildSlice(engine);
     rebuildLines(engine);
@@ -720,10 +804,8 @@ export default function FlowScene({ scene, result, view = {}, selected = null, o
     if (!engine) return;
     engine.view = view;
     engine.result = result;
-    const heights = (scene?.turbines || []).map((turbine) => turbine.z).filter(Number.isFinite);
-    const hubHeight = heights.length ? heights.reduce((sum, height) => sum + height, 0) / heights.length : 0.875;
-    engine.paths = validGrid(result?.grid) ? traceStreamlines(result.grid, hubHeight) : [];
-    engine.range = getFieldRange(result?.grid, view.field);
+    engine.paths = validGrid(result?.grid) ? traceStreamlines(result.grid, scene?.turbines) : [];
+    engine.range = fieldRange || getFieldRange(result?.grid, view.field, { contrast: view.contrast, turbines: scene?.turbines });
     engine.flow.visible = true;
     engine.slice.visible = true;
     rebuildSlice(engine);
@@ -735,10 +817,10 @@ export default function FlowScene({ scene, result, view = {}, selected = null, o
     const engine = engineRef.current;
     if (!engine) return;
     engine.view = view;
-    engine.range = getFieldRange(engine.result?.grid, view.field);
+    engine.range = fieldRange || getFieldRange(engine.result?.grid, view.field, { contrast: view.contrast, turbines: scene?.turbines });
     rebuildSlice(engine);
     rebuildLines(engine);
-  }, [view.field, view.slice, view.sliceAxis, view.slicePosition, view.streamlines]);
+  }, [view.field, view.contrast, view.slice, view.sliceAxis, view.slicePosition, view.streamlines, fieldRange]);
 
   useEffect(() => {
     const engine = engineRef.current;
@@ -746,9 +828,8 @@ export default function FlowScene({ scene, result, view = {}, selected = null, o
     engine.view = view;
     engine.controls.mouseButtons.LEFT = view.tool === 'pan' ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
     applyMode(engine);
-    const data = directoryView(engine.result?.organization, scene, view.organizationAddress);
-    if (data) fitOrganization(engine, scene, data);
-  }, [view.playing, view.tool, view.organization, view.mode]);
+    rebuildOrganization(engine, scene);
+  }, [view.playing, view.tool, view.organization, view.mode, view.organizationView]);
 
   useEffect(() => {
     const engine = engineRef.current;
