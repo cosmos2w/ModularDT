@@ -460,3 +460,21 @@ def test_response_totals_and_unweighted_diagnostics_are_separate(tmp_path, monke
     assert saved['response_objective']['component_weights'] == weights
     assert 'not a shared model-quality metric' in saved['panel_definitions']['weighted_loss_totals']
     assert history == before
+
+
+def test_balanced_response_metadata_uses_actual_declared_coefficient(tmp_path, monkeypatch):
+    coefficient = .0014978225391285025
+    losses = {'flow/u': .3, 'response/endpoint': .02, 'response/field_delta': .003,
+              'response/J_delta': .0001, 'response/P_delta': .0002}
+    history = [{'epoch': 500, 'arm': 'R14-Detail-LocalECover', 'phase': 'joint',
+        'case_visits': 600, 'train_losses': losses, 'validation': {'field_score': .3, 'case_count': 89},
+        'validation_objective': {'terms': {'flow/u': .2}}}]
+    loss_metadata = {name: {'panel': 'physics', 'label': name} for name in losses if name.startswith('response/')}
+    identity = {'thermal_state_response': {'enabled': True}, 'r16_6_balanced': {'coefficient': coefficient}}
+    captured = _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history, tmp_path, 'field_score', loss_metadata, identity)
+    actual = json.loads((tmp_path / 'loss_curves_metadata.json').read_text())['response_objective']
+    assert actual['finite_response_coefficient'] == coefficient
+    assert actual['component_weights'] == {'endpoint': .25, 'field_delta': .8 * coefficient,
+                                           'J_delta': .1 * coefficient, 'P_delta': .1 * coefficient}
+    assert np.allclose(captured[0]['lines'][0][0], [sum(losses.values())])

@@ -1648,6 +1648,22 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             axis.set_subplotspec(grid[index // 2, index % 2])
             if epochs:
                 axis.set_xlim(*limits)
+        # A response history often has five panels. Use its otherwise empty
+        # cell for the dense prediction legend so it does not cover curves.
+        if response_run and len(visible_axes) % 2 and native_axis in visible_axes:
+            legend = native_axis.get_legend()
+            handles, labels = native_axis.get_legend_handles_labels()
+            by_name = {}
+            for handle, label in zip(handles, labels):
+                name = label.removeprefix("TRAIN: ").removeprefix("HELD-OUT VALIDATION: ")
+                by_name.setdefault(name, handle)
+            if legend is not None and by_name:
+                legend.remove()
+                key_axis = figure.add_subplot(grid[rows - 1, 1])
+                key_axis.set_axis_off()
+                key_axis.legend(list(by_name.values()), list(by_name), loc="center left",
+                                fontsize=8, frameon=False,
+                                title="Prediction: TRAIN solid, VALIDATION dashed", title_fontsize=8)
     elif not history:
         figure.suptitle("No recorded training or validation metrics")
 
@@ -1787,7 +1803,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         )
     if response_run:
         spec = provider_identity["thermal_state_response"]
-        coefficient = float(spec.get("finite_response_coefficient", 0.1))
+        balanced_spec = provider_identity.get("r16_6_balanced", {})
+        coefficient = float(balanced_spec.get("coefficient", spec.get("finite_response_coefficient", 0.1)))
         default_weights = ({"endpoint": 0.25, "field_delta": 0.08, "J_delta": 0.01, "P_delta": 0.01}
                            if coefficient == 0.1 else
                            {"endpoint": 0.25, "field_delta": 0.8 * coefficient,
