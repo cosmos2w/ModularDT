@@ -82,7 +82,11 @@ class ThermalPortResponseTask(ThermalPortBaseTask):
         model.core.set_training_clock(self.source_parent_age + int(epoch), int(getattr(model.core, '_joint_update_index', 0)))
         p64 = model.prepare_native(scene.structure, receivers.fluid_xy, physical_heat=receivers.heat, local_query_points=receivers.local_query_points, ntheta=64, scene_key=scene.case_ids)
         p = native_angle_view(p64, receivers.ntheta)
-        modes = ('full', 'restricted') if model.training else ('restricted',)
+        read_mode = ('restricted' if model.training else
+                     getattr(model.core, '_read_execution_override', None) or 'restricted')
+        if read_mode not in ('full', 'restricted'):
+            raise ValueError(f'Unsupported Thermal port evaluation read mode {read_mode!r}.')
+        modes = ('full', 'restricted') if model.training else (read_mode,)
         (native, local, full64, outside) = ({}, {}, {}, {})
         work = {'preparations': 1, 'local_calls': 0}
         work.update({f'prepare_{k}': int(v) for (k, v) in p.organization.work_counts.items()})
@@ -95,7 +99,9 @@ class ThermalPortResponseTask(ThermalPortBaseTask):
             local[mode] = local_response_from_outside(model, self.local_operator, p, receivers.heat, receivers.local_query_points, outside[mode])
             work['local_calls'] += 1
             work.update({f'{mode}_decode_{k}': int(v) for (k, v) in counts.items()})
-        prediction = ThermalJointPairPredictions(native['full'], native['restricted'], work) if model.training else native['restricted']
+        prediction = ThermalJointPairPredictions(native['full'], native['restricted'], work) if model.training else native[read_mode]
+        if not model.training:
+            prediction.read_mode = read_mode
         prediction.initial = prediction
         prediction.local1 = local
         prediction.outside64 = outside
@@ -112,7 +118,7 @@ class ThermalPortResponseTask(ThermalPortBaseTask):
         if self.port_arm == 'C0':
             return result
         paired = isinstance(prediction, ThermalJointPairPredictions)
-        modes = ('full', 'restricted') if paired else ('restricted',)
+        modes = ('full', 'restricted') if paired else (getattr(prediction, 'read_mode', 'restricted'),)
         p = prediction.prepared64
         teacher_outside = targets.teacher_ports[..., 3].to(prediction.outside64[modes[0]])
         present = p.source_present[..., None].bool()
