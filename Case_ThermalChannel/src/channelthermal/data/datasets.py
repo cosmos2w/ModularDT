@@ -62,6 +62,22 @@ def prescribed_raster_geometry(config: dict, module_present: np.ndarray) -> tupl
     return padded, geometry
 
 
+def prescribed_patch_inputs(config: dict, module_present: np.ndarray) -> dict[str, np.ndarray]:
+    """Extract the current scene's prescribed FP64 inputs, never solved fields."""
+    centers, geometry = prescribed_raster_geometry(config, module_present)
+    heat = np.zeros(len(module_present), dtype=np.float64)
+    values = np.asarray(config["layout"]["heat_powers"], dtype=np.float64)
+    if values.shape != (int((np.asarray(module_present) > .5).sum()),):
+        raise ValueError("Prescribed heat must match original member slots.")
+    heat[:len(values)] = values
+    thermal = config["thermal"]
+    material = np.asarray([thermal[k] for k in ("solid_alpha", "fluid_alpha", "solid_k", "fluid_k")], dtype=np.float64)
+    if not np.isfinite(heat).all() or not np.isfinite(material).all() or (material <= 0).any():
+        raise ValueError("Prescribed heat and material must be finite with positive material coefficients.")
+    return {"raster_module_centers": centers, "raster_geometry": geometry,
+            "raster_heat_powers": heat, "raster_material_params": material}
+
+
 def _decode_scalar_string(value: Any) -> str:
     """Perform the decode scalar string operation used by this module."""
 
@@ -781,6 +797,7 @@ class GlobalChannelThermalDataset(Dataset):
         normalizer: Optional[H5Normalizer] = None,
         case_ids: Sequence[str] | None = None,
         include_raster_geometry: bool = False,
+        include_prescribed_patch: bool = False,
     ):
         """Initialize GlobalChannelThermalDataset and its required state."""
 
@@ -794,6 +811,7 @@ class GlobalChannelThermalDataset(Dataset):
         self.epoch = 0
         self.include_grid = bool(include_grid)
         self.include_raster_geometry = bool(include_raster_geometry)
+        self.include_prescribed_patch = bool(include_prescribed_patch)
         self.include_structure_targets = bool(include_structure_targets)
         self.require_converged = bool(require_converged)
         self._h5: Optional[h5py.File] = None
@@ -1140,7 +1158,7 @@ class GlobalChannelThermalDataset(Dataset):
             "local_module_params": local_module_params,
             "case_id": case_id,
         }
-        if self.include_raster_geometry:
+        if self.include_raster_geometry or self.include_prescribed_patch:
             if "case_config_json" not in group:
                 raise ValueError("Prescribed raster geometry is absent from the source case.")
             config = json.loads(_decode_scalar_string(group["case_config_json"][()]))
@@ -1149,6 +1167,8 @@ class GlobalChannelThermalDataset(Dataset):
                 raise ValueError("Source raster geometry does not match the model's original M slots.")
             sample["structure"]["raster_module_centers"] = centers64
             sample["structure"]["raster_geometry"] = raster_geometry
+            if self.include_prescribed_patch:
+                sample["structure"].update(prescribed_patch_inputs(config, module_present))
         if structure_targets is not None:
             sample["structure_targets"] = structure_targets
         if self.include_grid:

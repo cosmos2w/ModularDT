@@ -62,7 +62,7 @@ class ChannelThermalBatchCollator:
         order = torch.argsort(sort_key, dim=1)
 
         structure = batch["structure"]
-        for key in ("module_centers", "raster_module_centers", "heat_powers", "module_present", "module_source_ids", "module_characteristic_lengths"):
+        for key in ("module_centers", "raster_module_centers", "raster_heat_powers", "heat_powers", "module_present", "module_source_ids", "module_characteristic_lengths"):
             if key in structure:
                 structure[key] = _slice_axis(_gather_module_axis(structure[key], order, 1), 1, required)
 

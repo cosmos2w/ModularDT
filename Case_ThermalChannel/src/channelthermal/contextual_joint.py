@@ -23,7 +23,7 @@ class ThermalContextualJointAdapter(ThermalContentHypergraphAdapterV2):
 
     def __init__(self, normalization_stats: Mapping[str, Any], *, core_config=None,
                  core=None, heat_scale: float = 1.0, nx=128, ny=64,
-                 environment_nx=24, environment_ny=8):
+                 environment_nx=24, environment_ny=8, prescribed_patch_mode="none"):
         nn.Module.__init__(self)
         from honf_forward_core.contextual_organization.model import ContextualOrganizationJointCore
         if heat_scale <= 0:
@@ -34,6 +34,12 @@ class ThermalContextualJointAdapter(ThermalContentHypergraphAdapterV2):
                 self.core.module_encoder[0].weight[:, 9].zero_()
         self.nx, self.ny = int(nx), int(ny)
         self.environment_nx, self.environment_ny = int(environment_nx), int(environment_ny)
+        if prescribed_patch_mode not in ("none", "scaffold", "physical"):
+            raise ValueError("Unknown prescribed patch mode.")
+        self.prescribed_patch_mode = prescribed_patch_mode
+        if prescribed_patch_mode != "none" and ((self.nx, self.ny, self.environment_nx, self.environment_ny) != (128, 64, 24, 8)
+                or self.core.environment_input_dim != 342 or self.core.module_input_dim != 9):
+            raise ValueError("Prescribed patches require the native 128x64 grid and 342 E / 9 M inputs.")
         self.normalization_stats = _stats_json(normalization_stats)
         for suffix in ("mean", "std"):
             singular, plural = f"interface_target_{suffix}", f"interface_targets_{suffix}"
@@ -52,7 +58,8 @@ class ThermalContextualJointAdapter(ThermalContentHypergraphAdapterV2):
         return {"schema": self.SCHEMA, "core": self.core.get_config(),
                 "native_grid_nx_ny": [self.nx, self.ny],
                 "environment_grid_nx_ny": [self.environment_nx, self.environment_ny],
-                "heat_scale": self.heat_scale}
+                "heat_scale": self.heat_scale,
+                **({"prescribed_patch_mode": self.prescribed_patch_mode} if self.prescribed_patch_mode != "none" else {})}
 
     def state_payload(self):
         return {**self.get_config(), "normalization_stats": self.normalization_stats}
@@ -65,7 +72,8 @@ class ThermalContextualJointAdapter(ThermalContentHypergraphAdapterV2):
                     heat_scale=payload["heat_scale"], nx=payload["native_grid_nx_ny"][0],
                     ny=payload["native_grid_nx_ny"][1],
                     environment_nx=payload["environment_grid_nx_ny"][0],
-                    environment_ny=payload["environment_grid_nx_ny"][1])
+                    environment_ny=payload["environment_grid_nx_ny"][1],
+                    prescribed_patch_mode=payload.get("prescribed_patch_mode", "none"))
         if state_dict is not None:
             model.load_state_dict(state_dict, strict=True)
         return model.to(device)
@@ -108,9 +116,28 @@ class ThermalContextualJointAdapter(ThermalContentHypergraphAdapterV2):
                 raise ValueError("Prescribed raster geometry differs from the current original-member scene.")
             ratio = prescribed_raster_area_ratio(centers, scene.module_mask, geometry, nx=self.nx, ny=self.ny)
             module_features = torch.cat((module_features, ratio.to(module_features)[..., None]), -1)
+        environment_features = torch.cat((raw[..., :2], raw[..., 4:]), -1)
+        if self.prescribed_patch_mode != "none":
+            from .prescribed_patch import prescribed_environment_patch
+            keys = ("raster_module_centers", "raster_geometry", "raster_heat_powers", "raster_material_params")
+            if any(key not in structure for key in keys):
+                raise ValueError("Prescribed patches require source-precision inputs for the current scene.")
+            centers, geometry, source, material = (torch.as_tensor(structure[k], device=heat.device) for k in keys)
+            current_material = torch.as_tensor(structure["material_params"], device=heat.device)
+            if current_material.ndim == 1:
+                current_material = current_material[None].expand(heat.shape[0], -1)
+            if (not torch.equal(centers.to(scene.module_coordinates)[scene.module_mask], scene.module_coordinates[scene.module_mask])
+                    or not torch.equal(geometry[:, :2].to(scene.coordinate_scale), scene.coordinate_scale)
+                    or not torch.equal(geometry[:, 2].to(current_material), current_material[:, 5])
+                    or not torch.equal(source.to(heat)[scene.module_mask], heat[scene.module_mask])
+                    or not torch.equal(material.to(current_material), current_material[:, 1:5])):
+                raise ValueError("Prescribed patch inputs differ from the current scene.")
+            patch = prescribed_environment_patch(centers, scene.module_mask, geometry, source, material,
+                heat_scale=self.heat_scale, physical=self.prescribed_patch_mode == "physical")
+            environment_features = torch.cat((environment_features, patch.flatten(2).to(environment_features)), -1)
         return replace(scene,
             module_features=module_features,
-            environment_features=torch.cat((raw[..., :2], raw[..., 4:]), -1),
+            environment_features=environment_features,
             operating_features=torch.cat((operating[..., :10], *boundary), -1))
 
     @staticmethod

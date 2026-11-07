@@ -342,7 +342,8 @@ def _load_data_binding(manifest: Mapping[str, Any] | str | Path | None, data_pat
 
 
 def _read_selected_cases(dataset_path: Path, case_ids: Sequence[str], *, split: str, normalizer: H5Normalizer,
-                         include_grid: bool, include_raster_geometry: bool = False) -> list[dict[str, Any]]:
+                         include_grid: bool, include_raster_geometry: bool = False,
+                         include_prescribed_patch: bool = False) -> list[dict[str, Any]]:
     dataset = GlobalChannelThermalDataset(
         dataset_path,
         split=split,
@@ -355,6 +356,7 @@ def _read_selected_cases(dataset_path: Path, case_ids: Sequence[str], *, split: 
         normalizer=normalizer,
         case_ids=case_ids,
         include_raster_geometry=include_raster_geometry,
+        include_prescribed_patch=include_prescribed_patch,
     )
     if dataset.selected_case_ids != list(case_ids):
         raise ValueError("Joint Thermal loader changed the fixed source-case ordering.")

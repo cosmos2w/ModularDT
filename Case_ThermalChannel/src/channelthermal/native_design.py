@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .data.datasets import _local_disk_query_points, prescribed_raster_geometry
+from .data.datasets import _local_disk_query_points, prescribed_patch_inputs
 from .native_functionals import native_design_functionals
 
 
@@ -109,7 +109,6 @@ def build_native_design(config: Mapping[str, Any], case_id: str, *,
     if not np.isfinite(np.asarray(material_params, dtype=np.float64)).all() or min(map(float, material_params)) <= 0:
         raise ValueError("Native Thermal material coefficients must be positive and finite.")
     present = np.ones(len(centers), dtype=np.float32)
-    centers64, raster_geometry = prescribed_raster_geometry(config, present)
     tensor = lambda v: torch.as_tensor(v, dtype=torch.float32, device=device)[None]
     structure = {
         "module_centers": tensor(centers), "module_present": tensor(present),
@@ -117,8 +116,8 @@ def build_native_design(config: Mapping[str, Any], case_id: str, *,
         "u_in": tensor([flow["u_in"]]), "domain_length_x": tensor([lx]),
         "domain_length_y": tensor([ly]), "t_in": tensor([thermal["t_in"]]),
         "t_wall": tensor([thermal["t_wall"]]),
-        "raster_module_centers": torch.as_tensor(centers64, device=device)[None],
-        "raster_geometry": torch.as_tensor(raster_geometry, device=device)[None],
+        **{key: torch.as_tensor(value, device=device)[None]
+           for key, value in prescribed_patch_inputs(config, present).items()},
     }
     return NativeThermalDesign(
         case_id=case_id, member_ids=ids, structure=structure, heat=tensor(heat),

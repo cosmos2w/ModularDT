@@ -127,10 +127,12 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
     training_cases = _read_selected_cases(
         data_path, train_ids, split="train", normalizer=normalizer, include_grid=False,
         include_raster_geometry=model_config["base_model_config"]["module_input_dim"] == 10,
+        include_prescribed_patch=recipe.get("r16_7_prescribed") is not None,
     )
     validation_cases = _read_selected_cases(
         data_path, validation_ids, split="test", normalizer=normalizer, include_grid=False,
         include_raster_geometry=model_config["base_model_config"]["module_input_dim"] == 10,
+        include_prescribed_patch=recipe.get("r16_7_prescribed") is not None,
     )
     if saved_adapter_state is None:
         heat_values = np.concatenate([

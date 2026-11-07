@@ -487,7 +487,7 @@ def _validate_inherited_provider_training_state(
 
 def _structure_only(structure: Mapping[str, Any]) -> dict[str, Any]:
     result = {key: structure[key] for key in CONTEXT_KEYS if key in structure}
-    for key in ("raster_module_centers", "raster_geometry"):
+    for key in ("raster_module_centers", "raster_geometry", "raster_heat_powers", "raster_material_params"):
         if key in structure:
             result[key] = structure[key]
     required = {"module_centers", "module_present", "material_params"}

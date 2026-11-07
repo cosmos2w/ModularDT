@@ -335,7 +335,12 @@ def _native_endpoint_batch(provider, original, raw, label, record=None):
         raise ValueError('Physical endpoints must preserve original module slots.')
     case['case_id'] = f'{family}:{label}'
     case['structure']['module_centers'][:count] = np.asarray(raw['config']['layout']['centers'], np.float32)
-    if 'raster_module_centers' in case['structure']:
+    if 'raster_heat_powers' in case['structure']:
+        from ..data.datasets import prescribed_patch_inputs
+        case['structure'].update(prescribed_patch_inputs(raw['config'], case['structure']['module_present']))
+        case['structure']['material_params'][1:5] = case['structure']['raster_material_params'].astype(np.float32)
+        case['structure']['material_params'][5] = np.float32(raw['config']['domain']['module_radius'])
+    elif 'raster_module_centers' in case['structure']:
         from ..data.datasets import prescribed_raster_geometry
         centers64, raster_geometry = prescribed_raster_geometry(raw['config'], case['structure']['module_present'])
         case['structure']['raster_module_centers'] = centers64
