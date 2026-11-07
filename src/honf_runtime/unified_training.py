@@ -2815,6 +2815,7 @@ class TrainingEngine:
         training_mode: bool = True,
         include_gradient_tensors: bool = False,
         optimizer_state_by_name: Mapping[str, Any] | None = None,
+        restore_random_state: bool = True,
     ) -> dict[str, Any]:
         """Measure the exact engine objective and its grouped gradients without stepping.
 
@@ -2979,7 +2980,8 @@ class TrainingEngine:
                 if provider_state is not None and callable(provider_state_loader):
                     provider_state_loader(provider_state)
             finally:
-                restore_rng_state(rng_state)
+                if restore_random_state:
+                    restore_rng_state(rng_state)
 
         def _norm(rows: Mapping[str, torch.Tensor], selected: Sequence[str]) -> float:
             values = [rows[name] for name in selected if name in rows]
@@ -3800,6 +3802,9 @@ class TrainingEngine:
         if not torch.isfinite(norm) or norm <= 0:
             raise FloatingPointError("Nonfinite or zero actual parameter gradient.")
         optimizer.step()
+        after_step = getattr(provider, "after_optimizer_step", None)
+        if callable(after_step):
+            after_step(model, optimizer, norm, epoch=epoch, update_index=update_index)
         if successful_step_recorder is not None:
             successful_step_recorder(epoch, update_index, sum(len(batch.case_keys) for batch in microbatches))
         joint_losses, joint_work = joint_objective.after_update()

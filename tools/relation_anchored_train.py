@@ -49,6 +49,14 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("r16_6_balanced") is not None:
+            from channelthermal.training.r16_6_balanced_task import build_thermal_r16_6_task
+            model, provider = build_thermal_r16_6_task(recipe, arm=arm, device=device,
+                resume_payload=resume_payload, response_scales=response_scales)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
         if recipe.get("r16_5_warm_fork") is not None:
             from channelthermal.training.r16_5_warm_fork import build_thermal_r16_5_warm_fork_task
 
@@ -105,7 +113,9 @@ def engine_for(recipe, *, device, execution_horizon=None):
         thermal_extension = (thermal and port.get("schema") == "thermal_port_response_v1"
                              and port.get("arm") == "P64" and policy.get("membership") == "full_train600"
                              and horizon == 100 and execution_horizon == 500
-                             and (recipe.get("r16_5_warm_fork") is None or r16_5_arm == "PDeltaD"))
+                             and (recipe.get("r16_6_balanced", {}).get("arm") == "M"
+                                  or (recipe.get("r16_6_balanced") is None and
+                                      (recipe.get("r16_5_warm_fork") is None or r16_5_arm == "PDeltaD"))))
         if (not (wind_extension or thermal_extension) or type(execution_horizon) is not int
                 or execution_horizon <= horizon or execution_horizon % 100):
             raise ValueError("Unsupported explicit same-lineage horizon extension.")

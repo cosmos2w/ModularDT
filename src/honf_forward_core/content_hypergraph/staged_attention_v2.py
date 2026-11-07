@@ -66,11 +66,45 @@ def explicit_spatial_attention(
     return torch.matmul(weights, value), weights
 
 
+class ContextualPairMessage(nn.Module):
+    """Per-head nonlinear receiver/donor/geometry residual, reduced by edges."""
+
+    def __init__(self, width: int, heads: int, geometry_width: int) -> None:
+        super().__init__()
+        self.receiver = nn.Parameter(torch.empty(heads, width, 32))
+        self.donor = nn.Parameter(torch.empty(heads, width, 32))
+        self.geometry = nn.Parameter(torch.empty(heads, geometry_width, 32))
+        self.bias = nn.Parameter(torch.zeros(heads, 32))
+        self.output = nn.Parameter(torch.zeros(heads, 32, width // heads))
+        # Standalone route construction also preserves the caller's RNG.
+        generator = torch.Generator(device="cpu").manual_seed(0)
+        for parameter in (self.receiver, self.donor, self.geometry):
+            nn.init.xavier_uniform_(parameter, generator=generator)
+
+    def forward(self, receiver: Tensor, donor: Tensor, geometry: Tensor,
+                coefficients: Tensor, eligible: Tensor, tile_size: int = 4096) -> Tensor:
+        batch, receivers, _ = receiver.shape
+        receiver_projection = torch.einsum('brc,hcp->brhp', receiver, self.receiver)
+        donor_projection = torch.einsum('bdc,hcp->bdhp', donor, self.donor)
+        rows = eligible.nonzero(as_tuple=False)
+        reduced = receiver.new_zeros(batch * receivers, self.bias.shape[0], 32)
+        for start in range(0, rows.shape[0], tile_size):
+            b, r, d = rows[start:start + tile_size].unbind(-1)
+            a = (receiver_projection[b, r] +
+                 torch.einsum('eg,hgp->ehp', geometry[b, r, d], self.geometry) + self.bias)
+            psi = F.silu(a + donor_projection[b, d]) - F.silu(a)
+            reduced = reduced.index_add(0, b * receivers + r, psi * coefficients[b, r, d, :, None])
+        reduced = reduced.reshape(batch, receivers, self.bias.shape[0], 32)
+        return torch.einsum('brhp,hpv->brhv', reduced, self.output).reshape(batch, receivers, -1)
+
+
 class SpatialRouteAttentionV2(nn.Module):
     """One SDPA route with normalized Q/K and live bounded head temperatures."""
 
-    def __init__(self, width: int, heads: int, coordinate_dim: int, dropout: float = 0.0) -> None:
+    def __init__(self, width: int, heads: int, coordinate_dim: int, dropout: float = 0.0, *, contextual_message: bool = False) -> None:
         super().__init__()
+        if contextual_message and (width // heads != 32 or dropout != 0.0):
+            raise ValueError("Contextual messages require head width 32 and zero dropout.")
         if width % heads:
             raise ValueError("context width must be divisible by the attention head count.")
         self.width = int(width)
@@ -88,7 +122,33 @@ class SpatialRouteAttentionV2(nn.Module):
         self.geometry_score = nn.Sequential(
             nn.Linear(score_input, 32), nn.SiLU(), nn.Linear(32, heads, bias=False)
         )
+        self.pair_message = ContextualPairMessage(width, heads, score_input) if contextual_message else None
+        self.capture_pair_diagnostics = False
+        self.pair_diagnostics = None
         self.raw_temperature = nn.Parameter(torch.full((heads,), _initial_temperature_logit(self.head_width)))
+
+    def record_pair_diagnostics(self, stage_identity, base, correction, coefficients, eligible):
+        """Opt-in, last-call trace; counters distinguish forward and backward use."""
+        if not self.capture_pair_diagnostics:
+            return
+        positive = eligible[..., None] & (coefficients > 0)
+        positive_heads = int(positive.sum().detach().cpu())
+        edges = int(positive.any(-1).sum().detach().cpu()) * self.heads
+        batch, receivers, donors = eligible.shape
+        record = dict(stage=stage_identity, base=base.detach(), correction=correction.detach(),
+                      dense_score_head_pairs=batch * receivers * donors * self.heads,
+                      dense_geometry_pairs=batch * receivers * donors,
+                      positive_edge_heads=positive_heads, evaluated_edge_heads=edges,
+                      forward_reductions=edges,
+                      backward_edge_heads=0, backward_reductions=0,
+                      grad_enabled=torch.is_grad_enabled())
+        self.pair_diagnostics = record
+        if correction.requires_grad:
+            def backward_count(grad):
+                record["backward_edge_heads"] += edges
+                record["backward_reductions"] += edges
+                return grad
+            correction.register_hook(backward_count)
 
     @property
     def temperature(self) -> Tensor:
@@ -186,7 +246,8 @@ class SpatialRouteAttentionV2(nn.Module):
                     applied_message_mass=destination.new_zeros(batch,query_count,self.heads))
             return update, attention, snapshot
 
-        q = self.query(self.query_norm(destination))
+        receiver_normalized = self.query_norm(destination)
+        q = self.query(receiver_normalized)
         donor_normalized = self.key_norm(donor)
         k = self.key(donor_normalized)
         v = self.value(donor_normalized)
@@ -278,7 +339,8 @@ class SpatialRouteAttentionV2(nn.Module):
                 self, q, k, v, geometry_bias, donor_measure, allowed,
                 destination_mask, value_policy, route_name=route_name,
                 stage_identity=stage_identity, destination_ids=destination_ids,
-                donor_ids=donor_ids)
+                donor_ids=donor_ids, receiver_normalized=receiver_normalized,
+                donor_normalized=donor_normalized, geometry_features=geometry_features)
             if native_snapshot is not None:
                 # Snapshot binds scores to their actual source-state stage;
                 # coefficients are exported separately, never recomputed afterward.
@@ -297,6 +359,17 @@ class SpatialRouteAttentionV2(nn.Module):
         )
         attended = attended.transpose(1, 2).reshape(batch, query_count, self.width)
         update = self.output(attended)
+        if self.pair_message is not None:
+            logits = torch.matmul(q, k.transpose(-2, -1)) + additive
+            coefficients = safe_masked_softmax(logits, allowed[:, None], dim=-1).permute(0, 2, 3, 1)
+            residual = self.pair_message(receiver_normalized, donor_normalized, geometry_features,
+                                         coefficients, allowed & (coefficients > 0).any(-1))
+            correction = F.linear(residual, self.output.weight, None)
+            valid_trace = (row_has_donor & destination_mask[:, :, None]).to(update.dtype)
+            correction = correction * valid_trace
+            self.record_pair_diagnostics(stage_identity, update * valid_trace,
+                                         correction, coefficients, allowed)
+            update = update + correction
         valid_rows = row_has_donor & destination_mask[:, :, None]
         update = update * valid_rows.to(update.dtype)
         if not return_attention:
@@ -331,12 +404,12 @@ class TokenFeedForwardV2(nn.Module):
 class StagedContextCycleV2(nn.Module):
     """MM → EM(new M) → EE(new E) → ME(new E), followed by one/type FFN."""
 
-    def __init__(self, width: int, heads: int, coordinate_dim: int, dropout: float = 0.0) -> None:
+    def __init__(self, width: int, heads: int, coordinate_dim: int, dropout: float = 0.0, *, contextual_message: bool = False) -> None:
         super().__init__()
-        self.mm = SpatialRouteAttentionV2(width, heads, coordinate_dim, dropout)
-        self.em = SpatialRouteAttentionV2(width, heads, coordinate_dim, dropout)
-        self.ee = SpatialRouteAttentionV2(width, heads, coordinate_dim, dropout)
-        self.me = SpatialRouteAttentionV2(width, heads, coordinate_dim, dropout)
+        self.mm = SpatialRouteAttentionV2(width, heads, coordinate_dim, dropout, contextual_message=contextual_message)
+        self.em = SpatialRouteAttentionV2(width, heads, coordinate_dim, dropout, contextual_message=contextual_message)
+        self.ee = SpatialRouteAttentionV2(width, heads, coordinate_dim, dropout, contextual_message=contextual_message)
+        self.me = SpatialRouteAttentionV2(width, heads, coordinate_dim, dropout, contextual_message=contextual_message)
         self.environment_ff = TokenFeedForwardV2(width, dropout)
         self.module_ff = TokenFeedForwardV2(width, dropout)
         self.dropout = nn.Dropout(dropout)
