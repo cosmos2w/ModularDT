@@ -1655,9 +1655,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             axis.set_subplotspec(grid[index // 2, index % 2])
             if epochs:
                 axis.set_xlim(*limits)
-        # A response history often has five panels. Use its otherwise empty
-        # cell for the dense prediction legend so it does not cover curves.
-        if response_run and len(visible_axes) % 2 and native_axis in visible_axes:
+        # Legacy response histories use an empty cell for their dense legend;
+        # scratch screening keeps unused grid cells blank.
+        if (response_run and not scratch_family_run
+                and len(visible_axes) % 2 and native_axis in visible_axes):
             legend = native_axis.get_legend()
             handles, labels = native_axis.get_legend_handles_labels()
             by_name = {}
