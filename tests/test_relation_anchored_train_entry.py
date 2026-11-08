@@ -114,6 +114,59 @@ def test_p64_dispatch_and_excluded_experiments(monkeypatch):
             cli.build({**recipe, name: {"enabled": True}}, device="cpu")
 
 
+def test_scratch_family_dispatch_receives_literal_resume_state(monkeypatch):
+    import sys
+
+    module = ModuleType('channelthermal.training.r16_10_family_task')
+    expected = (object(), object())
+    saved = {'epoch': 10, 'provider_training_state': {'cursor': 0}}
+    recipe = {'dataset': {'name': 'thermal'}, 'initialization': {'seed': 0},
+              'member_routing': {'arm': 'R14-Detail-LocalECover'},
+              'r16_10_family': {'arm': 'R'}}
+
+    def build(actual, *, arm, device, resume_payload):
+        assert actual is recipe and resume_payload is saved
+        assert arm == 'R14-Detail-LocalECover' and device == 'cpu'
+        return expected
+
+    module.build_thermal_r16_10_task = build
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    health = ModuleType('channelthermal.training.r16_10_health')
+    attached = []
+    health.attach_update_diagnostics = lambda provider, actual: attached.append((provider, actual))
+    monkeypatch.setitem(sys.modules, health.__name__, health)
+    assert cli.build(recipe, device='cpu', resume_payload=saved) == expected
+    assert attached == [(expected[1], recipe)]
+
+
+def test_scratch_family_resume_loads_saved_state_without_legacy_scales(monkeypatch):
+    recipe = {'dataset': {'name': 'thermal'}, 'member_routing': {'arm': 'joint'},
+              'r16_10_family': {'arm': 'B0'}}
+    saved = {'epoch': 10, 'experiment_identity': {'recipe': copy.deepcopy(recipe)}}
+    monkeypatch.setattr(Path, 'read_text', lambda self: json.dumps(recipe))
+    monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: Path('/unused'))
+    monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: saved)
+
+    def build(actual, *, device, resume_payload):
+        assert actual == recipe and resume_payload is saved
+        return object(), object()
+
+    class Engine:
+        def fit(self, model, provider, output, **kwargs):
+            assert kwargs['resume_checkpoint'] == 'latest'
+            assert kwargs['stop_after'] == 1000
+            return {'completed_epoch': 1000}
+
+    monkeypatch.setattr(cli, 'build', build)
+    monkeypatch.setattr(cli, 'engine_for', lambda *args, **kwargs: Engine())
+    assert cli.main(['fit', '--recipe', 'run.json', '--output', 'run', '--resume', 'latest',
+                     '--stop-after', '1000']) == 0
+    saved['experiment_identity']['recipe']['r16_10_family']['arm'] = 'R'
+    with pytest.raises(ValueError, match='recipe differs'):
+        cli.main(['fit', '--recipe', 'run.json', '--output', 'run', '--resume', 'latest',
+                  '--stop-after', '1000'])
+
+
 def test_fit_preserves_same_run_resume_arguments(monkeypatch, capsys):
     recipe = wind_recipe()
     monkeypatch.setattr(Path, "read_text", lambda self: json.dumps(recipe))
@@ -153,13 +206,17 @@ def test_response_resume_restores_saved_scales_and_keeps_exact_recipe(monkeypatc
               'thermal_state_response': response}
     scales = {'flow/u': {'scale': .45560681823737065, 'fit_rms': .45560681823737065, 'floor': .01}}
     checkpoint = {'experiment_identity': {'recipe': copy.deepcopy(recipe),
-                                           'provider_identity': {'response_scales': scales}}}
+                                           'provider_identity': {'response_scales': scales,
+                                               'adapter_state': {'normalization_stats': {'saved': [1.0]}},
+                                               'source_binding': {'normalization_source': 'saved TRAIN stats'}}}}
     monkeypatch.setattr(Path, 'read_text', lambda self: json.dumps(recipe))
     monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: Path('/unused'))
     monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: checkpoint)
     captured = {}
 
-    def build(actual_recipe, *, device, response_scales):
+    def build(actual_recipe, *, device, response_scales, saved_adapter_state, saved_normalization_source):
+        assert saved_adapter_state == checkpoint['experiment_identity']['provider_identity']['adapter_state']
+        assert saved_normalization_source == 'saved TRAIN stats'
         captured.update(recipe=actual_recipe, scales=response_scales, device=device)
         return object(), object()
 

@@ -49,6 +49,18 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("r16_10_family") is not None:
+            from channelthermal.training.r16_10_family_task import build_thermal_r16_10_task
+
+            model, provider = build_thermal_r16_10_task(
+                recipe, arm=arm, device=device, resume_payload=resume_payload)
+            from channelthermal.training.r16_10_health import attach_update_diagnostics
+
+            attach_update_diagnostics(provider, recipe)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
         if recipe.get("r16_8_content") is not None:
             from channelthermal.training.r16_8_content_task import build_thermal_r16_8_task
             model, provider = build_thermal_r16_8_task(recipe, arm=arm, device=device,
@@ -188,13 +200,16 @@ def main(argv=None):
     if args.cuda_memory_fraction is not None:
         torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device=args.device)
     source_payload = None
-    if (recipe.get("thermal_state_response", {}).get("enabled")
+    if ((recipe.get("thermal_state_response", {}).get("enabled")
+         or recipe.get("r16_10_family") is not None)
             and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
         selector = args.checkpoint if args.command == "evaluate" else args.resume
         source_payload = load_trusted_checkpoint(resolve_checkpoint(args.output, selector), map_location="cpu")
         if source_payload["experiment_identity"]["recipe"] != recipe:
             raise ValueError("The recipe differs from the saved run.")
     options = {}
+    if source_payload is not None and recipe.get("r16_10_family") is not None:
+        options["resume_payload"] = source_payload
     if source_payload is not None and recipe.get("thermal_state_response", {}).get("enabled"):
         # Objective denominators are saved scientific state. Recomputing their
         # last bits on another device must not change the restored objective.

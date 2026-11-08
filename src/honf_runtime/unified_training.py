@@ -881,7 +881,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         row.get("arm") in ("R13-8-A-EAnchor", "R13-8-L-LocalECover", "R14-Detail-LocalECover") for row in history
     )
     paired_member_routing_run = joint_member_routing_run or anchored_member_routing_run
-    response_run = bool(provider_identity and provider_identity.get("thermal_state_response"))
+    scratch_family_run = bool(provider_identity and
+                              provider_identity.get("recipe", {}).get("r16_10_family"))
+    response_run = bool(provider_identity and
+                        (provider_identity.get("thermal_state_response") or scratch_family_run))
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
                                       "R13-4-Full", "R13-4-Guide"}
@@ -898,6 +901,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         for row in history
     )
     joint_validation_label = "exposed VAL89" if canonical_val89_joint else "exposed DEV"
+    if scratch_family_run:
+        joint_validation_label = "sampled VAL9/89"
     budgeted_native_run = any(isinstance(row.get("native_budgeted_routing_state"), Mapping) for row in history)
     member_routing_native_terms = {
         "flow/u", "flow/v", "flow/p", "flow/omega",
@@ -5424,7 +5429,12 @@ class TrainingEngine:
                         "peak_reserved_bytes": torch.cuda.max_memory_reserved(self.device),
                         "allocator_backend": torch.cuda.get_allocator_backend(),
                         "allocator_config": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
-                        "allocator_memory_fraction": torch.cuda.get_per_process_memory_fraction(self.device),
+                        # The getter is absent in supported older PyTorch builds;
+                        # unavailable telemetry must not abort a completed epoch.
+                        "allocator_memory_fraction": (
+                            torch.cuda.get_per_process_memory_fraction(self.device)
+                            if hasattr(torch.cuda, "get_per_process_memory_fraction") else None
+                        ),
                         "scope": "complete epoch including data transfer, forward, backward and optimizer; excludes monitoring",
                     })
                 train_seconds = time.perf_counter() - epoch_started
