@@ -6,6 +6,7 @@ Nothing in this reader selects cases, solves physics, or fits scales.
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 from pathlib import Path
@@ -23,8 +24,16 @@ class ThermalR168Corpus:
     def __init__(self, manifest_path):
         self.manifest_path = str(manifest_path)
         manifest = json.loads(Path(manifest_path).read_text())
-        if manifest.get('schema') != 'thermal_r16_8_corpus_v1':
-            raise ValueError('Expected thermal_r16_8_corpus_v1.')
+        schema = manifest.get('schema')
+        if schema not in ('thermal_r16_8_corpus_v1', 'thermal_r16_9_corpus_v2'):
+            raise ValueError('Expected a supported Thermal response corpus schema.')
+        self.schema = schema
+        self.scope = manifest.get('scope') if schema == 'thermal_r16_9_corpus_v2' else None
+        self.preview = manifest.get('preview', False) if self.scope is not None else False
+        if type(self.preview) is not bool or (self.preview and self.scope != 'fit'):
+            raise ValueError('Only a FIT integration preview may be partial.')
+        if schema == 'thermal_r16_9_corpus_v2' and self.scope not in ('fit', 'native_seen', 'fresh_layout'):
+            raise ValueError('R16-9 requires one explicit corpus role.')
         self.cases, self.records = {}, {}
         for case in manifest['cases']:
             family = str(case['case_id'])
@@ -32,6 +41,10 @@ class ThermalR168Corpus:
                 raise ValueError('Corpus cases require unique IDs and an explicit role.')
             if not case.get('source_case_dir') or not case.get('source_config'):
                 raise ValueError('Corpus case requires its raw baseline and source configuration.')
+            if self.scope is not None and (case['role'] != self.scope or
+                    not isinstance(case.get('actual_solver_config'), dict) or
+                    not isinstance(case.get('numerical_policy'), dict)):
+                raise ValueError('R16-9 baseline role or numerical provenance is missing.')
             self.cases[family] = case
         self._actions = {family: [] for family in self.cases}
         for entry in manifest['actions']:
@@ -41,6 +54,9 @@ class ThermalR168Corpus:
                 raise ValueError('Actions need unique IDs within an existing case.')
             if entry.get('role') != self.cases[family]['role']:
                 raise ValueError('Action and family roles differ.')
+            if self.scope is not None and (not isinstance(entry.get('actual_solver_config'), dict)
+                    or not isinstance(entry.get('numerical_policy'), dict)):
+                raise ValueError('R16-9 action numerical provenance is missing.')
             if entry.get('status') != 'converged' or not entry.get('raw_case_dir'):
                 raise ValueError('An action requires a converged raw endpoint.')
             delta = entry.get('physical_delta', {})
@@ -48,8 +64,9 @@ class ThermalR168Corpus:
                 raise ValueError('An action requires finite native J/P response labels.')
             self.records[key] = entry
             self._actions[family].append(action)
-        if any(len(actions) != 4 for actions in self._actions.values()):
-            raise ValueError('Each corpus family requires four declared actions.')
+        expected_actions = 1 if self.preview else 4
+        if (self.preview and len(self.cases) != 1) or any(len(actions) != expected_actions for actions in self._actions.values()):
+            raise ValueError('Corpus family action count differs from its declared role or preview.')
 
     def family_ids(self, role):
         if role not in ('fit', 'native_seen', 'fresh_layout'):
@@ -78,21 +95,35 @@ class ThermalR168Corpus:
             raise ValueError('Fresh layouts do not have a TRAIN provider case.')
         raw_b = load_raw_endpoint(case['source_case_dir'])
         raw_e = load_raw_endpoint(entry['raw_case_dir'])
-        if raw_b['config'] != case['source_config']:
-            raise ValueError('Raw baseline differs from declared source configuration.')
-        for section in ('domain', 'thermal', 'local_module'):
-            if any(raw_e['config'][section].get(key) != value
-                   for key, value in raw_b['config'][section].items()):
-                raise ValueError(f'Physical edit changed {section} controls.')
-        base_layout, edit_layout = raw_b['config']['layout'], raw_e['config']['layout']
-        for key in ('num_modules', 'seed', 'heat_powers'):
-            if base_layout[key] != edit_layout[key]:
-                raise ValueError(f'Physical edit changed layout {key}.')
-        if edit_layout['centers'] != entry['centers']:
-            raise ValueError('Physical edit differs from declared source-precision centers.')
-        from ..interaction_evidence.reference_adapter import operating_context_from_config
-        if operating_context_from_config(raw_b['config']).values != operating_context_from_config(raw_e['config']).values:
-            raise ValueError('Physical edit changed operating controls.')
+        if self.schema == 'thermal_r16_9_corpus_v2':
+            from ..interaction_evidence.numerical_policy import validate_numerical_policy
+            if raw_b['config'] != case['actual_solver_config'] or raw_e['config'] != entry['actual_solver_config']:
+                raise ValueError('Raw endpoint configuration differs from saved numerical provenance.')
+            baseline_expected = copy.deepcopy(case['source_config'])
+            edit_expected = copy.deepcopy(case['source_config'])
+            edit_expected['layout']['centers'] = copy.deepcopy(entry['centers'])
+            for expected, actual, saved in ((baseline_expected, raw_b['config'], case['numerical_policy']),
+                                            (edit_expected, raw_e['config'], entry['numerical_policy'])):
+                observed = validate_numerical_policy(expected, actual, policy='thermal_time_cap_v1', require_converged=True)
+                if observed != saved:
+                    raise ValueError('Raw endpoint numerical-policy provenance differs from saved record.')
+            base_layout = baseline_expected['layout']
+        else:
+            if raw_b['config'] != case['source_config']:
+                raise ValueError('Raw baseline differs from declared source configuration.')
+            for section in ('domain', 'thermal', 'local_module'):
+                if any(raw_e['config'][section].get(key) != value
+                       for key, value in raw_b['config'][section].items()):
+                    raise ValueError(f'Physical edit changed {section} controls.')
+            base_layout, edit_layout = raw_b['config']['layout'], raw_e['config']['layout']
+            for key in ('num_modules', 'seed', 'heat_powers'):
+                if base_layout[key] != edit_layout[key]:
+                    raise ValueError(f'Physical edit changed layout {key}.')
+            if edit_layout['centers'] != entry['centers']:
+                raise ValueError('Physical edit differs from declared source-precision centers.')
+            from ..interaction_evidence.reference_adapter import operating_context_from_config
+            if operating_context_from_config(raw_b['config']).values != operating_context_from_config(raw_e['config']).values:
+                raise ValueError('Physical edit changed operating controls.')
         if not np.array_equal(raw_b['material_mask'], raw_e['material_mask']):
             raise ValueError('Attached material receivers differ between endpoints.')
         original = provider._load_native_cases([family])[0]
