@@ -208,6 +208,8 @@ def _research_decisions(predicted, physical, actions, sensitivity, research_scal
             chosen = ranked[0]  # Baseline delta is zero and therefore always eligible.
             eligible = [a for a in actions if physical[a][constraint] <= cap]
             best = min(eligible, key=lambda a: (physical[a][objective], physical[a][constraint], a))
+            admitted_physical = [a for a in ranked if physical[a][constraint] <= cap]
+            best_admitted = min(admitted_physical, key=lambda a: (physical[a][objective], physical[a][constraint], a))
             violation = physical[chosen][constraint] > cap
             accepted = 'baseline' if violation else chosen
             requests.append({'objective': objective, 'constraint': constraint, 'multiplier': multiplier,
@@ -215,7 +217,9 @@ def _research_decisions(predicted, physical, actions, sensitivity, research_scal
                 'constraint_max_delta': cap, 'model_selected_action': chosen,
                 'selected_predicted_delta': predicted[chosen], 'selected_physical_delta': physical[chosen],
                 'raw_constraint_violation': violation,
-                'objective_ordering_failure': not violation and physical[chosen][objective] > physical[best][objective],
+                'objective_ordering_failure': not violation and physical[chosen][objective] > physical[best_admitted][objective],
+                'best_admitted_physically_feasible_action': best_admitted,
+                'physical_optimum_excluded_by_model': predicted[best][constraint] > cap,
                 'false_feasible_actions': [a for a in actions[1:] if predicted[a][constraint] <= cap and physical[a][constraint] > cap],
                 'false_rejected_actions': [a for a in actions[1:] if predicted[a][constraint] > cap and physical[a][constraint] <= cap],
                 'near_null_false_rejected_actions': [a for a in actions[1:] if predicted[a][constraint] > cap and physical[a][constraint] <= cap and abs(physical[a][constraint]) <= float(sensitivity[constraint])],
@@ -385,6 +389,8 @@ def family_board(model, provider, recipe, role, input_path, output):
             'physically_improving_exact':sum(x['physically_improving'] for x in shortlist),
             'numerically_resolved_improving':sum(x['numerically_resolved_improvement'] for x in shortlist),
             'objective_ordering_failures':sum(x['objective_ordering_failure'] for x in shortlist),
+            'physical_optimum_excluded_by_model':sum(x['physical_optimum_excluded_by_model'] for x in shortlist),
+            'false_rejected_actions':sum(len(x['false_rejected_actions']) for x in shortlist),
             'near_null_false_rejections':sum(len(x['near_null_false_rejected_actions']) for x in shortlist),
             'mean_normalized_regret':float(np.mean([x['normalized_regret'] for x in shortlist]))}
         field_summary = {}

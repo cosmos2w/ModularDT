@@ -160,3 +160,25 @@ def test_decision_physical_violation_falls_back_without_reranking():
     assert row['raw_constraint_violation'] and row['physical_best_action'] == 'b'
     assert row['regret'] == pytest.approx(1.)
     assert len(rows) == 10
+
+
+def test_ordering_error_distinguishes_optimum_rejected_by_model():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+    from thermal_r16_10_evaluate import _research_decisions
+    predicted = {'baseline': {'J': 0., 'P': 0.}, 'a': {'J': -2., 'P': 1.}, 'b': {'J': -1., 'P': 0.}}
+    physical = {'baseline': {'J': 0., 'P': 0.}, 'a': {'J': -3., 'P': 0.}, 'b': {'J': -1., 'P': 0.}}
+    def row(p):
+        return next(x for x in _research_decisions(p, physical, list(p), {'J': .01, 'P': .01},
+                         {'J': 1., 'P': 1.}, {'J': 1., 'P': 1.})
+                    if x['objective'] == 'J' and x['multiplier'] == .5)
+    excluded = row(predicted)
+    assert excluded['model_selected_action'] == 'b' and excluded['physical_best_action'] == 'a'
+    assert excluded['physical_optimum_excluded_by_model'] and not excluded['objective_ordering_failure']
+    assert excluded['false_rejected_actions'] == ['a'] and excluded['near_null_false_rejected_actions'] == ['a']
+    admitted = dict(predicted, a={'J': -.5, 'P': 0.})
+    ordered = row(admitted)
+    assert ordered['model_selected_action'] == 'b' and ordered['best_admitted_physically_feasible_action'] == 'a'
+    assert not ordered['physical_optimum_excluded_by_model'] and ordered['objective_ordering_failure']
+    assert ordered['regret'] == excluded['regret'] == pytest.approx(2.)
