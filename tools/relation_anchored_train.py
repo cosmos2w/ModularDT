@@ -49,6 +49,14 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("r16_8_content") is not None:
+            from channelthermal.training.r16_8_content_task import build_thermal_r16_8_task
+            model, provider = build_thermal_r16_8_task(recipe, arm=arm, device=device,
+                resume_payload=resume_payload, response_scales=response_scales)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
         if recipe.get("r16_7_prescribed") is not None:
             from channelthermal.training.r16_7_prescribed_task import build_thermal_r16_7_task
             model, provider = build_thermal_r16_7_task(recipe, arm=arm, device=device,

@@ -58,6 +58,17 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
     selected = policy(scores, allowed, route_name, stage_identity=stage_identity,
                       destination_ids=destination_ids, donor_ids=donor_ids,
                       donor_measure=donor_measure)
+    replacement = getattr(attention, 'content_replacement', None)
+    def replacement_update(coefficients, mass, support):
+        if receiver_normalized is None or donor_normalized is None or geometry_features is None:
+            raise ValueError('Content replacement requires normalized endpoints and geometry.')
+        reduced = replacement(receiver_normalized, donor_normalized, geometry_features, value,
+                              coefficients, support & (coefficients > 0).any(-1))
+        reduced = reduced.reshape(query.shape[0], query.shape[2], attention.width)
+        update = F.linear(reduced, attention.output.weight, None)
+        if attention.output.bias is not None:
+            update = update + attention.output.bias * mass.mean(-1, keepdim=True)
+        return update * destination_mask[..., None].to(update.dtype)
     def add_pair(update, coefficients, support):
         if getattr(attention, "pair_message", None) is None:
             return update
@@ -74,6 +85,12 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
             raise ValueError('Frozen SDPA controls must match the native contextual axes.')
         if any(t.requires_grad for t in context_plan_tensors(selected)):
             raise ValueError('Frozen SDPA contextual controls must be detached in full.')
+        if replacement is not None:
+            weights = safe_masked_softmax(torch.matmul(selected.query, selected.key.transpose(-2, -1))
+                + selected.additive_mask, selected.incidence.bool()[:, None], dim=-1)
+            update = replacement_update(weights.permute(0, 2, 3, 1), selected.message_mass,
+                                        selected.incidence.bool())
+            return update, weights, selected.incidence, selected.message_mass
         attended=F.scaled_dot_product_attention(selected.query,selected.key,value,
             attn_mask=selected.additive_mask,dropout_p=0.,scale=1.)
         attended=attended.transpose(1,2).reshape(query.shape[0],query.shape[2],attention.width)
@@ -119,6 +136,12 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
         additive = additive.masked_fill(~effective_allowed[:, None], -torch.inf)
         row_present = effective_allowed.any(-1)
         additive = torch.where(row_present[:, None, :, None], additive, torch.zeros_like(additive))
+        if replacement is not None:
+            weights = safe_masked_softmax(torch.matmul(query, key.transpose(-2, -1)) + additive,
+                                          effective_allowed[:, None], dim=-1)
+            actual_mass = weights.sum(-1).transpose(1, 2)
+            update = replacement_update(weights.permute(0, 2, 3, 1), actual_mass, effective_allowed)
+            return update, weights, gates, actual_mass
         attended = F.scaled_dot_product_attention(query, key, value, attn_mask=additive,
             dropout_p=attention.dropout if attention.training else 0.0, scale=1.0)
         attended = attended.transpose(1, 2).reshape(query.shape[0], query.shape[2], attention.width)
@@ -127,6 +150,9 @@ def contextual_value_update(attention, query, key, value, geometry_bias,
             actual_weights = safe_masked_softmax(torch.matmul(query, key.transpose(-2, -1)) + additive,
                                                  effective_allowed[:, None], dim=-1)
             update = add_pair(update, actual_weights.permute(0, 2, 3, 1), effective_allowed)
+        return update, coefficients.permute(0, 3, 1, 2), gates, mass
+    if replacement is not None:
+        update = replacement_update(coefficients, mass, (gates > 0) & allowed)
         return update, coefficients.permute(0, 3, 1, 2), gates, mass
     batch, _, receivers, _ = query.shape
     backend=getattr(policy,'execution_backend','segment')

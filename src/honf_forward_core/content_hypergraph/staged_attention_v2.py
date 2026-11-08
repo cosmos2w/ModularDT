@@ -98,6 +98,117 @@ class ContextualPairMessage(nn.Module):
         return torch.einsum('brhp,hpv->brhv', reduced, self.output).reshape(batch, receivers, -1)
 
 
+class ContextualContentReplacement(nn.Module):
+    """Two independent zero-initialized shifts on the actual value path.
+
+    Optional work_trace counts forward tensor elements, not timings or FLOPs;
+    projection rows count both signs. Checkpoint replay calls are observed
+    separately and are updated in place when backward recomputes a tile.
+    """
+
+    def __init__(self, width: int, heads: int, geometry_width: int, mode: str):
+        super().__init__()
+        if mode not in ('c8', 's8'):
+            raise ValueError('Content replacement mode must be c8 or s8.')
+        self.mode = mode
+        self.capture_messages = False
+        self.message_trace = None
+        self.capture_work = False
+        self.work_trace = None
+        value_width = width // heads
+        for sign in ('plus', 'minus'):
+            for name, shape in (('q', (heads, width, value_width)),
+                                ('p', (heads, width, value_width)),
+                                ('r', (heads, geometry_width, value_width)),
+                                ('b', (heads, value_width))):
+                self.register_parameter(f'{name}_{sign}', nn.Parameter(torch.zeros(shape),
+                    requires_grad=(mode == 's8' or name not in ('p', 'r'))))
+
+    def forward(self, receiver, donor, geometry, value, coefficients, eligible, tile_size=1024):
+        batch, receivers, _ = receiver.shape
+        self.message_trace = None
+        self.work_trace = None
+        v = value.transpose(1, 2)
+        donor_plus = torch.einsum('bdc,hcv->bdhv', donor, self.q_plus) + self.b_plus
+        donor_minus = torch.einsum('bdc,hcv->bdhv', donor, self.q_minus) + self.b_minus
+        heads, vector_width = value.shape[1], value.shape[-1]
+        donors = donor.shape[1]
+        if self.capture_work:
+            self.work_trace = dict(mode=self.mode, donor_projection_rows=2 * batch * donors,
+                receiver_projection_rows=0, geometry_projection_rows=0,
+                donor_nonlinear_heads=0, evaluated_edge_heads=0,
+                coefficient_reduction_head_pairs=0, nonlinear_vector_elements=0,
+                reduction_vector_elements=0, forward_tile_calls=0, tile_calls=0,
+                checkpoint_replay_calls=0)
+        if self.mode == 'c8':
+            messages = F.silu(v + donor_plus) - F.silu(-v + donor_minus)
+            if self.work_trace is not None:
+                self.work_trace.update(donor_nonlinear_heads=batch * donors * heads,
+                    coefficient_reduction_head_pairs=batch * receivers * donors * heads,
+                    nonlinear_vector_elements=2 * batch * donors * heads * vector_width,
+                    reduction_vector_elements=batch * receivers * donors * heads * vector_width)
+            if self.capture_messages:
+                rows = eligible.nonzero(as_tuple=False)
+                b, r, d = rows.unbind(-1)
+                self.message_trace = dict(rows=rows.detach(), messages=messages[b, d].detach(),
+                                          coefficients=coefficients[b, r, d].detach())
+            return torch.einsum('brdh,bdhv->brhv', coefficients * eligible[..., None], messages)
+        receiver_plus = torch.einsum('brc,hcv->brhv', receiver, self.p_plus)
+        receiver_minus = torch.einsum('brc,hcv->brhv', receiver, self.p_minus)
+        rows = eligible.nonzero(as_tuple=False)
+        work = self.work_trace
+        if work is not None:
+            edge_count = rows.shape[0]
+            work.update(receiver_projection_rows=2 * batch * receivers,
+                geometry_projection_rows=2 * edge_count,
+                evaluated_edge_heads=edge_count * heads,
+                coefficient_reduction_head_pairs=edge_count * heads,
+                nonlinear_vector_elements=2 * edge_count * heads * vector_width,
+                reduction_vector_elements=edge_count * heads * vector_width)
+        reduced = value.new_zeros(batch * receivers, value.shape[1], value.shape[-1])
+        captured = [] if self.capture_messages else None
+
+        def tile(vv, dp, dm, rp, rm, geo, weights, rplus, rminus, b, r, d):
+            if work is not None:
+                work['tile_calls'] += 1
+                if work['forward_tile_calls']:
+                    work['checkpoint_replay_calls'] += 1
+            plus = vv[b, d] + dp[b, d] + rp[b, r] + torch.einsum('eg,hgv->ehv', geo[b, r, d], rplus)
+            minus = -vv[b, d] + dm[b, d] + rm[b, r] + torch.einsum('eg,hgv->ehv', geo[b, r, d], rminus)
+            return (F.silu(plus) - F.silu(minus)) * weights[b, r, d, :, None]
+
+        for start in range(0, rows.shape[0], tile_size):
+            b, r, d = rows[start:start + tile_size].unbind(-1)
+            # Checkpoint full endpoint tensors and gather inside the tile so
+            # autograd does not retain a separate edge-wide endpoint bank.
+            args = (v, donor_plus, donor_minus, receiver_plus, receiver_minus,
+                    geometry, coefficients, self.r_plus, self.r_minus, b, r, d)
+            if torch.is_grad_enabled() and any(x.requires_grad for x in args):
+                from torch.utils.checkpoint import checkpoint
+                contribution = checkpoint(tile, *args, use_reentrant=False)
+            else:
+                contribution = tile(*args)
+            if captured is not None:
+                # Recover the message directly, including zero coefficients per head.
+                with torch.no_grad():
+                    vv, dp, dm, rp, rm, geo, _, rplus, rminus, _, _, _ = args
+                    captured.append((F.silu(vv[b, d] + dp[b, d] + rp[b, r] + torch.einsum('eg,hgv->ehv', geo[b, r, d], rplus))
+                        - F.silu(-vv[b, d] + dm[b, d] + rm[b, r] + torch.einsum('eg,hgv->ehv', geo[b, r, d], rminus))).detach())
+            reduced = reduced.index_add(0, b * receivers + r, contribution)
+        if work is not None:
+            work['forward_tile_calls'] = work['tile_calls']
+        if not rows.numel():
+            reduced = reduced + (value.sum() + donor_plus.sum() + donor_minus.sum()
+                                 + receiver_plus.sum() + receiver_minus.sum()
+                                 + self.r_plus.sum() + self.r_minus.sum()) * 0
+        if captured is not None:
+            b, r, d = rows.unbind(-1)
+            messages = torch.cat(captured, dim=0) if captured else value.new_empty(0, value.shape[1], value.shape[-1])
+            self.message_trace = dict(rows=rows.detach(), messages=messages,
+                                      coefficients=coefficients[b, r, d].detach())
+        return reduced.reshape(batch, receivers, value.shape[1], value.shape[-1])
+
+
 class SpatialRouteAttentionV2(nn.Module):
     """One SDPA route with normalized Q/K and live bounded head temperatures."""
 
@@ -123,9 +234,19 @@ class SpatialRouteAttentionV2(nn.Module):
             nn.Linear(score_input, 32), nn.SiLU(), nn.Linear(32, heads, bias=False)
         )
         self.pair_message = ContextualPairMessage(width, heads, score_input) if contextual_message else None
+        self.content_replacement = None
         self.capture_pair_diagnostics = False
         self.pair_diagnostics = None
         self.raw_temperature = nn.Parameter(torch.full((heads,), _initial_temperature_logit(self.head_width)))
+
+    def enable_content_replacement(self, mode: str) -> None:
+        if self.pair_message is not None or self.content_replacement is not None:
+            raise ValueError('Content replacement requires a route without another message modification.')
+        if self.dropout:
+            raise ValueError('Content replacement requires zero attention dropout.')
+        self.content_replacement = ContextualContentReplacement(
+            self.width, self.heads, 2 * self.coordinate_dim + 1, mode
+        ).to(device=self.value.weight.device, dtype=self.value.weight.dtype)
 
     def record_pair_diagnostics(self, stage_identity, base, correction, coefficients, eligible):
         """Opt-in, last-call trace; counters distinguish forward and backward use."""
@@ -348,6 +469,8 @@ class SpatialRouteAttentionV2(nn.Module):
             exported = native_snapshot if native_snapshot is not None else snapshot
             return (update, weights if return_attention else None, exported) if exported is not None else (
                 update, weights if return_attention else None)
+        if self.content_replacement is not None:
+            raise ValueError('Content replacement requires the contextual value policy.')
         attended = F.scaled_dot_product_attention(
             q,
             k,
