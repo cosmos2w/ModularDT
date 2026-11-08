@@ -65,6 +65,36 @@ def test_satisfied_hinge_is_valid_for_update_diagnostics_but_not_calibration():
         calibrate_components(model, losses)
 
 
+def test_identical_counterfactuals_start_from_identical_nonzero_adamw_moments():
+    model = torch.nn.Linear(1, 1, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=.01)
+    p = model.weight
+    for target in (1., 3., -2.):
+        optimizer.zero_grad(set_to_none=True)
+        (p - target).square().sum().backward()
+        optimizer.step()
+    result = counterfactual_updates(model, optimizer,
+        {'native': lambda: (p - 5).square().sum()}, {'native': 1.})
+    assert result['updates']['native_only'] == result['updates']['combined']
+
+
+def test_scratch_curves_record_calibrated_family_weights_and_sampled_validation(tmp_path):
+    import json
+    from honf_runtime.unified_training import _render_loss_curves
+
+    coefficients = {'endpoint': .2863, 'response': .2574, 'decision': .00636}
+    identity = {'recipe': {'r16_10_family': {'arm': 'R'}},
+                'r16_10_family': {'coefficients': coefficients}}
+    history = [{'epoch': 1, 'phase': 'joint', 'arm': 'R14-Detail-LocalECover',
+                'case_visits': 150, 'train_losses': {'flow/u': .2,
+                    'family/endpoint': .1, 'family/response': .05}}]
+    _render_loss_curves(history, tmp_path, 'field_score', provider_identity=identity)
+    metadata = json.loads((tmp_path / 'loss_curves_metadata.json').read_text())
+    assert metadata['response_objective']['component_coefficients'] == coefficients
+    assert 'VAL9/89' in metadata['validation_scope']
+    assert 'excludes family' in metadata['response_objective']['validation_total']
+
+
 def test_native_sampling_and_exact_matched_views(monkeypatch, tmp_path):
     import sys
     from pathlib import Path

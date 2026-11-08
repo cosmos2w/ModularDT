@@ -89,9 +89,35 @@ def test_five_endpoint_objective_and_response_gradient(monkeypatch):
     monkeypatch.setattr(module, 'decision_losses', lambda predictions, truth, sensitivity, research, scales:
         ({'feasibility': predictions.sum() * 0, 'ranking': predictions.sum() * 0, 'near_null': predictions.sum() * 0}, {}))
     model = SimpleNamespace(architecture='joint')
-    components, _ = obj.family_components(model, 'original', 'x')
+    components, _ = obj.family_components(model, 'original', 'x', batched=False)
     assert components['endpoint'].item() == pytest.approx(3.)
     # Differences 1,2,3,4: mean square 7.5 for field, J and P.
     assert components['response'].item() == pytest.approx(7.5)
     components['response'].backward()
     assert value.grad.item() == pytest.approx(15., rel=1e-5)
+
+
+def test_batch_family_preserves_endpoint_masks_and_gradients():
+    from channelthermal.training.r16_10_family_task import _stack_family_batches, _split_family_prediction
+    from channelthermal.training.content_hypergraph_task import ThermalContentSceneInputs, ThermalContentReceivers
+    from channelthermal.training.r16_10_native_task import NativePortTargets
+    from channelthermal.training.joint_member_routing_task import ThermalJointPairPredictions
+    from honf_runtime.unified_training import TaskBatch
+    def batch(i):
+        x = torch.tensor([[float(i)]])
+        target = NativePortTargets(case_ids=(str(i),), case_indices=(0,), epoch=0,
+            field_targets=x, point_weights=x, interface_target=x, interface_valid_mask=x,
+            material_targets=x, outside_temperature=x, outside_valid=x)
+        return TaskBatch(scene_inputs=ThermalContentSceneInputs({'value': x}, case_ids=(str(i),)),
+            receivers=ThermalContentReceivers(x, x, x), targets=target,
+            auxiliary={}, case_keys=(str(i),))
+    combined = _stack_family_batches([batch(i) for i in range(5)])
+    assert combined.scene_inputs.case_ids == ('0', '1', '2', '3', '4')
+    assert combined.targets.outside_temperature[:, 0].tolist() == [0., 1., 2., 3., 4.]
+    source = torch.arange(5., dtype=torch.float64, requires_grad=True).reshape(5, 1)
+    prepared = SimpleNamespace(source_present=torch.ones(5, 1), stencils={'fluid': SimpleNamespace(valid=torch.tensor([[1], [0], [1], [0], [1]]))})
+    branch = SimpleNamespace(native_prepared=prepared, native_main={'pred_field': source})
+    outputs = _split_family_prediction(ThermalJointPairPredictions(branch, branch, {}), 5)
+    assert outputs[1].full.native_prepared.stencils['fluid'].valid.item() == 0
+    sum(row.full.native_main['pred_field'].sum() * i for i, row in enumerate(outputs)).backward()
+    assert torch.equal(source.grad if source.is_leaf else source._base.grad, torch.arange(5., dtype=torch.float64))

@@ -917,6 +917,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         return objective if isinstance(objective, Mapping) else {}
 
     def term_group(name: str) -> int:
+        if scratch_family_run and name.startswith("family/"):
+            return 1
         if name in member_routing_native_terms:
             return 0
         if loss_metadata and name in loss_metadata:
@@ -1806,7 +1808,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "The reader and contextual organization receive gradients through native and response losses; "
             "no separately fitted routing penalty is present."
         )
-    if response_run:
+    if response_run and not scratch_family_run:
         spec = provider_identity["thermal_state_response"]
         balanced_spec = provider_identity.get("r16_6_balanced", {})
         coefficient = float(balanced_spec.get("coefficient", spec.get("finite_response_coefficient", 0.1)))
@@ -1826,6 +1828,23 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "TRAIN is this arm's recorded optimized objective; VALIDATION is the common native objective "
             "on the exposed panel. Their prediction paths and reductions differ; TRAIN totals from "
             "different objective weights are not a shared model-quality metric."
+        )
+    if scratch_family_run:
+        family = provider_identity.get("r16_10_family", {})
+        metadata["response_objective"] = {
+            "arm": provider_identity["recipe"]["r16_10_family"]["arm"],
+            "component_coefficients": dict(family.get("coefficients", {})),
+            "active_components": [name.removeprefix("family/") for name in all_names
+                                  if name.startswith("family/")],
+            "ramp": "zero through epoch 10, (epoch-10)/40 through 50, then one",
+            "training_total": "sum of recorded weighted native and active family contributions",
+            "validation_total": "native objective on fixed sampled VAL9/89; excludes family objectives",
+            "family_reduction": "equal family means; five equal endpoints and paired full/P95 views",
+        }
+        metadata["validation_scope"] = "fixed input-stratified sampled VAL9/89; exposed development evidence"
+        metadata["panel_definitions"]["physics"] = (
+            "Recorded weighted endpoint, finite-response and decision family objectives, when active; "
+            "no family labels enter native validation."
         )
     if (provider_identity and provider_identity.get("thermal_state_response") and
             provider_identity.get("restricted_evaluation_execution") == "all_native"):
@@ -5861,7 +5880,8 @@ class TrainingEngine:
                             **({"loss_metadata": provider.loss_metadata()}
                                if callable(getattr(provider, "loss_metadata", None)) else {}),
                             **({"provider_identity": provider_identity}
-                               if provider_identity.get("thermal_state_response") else {}),
+                            if (provider_identity.get("thermal_state_response")
+                                or provider_identity.get("recipe", {}).get("r16_10_family")) else {}),
                         )
                     finally:
                         restore_rng_state(curve_rng)

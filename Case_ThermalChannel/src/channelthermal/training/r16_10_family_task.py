@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import math
-from types import MethodType
+from types import MethodType, SimpleNamespace
+from dataclasses import fields, replace
 import numpy as np
 import torch
 
@@ -21,6 +22,46 @@ def auxiliary_ramp(epoch):
 def _views(prediction):
     return ([prediction.full, prediction.restricted]
             if isinstance(prediction, ThermalJointPairPredictions) else [prediction])
+
+
+def _stack_family_batches(batches):
+    """Combine the same family's one-case endpoints without changing their order."""
+    def combine(values):
+        first = values[0]
+        if torch.is_tensor(first):
+            return torch.cat(values, dim=0)
+        if isinstance(first, dict):
+            if any(set(value) != set(first) for value in values):
+                raise ValueError('Endpoint input structures differ.')
+            return {key: combine([value[key] for value in values]) for key in first}
+        if isinstance(first, tuple):
+            return sum(values, ())
+        if any(value != first for value in values):
+            raise ValueError('Endpoint batch metadata differs.')
+        return first
+    def combine_dataclass(rows):
+        return replace(rows[0], **{field.name: combine([getattr(row, field.name) for row in rows])
+                                  for field in fields(rows[0])})
+    return replace(batches[0],
+        scene_inputs=combine_dataclass([batch.scene_inputs for batch in batches]),
+        receivers=combine_dataclass([batch.receivers for batch in batches]),
+        targets=combine_dataclass([batch.targets for batch in batches]),
+        case_keys=sum((batch.case_keys for batch in batches), ()))
+
+
+def _split_family_prediction(prediction, count):
+    """Take differentiable views of the fields and masks consumed by family losses."""
+    def branch_slice(branch, index):
+        prepared = branch.native_prepared
+        stencil = {name: SimpleNamespace(valid=item.valid[index:index + 1])
+                   for name, item in prepared.stencils.items()}
+        local_prepared = SimpleNamespace(stencils=stencil, source_present=prepared.source_present[index:index + 1])
+        return SimpleNamespace(native_prepared=local_prepared,
+            native_main={name: value[index:index + 1] for name, value in branch.native_main.items()})
+    if not isinstance(prediction, ThermalJointPairPredictions):
+        raise ValueError('Batched family execution requires paired access views.')
+    return [ThermalJointPairPredictions(branch_slice(prediction.full, i),
+              branch_slice(prediction.restricted, i), {}) for i in range(count)]
 
 
 class R1610FamilyObjective:
@@ -93,7 +134,7 @@ class R1610FamilyObjective:
         self.research_scales = result
         return result
 
-    def family_components(self, model, source, family):
+    def family_components(self, model, source, family, *, batched=True):
         if self.response_scales is None or self.sensitivity is None or self.research_scales is None:
             raise ValueError('Eligible FIT response and decision scales must be configured.')
         actions = self.actions(source, family)
@@ -102,10 +143,14 @@ class R1610FamilyObjective:
         raws = [pairs[0]['raw_baseline']] + [p['raw_edited'] for p in pairs]
         batches = [self.provider.with_raw_port_targets(b, raw) for b, raw in zip(batches, raws)]
         predictions, work = [], {}
-        for batch in batches:
+        prediction_batches = [_stack_family_batches(batches)] if batched else batches
+        for batch in prediction_batches:
             pred, aux = self.provider.predict_native(model, batch.scene_inputs, batch.receivers,
                                                       model.architecture, 'joint', epoch=0)
-            predictions.append(pred)
+            if batched:
+                predictions.extend(_split_family_prediction(pred, len(batches)))
+            else:
+                predictions.append(pred)
             for key, value in aux.get('work', {}).items():
                 if isinstance(value, (int, float)):
                     work[key] = work.get(key, 0.) + float(value)

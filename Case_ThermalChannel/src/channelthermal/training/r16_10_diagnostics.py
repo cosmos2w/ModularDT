@@ -163,7 +163,11 @@ def counterfactual_updates(model, optimizer, loss_fns, combined_weights, clip_gr
         initial_rng = (random.getstate(), np.random.get_state(), torch.get_rng_state(),
                        torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None)
         for name, weights in (('native_only', {'native': 1.0}), ('combined', combined_weights)):
-            model.load_state_dict(initial_model); optimizer.load_state_dict(initial_optimizer)
+            model.load_state_dict(initial_model)
+            # Optimizer loading can reuse same-device state tensors. Give each
+            # counterfactual its own moments so the first update cannot advance
+            # the second update's reference state.
+            optimizer.load_state_dict(copy.deepcopy(initial_optimizer))
             random.setstate(initial_rng[0]); np.random.set_state(initial_rng[1]); torch.set_rng_state(initial_rng[2])
             if initial_rng[3] is not None:
                 torch.cuda.set_rng_state_all(initial_rng[3])

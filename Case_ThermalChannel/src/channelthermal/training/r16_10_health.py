@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from pathlib import Path
 from types import MethodType
 
@@ -44,6 +45,7 @@ def _diagnose(provider, recipe, model, optimizer, epoch, clip_limit):
 
     spec = recipe['r16_10_family']
     population, arm = int(spec['population']), spec['arm']
+    started = time.perf_counter()
     with preserved_state(model, optimizer):
         model.train()
         objective = (_build_b0_objective(provider, spec) if arm == 'B0'
@@ -85,6 +87,7 @@ def _diagnose(provider, recipe, model, optimizer, epoch, clip_limit):
                           family_calibration_panel=[list(v) for v in panel],
                           combined_weights=weights, epoch=int(epoch),
                           sampling='first source-ordered member of seed20261108 calibration panel')
+            result['complete_diagnostic_seconds'] = time.perf_counter() - started
             return result
         finally:
             objective.schedule.load_state_dict(schedule_state)
