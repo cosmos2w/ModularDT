@@ -154,7 +154,7 @@
       "ee_incidence_aggregation": "post_gate",
       "ee_gate_mode": "relative_quadratic",
       "ee_initial_tau": 1.4907824993133545,
-      "access_measure": "active_domain"
+      "access_measure": "inventory_unit_total"
     },
     "health": {
       "enabled": true,
