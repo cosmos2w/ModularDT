@@ -139,6 +139,31 @@ def test_scratch_family_dispatch_receives_literal_resume_state(monkeypatch):
     assert attached == [(expected[1], recipe)]
 
 
+def test_posttrain_evaluation_dispatch_uses_child_state(monkeypatch):
+    import sys
+
+    module = ModuleType('channelthermal.training.r16_10_posttrain')
+    recipe = {'dataset': {'name': 'thermal'}, 'initialization': {'seed': 0},
+              'member_routing': {'arm': 'R14-Detail-LocalECover'},
+              'r16_10_family': {'arm': 'R'}, 'r16_10_posttrain': {'source_epoch': 3000}}
+    saved = {'epoch': 100}
+    expected = (object(), object())
+    def build(actual, *, device, source, resume_payload):
+        assert actual is recipe and device == 'cpu' and source is None and resume_payload is saved
+        return expected
+    module.build_posttrain_task = build
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert cli.build(recipe, device='cpu', resume_payload=saved) == expected
+
+
+def test_posttrain_fit_requires_dedicated_state_preserving_entry(monkeypatch):
+    recipe = {'r16_10_posttrain': {'source_epoch': 3000}}
+    monkeypatch.setattr(Path, 'read_text', lambda self: json.dumps(recipe))
+    with pytest.raises(SystemExit) as error:
+        cli.main(['fit', '--recipe', 'post.json', '--output', 'child', '--stop-after', '1000'])
+    assert error.value.code == 2
+
+
 def test_scratch_family_resume_loads_saved_state_without_legacy_scales(monkeypatch):
     recipe = {'dataset': {'name': 'thermal'}, 'member_routing': {'arm': 'joint'},
               'r16_10_family': {'arm': 'B0'}}

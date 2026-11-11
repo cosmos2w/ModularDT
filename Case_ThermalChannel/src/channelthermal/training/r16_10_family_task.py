@@ -243,7 +243,7 @@ def attach_family_objective(provider, objective, *, arm, coefficients, families_
     return provider
 
 
-def build_thermal_r16_10_task(recipe, *, arm, device='cpu', resume_payload=None):
+def build_thermal_r16_10_task(recipe, *, arm, device='cpu', resume_payload=None, native_task_options=None):
     """Construct a scratch provider; auxiliary arms require population calibration."""
     import json
     from pathlib import Path
@@ -264,7 +264,8 @@ def build_thermal_r16_10_task(recipe, *, arm, device='cpu', resume_payload=None)
         adapter_state = calibration['adapter_state']
         normalization_source = calibration['normalization_source']
     model, provider = build_thermal_r16_10_native_task(recipe, arm=arm, device=device,
-        saved_adapter_state=adapter_state, saved_normalization_source=normalization_source)
+        saved_adapter_state=adapter_state, saved_normalization_source=normalization_source,
+        **(native_task_options or {}))
     if family_arm == 'V':
         from .r16_8_content_task import enable_content
         enable_content(model, 'C8')

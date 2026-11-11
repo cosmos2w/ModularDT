@@ -1853,7 +1853,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "component_coefficients": dict(family.get("coefficients", {})),
             "active_components": [name.removeprefix("family/") for name in all_names
                                   if name.startswith("family/")],
-            "ramp": "zero through epoch 10, (epoch-10)/40 through 50, then one",
+            "ramp": ("min(local post-training epoch / 40, 1)"
+                     if provider_identity.get("r16_10_posttrain") else
+                     "zero through epoch 10, (epoch-10)/40 through 50, then one"),
             "training_total": "sum of recorded weighted native and active family contributions",
             "validation_total": "native objective on fixed sampled VAL9/89; excludes family objectives",
             "family_reduction": "equal family means; five equal endpoints and paired full/P95 views",

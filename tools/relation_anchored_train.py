@@ -49,6 +49,12 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("r16_10_posttrain") is not None:
+            from channelthermal.training.r16_10_posttrain import build_posttrain_task
+
+            source = (None if resume_payload is not None else load_trusted_checkpoint(
+                recipe['initialization']['source_checkpoint'], map_location='cpu'))
+            return build_posttrain_task(recipe, device=device, source=source, resume_payload=resume_payload)
         if recipe.get("r16_10_family") is not None:
             from channelthermal.training.r16_10_family_task import build_thermal_r16_10_task
 
@@ -166,7 +172,11 @@ def engine_for(recipe, *, device, execution_horizon=None):
         training_mode="joint", write_initial_artifacts=bool(policy.get("write_initial_artifacts", True)),
     )
     engine_type = TrainingEngine
-    if thermal and recipe.get("r16_5_warm_fork") is not None:
+    if thermal and recipe.get("r16_10_posttrain") is not None:
+        from channelthermal.training.r16_10_posttrain import PosttrainEngine
+
+        engine_type = PosttrainEngine
+    elif thermal and recipe.get("r16_5_warm_fork") is not None:
         from channelthermal.training.r16_5_warm_fork import ThermalR165WarmForkEngine
 
         engine_type = ThermalR165WarmForkEngine
@@ -202,6 +212,8 @@ def main(argv=None):
             and (not 0 < args.cuda_memory_fraction <= 1 or torch.device(args.device).type != "cuda")):
         parser.error("--cuda-memory-fraction requires a CUDA device and a fraction in (0, 1]")
     recipe = json.loads(args.recipe.read_text())
+    if args.command == 'fit' and recipe.get('r16_10_posttrain') is not None:
+        parser.error('Use tools/thermal_r16_10_posttrain.py for the state-preserving post-training fit.')
     configure_r16_5_execution(recipe, device=args.device)
     if args.cuda_memory_fraction is not None:
         torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device=args.device)

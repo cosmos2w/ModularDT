@@ -197,14 +197,15 @@ class ThermalR1610NativeTask(ThermalR138AnchoredMemberRoutingTask):
 
 
 def build_thermal_r16_10_native_task(recipe, *, arm=ARM_DETAIL, device='cpu', task_type=ThermalR1610NativeTask,
-                                     saved_adapter_state=None, saved_normalization_source=None):
+                                     saved_adapter_state=None, saved_normalization_source=None,
+                                     source_kind=DETAIL_SOURCE_KIND, lineage='R16-10 scratch'):
     training = recipe['training']
     if (int(training['effective_batch_size']) != 48 or not 1 <= int(training['microbatch_cases']) <= 24
             or int(recipe['member_routing']['model']['query_tile_size']) != 128):
         raise ValueError('R16-10 requires effective batch 48, microbatch at most 24 and training tile 128.')
     model, provider = _build_thermal_member_routing_task(recipe, arm=arm, device=device, task_type=task_type,
         variants={DETAIL_CORE_SCHEMA: {**_VARIANTS[DETAIL_CORE_SCHEMA], 'arm': arm}},
-        section_schema=DETAIL_CONFIG_SCHEMA, source_kind=DETAIL_SOURCE_KIND, lineage='R16-10 scratch', required_address_mode=None,
+        section_schema=DETAIL_CONFIG_SCHEMA, source_kind=source_kind, lineage=lineage, required_address_mode=None,
         saved_adapter_state=saved_adapter_state, saved_normalization_source=saved_normalization_source)
     val_ids = [case_id for case_id in provider.catalog_case_ids
                if provider.case_split_by_id[case_id] == 'test' and case_id != '0273']
