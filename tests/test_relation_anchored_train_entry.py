@@ -235,3 +235,26 @@ def test_response_resume_restores_saved_scales_and_keeps_exact_recipe(monkeypatc
     with pytest.raises(ValueError, match='recipe differs'):
         cli.main(['fit', '--recipe', 'run.json', '--output', 'run', '--resume', 'latest',
                   '--stop-after', '200'])
+
+
+def test_r16_10_extension_accepts_latest_only_if_saved_epoch_is_2000(monkeypatch):
+    recipe = {'dataset': {'name': 'thermal'}, 'member_routing': {'arm': 'joint'},
+              'r16_10_family': {'arm': 'B0'}}
+    saved = {'epoch': 2000, 'experiment_identity': {'recipe': copy.deepcopy(recipe),
+                                                    'engine_config': {'total_epochs': 2000}}}
+    monkeypatch.setattr(Path, 'read_text', lambda self: json.dumps(recipe))
+    monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: Path('/unused/latest.pt'))
+    monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: saved)
+    monkeypatch.setattr(cli, 'build', lambda *args, **kwargs: (object(), object()))
+    class Engine:
+        def fit(self, model, provider, output, **kwargs):
+            assert kwargs['resume_checkpoint'] == 'latest'
+            assert kwargs['allow_horizon_extension'] is True
+            return {'completed_epoch': 3000}
+    monkeypatch.setattr(cli, 'engine_for', lambda *args, **kwargs: Engine())
+    arguments = ['fit', '--recipe', 'run.json', '--output', 'run', '--resume', 'latest',
+                 '--extend-horizon', '--stop-after', '3000']
+    assert cli.main(arguments) == 0
+    saved['epoch'] = 1900
+    with pytest.raises(ValueError, match='completed epoch 2000 state'):
+        cli.main(arguments)

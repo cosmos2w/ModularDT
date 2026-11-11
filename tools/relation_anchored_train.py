@@ -215,9 +215,8 @@ def main(argv=None):
             raise ValueError("The recipe differs from the saved run.")
         if (args.extend_horizon and recipe.get("r16_10_family") is not None
                 and source_payload["experiment_identity"]["engine_config"]["total_epochs"] == 2000
-                and (int(source_payload["epoch"]) != 2000
-                     or Path(args.resume).name != "epoch_2000_model.pt")):
-            raise ValueError("R16-10 extension requires the literal completed epoch 2000 checkpoint.")
+                and int(source_payload["epoch"]) != 2000):
+            raise ValueError("R16-10 extension requires a completed epoch 2000 state.")
     options = {}
     if source_payload is not None and recipe.get("r16_10_family") is not None:
         options["resume_payload"] = source_payload
