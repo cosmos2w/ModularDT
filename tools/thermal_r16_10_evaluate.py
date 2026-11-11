@@ -141,7 +141,7 @@ def calibrate_b0(model, provider, recipe, inputs):
 
 
 def family_board_inputs(recipe, role, native_ids):
-    """Build input-only sampled action catalogues for the three shortlist boards."""
+    """Build input-only sampled action catalogues for the requested boards."""
     import copy
     from channelthermal.training.thermal_state_response_task import ThermalResponseCorpus, ACTIONS
     spec = recipe['r16_10_family']
@@ -176,6 +176,23 @@ def family_board_inputs(recipe, role, native_ids):
                     'actions': [{'action': a, 'centers': new.action_entry(family, a, role='fit')['centers'],
                                  'raw_path': new.action_entry(family, a, role='fit')['raw_case_dir']}
                                 for a in new.actions_for_family(family)]})
+        return catalog, len(population)
+    elif role in ('native_seen', 'fresh_layout'):
+        from channelthermal.training.r16_8_corpus import ThermalR168Corpus
+        path = Path('/data2/wanglz/ModularDT/r16_9_reference_recovery_20261107/references') / f'{role}_corpus.json'
+        corpus = ThermalR168Corpus(path)
+        if corpus.scope != role or corpus.preview:
+            raise ValueError('Unexpected physical corpus role or preview')
+        population = tuple(corpus.cases)  # manifest source order
+        for family in sampled_ids(population):
+            case = corpus.cases[family]
+            catalog.append({'family': family, 'source': role, 'config': case['source_config'],
+                'baseline_path': case['source_case_dir'],
+                'module_count': case['source_config']['layout']['num_modules'],
+                'actions': [{'action': action,
+                    'centers': corpus.action_entry(family, action, role=role)['centers'],
+                    'raw_path': corpus.action_entry(family, action, role=role)['raw_case_dir']}
+                    for action in corpus.actions_for_family(family)]})
         return catalog, len(population)
     elif role == 'original_withheld':
         population = original.family_ids('response_holdout')
@@ -426,7 +443,7 @@ def main(argv=None):
     p.add_argument('--device', default='cpu')
     p.add_argument('--split', choices=('train', 'validation'))
     p.add_argument('--calibration-input', type=Path, help='Eligible TRAIN-only original labels and fitted scales JSON')
-    p.add_argument('--board', choices=('fit', 'original_withheld', 'historical_new_withheld'))
+    p.add_argument('--board', choices=('fit', 'original_withheld', 'historical_new_withheld', 'native_seen', 'fresh_layout'))
     p.add_argument('--training-inputs', type=Path, help='Training-only scales for family boards')
     p.add_argument('--output', type=Path, required=True)
     args = p.parse_args(argv)
@@ -435,8 +452,16 @@ def main(argv=None):
     if args.board:
         if args.training_inputs is None:
             p.error('--board requires --training-inputs')
-        if recipe['r16_10_family']['population'] != 150 or int(saved['epoch']) not in ((100, 500, 1000) if args.board == 'fit' else (500, 1000)):
-            raise ValueError('Board is outside authorized TRAIN150 milestone cadence')
+        population = recipe['r16_10_family']['population']
+        epoch = int(saved['epoch'])
+        if population == 150:
+            allowed = args.board in ('fit', 'original_withheld', 'historical_new_withheld') and epoch in ((100, 500, 1000) if args.board == 'fit' else (500, 1000))
+        else:
+            allowed = (population == 600 and epoch == 2000 and
+                       recipe['r16_10_family']['arm'] in ('B0', 'R') and
+                       path.name == 'epoch_2000_model.pt')
+        if not allowed:
+            raise ValueError('Board is outside the authorized milestone cadence')
         payload = family_board(model, provider, recipe, args.board, args.training_inputs, args.output)
         payload.update(checkpoint=str(path), epoch=int(saved['epoch']))
         args.output.parent.mkdir(parents=True, exist_ok=True)

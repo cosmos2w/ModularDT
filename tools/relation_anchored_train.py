@@ -144,7 +144,13 @@ def engine_for(recipe, *, device, execution_horizon=None):
                              and (recipe.get("r16_6_balanced", {}).get("arm") == "M"
                                   or (recipe.get("r16_6_balanced") is None and
                                       (recipe.get("r16_5_warm_fork") is None or r16_5_arm == "PDeltaD"))))
-        if (not (wind_extension or thermal_extension) or type(execution_horizon) is not int
+        family = recipe.get("r16_10_family", {})
+        r16_10_extension = (thermal and family.get("schema") == "thermal_r16_10_family_v1"
+                            and family.get("population") == 600 and family.get("arm") in ("B0", "R")
+                            and policy.get("membership") == "full_train600" and horizon == 2000
+                            and execution_horizon == 3000
+                            and recipe.get("member_routing", {}).get("model", {}).get("access_measure") == "inventory_unit_total")
+        if (not (wind_extension or thermal_extension or r16_10_extension) or type(execution_horizon) is not int
                 or execution_horizon <= horizon or execution_horizon % 100):
             raise ValueError("Unsupported explicit same-lineage horizon extension.")
         horizon = execution_horizon
@@ -181,7 +187,7 @@ def main(argv=None):
     parser.add_argument("--stop-after", type=int)
     parser.add_argument("--resume", help="Same-run checkpoint selector, typically latest")
     parser.add_argument("--extend-horizon", action="store_true",
-                        help="Explicit same-run extension; retain saved recipe and constant optimizer schedule")
+                        help="Explicit same-run extension; retain the saved recipe and optimizer schedule")
     parser.add_argument("--checkpoint", default="latest")
     parser.add_argument("--cuda-memory-fraction", type=float,
                         help="Optional process-local CUDA allocator limit; does not change training populations")
@@ -207,6 +213,11 @@ def main(argv=None):
         source_payload = load_trusted_checkpoint(resolve_checkpoint(args.output, selector), map_location="cpu")
         if source_payload["experiment_identity"]["recipe"] != recipe:
             raise ValueError("The recipe differs from the saved run.")
+        if (args.extend_horizon and recipe.get("r16_10_family") is not None
+                and source_payload["experiment_identity"]["engine_config"]["total_epochs"] == 2000
+                and (int(source_payload["epoch"]) != 2000
+                     or Path(args.resume).name != "epoch_2000_model.pt")):
+            raise ValueError("R16-10 extension requires the literal completed epoch 2000 checkpoint.")
     options = {}
     if source_payload is not None and recipe.get("r16_10_family") is not None:
         options["resume_payload"] = source_payload

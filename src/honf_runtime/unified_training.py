@@ -388,7 +388,16 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                                  and thermal.get("arm") == "P64"
                                  and recipe.get("training", {}).get("membership") == "full_train600"
                                  and before == 100 and after == 500)
-            if (allow_microbatch_change or not (wind_extension or thermal_extension)
+            family = recipe.get("r16_10_family", {})
+            r16_10_extension = (isinstance(recipe.get("dataset"), dict)
+                                and recipe["dataset"].get("name") == "thermal"
+                                and family.get("schema") == "thermal_r16_10_family_v1"
+                                and family.get("population") == 600 and family.get("arm") in ("B0", "R")
+                                and recipe.get("training", {}).get("membership") == "full_train600"
+                                and recipe.get("training", {}).get("local_horizon") == 2000
+                                and recipe.get("member_routing", {}).get("model", {}).get("access_measure") == "inventory_unit_total"
+                                and before == 2000 and after == 3000)
+            if (allow_microbatch_change or not (wind_extension or thermal_extension or r16_10_extension)
                     or type(before) is not int or type(after) is not int
                     or before % 100 or after <= before or after % 100
                     or old["engine_config"].get("checkpoint_epochs") != list(range(100, before + 1, 100))
@@ -398,7 +407,12 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             for group in schedules:
                 schedule = group.get("schedule", {})
                 rate = schedule.get("peak_lr")
-                if (not isinstance(rate, (int, float)) or rate <= 0
+                if r16_10_extension:
+                    if schedule != {"peak_lr": 3e-4, "warmup_start_lr": 3e-4,
+                                    "warmup_epochs": 0, "hold_through_epoch": 1000,
+                                    "total_epochs": 2000, "final_lr": 3e-5}:
+                        raise ValueError(message)
+                elif (not isinstance(rate, (int, float)) or rate <= 0
                         or schedule.get("final_lr") != rate
                         or schedule.get("warmup_start_lr") != rate
                         or schedule.get("warmup_epochs") != 0):
@@ -408,11 +422,13 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             amended["engine_config"]["checkpoint_epochs"] = new["engine_config"]["checkpoint_epochs"]
             if amended != new:
                 raise ValueError(message)
-            return {"kind": ("explicit_thermal_port_horizon_extension" if thermal_extension else
+            return {"kind": ("explicit_r16_10_horizon_extension" if r16_10_extension else
+                             "explicit_thermal_port_horizon_extension" if thermal_extension else
                              "explicit_relation_anchored_wind_horizon_extension"),
                     "previous_horizon": before, "execution_horizon": after,
                     "optimizer_schedule_unchanged": True,
-                    "trajectory_note": "Only the engine horizon and future 100-epoch milestones change; original recipe, constant AdamW schedule, data, sampling and all other identity fields remain unchanged."}
+                    "trajectory_note": ("Only the engine horizon and future 100-epoch milestones change; the original AdamW schedule remains clamped at its epoch-2000 final rate, and recipe, data, sampling and all other identity fields remain unchanged." if r16_10_extension else
+                        "Only the engine horizon and future 100-epoch milestones change; original recipe, constant AdamW schedule, data, sampling and all other identity fields remain unchanged.")}
         if saved.get("workflow") == "spatial_interaction_groups_joint_training_v1":
             if allow_microbatch_change:
                 raise ValueError(message)
