@@ -141,6 +141,22 @@ def weighted_mean(values, weights=None):
     return sum(weight * value for value, weight in zip(values, weights)) / denominator
 
 
+def masked_weighted_mse(error, mask, weights):
+    """Mean squared residual with explicit nonnegative receiver mass."""
+    if not torch.is_tensor(error):
+        raise TypeError('Residual must be a tensor.')
+    mask = torch.as_tensor(mask, device=error.device, dtype=torch.bool)
+    weights = torch.as_tensor(weights, device=error.device, dtype=error.dtype)
+    if mask.shape != error.shape or weights.shape != error.shape:
+        raise ValueError('Residual, mask and receiver weights must align.')
+    if not bool(torch.isfinite(weights).all()) or bool((weights < 0).any()):
+        raise ValueError('Receiver weights must be finite and nonnegative.')
+    active = mask & (weights > 0)
+    if not bool(active.any()) or not bool(torch.isfinite(error[active]).all()):
+        raise ValueError('Weighted support must contain finite residuals with positive mass.')
+    return (error[active].square() * weights[active]).sum() / weights[active].sum()
+
+
 def equal_family_mean(values, family_ids):
     """Average observations within each family, then average families equally."""
     values, family_ids = tuple(values), tuple(family_ids)

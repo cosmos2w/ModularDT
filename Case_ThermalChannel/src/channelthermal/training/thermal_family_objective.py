@@ -102,6 +102,11 @@ class ThermalFamilyObjectiveMixin:
         batches = [pairs[0]['baseline']] + [p['edited'] for p in pairs]
         raws = [pairs[0]['raw_baseline']] + [p['raw_edited'] for p in pairs]
         batches = [self.provider.with_raw_port_targets(b, raw) for b, raw in zip(batches, raws)]
+        measure_name = getattr(self, 'auxiliary_fluid_measure', 'grid')
+        if measure_name not in ('grid', 'catalogue'):
+            raise ValueError('Auxiliary fluid measure must be grid or catalogue.')
+        measure = (self.provider.auxiliary_catalogue_measure(family, batches[0])
+                   if measure_name == 'catalogue' else None)
         predictions, work = [], {}
         prediction_batches = [_stack_family_batches(batches)] if batched else batches
         for batch in prediction_batches:
@@ -119,8 +124,10 @@ class ThermalFamilyObjectiveMixin:
             raise ValueError('Thermal family fitting requires both full and restricted joint views.')
         result = {}
         if 'endpoint' in names:
-            result['endpoint'] = equal_mean(self.provider.endpoint_state_loss(p, b)
-                                            for p, b in zip(predictions, batches))
+            result['endpoint'] = equal_mean(
+                self.provider.endpoint_state_loss(p, b) if measure is None else
+                self.provider.endpoint_state_loss(p, b, auxiliary_measure=measure)
+                for p, b in zip(predictions, batches))
         if names & {'response', 'decision'}:
             # Receiver identities/order and physical controls are checked when
             # the case-owned corpus constructs each native endpoint pair.
@@ -141,8 +148,17 @@ class ThermalFamilyObjectiveMixin:
                         mask = bm & em
                         if not bool(mask.any()):
                             raise ValueError(f'No common support for {name}.')
-                        terms.append(normalized_response_mse(bp, ep, bt, et, mask,
-                            self.response_scales[name], group_dim=-1 if bp.ndim != 2 else None))
+                        if measure is not None and name in FIELD_ROLES[:5]:
+                            scale = self.response_scales[name]
+                            if isinstance(scale, dict):
+                                scale = scale['scale']
+                            scale = float(scale)
+                            if not 0 < scale < float('inf'):
+                                raise ValueError('Response scale must be positive and finite.')
+                            terms.append(measure.mse((ep - bp - et + bt) / scale, mask))
+                        else:
+                            terms.append(normalized_response_mse(bp, ep, bt, et, mask,
+                                self.response_scales[name], group_dim=-1 if bp.ndim != 2 else None))
                         weights.append(float(self.provider.native_weights[name]))
                     field_losses.append(weighted_mean(terms, weights))
                     for index, name in enumerate(('J', 'P')):

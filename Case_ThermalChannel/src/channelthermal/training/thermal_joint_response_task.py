@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from types import MethodType
@@ -25,6 +26,7 @@ from .thermal_family_objective import ThermalFamilyObjectiveMixin
 from .thermal_native_port_task import ThermalNativePortTask
 from .thermal_response_raw import load_raw_endpoint
 from .thermal_state_response_task import FIELD_ROLES, _native_endpoint_batch, _reference_delta_squares
+from .r16_10_corpus import EligibleFamilySchedule
 
 SCHEMA = 'thermal_joint_response_v1'
 FAMILY_SCHEMA = 'thermal_response_families_v1'
@@ -133,6 +135,7 @@ class ThermalFitFamilyCorpus:
             raise ValueError(f'Expected {FAMILY_SCHEMA}.')
         self.path, self.root = str(path), path.parent
         self.cases, self.records, self._actions = {}, {}, {}
+        self._family_cache = None
         training = set(map(str, training_ids))
         for source in manifest.get('cases', ()):
             case = copy.deepcopy(source)
@@ -198,10 +201,25 @@ class ThermalFitFamilyCorpus:
                 validate_thermal_endpoint_config(native_config, case['source_config'],
                     centers=native_config['layout']['centers'])
 
+    @contextmanager
+    def family_context(self, family):
+        if self._family_cache is not None or family not in self.cases:
+            raise ValueError('Family input cache requires one declared, non-nested family.')
+        self._family_cache = {'family': family}
+        try:
+            yield
+        finally:
+            self._family_cache = None
+
     def pair(self, provider, family, action):
         from ..data.datasets import _local_disk_query_points
         case, row = self.cases[family], self.records[(family, action)]
-        baseline = load_raw_endpoint(case['source_case_dir'])
+        cache = self._family_cache if self._family_cache is not None and self._family_cache['family'] == family else None
+        baseline = cache.get('baseline') if cache is not None else None
+        if baseline is None:
+            baseline = load_raw_endpoint(case['source_case_dir'])
+            if cache is not None:
+                cache['baseline'] = baseline
         edited = load_raw_endpoint(row['raw_case_dir'])
         config = case['source_config']
         self._verify_saved(case, config, baseline['config'], config['layout']['centers'])
@@ -209,7 +227,11 @@ class ThermalFitFamilyCorpus:
         if (not np.array_equal(baseline['material_mask'], edited['material_mask'])
                 or baseline['field'].shape != edited['field'].shape):
             raise ValueError('Physical endpoints do not share the ordered native receiver catalogue.')
-        original = provider._load_native_cases([family])[0]
+        original = cache.get('original') if cache is not None else None
+        if original is None:
+            original = provider._load_native_cases([family])[0]
+            if cache is not None:
+                cache['original'] = original
         count = int(config['layout']['num_modules'])
         if (not np.array_equal(np.asarray(original['structure']['module_centers'][:count]),
                                np.asarray(config['layout']['centers'], dtype=np.float32))
@@ -218,7 +240,11 @@ class ThermalFitFamilyCorpus:
                 or not np.array_equal(np.asarray(original['module_internal_query_points']),
                                       _local_disk_query_points(baseline['material_mask']))):
             raise ValueError('FIT baseline differs from the native TRAIN member or receiver identity.')
-        base_batch = _native_endpoint_batch(provider, original, baseline, 'baseline')
+        base_batch = cache.get('base_batch') if cache is not None else None
+        if base_batch is None:
+            base_batch = _native_endpoint_batch(provider, original, baseline, 'baseline')
+            if cache is not None:
+                cache['base_batch'] = base_batch
         edit_batch = _native_endpoint_batch(provider, original, edited, action)
         if not torch.equal(base_batch.receivers.heat, edit_batch.receivers.heat):
             raise ValueError('A response edit changed the prescribed heat controls.')
@@ -247,6 +273,30 @@ class ThermalFitFamilyObjective(ThermalFamilyObjectiveMixin):
     def label(self, source, family, action):
         self.actions(source, family)
         return self.corpus.physical_delta(family, action)
+
+
+class ThermalPairedFitFamilyObjective(ThermalFitFamilyObjective):
+    """Portable manifest with explicit, separately scheduled FIT sources."""
+
+    def actions(self, source, family):
+        if family not in self.schedule.families.get(source, ()):
+            raise ValueError('Family is outside its declared eligible FIT source.')
+        actions = self.corpus.actions(family)
+        if len(actions) != 4:
+            raise ValueError('Paired FIT families require exactly four actions.')
+        return actions
+
+    def pair(self, source, family, action):
+        self.actions(source, family)
+        return self.corpus.pair(self.provider, family, action)
+
+    def label(self, source, family, action):
+        self.actions(source, family)
+        return self.corpus.physical_delta(family, action)
+
+    def family_components(self, model, source, family, **kwargs):
+        with self.corpus.family_context(family):
+            return super().family_components(model, source, family, **kwargs)
 
 
 def _fit_response_scales(provider, corpus, floors):
@@ -278,6 +328,48 @@ def _norm(parameters, loss=None):
     else:
         gradients = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
     return math.sqrt(sum(float(g.detach().double().square().sum()) for g in gradients if g is not None))
+
+
+def calibrate_paired_response(model, provider, *, epoch, native_ids, fit_families):
+    """Measure grid coefficients and catalogue gradients on fixed TRAIN panels.
+
+    The caller chooses the declared input-only panels and persists the receipt.
+    No optimizer update, parameter, gradient, mode or random state is retained.
+    """
+    from .r16_10_diagnostics import gradient_diagnostics, preserved_state
+    objective = provider.family_objective
+    native, panel = tuple(map(str, native_ids)), tuple(tuple(row) for row in fit_families)
+    if (epoch != 10 or objective.auxiliary_fluid_measure != 'grid' or len(native) != 15
+            or len(set(native)) != 15 or not set(native).issubset(provider.training_case_ids)
+            or len(panel) != 4 or len(set(panel)) != 4
+            or any(f not in objective.schedule.families.get(s, ()) for s, f in panel)):
+        raise ValueError('Paired calibration requires epoch-10 grid and valid TRAIN15/FIT4 panels.')
+    def native_loss():
+        for batch in provider.native_evaluation_batches(split='train', case_keys=native, microbatch_size=1):
+            prediction, _ = provider.predict_native(model, batch.scene_inputs, batch.receivers,
+                                                     model.architecture, 'joint', epoch=epoch)
+            yield provider.endpoint_state_loss(prediction, batch) / len(native)
+    def family_loss(component, measure):
+        def pieces():
+            objective.auxiliary_fluid_measure = measure
+            for source, family in panel:
+                values, _ = objective.family_components(model, source, family, components=('endpoint', 'response'))
+                yield values[component] / len(panel)
+        return pieces
+    losses = {'native': native_loss, **{f'{measure}_{name}': family_loss(name, measure)
+              for measure in ('grid', 'catalogue') for name in ('endpoint', 'response')}}
+    try:
+        with preserved_state(model):
+            model.train()
+            result = gradient_diagnostics(model, losses, require_nonzero=True)
+    finally:
+        objective.auxiliary_fluid_measure = 'grid'
+    norms = result['groups']['global']['norms']
+    return {'epoch': epoch, 'measure': 'grid', 'native_case_ids': list(native),
+            'fit_families': [list(row) for row in panel], 'response_scales': dict(objective.response_scales),
+            'gradient_diagnostics': result,
+            'coefficients': {'endpoint': .25 * norms['native'] / norms['grid_endpoint'],
+                             'response': .10 * norms['native'] / norms['grid_response']}}
 
 
 def _attach_response(provider, objective, config, *, count, seed, restored_calibration=None,
@@ -392,6 +484,131 @@ def _attach_response(provider, objective, config, *, count, seed, restored_calib
     return provider
 
 
+def _attach_paired_response(provider, objective, config, spec, restored_state=None):
+    """Keep calibration pending until the common measured grid receipt exists."""
+    sources = {name: [family for family, row in objective.corpus.cases.items()
+                      if row.get('source') == name] for name in ('original', 'new')}
+    if tuple(map(len, sources.values())) != (15, 25) or sum(map(len, sources.values())) != len(objective.corpus.cases):
+        raise ValueError('TRAIN150 requires exactly 15 original and 25 new FIT families.')
+    objective.schedule = EligibleFamilySchedule(sources['original'], sources['new'], provider.training_case_ids, seed=0)
+    if any(len(objective.actions(source, family)) != 4 for source in sources for family in sources[source]):
+        raise ValueError('Every family requires four edits.')
+    counts = {'original': 1, 'new': 2}
+    calibration_path = Path(spec['calibration_path']).expanduser()
+    candidate = spec['qualified_tile']
+    if type(candidate) is not int or candidate not in (128, 256, 512):
+        raise ValueError('Qualified tile must be 128, 256 or 512.')
+    decision_path = Path(spec['executor_decision_path']).expanduser()
+    state = {'calibration': None, 'executor': {'active_tile': None, 'decision': None}}
+    provider.family_objective = objective
+    provider.training_history_in_logs = True
+    provider.auxiliary_loss_names = ('family/endpoint', 'family/response')
+    previous_metadata = provider.loss_metadata
+    def loss_metadata(self):
+        result = dict(previous_metadata())
+        for name in ('endpoint', 'response'):
+            result['family/' + name] = {'panel': 'physics', 'label': 'FIT family ' + name,
+                'unit': 'scaled squared error', 'formula': 'equal FIT family and action mean',
+                'weight': 'common grid calibration and epoch ramp'}
+        return result
+    provider.loss_metadata = MethodType(loss_metadata, provider)
+    def load_calibration():
+        receipt = json.loads(calibration_path.read_text())
+        native = tuple(map(str, receipt.get('native_case_ids', ())))
+        fit = tuple((str(row[0]), str(row[1])) for row in receipt.get('fit_families', ()))
+        def panel(values):
+            values = tuple(values)
+            selected = set(np.random.default_rng(20261108).choice(len(values),
+                           size=max(1, int(np.floor(.1 * len(values) + .5))), replace=False).tolist())
+            return tuple(value for index, value in enumerate(values) if index in selected)
+        population = tuple((source, family) for source in ('original', 'new')
+                           for family in objective.schedule.families[source])
+        if (len(native) != 15 or len(set(native)) != 15 or not set(native).issubset(provider.training_case_ids)
+                or len(fit) != 4 or len(set(fit)) != 4
+                or any(f not in objective.schedule.families.get(s, ()) for s, f in fit)
+                or native != panel(provider.training_case_ids) or fit != panel(population)
+                or receipt.get('measure') != 'grid' or receipt.get('epoch') != 10
+                or _scales(receipt.get('response_scales')) != objective.response_scales):
+            raise ValueError('Common calibration must identify the TRAIN15/FIT4 grid panel and matching scales.')
+        coeffs = receipt.get('coefficients', {})
+        if set(coeffs) != {'endpoint', 'response'} or any(
+                not math.isfinite(float(v)) or float(v) <= 0 for v in coeffs.values()):
+            raise ValueError('Common calibration requires positive measured endpoint and response coefficients.')
+        return copy.deepcopy(receipt)
+    def auxiliary_update_terms(self, model, *, epoch, update_index, update_count):
+        ramp = config.ramp(epoch)
+        if not ramp:
+            return
+        if state['calibration'] is None:
+            state['calibration'] = load_calibration()
+        selected = objective.schedule.epoch(epoch, counts)
+        slots = np.linspace(0, update_count - 1, len(selected), dtype=int)
+        for (source, family), slot in zip(selected, slots):
+            if int(slot) != update_index:
+                continue
+            components, work = objective.family_components(model, source, family, components=('endpoint', 'response'))
+            terms = {'family/' + name: LossTerm(components[name], 1., ramp * float(state['calibration']['coefficients'][name])
+                     * update_count / len(selected)) for name in ('endpoint', 'response')}
+            work.update(family_presentations=1, edited_presentations=4)
+            yield terms, work
+    provider.auxiliary_update_terms = MethodType(auxiliary_update_terms, provider)
+    provider.state_response_metadata = MethodType(lambda self: {'calibration': copy.deepcopy(state['calibration'])}, provider)
+    provider.response_epoch_family_ids = MethodType(
+        lambda self, epoch: [f'{source}:{family}' for source, family in objective.schedule.current]
+        if epoch > 10 else [], provider)
+    def begin_training_epoch(self, model, epoch):
+        if epoch <= 50:
+            tile = candidate
+        elif epoch <= 70:
+            tile = 128 if epoch <= 55 or epoch >= 66 else candidate
+        else:
+            decision = json.loads(decision_path.read_text())
+            if decision.get('qualified_tile') != candidate or decision.get('selected_tile') not in (128, candidate):
+                raise ValueError('Executor decision does not match the qualified ABBA schedule.')
+            if state['executor']['decision'] is not None and state['executor']['decision'] != decision:
+                raise ValueError('Executor decision differs from the saved paired state.')
+            state['executor']['decision'] = decision
+            tile = decision['selected_tile']
+        core = getattr(model, 'core', model)
+        if not hasattr(core, 'query_tile_size'):
+            raise ValueError('Paired executor requires the anchored query tile.')
+        core.query_tile_size = tile
+        state['executor']['active_tile'] = tile
+        return {'active_tile': tile, 'qualified_tile': candidate,
+                'decision': copy.deepcopy(state['executor']['decision'])}
+    provider.begin_training_epoch = MethodType(begin_training_epoch, provider)
+    old_state = getattr(provider, 'training_state_dict', lambda: {})
+    old_load = getattr(provider, 'load_training_state_dict', lambda saved: None)
+    def training_state_dict(self):
+        return {'native': old_state(), 'thermal_joint_response': {'calibration': copy.deepcopy(state['calibration']),
+                'schedule': objective.schedule.state_dict(), 'executor': copy.deepcopy(state['executor'])}}
+    def load_training_state_dict(self, saved):
+        old_load(saved['native'])
+        paired = saved['thermal_joint_response']
+        objective.schedule.load_state_dict(paired['schedule'])
+        state['calibration'] = copy.deepcopy(paired['calibration'])
+        state['executor'] = copy.deepcopy(paired['executor'])
+        if state['calibration'] is not None and state['calibration'] != load_calibration():
+            raise ValueError('Common calibration differs from the saved paired state.')
+    provider.training_state_dict = MethodType(training_state_dict, provider)
+    provider.load_training_state_dict = MethodType(load_training_state_dict, provider)
+    previous_identity = provider.identity_payload
+    def identity_payload(self):
+        result = dict(previous_identity())
+        result['native_only_training'] = False
+        result['response_training_family_ids'] = list(objective.corpus.family_ids())
+        result['response_supervision'] = 'explicit selected TRAIN FIT families'
+        result['objective'].update(response_training_families=list(objective.corpus.family_ids()), response_fit=True)
+        result['thermal_joint_response'] = {'schema': SCHEMA, 'fit_manifest': objective.corpus.path,
+            'families': {s: list(ids) for s, ids in objective.schedule.families.items()},
+            'counts': counts, 'response_scales': dict(objective.response_scales),
+            'measure': objective.auxiliary_fluid_measure, 'calibration_path': str(calibration_path), 'tau': objective.tau,
+            'qualified_tile': candidate, 'executor_decision_path': str(decision_path)}
+        return result
+    provider.identity_payload = MethodType(identity_payload, provider)
+    return provider
+
+
 def build_thermal_joint_response_task(recipe, *, arm=None, device='cpu', resume_payload=None):
     """Build the clean native task and attach explicitly labeled FIT response when enabled."""
     _check_legacy_selectors(recipe)
@@ -447,14 +664,34 @@ def build_thermal_joint_response_task(recipe, *, arm=None, device='cpu', resume_
         scales, external_coefficients = _scales(scale_spec.get('values')), None
     elif mode == 'fit':
         saved_scales = identity.get('thermal_joint_response', {}).get('response_scales')
+        floors = scale_spec.get('floors')
+        if spec.get('paired') is not None and scale_spec.get('repeatability') is not None:
+            repeatability = scale_spec['repeatability']
+            functional = scale_spec.get('functional_floors', {})
+            if set(repeatability) != set(FIELD_ROLES) or set(functional) != set(FUNCTIONALS):
+                raise ValueError('Paired scale fitting needs every field repeatability and both functional floors.')
+            state_scales = {name: float(model.field_std[i]) for i, name in enumerate(FIELD_ROLES[:5])}
+            state_scales.update({'temperature/surface': float(model.interface_target_std[0]),
+                                 'temperature/material': float(model.internal_temperature_std[0]),
+                                 'q_proxy': float(model.interface_target_std[1])})
+            floors = {name: max(.01 * state_scales[name], float(repeatability[name])) for name in FIELD_ROLES}
+            floors.update(functional)
         scales = (_scales(saved_scales) if saved_scales is not None else
-                  _fit_response_scales(provider, corpus, scale_spec.get('floors')))
+                  _fit_response_scales(provider, corpus, floors))
         external_coefficients = None
     else:
         raise ValueError('Response scales must use fit, explicit, or calibration mode.')
-    objective = ThermalFitFamilyObjective(provider, corpus, scales, config, spec.get('tau', .4149511814117432))
+    paired = spec.get('paired')
+    objective_type = ThermalPairedFitFamilyObjective if paired is not None else ThermalFitFamilyObjective
+    objective = objective_type(provider, corpus, scales, config, spec.get('tau', .4149511814117432))
     saved_state = (resume_payload or {}).get('provider_training_state', {}).get('thermal_joint_response', {})
-    _attach_response(provider, objective, config, count=spec.get('families_per_epoch', 4),
+    if paired is not None:
+        if config.warmup_epochs != 10 or config.ramp_epochs != 40 or paired.get('measure') not in ('grid', 'catalogue'):
+            raise ValueError('Paired TRAIN150 needs the declared ramp and grid or catalogue measure.')
+        objective.auxiliary_fluid_measure = paired['measure']
+        _attach_paired_response(provider, objective, config, paired, restored_state=saved_state)
+    else:
+        _attach_response(provider, objective, config, count=spec.get('families_per_epoch', 4),
                      seed=spec.get('family_seed', 0), restored_calibration=saved_state.get('calibration'),
                      external_calibration=external_coefficients)
     if identity and identity.get('thermal_joint_response') != provider.identity_payload()['thermal_joint_response']:

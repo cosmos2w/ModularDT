@@ -4110,6 +4110,9 @@ class TrainingEngine:
         output.mkdir(parents=True, exist_ok=True)
         layout = RunLayout(output)
         layout.ensure()
+        history_in_logs = bool(getattr(provider, "training_history_in_logs", False))
+        history_path = layout.write_path("history.json", category="logs") if history_in_logs else layout.write_path("history.json")
+        curve_path = layout.write_path("loss_curves.png", category="logs") if history_in_logs else layout.write_path("loss_curves.png")
         if external_state_continuation and resume_checkpoint is None:
             raise ValueError("External full-state continuation requires an explicit saved checkpoint.")
         if resume_checkpoint is None:
@@ -4124,7 +4127,7 @@ class TrainingEngine:
             has_epoch_checkpoints = any((output / "checkpoints").glob("epoch_*_model.pt")) or any(
                 output.glob("epoch_*_model.pt")
             )
-            if any(layout.read_path(name).exists() for name in markers) or has_epoch_checkpoints:
+            if any(layout.read_path(name).exists() for name in markers) or history_path.exists() or has_epoch_checkpoints:
                 raise ValueError("A new fit requires a fresh run directory; use exact resume for existing history.")
         elif external_state_continuation:
             if (branch_from_checkpoint is not None or not allow_horizon_extension
@@ -5320,6 +5323,10 @@ class TrainingEngine:
         previous_phase = self.config.stage_for_epoch(start_epoch - 1) if start_epoch > 1 else None
         try:
             for epoch in range(start_epoch, int(stop_after) + 1):
+                epoch_executor = None
+                epoch_executor_hook = getattr(provider, "begin_training_epoch", None)
+                if callable(epoch_executor_hook):
+                    epoch_executor = epoch_executor_hook(model, epoch)
                 # Callbacks (preparation, validation, or a prior calibration hook)
                 # may leave the module in evaluation mode. The engine owns the
                 # mode for every optimization epoch.
@@ -5530,6 +5537,8 @@ class TrainingEngine:
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                     "case_order_sha256": order_hash,
                 }
+                if epoch_executor is not None:
+                    row["executor"] = copy.deepcopy(epoch_executor)
                 diagnostic_sums = _sum_mapping([item["diagnostics"] for item in update_rows])
                 if diagnostic_sums:
                     # Updates without auxiliary exposure contribute zero: each
@@ -5897,7 +5906,7 @@ class TrainingEngine:
                         payload["resume_amendments"] = resume_amendments
                     if branch_parent is not None:
                         payload["branch_parent"] = branch_parent
-                    _write_training_history(layout.write_path("history.json"), history, compact=compact_history)
+                    _write_training_history(history_path, history, compact=compact_history)
                     if milestone:
                         _atomic_torch_save(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
                     validation_sidecar_due = (
@@ -5928,7 +5937,7 @@ class TrainingEngine:
                     _atomic_torch_save(layout.write_path("latest_model.pt"), payload)
                     latest_epoch = epoch
                 if curve_due:
-                    _write_training_history(layout.write_path("history.json"), history, compact=compact_history)
+                    _write_training_history(history_path, history, compact=compact_history)
                     curve_identity = provider_identity
                     if provider_identity.get("state_response", {}).get("enabled", False):
                         metadata_reader = getattr(provider, "state_response_metadata", None)
@@ -5939,7 +5948,7 @@ class TrainingEngine:
                     try:
                         _render_loss_curves(
                             history,
-                            layout.write_path("loss_curves.png").parent,
+                            curve_path.parent,
                             self.selection.field_metric,
                             **({"loss_metadata": provider.loss_metadata()}
                                if callable(getattr(provider, "loss_metadata", None)) else {}),

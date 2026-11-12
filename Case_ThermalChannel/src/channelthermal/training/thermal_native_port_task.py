@@ -8,8 +8,9 @@ import torch
 
 from honf_forward_core.read_execution import resolve_read_mode
 from honf_runtime.unified_training import LossTerm, OptimizerGroupSpec, ScheduleSpec
+from honf_runtime.state_response import masked_weighted_mse
 
-from ..native_observations import interpolate_native
+from ..native_observations import interpolate_native, native_cell_center_stencil
 from .content_hypergraph_task import ThermalContentPredictions, ThermalContentTargets
 from .joint_member_routing_task import ThermalJointPairPredictions
 from .r13_8_anchored_task import ARM_DETAIL, ThermalR138AnchoredMemberRoutingTask
@@ -19,6 +20,26 @@ from .r13_8_anchored_task import ARM_DETAIL, ThermalR138AnchoredMemberRoutingTas
 class NativePortTargets(ThermalContentTargets):
     outside_temperature: torch.Tensor | None = None
     outside_valid: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
+class AuxiliaryFluidMeasure:
+    """Baseline catalogue extraction, separate from endpoint physical support."""
+    stencil: object
+    weights: torch.Tensor
+
+    def mse(self, residual, mask):
+        if residual.ndim != 2 or mask.shape != residual.shape:
+            raise ValueError('Fluid residual and physical mask must be aligned [1,N] grids.')
+        indices = self.stencil.indices
+        if indices.shape[0] != residual.shape[0]:
+            raise ValueError('Catalogue and grid batch dimensions differ.')
+        batch = torch.arange(residual.shape[0], device=residual.device)[:, None, None]
+        corners_valid = mask[batch, indices] | (self.stencil.weights == 0)
+        valid = self.stencil.valid & corners_valid.all(-1)
+        safe = torch.where(mask, residual, torch.zeros_like(residual))
+        extracted = interpolate_native(safe[..., None], self.stencil)[..., 0]
+        return masked_weighted_mse(extracted, valid, self.weights)
 
 
 def _module_mean(error, mask):
@@ -41,6 +62,28 @@ class ThermalNativePortTask(ThermalR138AnchoredMemberRoutingTask):
         else:
             super()._validate_initialization(initialization)
 
+    def auxiliary_catalogue_measure(self, family, baseline):
+        """Read all saved training receivers, preserving their order and mass."""
+        import h5py
+        family = str(family)
+        if family not in self.training_case_ids:
+            raise ValueError('Auxiliary catalogue must belong to the native TRAIN membership.')
+        with h5py.File(self.data_path, 'r') as h5:
+            group = h5['cases'][family]
+            rows = np.asarray(group['sampled_points'][...])
+            weights = (np.asarray(group['sampled_point_weights'][...])
+                       if 'sampled_point_weights' in group else np.ones(len(rows)))
+        if rows.ndim != 2 or rows.shape[1] < 2 or weights.shape != (len(rows),) or not len(rows):
+            raise ValueError('Malformed baseline native catalogue.')
+        device = baseline.receivers.fluid_xy.device
+        xy = torch.as_tensor(rows[None, :, :2], device=device)
+        if not xy.is_floating_point():
+            xy = xy.float()
+        structure = baseline.scene_inputs.structure
+        lengths = torch.stack((structure['domain_length_x'].reshape(-1),
+                               structure['domain_length_y'].reshape(-1)), -1).to(xy)
+        stencil = native_cell_center_stencil(xy, lengths, nx=self.adapter.nx, ny=self.adapter.ny)
+        return AuxiliaryFluidMeasure(stencil, torch.as_tensor(weights[None], device=device))
     def configure_native(self):
         options = self.recipe.get('thermal_joint_response', {}).get('native_ports', {})
         count = options.get('angle_count', 64)
@@ -178,11 +221,21 @@ class ThermalNativePortTask(ThermalR138AnchoredMemberRoutingTask):
             pred.work = work
         return pred, {'work': work}
 
-    def _native_terms(self, predictions, targets):
+    def _native_terms(self, predictions, targets, auxiliary_measure=None):
         modes = (predictions.full, predictions.restricted) if isinstance(predictions, ThermalJointPairPredictions) else (predictions,)
         all_roles, outside_losses = [], []
         for prediction in modes:
-            all_roles.append(self._role_losses(prediction, targets))
+            roles = self._role_losses(prediction, targets)
+            if auxiliary_measure is not None:
+                output, prepared = prediction.native_main, prediction.native_prepared
+                field = output['pred_field']
+                target = targets.field_targets.to(device=field.device)
+                support = targets.point_weights.bool() & prepared.stencils['fluid'].valid.reshape(targets.point_weights.shape)
+                for i, name in enumerate(('flow/u', 'flow/v', 'flow/p', 'flow/omega', 'temperature/fluid')):
+                    mask = support & torch.isfinite(target[..., i])
+                    residual = (field[..., i] - torch.nan_to_num(target[..., i])) / self.model.field_std[i]
+                    roles[name] = auxiliary_measure.mse(residual, mask).reshape(1)
+            all_roles.append(roles)
             prepared = prediction.native_prepared
             value = prediction.native_main['pred_outside_temperature']
             target = targets.outside_temperature.to(value)
@@ -195,8 +248,8 @@ class ThermalNativePortTask(ThermalR138AnchoredMemberRoutingTask):
         terms['port/outside_temperature'] = LossTerm(sum(v.sum() for v in outside_losses) / len(modes), count, self.outside_temperature_weight)
         return terms
 
-    def endpoint_state_loss(self, prediction, batch):
-        terms = self._native_terms(prediction, batch.targets)
+    def endpoint_state_loss(self, prediction, batch, auxiliary_measure=None):
+        terms = self._native_terms(prediction, batch.targets, auxiliary_measure)
         return sum(t.numerator / t.denominator * t.weight for t in terms.values())
 
     def loss_terms(self, predictions, targets, phase, auxiliary_state):

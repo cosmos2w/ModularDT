@@ -112,6 +112,20 @@ def _response_validation_ids(recipe, candidates):
     return selected
 
 
+def _response_validation_population(recipe, catalog, default):
+    """Optionally select the existing canonical VAL89 without changing TRAIN."""
+    population = recipe.get('evaluation', {}).get('validation_population')
+    if population is None:
+        return default
+    if population != 'canonical_VAL89' or recipe.get('training', {}).get('membership') != 'fixed25_train150_dev22':
+        raise ValueError('Unsupported state-response validation population.')
+    candidates = tuple(str(row['case_id']) for row in catalog
+                       if row['split'] == 'test' and str(row['case_id']) != '0273')
+    if len(candidates) != 89:
+        raise ValueError('Expected the existing canonical VAL89 catalogue.')
+    return candidates
+
+
 def _response_catalog_binding(recipe):
     """Use native TRAIN and a declared validation split without a fixed25 manifest."""
     from honf_runtime.compat import resolve_demo_path
@@ -184,6 +198,7 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
         train_ids, validation_ids = _training_membership(recipe, catalog, manifest)
         validation_split = "test"
     if recipe.get("training_profile") == "state_response":
+        validation_ids = _response_validation_population(recipe, catalog, validation_ids)
         validation_ids = _response_validation_ids(recipe, validation_ids)
     if saved_adapter_state is None:
         normalizer = fit_global_normalizer(data_path, train_ids)
