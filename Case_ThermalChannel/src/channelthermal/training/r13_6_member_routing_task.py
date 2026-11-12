@@ -117,7 +117,8 @@ def _response_validation_population(recipe, catalog, default):
     population = recipe.get('evaluation', {}).get('validation_population')
     if population is None:
         return default
-    if population != 'canonical_VAL89' or recipe.get('training', {}).get('membership') != 'fixed25_train150_dev22':
+    if (population != 'canonical_VAL89' or recipe.get('training', {}).get('membership') not in
+            ('fixed25_train150_dev22', 'full_train600', 'scratch_train600_exposed_val89')):
         raise ValueError('Unsupported state-response validation population.')
     candidates = tuple(str(row['case_id']) for row in catalog
                        if row['split'] == 'test' and str(row['case_id']) != '0273')

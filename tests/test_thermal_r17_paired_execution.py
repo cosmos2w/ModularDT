@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 import torch
 
-from channelthermal.training.thermal_joint_response_task import _attach_paired_response, calibrate_paired_response
+from channelthermal.training.thermal_joint_response_task import (
+    _attach_paired_response, calibrate_paired_response, ThermalPairedFormalNativeTask,
+)
 from channelthermal.training.r13_6_member_routing_task import _response_validation_population
 from honf_runtime.state_response import ResponseObjectiveConfig
 
@@ -45,7 +47,13 @@ def test_pending_calibration_source_cursors_and_executor_resume(tmp_path):
     spec = {'calibration_path': str(path), 'qualified_tile': 512, 'executor_decision_path': str(decision)}
     provider, objective = Provider(), Objective()
     _attach_paired_response(provider, objective, ResponseObjectiveConfig(), spec)
-    assert provider.identity_payload()['thermal_joint_response']['counts'] == {'original': 1, 'new': 2}
+    identity = provider.identity_payload()['thermal_joint_response']
+    assert identity == {'schema': 'thermal_joint_response_v1', 'fit_manifest': 'manifest.json',
+        'families': {'original': list(objective.schedule.families['original']),
+                     'new': list(objective.schedule.families['new'])},
+        'counts': {'original': 1, 'new': 2}, 'response_scales': objective.response_scales,
+        'measure': 'grid', 'calibration_path': str(path), 'tau': .4,
+        'qualified_tile': 512, 'executor_decision_path': str(decision)}
     model = torch.nn.Linear(1, 1)
     model.core = SimpleNamespace(query_tile_size=512)
     assert provider.begin_training_epoch(model, 51)['active_tile'] == 128
@@ -92,6 +100,8 @@ def test_canonical_validation_population_is_explicit_and_keeps_default():
     recipe = {'training': {'membership': 'fixed25_train150_dev22'},
               'evaluation': {'validation_population': 'canonical_VAL89'}}
     assert len(_response_validation_population(recipe, catalog, ('old',))) == 89
+    recipe['training']['membership'] = 'full_train600'
+    assert len(_response_validation_population(recipe, catalog, ('old',))) == 89
 
 
 def test_calibration_preserves_rng_gradients_and_unattached_optimizer():
@@ -134,3 +144,70 @@ def test_calibration_preserves_rng_gradients_and_unattached_optimizer():
     for key, saved in before_opt['state'].items():
         assert all(torch.equal(value, optimizer.state_dict()['state'][key][name])
                    for name, value in saved.items())
+
+
+def test_formal_sources_exposure_and_exact_resume(tmp_path):
+    provider = Provider()
+    provider.training_case_ids = tuple(f'{i:04}' for i in range(600))
+    objective = Objective()
+    objective.corpus.cases = {f'{i:04}': {'source': 'original' if i < 48 else 'new'} for i in range(144)}
+    spec = {'calibration_path': str(tmp_path/'calibration.json'), 'qualified_tile': 512,
+            'executor_decision_path': str(tmp_path/'decision.json')}
+    _attach_paired_response(provider, objective, ResponseObjectiveConfig(), spec)
+    assert provider.identity_payload()['thermal_joint_response']['counts'] == {'original': 4, 'new': 8}
+    model = torch.nn.Linear(1, 1)
+    model.core = SimpleNamespace(query_tile_size=512)
+    assert provider.begin_training_epoch(model, 51)['active_tile'] == 512
+    assert provider.begin_training_epoch(model, 71)['active_tile'] == 512
+    def panel(values):
+        selected = set(np.random.default_rng(20261108).choice(len(values), int(.1*len(values)+.5), replace=False))
+        return [value for i, value in enumerate(values) if i in selected]
+    families = [(s, f) for s in ('original', 'new') for f in objective.schedule.families[s]]
+    receipt = {'native_case_ids': panel(provider.training_case_ids), 'fit_families': panel(families),
+               'epoch': 10, 'measure': 'grid', 'response_scales': objective.response_scales,
+               'coefficients': {'endpoint': .2, 'response': .1}}
+    assert len(receipt['native_case_ids']) == 60 and len(receipt['fit_families']) == 14
+    (tmp_path/'calibration.json').write_text(json.dumps(receipt))
+    presentations = [item for slot in range(13) for item in
+                     provider.auxiliary_update_terms(model, epoch=11, update_index=slot, update_count=13)]
+    assert len(presentations) == 12
+    saved = provider.training_state_dict()
+    restored, other = Provider(), Objective()
+    restored.training_case_ids = provider.training_case_ids
+    other.corpus.cases = copy.deepcopy(objective.corpus.cases)
+    _attach_paired_response(restored, other, ResponseObjectiveConfig(), spec)
+    restored.load_training_state_dict(saved)
+    assert other.schedule.cursor == {'original': 4, 'new': 8}
+    assert restored.identity_payload() == provider.identity_payload()
+
+
+def test_formal_calibration_panel_and_learning_rate_schedule():
+    model = torch.nn.Linear(1, 1)
+    model.architecture = 'joint'
+    with torch.no_grad():
+        model.weight.fill_(1.)
+        model.bias.fill_(1.)
+    objective = Objective()
+    objective.schedule = SimpleNamespace(families={'original': tuple(f'{i:04}' for i in range(48)),
+                                                   'new': tuple(f'{i:04}' for i in range(48, 144))})
+    def family_components(model, source, family, components):
+        factor = 2. if objective.auxiliary_fluid_measure == 'catalogue' else 1.
+        return {'endpoint': factor * (model.weight + 2).square().sum(),
+                'response': factor * (model.bias + 3).square().sum()}, {}
+    objective.family_components = family_components
+    provider = Provider()
+    provider.training_case_ids = tuple(f'{i:04}' for i in range(600))
+    provider.family_objective = objective
+    batch = SimpleNamespace(scene_inputs=None, receivers=None)
+    provider.native_evaluation_batches = lambda **kw: (batch for _ in kw['case_keys'])
+    provider.predict_native = lambda model, *a, **kw: (model(torch.ones(1, 1)), {})
+    provider.endpoint_state_loss = lambda prediction, batch: (prediction + 4).square().sum()
+    panel = [('original', f'{i:04}') for i in range(4)] + [('new', f'{i:04}') for i in range(48, 58)]
+    receipt = calibrate_paired_response(model, provider, epoch=10,
+                                        native_ids=provider.training_case_ids[:60], fit_families=panel)
+    assert receipt['coefficients']['endpoint'] == pytest.approx(.25 * np.sqrt(288) / 6)
+    assert receipt['coefficients']['response'] == pytest.approx(.10 * np.sqrt(288) / 8)
+    task = object.__new__(ThermalPairedFormalNativeTask)
+    task.recipe = {'optimizer': {'lr': 3e-4}, 'training': {'optimizer_schedule_horizon': 2000}}
+    assert task._schedule_payload() == {'peak_lr': 3e-4, 'warmup_start_lr': 3e-4, 'warmup_epochs': 0,
+                                        'hold_through_epoch': 1000, 'total_epochs': 2000, 'final_lr': 3e-5}

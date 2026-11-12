@@ -299,6 +299,16 @@ class ThermalPairedFitFamilyObjective(ThermalFitFamilyObjective):
             return super().family_components(model, source, family, **kwargs)
 
 
+class ThermalPairedFormalNativeTask(ThermalNativePortTask):
+    """Full-population paired recipe: hold then cosine decay through 2000 epochs."""
+    def _schedule_payload(self):
+        lr = float(self.recipe['optimizer']['lr'])
+        return {'peak_lr': lr, 'warmup_start_lr': lr, 'warmup_epochs': 0,
+                'hold_through_epoch': 1000,
+                'total_epochs': int(self.recipe['training']['optimizer_schedule_horizon']),
+                'final_lr': float(self.recipe['optimizer'].get('final_lr', 3e-5))}
+
+
 def _fit_response_scales(provider, corpus, floors):
     floors = _scales(floors)
     all_family = {name: [] for name in floors}
@@ -330,6 +340,15 @@ def _norm(parameters, loss=None):
     return math.sqrt(sum(float(g.detach().double().square().sum()) for g in gradients if g is not None))
 
 
+def _paired_population(families):
+    sizes = tuple(len(families[name]) for name in ('original', 'new'))
+    if sizes == (15, 25):
+        return {'original': 1, 'new': 2}, 15, 4
+    if sizes == (48, 96):
+        return {'original': 4, 'new': 8}, 60, 14
+    raise ValueError('Paired fitting requires the eligible TRAIN150 or TRAIN600 FIT families.')
+
+
 def calibrate_paired_response(model, provider, *, epoch, native_ids, fit_families):
     """Measure grid coefficients and catalogue gradients on fixed TRAIN panels.
 
@@ -339,11 +358,12 @@ def calibrate_paired_response(model, provider, *, epoch, native_ids, fit_familie
     from .r16_10_diagnostics import gradient_diagnostics, preserved_state
     objective = provider.family_objective
     native, panel = tuple(map(str, native_ids)), tuple(tuple(row) for row in fit_families)
-    if (epoch != 10 or objective.auxiliary_fluid_measure != 'grid' or len(native) != 15
-            or len(set(native)) != 15 or not set(native).issubset(provider.training_case_ids)
-            or len(panel) != 4 or len(set(panel)) != 4
+    _, native_count, family_count = _paired_population(objective.schedule.families)
+    if (epoch != 10 or objective.auxiliary_fluid_measure != 'grid' or len(native) != native_count
+            or len(set(native)) != native_count or not set(native).issubset(provider.training_case_ids)
+            or len(panel) != family_count or len(set(panel)) != family_count
             or any(f not in objective.schedule.families.get(s, ()) for s, f in panel)):
-        raise ValueError('Paired calibration requires epoch-10 grid and valid TRAIN15/FIT4 panels.')
+        raise ValueError(f'Paired calibration requires epoch-10 grid and valid TRAIN{native_count}/FIT{family_count} panels.')
     def native_loss():
         for batch in provider.native_evaluation_batches(split='train', case_keys=native, microbatch_size=1):
             prediction, _ = provider.predict_native(model, batch.scene_inputs, batch.receivers,
@@ -488,12 +508,12 @@ def _attach_paired_response(provider, objective, config, spec, restored_state=No
     """Keep calibration pending until the common measured grid receipt exists."""
     sources = {name: [family for family, row in objective.corpus.cases.items()
                       if row.get('source') == name] for name in ('original', 'new')}
-    if tuple(map(len, sources.values())) != (15, 25) or sum(map(len, sources.values())) != len(objective.corpus.cases):
-        raise ValueError('TRAIN150 requires exactly 15 original and 25 new FIT families.')
+    counts, native_count, family_count = _paired_population(sources)
+    if sum(map(len, sources.values())) != len(objective.corpus.cases):
+        raise ValueError('Every paired FIT family must declare its original or new source.')
     objective.schedule = EligibleFamilySchedule(sources['original'], sources['new'], provider.training_case_ids, seed=0)
     if any(len(objective.actions(source, family)) != 4 for source in sources for family in sources[source]):
         raise ValueError('Every family requires four edits.')
-    counts = {'original': 1, 'new': 2}
     calibration_path = Path(spec['calibration_path']).expanduser()
     candidate = spec['qualified_tile']
     if type(candidate) is not int or candidate not in (128, 256, 512):
@@ -523,13 +543,13 @@ def _attach_paired_response(provider, objective, config, spec, restored_state=No
             return tuple(value for index, value in enumerate(values) if index in selected)
         population = tuple((source, family) for source in ('original', 'new')
                            for family in objective.schedule.families[source])
-        if (len(native) != 15 or len(set(native)) != 15 or not set(native).issubset(provider.training_case_ids)
-                or len(fit) != 4 or len(set(fit)) != 4
+        if (len(native) != native_count or len(set(native)) != native_count or not set(native).issubset(provider.training_case_ids)
+                or len(fit) != family_count or len(set(fit)) != family_count
                 or any(f not in objective.schedule.families.get(s, ()) for s, f in fit)
                 or native != panel(provider.training_case_ids) or fit != panel(population)
                 or receipt.get('measure') != 'grid' or receipt.get('epoch') != 10
                 or _scales(receipt.get('response_scales')) != objective.response_scales):
-            raise ValueError('Common calibration must identify the TRAIN15/FIT4 grid panel and matching scales.')
+            raise ValueError(f'Common calibration must identify the TRAIN{native_count}/FIT{family_count} grid panel and matching scales.')
         coeffs = receipt.get('coefficients', {})
         if set(coeffs) != {'endpoint', 'response'} or any(
                 not math.isfinite(float(v)) or float(v) <= 0 for v in coeffs.values()):
@@ -557,7 +577,7 @@ def _attach_paired_response(provider, objective, config, spec, restored_state=No
         lambda self, epoch: [f'{source}:{family}' for source, family in objective.schedule.current]
         if epoch > 10 else [], provider)
     def begin_training_epoch(self, model, epoch):
-        if epoch <= 50:
+        if native_count == 60 or epoch <= 50:
             tile = candidate
         elif epoch <= 70:
             tile = 128 if epoch <= 55 or epoch >= 66 else candidate
@@ -620,8 +640,10 @@ def build_thermal_joint_response_task(recipe, *, arm=None, device='cpu', resume_
         raise ValueError('Enabled state/response requires a FIT family manifest, physical labels and scales.')
     arm = arm or recipe['member_routing'].get('arm', ARM_DETAIL)
     identity = (resume_payload or {}).get('experiment_identity', {}).get('provider_identity', {})
+    formal = (spec.get('paired') is not None and recipe.get('training', {}).get('membership')
+              in ('full_train600', 'scratch_train600_exposed_val89'))
     model, provider = _build_thermal_member_routing_task(recipe, arm=arm, device=device,
-        task_type=ThermalNativePortTask,
+        task_type=ThermalPairedFormalNativeTask if formal else ThermalNativePortTask,
         variants={DETAIL_CORE_SCHEMA: {**_VARIANTS[DETAIL_CORE_SCHEMA], 'arm': arm}},
         section_schema=DETAIL_CONFIG_SCHEMA, source_kind=DETAIL_SOURCE_KIND,
         lineage='Thermal native state/response', required_address_mode=None,
@@ -687,7 +709,7 @@ def build_thermal_joint_response_task(recipe, *, arm=None, device='cpu', resume_
     saved_state = (resume_payload or {}).get('provider_training_state', {}).get('thermal_joint_response', {})
     if paired is not None:
         if config.warmup_epochs != 10 or config.ramp_epochs != 40 or paired.get('measure') not in ('grid', 'catalogue'):
-            raise ValueError('Paired TRAIN150 needs the declared ramp and grid or catalogue measure.')
+            raise ValueError('Paired training needs the declared ramp and grid or catalogue measure.')
         objective.auxiliary_fluid_measure = paired['measure']
         _attach_paired_response(provider, objective, config, paired, restored_state=saved_state)
     else:
