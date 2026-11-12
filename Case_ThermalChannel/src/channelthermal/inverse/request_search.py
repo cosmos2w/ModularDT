@@ -230,6 +230,16 @@ def capture_routing_scores(model, provider, prepared, query_weights):
             np.add.at(address, (rows[positive], anchors[positive]), weights[positive])
             slices.append((np.arange(start, stop), beta, address))
     service, overlap, address = routing_scores(w, slices, membership[:, :m])
+    provenance = {route: {'stage_identity': str(info['stage_identity']),
+                          'route': str(info['route']),
+                          'receiver_role': str(info['receiver_role']),
+                          'donor_role': str(info['donor_role'])}
+                  for route, info in org.anchored_route_provenance.items()}
+    if set(provenance) != {'em', 'ee'}:
+        raise ValueError('missing actual anchored EM/EE stage provenance')
     return {'service': service, 'overlap': overlap, 'address_mass': address,
             'joint_membership': membership, 'module_ids': module_ids,
-            'environment_ids': environment_ids, 'query_indices': np.flatnonzero(w > 0)}
+            'environment_ids': environment_ids, 'query_indices': np.flatnonzero(w > 0),
+            'applied_em': org.anchored_applied_EM[0].detach().cpu().numpy(),
+            'applied_ee': org.anchored_applied_EE[0].detach().cpu().numpy(),
+            'route_provenance': provenance}

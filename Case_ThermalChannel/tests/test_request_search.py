@@ -83,9 +83,16 @@ def test_tiled_capture_uses_anchored_directory_and_global_indices():
     query = QueryBatch(coordinates=torch.zeros(1, 5, 2), query_ids=torch.arange(5)[None],
         anchor_indices=torch.tensor([[[0], [1], [0], [1], [0]]]), anchor_weights=torch.ones(1, 5, 1))
     scene = NS(module_ids=torch.tensor([[10, 11]]), environment_ids=torch.tensor([[20, 21]]))
-    prepared = NS(query_batch=query, organization=NS(scene=scene, e_access_directory=NS(restricted=Directory())))
+    provenance = {route: {'stage_identity': 'layer0/' + route, 'route': route,
+                          'receiver_role': 'E', 'donor_role': donor}
+                  for route, donor in [('em', 'M'), ('ee', 'E')]}
+    prepared = NS(query_batch=query, organization=NS(scene=scene, e_access_directory=NS(restricted=Directory()),
+        anchored_route_provenance=provenance, anchored_applied_EM=torch.ones(1, 2, 2),
+        anchored_applied_EE=torch.eye(2)[None]))
     got = capture_routing_scores(NS(core=Core()), None, prepared, [0, .25, 0, 0, .75])
     np.testing.assert_allclose(got['service'], [.325, .1625])
     np.testing.assert_allclose(got['joint_membership'], [[.3, 0, .7, 0], [0, .4, 0, .6]], rtol=1e-6)
     np.testing.assert_allclose(got['address_mass'], [.75, .25])
     assert got['query_indices'].tolist() == [1, 4]
+    assert got['route_provenance']['em']['stage_identity'] == 'layer0/em'
+    assert got['applied_ee'].shape == (2, 2)
