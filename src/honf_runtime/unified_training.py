@@ -388,7 +388,16 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                                  and thermal.get("arm") == "P64"
                                  and recipe.get("training", {}).get("membership") == "full_train600"
                                  and before == 100 and after == 500)
-            if (allow_microbatch_change or not (wind_extension or thermal_extension)
+            family = recipe.get("r16_10_family", {})
+            r16_10_extension = (isinstance(recipe.get("dataset"), dict)
+                                and recipe["dataset"].get("name") == "thermal"
+                                and family.get("schema") == "thermal_r16_10_family_v1"
+                                and family.get("population") == 600 and family.get("arm") in ("B0", "R")
+                                and recipe.get("training", {}).get("membership") == "full_train600"
+                                and recipe.get("training", {}).get("local_horizon") == 2000
+                                and recipe.get("member_routing", {}).get("model", {}).get("access_measure") == "inventory_unit_total"
+                                and before == 2000 and after == 3000)
+            if (allow_microbatch_change or not (wind_extension or thermal_extension or r16_10_extension)
                     or type(before) is not int or type(after) is not int
                     or before % 100 or after <= before or after % 100
                     or old["engine_config"].get("checkpoint_epochs") != list(range(100, before + 1, 100))
@@ -398,7 +407,12 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             for group in schedules:
                 schedule = group.get("schedule", {})
                 rate = schedule.get("peak_lr")
-                if (not isinstance(rate, (int, float)) or rate <= 0
+                if r16_10_extension:
+                    if schedule != {"peak_lr": 3e-4, "warmup_start_lr": 3e-4,
+                                    "warmup_epochs": 0, "hold_through_epoch": 1000,
+                                    "total_epochs": 2000, "final_lr": 3e-5}:
+                        raise ValueError(message)
+                elif (not isinstance(rate, (int, float)) or rate <= 0
                         or schedule.get("final_lr") != rate
                         or schedule.get("warmup_start_lr") != rate
                         or schedule.get("warmup_epochs") != 0):
@@ -408,11 +422,13 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             amended["engine_config"]["checkpoint_epochs"] = new["engine_config"]["checkpoint_epochs"]
             if amended != new:
                 raise ValueError(message)
-            return {"kind": ("explicit_thermal_port_horizon_extension" if thermal_extension else
+            return {"kind": ("explicit_r16_10_horizon_extension" if r16_10_extension else
+                             "explicit_thermal_port_horizon_extension" if thermal_extension else
                              "explicit_relation_anchored_wind_horizon_extension"),
                     "previous_horizon": before, "execution_horizon": after,
                     "optimizer_schedule_unchanged": True,
-                    "trajectory_note": "Only the engine horizon and future 100-epoch milestones change; original recipe, constant AdamW schedule, data, sampling and all other identity fields remain unchanged."}
+                    "trajectory_note": ("Only the engine horizon and future 100-epoch milestones change; the original AdamW schedule remains clamped at its epoch-2000 final rate, and recipe, data, sampling and all other identity fields remain unchanged." if r16_10_extension else
+                        "Only the engine horizon and future 100-epoch milestones change; original recipe, constant AdamW schedule, data, sampling and all other identity fields remain unchanged.")}
         if saved.get("workflow") == "spatial_interaction_groups_joint_training_v1":
             if allow_microbatch_change:
                 raise ValueError(message)
@@ -866,7 +882,8 @@ def _diagnostic_age_branch_amendment(
 
 
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str,
-                        loss_metadata: Mapping[str, Mapping[str, str]] | None = None) -> None:
+                        loss_metadata: Mapping[str, Mapping[str, str]] | None = None,
+                        provider_identity: Mapping[str, Any] | None = None) -> None:
     """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -880,6 +897,12 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         row.get("arm") in ("R13-8-A-EAnchor", "R13-8-L-LocalECover", "R14-Detail-LocalECover") for row in history
     )
     paired_member_routing_run = joint_member_routing_run or anchored_member_routing_run
+    scratch_family_run = bool(provider_identity and
+                              provider_identity.get("recipe", {}).get("r16_10_family"))
+    legacy_response_run = bool(provider_identity and provider_identity.get("thermal_state_response"))
+    state_response_run = bool(provider_identity and
+                              provider_identity.get("state_response", {}).get("enabled", False))
+    response_run = legacy_response_run or scratch_family_run or state_response_run
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
                                       "R13-4-Full", "R13-4-Guide"}
@@ -896,6 +919,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         for row in history
     )
     joint_validation_label = "exposed VAL89" if canonical_val89_joint else "exposed DEV"
+    if scratch_family_run:
+        joint_validation_label = "sampled VAL9/89"
+    elif state_response_run:
+        joint_validation_label = "configured validation panel"
     budgeted_native_run = any(isinstance(row.get("native_budgeted_routing_state"), Mapping) for row in history)
     member_routing_native_terms = {
         "flow/u", "flow/v", "flow/p", "flow/omega",
@@ -910,6 +937,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         return objective if isinstance(objective, Mapping) else {}
 
     def term_group(name: str) -> int:
+        if scratch_family_run and name.startswith("family/"):
+            return 1
         if name in member_routing_native_terms:
             return 0
         if loss_metadata and name in loss_metadata:
@@ -1087,8 +1116,6 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         if masked_count < len(values):
             axis.plot(epochs, np.ma.masked_where(invalid, numeric), linestyle=linestyle,
                       marker=(marker if len(values) <= 100 else None), label=label, color=color)
-        elif len(values):
-            axis.set_ylim(1.0, 10.0)
         return masked_count
 
     names: set[str] = set()
@@ -1112,6 +1139,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         for name in group_names:
             color = colors[name]
             for source, series_label in (("train", "TRAIN"), ("validation", "HELD-OUT VALIDATION")):
+                response_weights = provider_identity.get("response_objective_weights", {}) if response_run else {}
+                if (source == "train" and name.startswith("response/")
+                        and response_weights.get(name.removeprefix("response/")) == 0):
+                    continue
                 points = [(int(row["epoch"]), value_at(row, name, source)) for row in history
                           if type(row.get("epoch")) is int and value_at(row, name, source) is not None]
                 if points:
@@ -1169,14 +1200,16 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         masked_count_total += plot_series(
             total_axis, [row["epoch"] for row in train_rows],
             [recorded_sum(row["train_losses"]) for row in train_rows],
-            label="TRAIN: recorded weighted sum", color="C0", marker=".")
+            label=("TRAIN: optimized total" if response_run else "TRAIN: recorded weighted sum"),
+            color="C0", marker=".")
     if validation_rows:
         masked_count_total += plot_series(
             total_axis, [row["epoch"] for row in validation_rows],
             [recorded_sum({"total": objective_at(row)["total"]})
              if "total" in objective_at(row) else recorded_sum(objective_at(row).get("terms"))
              for row in validation_rows],
-            label="VALIDATION: recorded total", color="C1", linestyle="--", marker="o")
+            label=("VALIDATION: native total" if response_run else "VALIDATION: recorded total"),
+            color="C1", linestyle="--", marker="o")
     else:
         pending = not any(isinstance(row.get("validation"), Mapping) and row["validation"] for row in history)
         total_axis.text(0.02, 0.10, "Validation: first review pending" if pending else
@@ -1190,7 +1223,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         if (matched and type(row.get("epoch")) is int
                 and (matched != set(row.get("train_losses", {})) or matched != set(objective.get("terms", {})))):
             comparable_rows.append((int(row["epoch"]), objective))
-    if comparable_rows:
+    if comparable_rows and not response_run:
         for key, label, color, style, marker in (
             ("training_matched_total", "TRAIN: shared-term subtotal", "C0", ":", "."),
             ("validation_matched_total", "VALIDATION: shared-term subtotal", "C1", ":", "o"),
@@ -1272,6 +1305,24 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             fontsize=8.9,
         )
     routing_axis.set_ylabel("Weighted loss contribution (dimensionless)")
+
+    # FIT delta diagnostics are unweighted equal-family/action means. They
+    # stay separate from the optimized terms, including when their coefficient
+    # is zero, and use endpoint predictions already produced by the provider.
+    diagnostic_names = sorted({name for row in history
+                               for name in row.get("train_diagnostics", {})})
+    if response_run and diagnostic_names:
+        routing_axis.clear()
+        diagnostic_labels = {"response/field_delta": "Field delta", "response/J_delta": "J delta",
+                             "response/P_delta": "P delta"}
+        for index, name in enumerate(diagnostic_names):
+            points = [(int(row["epoch"]), row["train_diagnostics"][name]) for row in history
+                      if type(row.get("epoch")) is int and name in row.get("train_diagnostics", {})]
+            masked_count_total += plot_series(
+                routing_axis, [point[0] for point in points], [point[1] for point in points],
+                label=f"FIT diagnostic: {diagnostic_labels.get(name, term_label(name))}", color=f"C{index % 10}")
+        routing_axis.set_xlabel("Completed epoch")
+        routing_axis.grid(alpha=0.25, which="both")
 
     selector_points = []
     for row in history:
@@ -1580,7 +1631,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                     for axis in visible_axes}
     # Concise labels keep definitions in the metadata sidecar. Work counters
     # remain in history/metadata rather than the default loss figure.
-    total_axis.set_title("Weighted loss totals (different reductions)")
+    total_axis.set_title("Optimized TRAIN and native validation totals" if response_run else
+                         "Weighted loss totals (different reductions)")
     total_axis.set_ylabel("Weighted loss")
     selector_axis.set_ylabel("Normalized MSE" if field_metric == "field_score" else "Selector metric")
     native_axis.set_title("Flow losses" if flow_names and thermal_names and len(native_names) > 5 else "Prediction losses")
@@ -1588,7 +1640,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         thermal_axis.set_title("Thermal losses")
     selector_axis.set_title((f"{joint_validation_label.capitalize()} field error" if joint_run else "Exposed validation field error") if field_metric == "field_score" else "Exposed validation selector")
     physics_axis.set_title("Physics and response losses")
-    routing_axis.set_title("Other objective losses")
+    routing_axis.set_title("FIT response diagnostics (unweighted)" if response_run and diagnostic_names else
+                           "Other objective losses")
     for axis in [native_axis, physics_axis, routing_axis] + ([thermal_axis] if flow_names and thermal_names and len(native_names) > 5 else []):
         axis.set_ylabel("Weighted loss")
         handles, labels = axis.get_legend_handles_labels()
@@ -1597,8 +1650,13 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             name = label.removeprefix("TRAIN: ").removeprefix("HELD-OUT VALIDATION: ")
             by_name.setdefault(name, handle)
         if by_name:
-            axis.legend(list(by_name.values()), list(by_name), ncol=2, fontsize=8, frameon=False,
-                        title="TRAIN: solid   VALIDATION: dashed", title_fontsize=8)
+            axis.legend(list(by_name.values()), list(by_name),
+                        ncol=(1 if axis is routing_axis and response_run and diagnostic_names else 2),
+                        fontsize=8, frameon=False,
+                        title=("Unweighted FIT diagnostics" if axis is routing_axis and response_run
+                               and diagnostic_names else "TRAIN: solid   VALIDATION: dashed"), title_fontsize=8)
+    if response_run and diagnostic_names:
+        routing_axis.set_ylabel("Unweighted scaled squared error")
     visible_axes = [axis for axis in visible_axes if data_present.get(axis, True)]
     for axis in list(figure.axes):
         if axis not in visible_axes:
@@ -1617,6 +1675,23 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             axis.set_subplotspec(grid[index // 2, index % 2])
             if epochs:
                 axis.set_xlim(*limits)
+        # Legacy response histories use an empty cell for their dense legend;
+        # scratch screening keeps unused grid cells blank.
+        if (response_run and not scratch_family_run
+                and len(visible_axes) % 2 and native_axis in visible_axes):
+            legend = native_axis.get_legend()
+            handles, labels = native_axis.get_legend_handles_labels()
+            by_name = {}
+            for handle, label in zip(handles, labels):
+                name = label.removeprefix("TRAIN: ").removeprefix("HELD-OUT VALIDATION: ")
+                by_name.setdefault(name, handle)
+            if legend is not None and by_name:
+                legend.remove()
+                key_axis = figure.add_subplot(grid[rows - 1, 1])
+                key_axis.set_axis_off()
+                key_axis.legend(list(by_name.values()), list(by_name), loc="center left",
+                                fontsize=8, frameon=False,
+                                title="Prediction: TRAIN solid, VALIDATION dashed", title_fontsize=8)
     elif not history:
         figure.suptitle("No recorded training or validation metrics")
 
@@ -1740,12 +1815,115 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "train_work": "Exact core_decode_primary_query M/E selected-value and cheap-score row counters. Symlog display preserves zero selected-row evidence; row counts are not measured latency or executor savings.",
         })
         metadata["work_counter_definitions"].update(member_routing_work_definitions)
+    response_terms = [name for name in all_names if name.startswith("response/") and
+                      loss_metadata and name in loss_metadata]
+    if response_terms:
+        metadata["panel_definitions"]["physics"] = (
+            "TRAIN records weighted paired endpoint and finite-response loss contributions, including "
+            "zero for disabled response weights; exposed native validation has no response labels."
+        )
+        metadata["panel_definitions"]["routing"] = (
+            "Unweighted FIT response diagnostics use the same endpoint predictions and do not enter the "
+            "optimized total; no separately fitted routing penalty is present."
+            if diagnostic_names else
+            "The reader and contextual organization receive gradients through native and response losses; "
+            "no separately fitted routing penalty is present."
+        )
+    if legacy_response_run and not scratch_family_run:
+        spec = provider_identity["thermal_state_response"]
+        balanced_spec = provider_identity.get("r16_6_balanced", {})
+        coefficient = float(balanced_spec.get("coefficient", spec.get("finite_response_coefficient", 0.1)))
+        default_weights = ({"endpoint": 0.25, "field_delta": 0.08, "J_delta": 0.01, "P_delta": 0.01}
+                           if coefficient == 0.1 else
+                           {"endpoint": 0.25, "field_delta": 0.8 * coefficient,
+                            "J_delta": 0.1 * coefficient, "P_delta": 0.1 * coefficient})
+        weights = dict(provider_identity.get("response_objective_weights", default_weights))
+        metadata["response_objective"] = {
+            "finite_response_coefficient": coefficient,
+            "component_weights": weights,
+            "training_total": "sum of recorded weighted native, endpoint and finite-response contributions",
+            "validation_total": "native validation terms only; excludes FIT endpoints and response labels",
+            "diagnostics": "unweighted equal-family/action FIT means, separate from optimized loss",
+        }
+        metadata["panel_definitions"]["weighted_loss_totals"] = (
+            "TRAIN is this arm's recorded optimized objective; VALIDATION is the common native objective "
+            "on the exposed panel. Their prediction paths and reductions differ; TRAIN totals from "
+            "different objective weights are not a shared model-quality metric."
+        )
+    if scratch_family_run:
+        family = provider_identity.get("r16_10_family", {})
+        metadata["response_objective"] = {
+            "arm": provider_identity["recipe"]["r16_10_family"]["arm"],
+            "component_coefficients": dict(family.get("coefficients", {})),
+            "active_components": [name.removeprefix("family/") for name in all_names
+                                  if name.startswith("family/")],
+            "ramp": ("min(local post-training epoch / 40, 1)"
+                     if provider_identity.get("r16_10_posttrain") else
+                     "zero through epoch 10, (epoch-10)/40 through 50, then one"),
+            "training_total": "sum of recorded weighted native and active family contributions",
+            "validation_total": "native objective on fixed sampled VAL9/89; excludes family objectives",
+            "family_reduction": "equal family means; five equal endpoints and paired full/P95 views",
+        }
+        metadata["validation_scope"] = "fixed input-stratified sampled VAL9/89; exposed development evidence"
+        metadata["panel_definitions"]["physics"] = (
+            "Recorded weighted endpoint, finite-response and decision family objectives, when active; "
+            "no family labels enter native validation."
+        )
+    if state_response_run:
+        config = provider_identity.get("state_response", {})
+        calibration = provider_identity.get("state_response_calibration")
+        metadata["response_objective"] = {
+            "component_coefficients": dict(calibration.get("coefficients", {})) if calibration else {},
+            "calibration": calibration if calibration else "pending",
+            "ramp": {"warmup_epochs": int(config.get("warmup_epochs", 10)),
+                     "ramp_epochs": int(config.get("ramp_epochs", 40))},
+            "training_total": "sum of recorded weighted native and active family contributions",
+            "validation_total": "native objective on the configured validation panel; excludes family objectives",
+            "family_reduction": "equal family and action means with paired full and restricted views",
+        }
+        metadata["validation_scope"] = str(provider_identity.get("validation_scope", "configured validation panel"))
+        metadata["panel_definitions"]["physics"] = (
+            "Recorded weighted endpoint and finite-response family objectives; "
+            "no family labels enter native validation."
+        )
+        metadata["panel_definitions"]["weighted_loss_totals"] = (
+            "TRAIN is the sum of recorded weighted native and family objectives; VALIDATION is the native "
+            "objective on the configured panel. Prediction paths and reductions differ."
+        )
+    if (provider_identity and provider_identity.get("thermal_state_response") and
+            provider_identity.get("restricted_evaluation_execution") == "all_native"):
+        for name in member_routing_native_terms & set(all_names):
+            metadata["term_definitions"][name]["formula"] = (
+                "TRAIN and validation use the all-native reader and the run's TRAIN-fitted normalizer; "
+                "TRAIN macro-update means and pooled validation reductions differ."
+            )
+        metadata["panel_definitions"].update({
+            "shared_name_loss_summary": "TRAIN and validation use the all-native reader; their reductions differ.",
+            "native_prediction": "Native flow, temperature, and q-proxy losses use one all-native read in TRAIN and validation.",
+            "train_work": "Recorded all-native work counters are execution counts, not latency or executor savings.",
+        })
+        metadata["training_objective_pairing"] = {
+            "training_loss": "one all-native native field read",
+            "validation_loss": "one all-native native field read",
+        }
+        metadata["prediction_path_comparison"] = (
+            "TRAIN and validation use the all-native reader; TRAIN averages macro-update means and validation pools valid elements."
+        )
+        metadata.pop("paired_work_series", None)
     _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"
         temporary = output / f".loss_curves.{os.getpid()}.tmp.{suffix}"
         figure.savefig(temporary, format=suffix, dpi=140)
         os.replace(temporary, destination)
+        if len(history) == 1:
+            initial = output / f"loss_curves_initial.{suffix}"
+            if not initial.exists():
+                initial_temporary = output / f".loss_curves_initial.{os.getpid()}.tmp.{suffix}"
+                initial_temporary.write_bytes(destination.read_bytes())
+                os.replace(initial_temporary, initial)
+    if len(history) == 1 and not (output / "loss_curves_initial_metadata.json").exists():
+        _atomic_json(output / "loss_curves_initial_metadata.json", metadata)
     figure.clear()
 
 @dataclass(frozen=True)
@@ -2722,6 +2900,7 @@ class TrainingEngine:
         training_mode: bool = True,
         include_gradient_tensors: bool = False,
         optimizer_state_by_name: Mapping[str, Any] | None = None,
+        restore_random_state: bool = True,
     ) -> dict[str, Any]:
         """Measure the exact engine objective and its grouped gradients without stepping.
 
@@ -2886,7 +3065,8 @@ class TrainingEngine:
                 if provider_state is not None and callable(provider_state_loader):
                     provider_state_loader(provider_state)
             finally:
-                restore_rng_state(rng_state)
+                if restore_random_state:
+                    restore_rng_state(rng_state)
 
         def _norm(rows: Mapping[str, torch.Tensor], selected: Sequence[str]) -> float:
             values = [rows[name] for name in selected if name in rows]
@@ -3363,6 +3543,7 @@ class TrainingEngine:
         source_read_ordinary_update_index: int | None = None,
         source_read_primary_fine_rows: int | None = None,
         successful_step_recorder: Callable[[int, int, int], None] | None = None,
+        epoch_update_count: int | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, float], str | None]:
         planned = {
             name: _denominator(value)
@@ -3514,6 +3695,10 @@ class TrainingEngine:
             terms = provider.loss_terms(predictions, batch.targets, phase, auxiliary_state)
             if not isinstance(terms, Mapping):
                 raise TypeError("loss_terms must return a mapping of names to LossTerm values.")
+            native_diagnostic = getattr(provider, "diagnose_native_training_terms", None)
+            if callable(native_diagnostic):
+                native_diagnostic(model, terms, planned, epoch=epoch,
+                                  update_index=update_index, update_count=epoch_update_count)
             objective: torch.Tensor | None = None
             for name, term in terms.items():
                 if name not in planned:
@@ -3606,6 +3791,20 @@ class TrainingEngine:
                     else:
                         parameter.grad.add_(contribution)
         joint_objective.apply()
+        needs_native_norm = getattr(provider, "needs_native_gradient_norm", None)
+        if callable(needs_native_norm) and needs_native_norm(epoch=epoch, update_index=update_index):
+            record_native_norm = getattr(provider, "record_native_gradient_norm", None)
+            if not callable(record_native_norm):
+                raise ValueError("A native gradient norm request needs a provider recorder.")
+            native_squared_norm = 0.0
+            for group in optimizer.param_groups:
+                for parameter in group["params"]:
+                    if parameter.grad is not None:
+                        native_squared_norm += float(
+                            parameter.grad.detach().to(torch.float64).square().sum().item()
+                        )
+            record_native_norm(math.sqrt(native_squared_norm),
+                               case_keys=tuple(key for batch in microbatches for key in batch.case_keys))
         primary_fine_rows = None
         if source_read_manager is not None:
             primary_fine_rows = _source_read_primary_fine_rows(work)
@@ -3652,6 +3851,47 @@ class TrainingEngine:
                 weighted_auxiliary_norm=math.sqrt(auxiliary_squared_norm),
             )
             losses["source_read_auxiliary"] = float(auxiliary_loss.detach())
+        auxiliary_terms = getattr(provider, "auxiliary_update_terms", None)
+        if callable(auxiliary_terms):
+            if type(epoch_update_count) is not int or epoch_update_count < 1:
+                raise ValueError("Epoch-normalized auxiliary fitting requires the epoch update count.")
+            auxiliary_names = tuple(provider.auxiliary_loss_names)
+            if not auxiliary_names or set(auxiliary_names) & set(losses):
+                raise ValueError("Auxiliary loss names must be nonempty and distinct from native losses.")
+            # Explicit zeros preserve the mean over *all* native updates when
+            # auxiliary families are distributed sparsely through the epoch.
+            losses.update({name: 0.0 for name in auxiliary_names})
+            for terms, auxiliary_work in auxiliary_terms(
+                    model, epoch=epoch, update_index=update_index,
+                    update_count=epoch_update_count):
+                objective = None
+                for name, term in terms.items():
+                    if name not in auxiliary_names:
+                        raise ValueError(f"Undeclared auxiliary loss {name!r}.")
+                    denominator = _denominator(term.denominator)
+                    if (denominator <= 0 or not math.isfinite(float(term.weight))
+                            or not torch.is_tensor(term.numerator) or term.numerator.numel() != 1):
+                        raise ValueError("Auxiliary terms require a scalar numerator and positive denominator.")
+                    piece = term.numerator * (float(term.weight) / denominator)
+                    objective = piece if objective is None else objective + piece
+                    losses[name] += float(piece.detach())
+                diagnostic_values = getattr(provider, "auxiliary_diagnostic_values", None)
+                if callable(diagnostic_values):
+                    for name, value in diagnostic_values(terms, update_count=epoch_update_count).items():
+                        numeric = float(value)
+                        if not isinstance(name, str) or not name or not math.isfinite(numeric):
+                            raise ValueError("Auxiliary diagnostic names and values must be finite and nonempty.")
+                        key = f"__train_diagnostic__/{name}"
+                        work[key] = work.get(key, 0.0) + numeric
+                if objective is None or not bool(torch.isfinite(objective.detach())):
+                    raise FloatingPointError("Empty or nonfinite auxiliary optimizer objective.")
+                objective.backward()
+                del objective, terms, term, piece
+                for name, value in auxiliary_work.items():
+                    numeric = float(value)
+                    if not math.isfinite(numeric):
+                        raise ValueError("Auxiliary work counts must be finite.")
+                    work[name] = work.get(name, 0.0) + numeric
         before_step = getattr(provider, "before_optimizer_step", None)
         if callable(before_step):
             before_step(model, optimizer, losses, work, epoch=epoch, update_index=update_index)
@@ -3661,6 +3901,9 @@ class TrainingEngine:
         if not torch.isfinite(norm) or norm <= 0:
             raise FloatingPointError("Nonfinite or zero actual parameter gradient.")
         optimizer.step()
+        after_step = getattr(provider, "after_optimizer_step", None)
+        if callable(after_step):
+            after_step(model, optimizer, norm, epoch=epoch, update_index=update_index)
         if successful_step_recorder is not None:
             successful_step_recorder(epoch, update_index, sum(len(batch.case_keys) for batch in microbatches))
         joint_losses, joint_work = joint_objective.after_update()
@@ -5145,11 +5388,13 @@ class TrainingEngine:
                             update_index=update_index, update_cases=update_cases,
                             sampling_dataset_id=sampling_dataset_id)
                         update_kwargs = {}
+                        if callable(getattr(provider, "auxiliary_update_terms", None)):
+                            update_kwargs["epoch_update_count"] = update_count
                         if source_read_manager is not None:
-                            update_kwargs = {
+                            update_kwargs.update({
                                 "source_read_ordinary_update_index": completed_updates + len(update_rows) + 1,
                                 "source_read_primary_fine_rows": source_read_manager.last_primary_fine_rows,
-                            }
+                            })
                         if joint_step_recorder is not None:
                             update_kwargs["successful_step_recorder"] = joint_step_recorder
                         if (capture_fresh_stream
@@ -5160,6 +5405,9 @@ class TrainingEngine:
                             phase=phase, arm=arm, epoch=epoch, update_index=update_index,
                             **update_kwargs,
                         )
+                        diagnostic_prefix = "__train_diagnostic__/"
+                        diagnostics = {key[len(diagnostic_prefix):]: work.pop(key)
+                                       for key in list(work) if key.startswith(diagnostic_prefix)}
                         execution_metadata_reader = getattr(self, "take_last_update_execution_metadata", None)
                         execution_metadata = (
                             execution_metadata_reader() if callable(execution_metadata_reader) else None
@@ -5218,7 +5466,8 @@ class TrainingEngine:
                                 "update_index": update_index,
                                 "denominators": {name: float(value) for name, value in sorted(denominators.items())},
                             })
-                        update_row = {"losses": losses, "work": work, "case_count": len(update_cases),
+                        update_row = {"losses": losses, "work": work, "diagnostics": diagnostics,
+                                      "case_count": len(update_cases),
                                       "microbatch_count": successful_microbatch_count,
                                       "query_sampling_sha256": sampling_hash}
                         if oom_retry_attempts:
@@ -5251,8 +5500,18 @@ class TrainingEngine:
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
                     training_memory.update({
+                        "end_allocated_bytes": torch.cuda.memory_allocated(self.device),
+                        "end_reserved_bytes": torch.cuda.memory_reserved(self.device),
                         "peak_allocated_bytes": torch.cuda.max_memory_allocated(self.device),
                         "peak_reserved_bytes": torch.cuda.max_memory_reserved(self.device),
+                        "allocator_backend": torch.cuda.get_allocator_backend(),
+                        "allocator_config": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
+                        # The getter is absent in supported older PyTorch builds;
+                        # unavailable telemetry must not abort a completed epoch.
+                        "allocator_memory_fraction": (
+                            torch.cuda.get_per_process_memory_fraction(self.device)
+                            if hasattr(torch.cuda, "get_per_process_memory_fraction") else None
+                        ),
                         "scope": "complete epoch including data transfer, forward, backward and optimizer; excludes monitoring",
                     })
                 train_seconds = time.perf_counter() - epoch_started
@@ -5271,6 +5530,25 @@ class TrainingEngine:
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                     "case_order_sha256": order_hash,
                 }
+                diagnostic_sums = _sum_mapping([item["diagnostics"] for item in update_rows])
+                if diagnostic_sums:
+                    # Updates without auxiliary exposure contribute zero: each
+                    # action's provider multiplier accounts for all updates.
+                    row["train_diagnostics"] = {
+                        name: value / len(update_rows) for name, value in diagnostic_sums.items()
+                    }
+                response_family_reader = getattr(provider, "response_epoch_family_ids", None)
+                if callable(response_family_reader):
+                    row["response_fit_family_ids"] = list(response_family_reader(epoch))
+                response_action_reader = getattr(provider, "response_epoch_action_ids", None)
+                if callable(response_action_reader):
+                    row["response_action_ids"] = list(response_action_reader(epoch))
+                    row["case_ids"] = [str(case) for case in ordered_cases]
+                fit_sampler_reader = getattr(provider, "fit_sampler_epoch", None)
+                if callable(fit_sampler_reader):
+                    fit_sampler_epoch = fit_sampler_reader(epoch)
+                    if fit_sampler_epoch != epoch:
+                        row["fit_sampler_epoch"] = fit_sampler_epoch
                 retry_attempts = sum(int(item.get("oom_retry_attempts", 0)) for item in update_rows)
                 if retry_attempts:
                     row["oom_retry_attempts"] = retry_attempts
@@ -5604,6 +5882,10 @@ class TrainingEngine:
                     }
                     if sampler_epoch != epoch:
                         sampler_state["absolute_sampling_epoch"] = sampler_epoch
+                    fit_sampler_reader = getattr(provider, "fit_sampler_epoch", None)
+                    if callable(fit_sampler_reader) and fit_sampler_reader(epoch) != epoch:
+                        sampler_state["fit_sampling_epoch"] = fit_sampler_reader(epoch)
+                        sampler_state["next_fit_sampling_epoch"] = fit_sampler_reader(epoch + 1)
                     payload = self._checkpoint_payload(model, optimizer, identity=sealed_identity, arm=arm, epoch=epoch,
                         history=history, best_field=best_field, best_guarded=best_guarded, sampler_state=sampler_state,
                         group_specs=optimizer_specs,
@@ -5647,6 +5929,12 @@ class TrainingEngine:
                     latest_epoch = epoch
                 if curve_due:
                     _write_training_history(layout.write_path("history.json"), history, compact=compact_history)
+                    curve_identity = provider_identity
+                    if provider_identity.get("state_response", {}).get("enabled", False):
+                        metadata_reader = getattr(provider, "state_response_metadata", None)
+                        response_metadata = metadata_reader() if callable(metadata_reader) else {}
+                        curve_identity = {**provider_identity,
+                                          "state_response_calibration": response_metadata.get("calibration")}
                     curve_rng = capture_rng_state()
                     try:
                         _render_loss_curves(
@@ -5655,6 +5943,10 @@ class TrainingEngine:
                             self.selection.field_metric,
                             **({"loss_metadata": provider.loss_metadata()}
                                if callable(getattr(provider, "loss_metadata", None)) else {}),
+                            **({"provider_identity": curve_identity}
+                            if (provider_identity.get("thermal_state_response")
+                                or provider_identity.get("state_response", {}).get("enabled", False)
+                                or provider_identity.get("recipe", {}).get("r16_10_family")) else {}),
                         )
                     finally:
                         restore_rng_state(curve_rng)

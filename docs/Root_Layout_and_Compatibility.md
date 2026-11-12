@@ -27,6 +27,8 @@ Fresh `relation_anchored` and `relation_anchored_active` configurations share `D
 
 Resume preserves case membership, input identity, optimizer/scaler, RNG, sampler, selection, schedule and complete history. Latest, best-field and literal epoch checkpoints remain distinct. A compatible load is not a completed continuation. See the [compatibility contract](architecture/compatibility.md) and [run-artifact guide](guides/Run_Artifacts_and_Monitoring.md).
 
+The new `state_response` profile is opt-in at the recipe level and defaults to enabled within that profile; recipes without it retain their saved native or historical response objective. The retained R16-10 model, optimizer, RNG and objective state supports the original continuation semantics. The campaign-only `r16_10_actual_update` health telemetry is not continued in this source distribution; existing recorded history remains intact. Use the original research branch when that optional campaign instrumentation is required. The new profile still records its TRAIN-only response calibration.
+
 The maintained contract suite covers all six families, original six-hyperedge/dense next-update resume, relation-anchored and unified-hypergraph task handoffs, case adapters and field/organization visualization. A historical numerical-digest test marks only its exact known mismatch as expected; a new mismatch still fails. CUDA and external-data checks require their declared resources. Consult the actual test output for the environment being used.
 
 ## Documentation figures and external resources

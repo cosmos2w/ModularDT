@@ -1,0 +1,46 @@
+{
+  "schema": "thermal_response_families_v1",
+  "cases": [
+    {
+      "case_id": "REPLACE_WITH_NATIVE_TRAIN_ID",
+      "role": "fit",
+      "source_config": {
+        "domain": {},
+        "flow": {},
+        "thermal": {},
+        "layout": {
+          "num_modules": 1,
+          "centers": [
+            [
+              3.0,
+              2.0
+            ]
+          ],
+          "heat_powers": [
+            1.0
+          ]
+        },
+        "local_module": {}
+      },
+      "source_case_dir": "/path/to/actual/baseline"
+    }
+  ],
+  "actions": [
+    {
+      "case_id": "REPLACE_WITH_NATIVE_TRAIN_ID",
+      "action": "example_edit",
+      "role": "fit",
+      "centers": [
+        [
+          3.1,
+          2.0
+        ]
+      ],
+      "raw_case_dir": "/path/to/actual/edited_endpoint",
+      "physical_delta": {
+        "J": null,
+        "P": null
+      }
+    }
+  ]
+}

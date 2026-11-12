@@ -211,6 +211,37 @@ def interpolate_native(values: torch.Tensor, stencil: NativeStencil) -> torch.Te
     return (gathered * weights).sum(-extra_dims - 1) * valid
 
 
+def prescribed_raster_area_ratio(centers: torch.Tensor, present: torch.Tensor, geometry: torch.Tensor,
+                                 *, nx: int, ny: int) -> torch.Tensor:
+    """Owned cell-center area divided by disk area, in original M slot order.
+
+    The source raster assigns an overlapping cell to the last present M slot.
+    Geometry is prescribed source precision, independently of field targets.
+    """
+    if centers.ndim != 3 or centers.shape[-1] != 2 or present.shape != centers.shape[:2]:
+        raise ValueError("Raster geometry requires [B,M,2] centers and [B,M] presence.")
+    if centers.dtype != torch.float64 or geometry.dtype != torch.float64 or geometry.shape != (centers.shape[0], 5):
+        raise ValueError("Raster geometry requires source-precision FP64 centers and [B,5] geometry.")
+    if not bool(torch.isfinite(centers).all()) or not bool(torch.isfinite(geometry).all()):
+        raise ValueError("Raster geometry must be finite.")
+    lengths, radius, grids = geometry[:, :2], geometry[:, 2], geometry[:, 3:]
+    if bool((lengths <= 0).any()) or bool((radius <= 0).any()) or not bool((grids == grids.new_tensor([nx, ny])).all()):
+        raise ValueError("Raster geometry requires positive lengths/radius and the configured grid.")
+    # Match the source generator's endpoint-excluded linspace followed by its
+    # half-cell addition, including FP64 evaluation order at boundaries.
+    dx, dy = lengths[:, :1] / nx, lengths[:, 1:2] / ny
+    x = torch.arange(nx, device=centers.device, dtype=centers.dtype)[None] * dx + .5 * dx
+    y = torch.arange(ny, device=centers.device, dtype=centers.dtype)[None] * dy + .5 * dy
+    owner = torch.full((centers.shape[0], ny, nx), -1, dtype=torch.long, device=centers.device)
+    for slot in range(centers.shape[1]):
+        dx = x[:, None, :] - centers[:, slot, 0, None, None]
+        dy = y[:, :, None] - centers[:, slot, 1, None, None]
+        inside = (torch.hypot(dx, dy) <= radius[:, None, None]) & present[:, slot, None, None].bool()
+        owner = torch.where(inside, slot, owner)
+    counts = torch.stack([(owner == slot).sum((1, 2)) for slot in range(centers.shape[1])], -1)
+    return counts.to(centers) * (lengths.prod(-1) / (nx * ny) / (torch.pi * radius.square()))[:, None]
+
+
 def build_native_solid_mask(
     module_centers: torch.Tensor,
     module_present: torch.Tensor,

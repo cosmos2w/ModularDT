@@ -8,11 +8,12 @@ from .r13_8_anchored_task import ThermalR138AnchoredMemberRoutingTask
 
 class ThermalPortBaseTask(ThermalR138AnchoredMemberRoutingTask):
     def validation_metrics(self, predictions, targets, auxiliary_state):
-        # Report the assembled restricted field: joint fluid with final local
-        # material/interface values. Native direct losses remain separate.
+        # Assemble joint fluid with final local material/interface values.
+        # Paired training predictions use the restricted member.
         native = predictions.restricted if isinstance(predictions, ThermalJointPairPredictions) else predictions
         output = dict(native.native_main)
-        local = predictions.local1["restricted"]
+        mode = "restricted" if isinstance(predictions, ThermalJointPairPredictions) else getattr(predictions, "read_mode", "restricted")
+        local = predictions.local1[mode]
         count = targets.interface_target.shape[-2]
         if 64 % count:
             raise ValueError("Native interface angles are not aligned with 64 ports.")
@@ -53,7 +54,7 @@ class ThermalPortBaseTask(ThermalR138AnchoredMemberRoutingTask):
 
     def _terms(self, prediction, targets):
         paired = isinstance(prediction, ThermalJointPairPredictions)
-        modes = ("full", "restricted") if paired else ("restricted",)
+        modes = ("full", "restricted") if paired else (getattr(prediction, "read_mode", "restricted"),)
         per_mode = []
         for mode in modes:
             final = getattr(prediction, mode) if paired else prediction

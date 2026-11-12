@@ -21,6 +21,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 
+from . import storage_policy
 from .run_layout import RunLayout, resolve_checkpoint
 from .unified_training import (
     EngineConfig,
@@ -268,76 +269,12 @@ def _validate_research_config(config: Mapping[str, Any]) -> None:
 def verify_storage(config: Mapping[str, Any], *, output: str | Path | None = None,
                    estimated_bytes: int = 0, peak_temporary_bytes: int = 0) -> dict[str, Any]:
     """Verify configurable /data2 output, total budget and free-space headroom."""
-    data2 = Path("/data2")
-    if not data2.is_dir() or not os.path.ismount(data2):
-        raise RuntimeError("/data2 is not mounted; refusing to write research artifacts.")
-    storage = config["storage"]
-    root = Path(storage["output_root"]).expanduser().resolve(strict=False)
-    data2_stat = data2.stat()
-    parent = root
-    while not parent.exists() and parent != parent.parent:
-        parent = parent.parent
-    if parent.stat().st_dev != data2_stat.st_dev:
-        raise RuntimeError("Configured research root does not resolve to the mounted /data2 filesystem.")
-    if output is not None:
-        resolved_output = Path(output).expanduser().resolve(strict=False)
-        try:
-            resolved_output.relative_to(root)
-        except ValueError as error:
-            raise ValueError(f"Run output must be inside {root}.") from error
-    usage = os.statvfs(data2)
-    free_bytes = int(usage.f_bavail * usage.f_frsize)
-    headroom = int(storage["minimum_free_headroom_bytes"])
-    if free_bytes - int(estimated_bytes) < headroom:
-        raise RuntimeError("The requested run would breach configured /data2 free-space headroom.")
-    current_bytes = _tree_bytes(root) if root.exists() else 0
-    related_bytes = 0
-    for raw in storage.get("related_output_roots", ()):
-        related = Path(raw).expanduser().resolve(strict=True)
-        if not related.is_relative_to(data2.resolve()) or related.stat().st_dev != data2_stat.st_dev:
-            raise RuntimeError("Related research evidence must remain on the mounted /data2 filesystem.")
-        if related == root or related.is_relative_to(root) or root.is_relative_to(related):
-            raise ValueError("Related evidence roots must not overlap the scientific run root.")
-        related_bytes += _tree_bytes(related)
-    current_bytes += related_bytes
-    output_budget = int(storage["max_output_bytes"])
-    if current_bytes + int(estimated_bytes) > output_budget:
-        raise RuntimeError(
-            f"Research output budget exceeded: {current_bytes} existing + {estimated_bytes} estimated bytes "
-            f"> {output_budget}."
-        )
-    peak_limit = int(storage["max_peak_temporary_bytes"])
-    if int(peak_temporary_bytes) > peak_limit:
-        raise RuntimeError("Estimated peak temporary space exceeds the configured maximum.")
-    return {
-        "data2_mount": str(data2.resolve()),
-        "output_root": str(root),
-        "filesystem_device": int(data2_stat.st_dev),
-        "free_bytes_before": free_bytes,
-        "output_bytes_before": current_bytes,
-        "related_evidence_bytes_before": related_bytes,
-        "estimated_new_bytes": int(estimated_bytes),
-        "output_budget_bytes": output_budget,
-        "estimated_peak_temporary_bytes": int(peak_temporary_bytes),
-        "maximum_peak_temporary_bytes": peak_limit,
-        "minimum_free_headroom_bytes": headroom,
-    }
+    return storage_policy.verify_storage(config, output=output, estimated_bytes=estimated_bytes,
+        peak_temporary_bytes=peak_temporary_bytes, tree_bytes=_tree_bytes)
 
 
 def _tree_bytes(root: Path) -> int:
-    total = 0
-    if not root.exists():
-        return total
-    for directory, names, files in os.walk(root, followlinks=False):
-        names[:] = [name for name in names if not (Path(directory) / name).is_symlink()]
-        for name in files:
-            item = Path(directory) / name
-            if not item.is_symlink():
-                try:
-                    total += item.stat().st_size
-                except FileNotFoundError:
-                    continue
-    return total
+    return storage_policy._tree_bytes(root)
 
 
 def _estimate_run_bytes(config: Mapping[str, Any], *, epochs: int, source_size: int, diagnostic: bool) -> int:

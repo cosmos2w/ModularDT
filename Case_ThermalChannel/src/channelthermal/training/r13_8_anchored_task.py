@@ -514,12 +514,23 @@ class ThermalR138AnchoredMemberRoutingTask(_AnchoredPairedMemberRoutingTask):
     LINEAGE = "R13-8"
     training_state_schema = TRAINING_STATE_SCHEMA
 
+    def _anchored_variant(self):
+        return _VARIANTS.get(self.model.CORE_SCHEMA)
+
+    def _validate_initialization(self, initialization):
+        expected_source = DETAIL_SOURCE_KIND if self.arm == ARM_DETAIL else SOURCE_KIND
+        if (self.source_kind != expected_source or self.source_parent_age != 0
+                or initialization.get("source_checkpoint") is not None
+                or initialization.get("pretrained_weights") is not False
+                or initialization.get("source_arm") != f"scratch_common_seed{self.seed}"):
+            raise ValueError("Anchored training requires a declared fresh scratch lineage with no source checkpoint.")
+
     def __init__(self, **kwargs):
         # Reuse R13-5's paired full/restricted objective and native tasks while
         # avoiding its R13-6 health checker, whose applied-block assumptions do
         # not describe the compiled E directory.
         ThermalInteractionReusedMemberRoutingTask.__init__(self, **kwargs)
-        variant = _VARIANTS.get(self.model.CORE_SCHEMA)
+        variant = self._anchored_variant()
         if variant is None or self.model.architecture not in variant["adapter"].ARCHITECTURES:
             raise ValueError("R13-8 task requires an A/L anchored adapter.")
         self._member_routing_variant = variant
@@ -533,12 +544,7 @@ class ThermalR138AnchoredMemberRoutingTask(_AnchoredPairedMemberRoutingTask):
             self.seed = int(initialization["seed"])
         self.source_kind = str(initialization["source_kind"])
         self.source_parent_age = int(initialization.get("source_parent_age", 0))
-        expected_source = DETAIL_SOURCE_KIND if self.arm == ARM_DETAIL else SOURCE_KIND
-        if (self.source_kind != expected_source or self.source_parent_age != 0
-                or initialization.get("source_checkpoint") is not None
-                or initialization.get("pretrained_weights") is not False
-                or initialization.get("source_arm") != f"scratch_common_seed{self.seed}"):
-            raise ValueError("Anchored training requires a declared fresh scratch lineage with no source checkpoint.")
+        self._validate_initialization(initialization)
         self.training_sampling_arm = str(self.recipe["training"].get("sampling_arm", "R13-3-Relative"))
         health_config = self.recipe.get("member_routing", {}).get("health")
         self._member_routing_health = None

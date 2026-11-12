@@ -15,8 +15,21 @@ def test_response_compares_endpoints_and_changes_on_common_mask():
     assert result['baseline']['rmse'] == pytest.approx(np.sqrt(.5))
     assert result['edited']['rmse'] == pytest.approx(np.sqrt((1 + 400**2) / 2))
     assert result['response']['rmse'] == 1
+    assert result['response']['reference_rms'] == 2
+    assert result['response']['rmse_over_reference_rms'] == .5
     with pytest.raises(ValueError):
         compare_native_response(base, {'other': edit['temperature']})
+
+
+def test_zero_physical_response_keeps_absolute_error_and_no_fabricated_ratio():
+    base = {'attached': {'prediction': [3., 99.], 'reference': [2., 99.], 'mask': [True, False]}}
+    edit = {'attached': {'prediction': [4., -99.], 'reference': [2., -99.], 'mask': [True, True]}}
+    result = compare_native_response(base, edit)['attached']
+    assert result['edited']['count'] == 2
+    assert result['response']['count'] == 1
+    assert result['response']['rmse'] == 1
+    assert result['response']['reference_rms'] == 0
+    assert result['response']['rmse_over_reference_rms'] is None
 
 
 def test_equal_family_response_coverage_and_resolution():

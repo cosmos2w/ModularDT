@@ -110,9 +110,28 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+
+def _reject_legacy_profile_resume(run: str) -> None:
+    """Keep profile runs away from legacy constructors and identity rewrites."""
+    from honf_runtime.paths import resolve_path
+    from honf_runtime.run_layout import RunLayout
+
+    path = RunLayout(resolve_path(run)).read_path("experiment_identity.json")
+    if path.is_file():
+        recipe = json.loads(path.read_text()).get("recipe", {})
+        if recipe.get("training_profile") == "state_response":
+            raise ValueError(
+                "State-response runs use tools/relation_anchored_train.py fit --resume latest "
+                "or evaluate, with the saved recipe and the same --output run directory.")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "train":
+        from honf_runtime.paths import resolve_path
+        requested = json.loads(resolve_path(args.config).read_text())
+        if requested.get("training_profile") == "state_response":
+            raise ValueError("Use train-member-routing --config for the state-response profile.")
         result = research.train(
             args.config,
             device=args.device,
@@ -130,6 +149,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         config_path = (PROJECT / "configs" / "research" / f"thermal_{args.model}_train600.json"
                        if args.model else args.config)
+        from honf_runtime.paths import resolve_path
+        selected_path = resolve_path(config_path)
+        selected_recipe = json.loads(selected_path.read_text())
+        if selected_recipe.get("training_profile") == "state_response":
+            # The recommended profile must not be silently sent through the
+            # historical native-only task constructor.
+            from relation_anchored_train import main as train_joint_response
+            if args.devices and args.device not in args.devices:
+                raise ValueError("The requested device is outside the permitted device list.")
+            forward = ["inspect" if args.dry_run else "fit", "--recipe", str(selected_path),
+                       "--device", args.device]
+            if not args.dry_run:
+                stop = args.epochs or selected_recipe["training"].get("first_segment_epochs", 100)
+                forward += ["--output", args.output, "--stop-after", str(stop),
+                            "--compact-history" if args.compact_history else "--no-compact-history"]
+            return train_joint_response(forward)
         if args.dry_run:
             config, config_path = load_contextual_frontier_config(config_path)
             arm = _arm(config)
@@ -151,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
                 epochs=args.epochs, output=args.output, compact_history=args.compact_history,
             )
     elif args.command == "resume":
+        _reject_legacy_profile_resume(args.run)
         result = research.resume(
             args.run,
             device=args.device,
@@ -164,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=args.backend,
         )
     elif args.command == "resume-member-routing":
+        _reject_legacy_profile_resume(args.run)
         from honf_runtime.contextual_frontier_training import resume_contextual_frontier
         result = resume_contextual_frontier(
             args.run, device=args.device, devices=args.devices,
@@ -172,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
             compact_history=args.compact_history,
         )
     elif args.command == "evaluate":
+        _reject_legacy_profile_resume(args.run)
         result = research.evaluate(args.run, device=args.device, checkpoint=args.checkpoint)
     elif args.command in ("evaluate-r13-8", "evaluate-member-routing"):
         from honf_runtime.r13_8_anchored_organization_evaluation import evaluate

@@ -245,6 +245,7 @@ class ContentHypergraphCoreV2(nn.Module):
         source_read_executor: str = "packed",
         source_read_rank: int = 16,
         source_read_scorer_width: int = 32,
+        contextual_message: bool = False,
     ) -> None:
         super().__init__()
         architecture = str(architecture).strip().upper()
@@ -306,6 +307,9 @@ class ContentHypergraphCoreV2(nn.Module):
         self.context_dim = int(context_dim)
         self.num_heads = int(num_heads)
         self.context_depth = int(context_depth)
+        if type(contextual_message) is not bool:
+            raise ValueError("contextual_message must be boolean.")
+        self.contextual_message = contextual_message
         self.num_hyperedges = 6 if architecture == "A2-H6" else 0
         self.thermal_response_rank = int(thermal_response_rank)
         self.local_hidden_dim = int(local_hidden_dim)
@@ -355,7 +359,7 @@ class ContentHypergraphCoreV2(nn.Module):
             self.module_scene_gate = nn.Parameter(torch.tensor(0.1))
             self.environment_scene_gate = nn.Parameter(torch.tensor(0.1))
             self.context_blocks = nn.ModuleList(
-                StagedContextCycleV2(context_dim, num_heads, coordinate_dim, dropout)
+                StagedContextCycleV2(context_dim, num_heads, coordinate_dim, dropout, contextual_message=contextual_message)
                 for _ in range(context_depth)
             )
             self.query_encoder = QueryEncoderV2(query_input_dim, coordinate_dim, context_dim)
@@ -432,7 +436,15 @@ class ContentHypergraphCoreV2(nn.Module):
             for name, parameter in self.named_parameters():
                 if id(parameter) in initialized:
                     continue
-                if name.endswith("edge_seeds"):
+                if ".pair_message." in name:
+                    if name.endswith((".bias", ".output")):
+                        parameter.zero_()
+                    else:
+                        generator = torch.Generator(device="cpu").manual_seed(self._stable_seed(name))
+                        sample = torch.empty(tuple(parameter.shape), dtype=torch.float32)
+                        nn.init.xavier_uniform_(sample, generator=generator)
+                        parameter.copy_(sample.to(device=parameter.device, dtype=parameter.dtype))
+                elif name.endswith("edge_seeds"):
                     generator = torch.Generator(device="cpu")
                     generator.manual_seed(self._stable_seed(name))
                     sample = torch.randn(tuple(parameter.shape), generator=generator, dtype=torch.float32)
@@ -465,6 +477,8 @@ class ContentHypergraphCoreV2(nn.Module):
             "dropout": self.dropout_probability,
             "init_seed": self.init_seed,
         }
+        if self.contextual_message:
+            config["contextual_message"] = True
         if self.query_edge_geometry_mode is not None:
             config["query_edge_geometry_mode"] = self.query_edge_geometry_mode
         if self.reader_execution_backend != "legacy":
