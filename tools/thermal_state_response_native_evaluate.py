@@ -5,14 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
-from thermal_state_response_evaluate import restore_model, select_evaluation_ids
 import numpy as np
 import torch
+from thermal_state_response_evaluate import restore_model, select_evaluation_ids
+
 from honf_runtime.contextual_frontier_evaluation import (
-    _known_module_counts, _native_export_arrays, _summarize_nine_observables,
+    _known_module_counts,
+    _native_export_arrays,
+    _summarize_nine_observables,
 )
 
 
@@ -48,7 +51,8 @@ def evaluate_native_panel(model, provider, *, epoch, split, case_ids, mode, expo
             'maintained_native_reduction': reduced, 'work_counts': counts,
             'complete_panel_seconds': time.perf_counter() - started,
             'timing_scope': 'case loading, complete native preparation/decode/extraction, metrics and selected exports',
-            'receivers': 'all 8192 fluid grid cells with physical mask; 64 surface angles; all stored material points',
+            'receivers': ('all 8192 fluid grid cells with physical mask; '
+                          f'{getattr(provider, "port_angle_count", 64)} surface angles; all stored material points'),
             'interpretation': 'Exposed development evidence; no independent TEST or design-reliability claim.'}
 
 
@@ -80,7 +84,7 @@ def main(argv=None):
         case_ids=cases, mode=args.read_mode, export_cases=exports, output=args.output)
     result.update(schema='thermal_state_response_native_evaluation_v1', checkpoint=str(checkpoint),
                   epoch=int(saved['epoch']), recipe=str(args.recipe),
-                  read_mode='all_native' if model.core.reader_capability == 'all_native' else args.read_mode)
+                  read_mode='all_native' if getattr(model.core, 'reader_capability', None) == 'all_native' else args.read_mode)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(args.output.name + '.tmp')
     temporary.write_text(json.dumps(result, indent=2, allow_nan=False) + '\n')

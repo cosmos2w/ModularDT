@@ -1,10 +1,10 @@
 """Native evaluation preserves the complete panel and nine field summaries."""
-from contextlib import nullcontext
-import json
 import importlib.util
+import json
+import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-import sys
 
 import pytest
 import torch
@@ -16,7 +16,8 @@ entry = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(entry)
 
 
-def test_complete_native_panel_reuses_nine_observable_reduction(tmp_path):
+@pytest.mark.parametrize('angle_count', [None, 16, 64])
+def test_complete_native_panel_reuses_nine_observable_reduction(tmp_path, angle_count):
     class Provider:
         training_cases = validation_cases = ()
         def native_evaluation_batches(self, *, split, case_keys, microbatch_size):
@@ -39,13 +40,17 @@ def test_complete_native_panel_reuses_nine_observable_reduction(tmp_path):
     model = torch.nn.Linear(1, 1)
     model.core = SimpleNamespace(read_execution=lambda mode: nullcontext())
     model.architecture = 'fixture'
-    result = entry.evaluate_native_panel(model, Provider(), epoch=1000, split='validation',
+    provider = Provider()
+    if angle_count is not None:
+        provider.port_angle_count = angle_count
+    result = entry.evaluate_native_panel(model, provider, epoch=1000, split='validation',
         case_ids=('a', 'b'), mode='restricted', export_cases=(), output=tmp_path / 'result.json')
     assert len(result['nine_observables']) == 9
     assert result['nine_observables']['u']['mean'] == 2.
     assert result['nine_observables']['u']['p90'] == pytest.approx(2.8)
     assert result['nine_observables']['u']['worst_case_id'] == 'b'
     assert result['work_counts']['native_fluid_queries'] == 16384
+    assert f'{64 if angle_count is None else angle_count} surface angles' in result['receivers']
 
 
 @pytest.mark.parametrize('profile,split,all_cases,available_count,expected_count', [
@@ -73,3 +78,35 @@ def test_native_cli_selects_sample_or_preserved_validation_panel(monkeypatch, tm
         args.append('--all-cases')
     entry.main(args)
     assert tuple(seen) == available[:expected_count]
+
+
+@pytest.mark.parametrize('capability', [None, 'anchored', 'evidence_strength', 'all_native'])
+@pytest.mark.parametrize('requested_mode', ['restricted', 'full'])
+def test_native_cli_writes_results_for_classic_and_detail_readers(
+        monkeypatch, tmp_path, capability, requested_mode):
+    recipe_path = tmp_path / 'recipe.json'
+    recipe_path.write_text('{}')
+    core = SimpleNamespace()
+    if capability is not None:
+        core.reader_capability = capability
+    model = SimpleNamespace(core=core)
+    provider = SimpleNamespace(validation_case_ids=('case',))
+    checkpoint = tmp_path / 'epoch_0100_model.pt'
+    monkeypatch.setattr(entry, 'restore_model',
+        lambda *args: (model, provider, {'epoch': 100}, checkpoint))
+
+    def evaluate(model_arg, provider_arg, **kwargs):
+        assert model_arg is model and provider_arg is provider
+        assert kwargs['mode'] == requested_mode
+        return {'case_ids': list(kwargs['case_ids']), 'nine_observables': {'u': {'mean': 1.}}}
+
+    monkeypatch.setattr(entry, 'evaluate_native_panel', evaluate)
+    output = tmp_path / 'nested' / 'result.json'
+    entry.main(['--recipe', str(recipe_path), '--run', 'run', '--output', str(output),
+                '--read-mode', requested_mode])
+    result = json.loads(output.read_text())
+    assert result['read_mode'] == ('all_native' if capability == 'all_native' else requested_mode)
+    assert result['checkpoint'] == str(checkpoint)
+    assert result['epoch'] == 100 and result['case_ids'] == ['case']
+    assert result['nine_observables']['u']['mean'] == 1.
+    assert not output.with_name(output.name + '.tmp').exists()
