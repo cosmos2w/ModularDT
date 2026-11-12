@@ -41,6 +41,10 @@ def test_readme_math_uses_github_safe_delimiters_and_commands():
     assert fragments, "README should retain its model equations"
     for fragment in fragments:
         assert r"\operatorname" not in fragment
+        # GitHub can consume escaped literal braces before display-math parsing.
+        # Named delimiters survive that Markdown layer.
+        assert r"\left\{" not in fragment
+        assert r"\right\}" not in fragment
         assert r"\!" not in fragment
         assert "fallbackrawblock" not in fragment.lower()
         # Escaped set delimiters are TeX symbols, not brace groups.
