@@ -12,7 +12,8 @@ Objects, overlapping relationships and joint physical fields. The field textures
 | --- | --- |
 | Joint physical-field prediction | `relation_anchored` and `relation_anchored_active` retain contextualized original members and reuse applied relations for query access. |
 | Native three-dimensional Wind fields | `WindRelationAnchoredAdapter` provides joint velocity prediction, configurable environment lattices, trilinear coverage, original turbine IDs and masked ragged batches. |
-| Thermal ports and local operators | A native field decode supplies angular outside-temperature conditions to a compatible frozen local operator; port and local supervision train the shared predictor through those conditions. |
+| Thermal ports and local operators | Direct native-port supervision trains the joint predictor; the historical P64 composition can additionally use a compatible frozen local operator. |
+| State and finite-response training | Native field fitting with adjustable endpoint and finite-response supervision; cases provide the physical labels and observables. |
 | Physical-response evaluation | Fresh baseline/edited preparations, actual relation traces, native-unit field comparisons, common-support finite changes and equal-family decision metrics. |
 | Execution and visualization | Query tiling, native-decode reuse, verified native catalogues, complete histories and original-member organization figures. |
 
@@ -20,16 +21,16 @@ The shared core produces all configured physical channels through one joint fiel
 
 ## Relation-anchored fields
 
-Let $\mathcal{V}=\mathcal{M}\sqcup\mathcal{E}$ contain the original module and environment records. Member $i$ retains its ID, coordinate $x_i$, prescribed features, positive physical measure and contextual state $z_i$. Prescribed global conditions $\mathbf{c}$ enter the owning records before exchange. The [model definition](Model_Explain.md) gives the full notation, contextual equations and implementation map.
+Let $`\mathcal{V}=\mathcal{M}\sqcup\mathcal{E}`$ contain the original module and environment records. Member $`i`$ retains its ID, coordinate $`x_i`$, prescribed features, positive physical measure and contextual state $`z_i`$. Prescribed global conditions $`\mathbf{c}`$ enter the owning records before exchange. The [model definition](Model_Explain.md) gives the full notation, contextual equations and implementation map.
 
 1. Encode original members and their geometry, support and controls.
-2. Exchange information through directed $M\leftarrow M$, $E\leftarrow M$, $E\leftarrow E$ and $M\leftarrow E$ routes, retaining the actual applied relations.
+2. Exchange information through directed $`M\leftarrow M`$, $`E\leftarrow M`$, $`E\leftarrow E`$ and $`M\leftarrow E`$ routes, retaining the actual applied relations.
 3. Reuse the final E-receiver relations to form overlapping original-member address sets.
 4. Read accessible member details relative to each query and decode the physical fields jointly.
 
 ### Access measures and overlapping hyperedges
 
-For address $a\in\mathcal{E}$, let $g_{ai}\geq0$ combine its actual E-receiver gates with explicit positive own-E access. Let $\mu_i$ be the role-normalized inventory measure and $r(i)\in\{M,E\}$ the member's input role. The positive support of role $r$ is
+For address $`a\in\mathcal{E}`$, let $`g_{ai}\geq0`$ combine its actual E-receiver gates with explicit positive own-E access. Let $`\mu_i`$ be the role-normalized inventory measure and $`r(i)\in\{M,E\}`$ the member's input role. The positive support of role $`r`$ is
 
 $$
 \mathcal{A}_r(a)=\left\{i\in\mathcal{V}_r:g_{ai}>0,\ \mu_i>0\right\}.
@@ -46,15 +47,15 @@ $$
 \end{cases}
 $$
 
-The full directory $\Pi$, retained directory $D$ and native hyperedge $\mathcal{H}_a$ are
+The full directory $`\Pi`$, retained directory $`D`$ and native hyperedge $`\mathcal{H}_a`$ are
 
 $$
 \Pi_{ai}=\frac{g_{ai}\nu_{ai}}{\sum_jg_{aj}\nu_{aj}},\qquad
-D_{ai}=\Pi_{ai}\,\mathbf{1}\!\left[i\in\mathcal{S}_a\right],\qquad
+D_{ai}=\Pi_{ai}\,\mathbf{1}\left[i\in\mathcal{S}_a\right],\qquad
 \mathcal{H}_a=\left\{i:D_{ai}>0\right\}.
 $$
 
-A zero-total row stays zero. The retention rule selects $\mathcal{S}_a$ by joint M/E mass and preserves positive own-E access; the usual setting retains 95% mass. Stored weights are preserved during truncation. Hyperedges may overlap and retain individual members, coordinates and attributes. Their number and support are representation settings and learned access, respectively; neither is asserted to count physical subsystems.
+A zero-total row stays zero. The retention rule selects $`\mathcal{S}_a`$ by joint M/E mass and preserves positive own-E access; the usual setting retains 95% mass. Stored weights are preserved during truncation. Hyperedges may overlap and retain individual members, coordinates and attributes. Their number and support are representation settings and learned access, respectively; neither is asserted to count physical subsystems.
 
 <p align="center"><img src="docs/assets/readme/relation_anchored_regions.png" alt="Physical access regions with original module participation shown by ring sectors" width="1050"></p>
 
@@ -66,38 +67,38 @@ Scene 0277, the same checkpoint. Selected native rows retain their exact display
 
 ### Continuous coverage and original-member messages
 
-The adapter supplies nonnegative address weights $\lambda_a(q)$ satisfying $\sum_a\lambda_a(q)=1$ on each valid query. Thermal uses tensor-product smoothstep coverage over up to four environment centers; Wind uses trilinear coverage over up to eight. Each adapter preserves its declared physical support and boundary handling. The core consumes those indices and weights without changing the case's coordinate convention.
+The adapter supplies nonnegative address weights $`\lambda_a(q)`$ satisfying $`\sum_a\lambda_a(q)=1`$ on each valid query. Thermal uses tensor-product smoothstep coverage over up to four environment centers; Wind uses trilinear coverage over up to eight. Each adapter preserves its declared physical support and boundary handling. The core consumes those indices and weights without changing the case's coordinate convention.
 
-For each selected address and input role, calibrated query/member evidence $\ell_{ari}(q)$ reweights retained directory membership:
+For each selected address and input role, calibrated query/member evidence $`\ell_{ari}(q)`$ reweights retained directory membership:
 
 $$
 p_{ari}(q)=
-\frac{D_{ai}\exp\!\left(\ell_{ari}(q)\right)}
-{\sum_{j\in\mathcal{S}_a\cap\mathcal{V}_r}D_{aj}\exp\!\left(\ell_{arj}(q)\right)},\qquad
+\frac{D_{ai}\exp\left(\ell_{ari}(q)\right)}
+{\sum_{j\in\mathcal{S}_a\cap\mathcal{V}_r}D_{aj}\exp\left(\ell_{arj}(q)\right)},\qquad
 \beta_{ri}(q)=\sum_a\lambda_a(q)\,\rho_{ar}(q)\,p_{ari}(q).
 $$
 
-Here $\rho_{ar}(q)$ is a learned role-specific read strength; empty role support contributes zero. Repeated appearances of an original member are coalesced into $\beta_{ri}(q)$. Query evidence, contextual gates, directory weights and final query contributions are distinct quantities.
+Here $`\rho_{ar}(q)`$ is a learned role-specific read strength; empty role support contributes zero. Repeated appearances of an original member are coalesced into $`\beta_{ri}(q)`$. Query evidence, contextual gates, directory weights and final query contributions are distinct quantities.
 
-For displacement $\Delta_i(q)=q-x_i$, scene scale $\mathbf{L}$, member length $\boldsymbol{\ell}_i$, query state $z_q$ and contextual value $v_{ri}$, the selected-member message is
+For displacement $`\Delta_i(q)=q-x_i`$, scene scale $`\mathbf{L}`$, member length $`\boldsymbol{\ell}_i`$, query state $`z_q`$ and contextual value $`v_{ri}`$, the selected-member message is
 
 $$
-m_{ri}(q)=\operatorname{SiLU}\!\left(
+m_{ri}(q)=\mathrm{SiLU}\left(
 v_{ri}+W_r^qz_q+b_r^q
-+W_r^g\gamma\!\left(\Delta_i(q)/\mathbf{L}\right)
-+W_r^\ell\operatorname{asinh}\!\left(\Delta_i(q)/\boldsymbol{\ell}_i\right)
++W_r^g\gamma\left(\Delta_i(q)/\mathbf{L}\right)
++W_r^\ell\mathrm{asinh}\left(\Delta_i(q)/\boldsymbol{\ell}_i\right)
 \right).
 $$
 
-Division by length vectors is elementwise. The positional feature map $\gamma(t)$ concatenates $t$ with $\sin(2\pi ft)$ and $\cos(2\pi ft)$ for $f\in\{1,2,4\}$. The two role reads feed one joint decoder:
+Division by length vectors is elementwise. The positional feature map $`\gamma(t)`$ concatenates $`t`$ with $`\sin(2\pi ft)`$ and $`\cos(2\pi ft)`$ for $`f\in\{1,2,4\}`$. The two role reads feed one joint decoder:
 
 $$
 h_r(q)=\sum_{i\in\mathcal{V}_r}\beta_{ri}(q)m_{ri}(q),\qquad
-\widehat{\mathbf{y}}(q)=\mathcal{D}_{\mathrm{case}}\!\left(
-F_\theta\!\left([z_q,h_M(q),h_E(q)]\right)\right).
+\widehat{\mathbf{y}}(q)=\mathcal{D}_{\mathrm{case}}\left(
+F_\theta\left([z_q,h_M(q),h_E(q)]\right)\right).
 $$
 
-The case conversion $\mathcal{D}_{\mathrm{case}}$ restores native units using saved TRAIN-fitted transforms. Physical quantities derived from the joint field use the case's native observation operators and validity masks.
+The case conversion $`\mathcal{D}_{\mathrm{case}}`$ restores native units using saved TRAIN-fitted transforms. Physical quantities derived from the joint field use the case's native observation operators and validity masks.
 
 ## Installation and core interface
 
@@ -124,7 +125,13 @@ prepared = core.prepare(scene)
 fields = core.decode(prepared, queries).joint_fields
 ```
 
-Choose `relation_anchored_active` for active-domain access. Save `core.get_config()` with weights and adapter transforms. Historical checkpoints reconstruct their saved schema, tensor names and normalization; a public model name does not replace those semantics. Native case loaders preserve that reconstruction.
+For new models, start with `relation_anchored` (S) and its `inventory_unit_total` access measure. Choose `relation_anchored_active` for active-domain access. Save `core.get_config()` with weights and adapter transforms. Historical checkpoints reconstruct their saved schema, tensor names and normalization; a public model name does not replace those semantics. Native case loaders preserve that reconstruction.
+
+### State and finite-response training
+
+For the new state-response training profile, endpoint and finite-response supervision are enabled by default and adjustable. The case supplies paired TRAIN labels, physical scales and observations; the shared runtime provides the objective and balancing interface. Disable response supervision explicitly for a native-only baseline. Missing paired labels are an error when response training is enabled. The [state-response guide](docs/guides/State_Response_Training.md) explains the configuration, case contract and resume behavior.
+
+In a matched fresh Thermal TRAIN600 study at epoch 3000, adding endpoint and finite-response fitting reduced J and P mean absolute response errors by 65.1% and 90.8% on 56 edits from 14 of the 144 FIT families, compared with the native baseline. The arithmetic mean of nine equal-case validation field RMSE ratios (R over baseline) was 1.317, and performance on new families was uneven. These observations motivate the configurable training profile; they do not establish general response accuracy or inverse-design reliability. They do not select a replacement for the existing P64 port/local workflow.
 
 ### Wind: native 3-D coverage
 

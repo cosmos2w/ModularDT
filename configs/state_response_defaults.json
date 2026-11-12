@@ -1,0 +1,17 @@
+{
+  "training_profile": "state_response",
+  "state_response": {
+    "enabled": true,
+    "endpoint_weight": 1.0,
+    "response_weight": 1.0,
+    "field_response_weight": 1.0,
+    "functional_weights": {},
+    "warmup_epochs": 10,
+    "ramp_epochs": 40,
+    "coefficient_mode": "gradient_norm",
+    "gradient_norm_ratios": {
+      "endpoint": 0.25,
+      "response": 0.1
+    }
+  }
+}

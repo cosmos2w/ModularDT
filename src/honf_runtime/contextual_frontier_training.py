@@ -9,7 +9,6 @@ from __future__ import annotations
 import copy
 import json
 import math
-import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -17,6 +16,7 @@ from typing import Any, Callable, Mapping, Sequence
 import torch
 
 from . import research_training as research
+from . import storage_policy
 from .run_layout import RunLayout, resolve_checkpoint
 from .unified_training import (
     EngineConfig,
@@ -263,50 +263,7 @@ def load_contextual_frontier_config(path: str | Path) -> tuple[dict[str, Any], P
 
 def _ensure_workspace_storage_bindings(project: Path | None = None) -> dict[str, str]:
     """Repair the declared DATA2 workspace links before any run output is written."""
-    data2 = Path("/data2")
-    if not data2.is_dir() or not os.path.ismount(data2):
-        raise RuntimeError("/data2 is not mounted; refusing to create contextual-frontier outputs.")
-    data2_device = data2.stat().st_dev
-    root = project or Path(__file__).resolve().parents[2]
-    relocated = data2 / "wanglz/ModularDT/relocated_workspace/HONF_Proj"
-    bindings = (
-        (root / "Trained_Results", relocated / "Trained_Results", True),
-        (root / "diagnostics", relocated / "diagnostics", True),
-        (root / "Case_WindFarm/diagnostics/generated/native_role_catalogues_v1",
-         relocated / "Case_WindFarm/diagnostics/generated/native_role_catalogues_v1", False),
-    )
-    checked: dict[str, str] = {}
-    for link, target, create_target in bindings:
-        target = target.resolve(strict=False)
-        if not target.is_relative_to(data2.resolve()):
-            raise RuntimeError(f"Declared DATA2 target escaped /data2: {target}.")
-        if target.exists() and target.stat().st_dev != data2_device:
-            raise RuntimeError(f"Declared target is not on the mounted /data2 filesystem: {target}.")
-        if not target.exists():
-            if not create_target:
-                raise RuntimeError(f"Required shared DATA2 cache is missing: {target}.")
-            target.mkdir(parents=True, exist_ok=True)
-        resolved_target = target.resolve(strict=True)
-        if resolved_target.stat().st_dev != data2_device:
-            raise RuntimeError(f"Resolved DATA2 target is on the wrong filesystem: {resolved_target}.")
-
-        valid_link = False
-        if link.is_symlink():
-            try:
-                valid_link = link.resolve(strict=True) == resolved_target
-            except FileNotFoundError:
-                valid_link = False
-        elif link.exists():
-            raise RuntimeError(f"Expected a workspace symlink at {link}, found a non-symlink entry.")
-        if not valid_link:
-            if link.is_symlink():
-                link.unlink()
-            link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(resolved_target, target_is_directory=True)
-        if link.resolve(strict=True) != resolved_target or link.resolve(strict=True).stat().st_dev != data2_device:
-            raise RuntimeError(f"Workspace DATA2 binding verification failed for {link}.")
-        checked[str(link)] = str(resolved_target)
-    return checked
+    return storage_policy._ensure_workspace_storage_bindings(project)
 
 
 def _formal_forward_alias(output: Path, output_root: Path, *, project: Path | None = None) -> Path:
@@ -394,45 +351,21 @@ def _run_identity(config: Mapping[str, Any], provider: Any) -> dict[str, Any]:
 
 
 def _model_state_bytes(model: torch.nn.Module) -> int:
-    return sum(int(tensor.numel()) * int(tensor.element_size())
-               for tensor in model.state_dict().values() if torch.is_tensor(tensor))
+    return storage_policy._model_state_bytes(model)
 
 
 def _storage_estimate(model: torch.nn.Module, *, completed_epoch: int, stop_after: int,
                       config: Mapping[str, Any], fresh_namespace: bool = False,
                       checkpoint_epochs: Sequence[int] | None = None) -> tuple[int, int]:
-    """Conservatively include model, named Adam moments, aliases, and atomic-save space."""
-    state_bytes = max(1, _model_state_bytes(model))
-    payload_bytes = 4 * state_bytes + 8 * 1024**2
-    declared_checkpoints = (config["training"]["checkpoint_epochs"] if checkpoint_epochs is None
-                           else checkpoint_epochs)
-    milestones = sum(
-        1 for epoch in declared_checkpoints
-        if completed_epoch < int(epoch) <= stop_after
-    )
-    terminal = int(stop_after not in declared_checkpoints)
-    if completed_epoch == 0 or fresh_namespace:
-        alias_count = 2  # latest and best-field are distinct retained files
-    else:
-        alias_count = 0  # both aliases already exist and are atomically replaced
-    new_payload_count = milestones + terminal + alias_count
-    history_and_plots = 64 * 1024**2
-    estimated_new = new_payload_count * payload_bytes + history_and_plots
-    peak_temporary = payload_bytes + 32 * 1024**2
-    return estimated_new, peak_temporary
+    return storage_policy._storage_estimate(model, completed_epoch=completed_epoch, stop_after=stop_after,
+        config=config, fresh_namespace=fresh_namespace, checkpoint_epochs=checkpoint_epochs,
+        model_bytes=_model_state_bytes)
 
 
 def _prepare_storage(config: Mapping[str, Any], output: Path, *, estimated_bytes: int,
                      peak_temporary_bytes: int, bindings: Mapping[str, str] | None = None) -> dict[str, Any]:
-    snapshot = research.verify_storage(
-        config, output=output, estimated_bytes=estimated_bytes,
-        peak_temporary_bytes=peak_temporary_bytes,
-    )
-    if snapshot["free_bytes_before"] - estimated_bytes - peak_temporary_bytes < snapshot[
-            "minimum_free_headroom_bytes"]:
-        raise RuntimeError("Contextual-frontier output plus atomic-save space would breach DATA2 headroom.")
-    snapshot["workspace_bindings"] = dict(bindings or {})
-    return snapshot
+    return storage_policy._prepare_storage(config, output, estimated_bytes=estimated_bytes,
+        peak_temporary_bytes=peak_temporary_bytes, bindings=bindings, verifier=research.verify_storage)
 
 
 def _write_run_manifest(output: Path, config: Mapping[str, Any], config_path: Path,

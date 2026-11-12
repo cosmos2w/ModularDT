@@ -20,8 +20,19 @@ from honf_runtime.run_layout import resolve_checkpoint
 from honf_runtime.unified_training import EngineConfig, SamplingKey, SelectionPolicy, TrainingEngine
 
 
-def build(recipe, *, device):
+def configure_r16_5_execution(recipe, *, device):
+    """Select the declared replay-safe policy before any CUDA initialization."""
+    if recipe.get("r16_5_warm_fork") is None:
+        return
+    from channelthermal.training.r16_5_warm_fork import configure_r16_5_execution as configure
+
+    configure(recipe, device=device)
+
+
+def build(recipe, *, device, response_scales=None, saved_adapter_state=None, saved_normalization_source=None,
+          resume_payload=None):
     """Dispatch supported adapters while preserving their saved recipe schemas."""
+    configure_r16_5_execution(recipe, device=device)
     thermal = isinstance(recipe.get("dataset"), dict) and recipe["dataset"].get("name") == "thermal"
     unsupported = ("thermal_finite_response", "thermal_feedback", "local_expert", "local_ports")
     if any(recipe.get(name, {}).get("enabled", False) for name in unsupported):
@@ -32,12 +43,99 @@ def build(recipe, *, device):
     torch.manual_seed(seed)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
+    profile = recipe.get("training_profile")
+    if profile is not None and profile != "state_response":
+        raise ValueError(f"Unknown training profile {profile!r}.")
+    if profile == "state_response":
+        from honf_runtime.state_response import ResponseObjectiveConfig
+
+        constraints = ResponseObjectiveConfig.from_mapping(recipe.get("state_response", {}))
+        if thermal:
+            from channelthermal.training.thermal_joint_response_task import build_thermal_joint_response_task
+
+            return build_thermal_joint_response_task(recipe, device=device, resume_payload=resume_payload)
+        if constraints.enabled:
+            raise ValueError("This case has no state-response training adapter; provide aligned physical FIT labels "
+                             "and its case-owned adapter, or explicitly set state_response.enabled=false.")
     if recipe["dataset"] == "wind":
         from windfarm.training.relation_anchored_task import build_wind_relation_anchored_task
 
         return build_wind_relation_anchored_task(recipe, device=device)
     if thermal:
         arm = recipe["member_routing"]["arm"]
+        if recipe.get("r16_10_posttrain") is not None:
+            from channelthermal.training.r16_10_posttrain import build_posttrain_task
+
+            source = (None if resume_payload is not None else load_trusted_checkpoint(
+                recipe['initialization']['source_checkpoint'], map_location='cpu'))
+            return build_posttrain_task(recipe, device=device, source=source, resume_payload=resume_payload)
+        if recipe.get("r16_10_family") is not None:
+            from channelthermal.training.r16_10_family_task import build_thermal_r16_10_task
+
+            model, provider = build_thermal_r16_10_task(
+                recipe, arm=arm, device=device, resume_payload=resume_payload)
+            # Historical model/optimizer identities are retained. Campaign-only
+            # counterfactual update telemetry stays on the R16 research branch.
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
+        if recipe.get("r16_8_content") is not None:
+            from channelthermal.training.r16_8_content_task import build_thermal_r16_8_task
+            model, provider = build_thermal_r16_8_task(recipe, arm=arm, device=device,
+                resume_payload=resume_payload, response_scales=response_scales)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
+        if recipe.get("r16_7_prescribed") is not None:
+            from channelthermal.training.r16_7_prescribed_task import build_thermal_r16_7_task
+            model, provider = build_thermal_r16_7_task(recipe, arm=arm, device=device,
+                resume_payload=resume_payload, response_scales=response_scales)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
+        if recipe.get("r16_6_balanced") is not None:
+            from channelthermal.training.r16_6_balanced_task import build_thermal_r16_6_task
+            model, provider = build_thermal_r16_6_task(recipe, arm=arm, device=device,
+                resume_payload=resume_payload, response_scales=response_scales)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
+        if recipe.get("r16_5_warm_fork") is not None:
+            from channelthermal.training.r16_5_warm_fork import build_thermal_r16_5_warm_fork_task
+
+            model, provider = build_thermal_r16_5_warm_fork_task(
+                recipe, arm=arm, device=device, resume_payload=resume_payload, response_scales=response_scales)
+            # A fresh fork owns its own RNG; a resume restores its saved RNG in fit.
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
+        if recipe.get("r16_4_warm_fork") is not None:
+            from channelthermal.training.r16_4_warm_fork import build_thermal_r16_4_warm_fork_task
+
+            model, provider = build_thermal_r16_4_warm_fork_task(recipe, arm=arm, device=device)
+            if response_scales is not None and provider.response_scales != response_scales:
+                raise ValueError("Saved run response scales differ from the literal source FIT scales.")
+            # Each independent arm starts the same non-sampler streams. Exact
+            # resumes subsequently restore that lineage's own saved RNG state.
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            return model, provider
+        if recipe.get("thermal_state_response", {}).get("enabled", False):
+            from channelthermal.training.thermal_state_response_task import build_thermal_state_response_task
+
+            options = {"arm": arm, "device": device}
+            if response_scales is not None:
+                options["response_scales"] = response_scales
+            if saved_adapter_state is not None:
+                options["saved_adapter_state"] = saved_adapter_state
+                options["saved_normalization_source"] = saved_normalization_source
+            return build_thermal_state_response_task(recipe, **options)
         if recipe.get("thermal_port_response", {}).get("enabled", False):
             from channelthermal.training.thermal_port_response_task import build_thermal_port_response_task
 
@@ -46,6 +144,68 @@ def build(recipe, *, device):
 
         return build_thermal_r13_8_anchored_member_routing_task(recipe, arm=arm, device=device)
     raise ValueError(f"Unsupported dataset {recipe['dataset']!r}.")
+
+
+
+def bind_training_budget(provider, recipe, output):
+    """Bind an explicitly configured cumulative budget on fresh and resumed fits."""
+    import math
+    from numbers import Real
+
+    policy = recipe.get("training", recipe.get("execution", {}))
+    budget = policy.get("wall_clock_budget_seconds")
+    if budget is None:
+        return
+    reserve = policy.get("clean_save_reserve_seconds", 600)
+    if (isinstance(budget, bool) or not isinstance(budget, Real) or not math.isfinite(budget)
+            or budget <= 0 or isinstance(reserve, bool) or not isinstance(reserve, Real)
+            or not math.isfinite(reserve) or not 0 <= reserve < budget):
+        raise ValueError("Training budget must be positive with a finite clean-save reserve below it.")
+    bind = getattr(provider, "bind_wall_clock_budget", None)
+    if not callable(bind):
+        raise ValueError("This provider cannot enforce the configured training wall-clock budget.")
+    bind(output_dir=output, budget_seconds=float(budget), saver_reserve_seconds=float(reserve))
+
+
+
+def prepare_profile_fit(recipe, output, model, engine, *, source_payload, stop_after):
+    """Apply existing storage rules and retain the new profile's resolved recipe."""
+    from honf_runtime.state_response_storage import prepare_state_response_storage
+    from honf_runtime.run_layout import RunLayout
+    from honf_runtime.unified_training import _atomic_json
+
+    if type(stop_after) is not int or not 1 <= stop_after <= engine.config.total_epochs:
+        raise ValueError("The requested stop must be within the configured epoch horizon.")
+    completed = 0 if source_payload is None else int(source_payload["epoch"])
+    snapshot = prepare_state_response_storage(recipe, output, model, completed_epoch=completed,
+        stop_after=stop_after, checkpoint_epochs=engine.config.checkpoint_epochs)
+    target = Path(snapshot["run_output"])
+    alias = None
+    if recipe["storage"].get("formal_forward_run_alias", False):
+        if (not isinstance(recipe.get("dataset"), dict) or recipe["dataset"].get("name") != "thermal"
+                or recipe["training"]["membership"] != "full_train600"):
+            raise ValueError("The Thermal formal alias applies only to full_train600 runs.")
+        from honf_runtime.contextual_frontier_training import _formal_forward_alias
+
+        alias = PROJECT / "Trained_Results/ThermalChannel/HONF_Forward_Runs" / target.name
+        if source_payload is not None and (alias.exists() or alias.is_symlink()):
+            if not alias.is_symlink() or alias.resolve(strict=True) != target:
+                raise ValueError("The formal alias differs from the saved run output.")
+        else:
+            alias = _formal_forward_alias(target, Path(recipe["storage"]["output_root"]).expanduser().resolve(),
+                                          project=PROJECT)
+    target.mkdir(parents=True, exist_ok=True)
+    layout = RunLayout(target)
+    layout.ensure()
+    if alias is not None:
+        if not alias.is_symlink():
+            alias.symlink_to(target, target_is_directory=True)
+        snapshot["formal_forward_alias"] = str(alias)
+    record = "storage_preparation_resume.json" if source_payload is not None else "storage_preparation.json"
+    _atomic_json(layout.write_path(record, category="logs"), snapshot)
+    if source_payload is None:
+        _atomic_json(layout.write_path("resolved_config.json"), recipe)
+    return snapshot
 
 
 def engine_for(recipe, *, device, execution_horizon=None):
@@ -58,10 +218,20 @@ def engine_for(recipe, *, device, execution_horizon=None):
         wind_extension = (recipe.get("dataset") == "wind" and recipe.get("schema") in
                           ("wind_relation_anchored_r15_2_v2", "wind_relation_anchored_v1"))
         port = recipe.get("thermal_port_response", {})
+        r16_5_arm = recipe.get("r16_5_decision", {}).get("arm")
         thermal_extension = (thermal and port.get("schema") == "thermal_port_response_v1"
                              and port.get("arm") == "P64" and policy.get("membership") == "full_train600"
-                             and horizon == 100 and execution_horizon == 500)
-        if (not (wind_extension or thermal_extension) or type(execution_horizon) is not int
+                             and horizon == 100 and execution_horizon == 500
+                             and (recipe.get("r16_6_balanced", {}).get("arm") == "M"
+                                  or (recipe.get("r16_6_balanced") is None and
+                                      (recipe.get("r16_5_warm_fork") is None or r16_5_arm == "PDeltaD"))))
+        family = recipe.get("r16_10_family", {})
+        r16_10_extension = (thermal and family.get("schema") == "thermal_r16_10_family_v1"
+                            and family.get("population") == 600 and family.get("arm") in ("B0", "R")
+                            and policy.get("membership") == "full_train600" and horizon == 2000
+                            and execution_horizon == 3000
+                            and recipe.get("member_routing", {}).get("model", {}).get("access_measure") == "inventory_unit_total")
+        if (not (wind_extension or thermal_extension or r16_10_extension) or type(execution_horizon) is not int
                 or execution_horizon <= horizon or execution_horizon % 100):
             raise ValueError("Unsupported explicit same-lineage horizon extension.")
         horizon = execution_horizon
@@ -73,10 +243,23 @@ def engine_for(recipe, *, device, execution_horizon=None):
         total_epochs=horizon, monitor_every=int(policy.get("monitor_every", 100)),
         checkpoint_epochs=tuple(checkpoints), latest_every=int(policy.get("latest_every", 1)),
         curve_every=int(policy.get("curve_every", 10)), progress_enabled=bool(policy.get("progress_enabled", True)),
-        gradient_clip=float(recipe.get("gradient_clip", 1.0)), sampling_version=SamplingKey.CASE_EPOCH_VERSION,
+        gradient_clip=float(recipe.get("optimizer", {}).get("gradient_clip", recipe.get("gradient_clip", 1.0))), sampling_version=SamplingKey.CASE_EPOCH_VERSION,
         training_mode="joint", write_initial_artifacts=bool(policy.get("write_initial_artifacts", True)),
     )
-    return TrainingEngine(config, device=device, selection=SelectionPolicy(
+    engine_type = TrainingEngine
+    if thermal and recipe.get("r16_10_posttrain") is not None:
+        from channelthermal.training.r16_10_posttrain import PosttrainEngine
+
+        engine_type = PosttrainEngine
+    elif thermal and recipe.get("r16_5_warm_fork") is not None:
+        from channelthermal.training.r16_5_warm_fork import ThermalR165WarmForkEngine
+
+        engine_type = ThermalR165WarmForkEngine
+    elif thermal and recipe.get("r16_4_warm_fork") is not None:
+        from channelthermal.training.r16_4_warm_fork import ThermalR164WarmForkEngine
+
+        engine_type = ThermalR164WarmForkEngine
+    return engine_type(config, device=device, selection=SelectionPolicy(
         field_metric=policy.get("field_metric", "field_score")))
 
 
@@ -89,8 +272,12 @@ def main(argv=None):
     parser.add_argument("--stop-after", type=int)
     parser.add_argument("--resume", help="Same-run checkpoint selector, typically latest")
     parser.add_argument("--extend-horizon", action="store_true",
-                        help="Explicit same-run extension; retain saved recipe and constant optimizer schedule")
+                        help="Explicit same-run extension; retain the saved recipe and optimizer schedule")
     parser.add_argument("--checkpoint", default="latest")
+    parser.add_argument("--compact-history", action=argparse.BooleanOptionalAction, default=None,
+                        help="Optional output-only history format; retain every recorded epoch")
+    parser.add_argument("--cuda-memory-fraction", type=float,
+                        help="Optional process-local CUDA allocator limit; does not change training populations")
     args = parser.parse_args(argv)
     if args.extend_horizon and (args.command != "fit" or not args.resume or args.stop_after is None):
         parser.error("--extend-horizon requires fit, --resume and --stop-after")
@@ -98,8 +285,43 @@ def main(argv=None):
         parser.error("fit requires --output and --stop-after")
     if args.command == "evaluate" and args.output is None:
         parser.error("evaluate requires --output")
+    if (args.cuda_memory_fraction is not None
+            and (not 0 < args.cuda_memory_fraction <= 1 or torch.device(args.device).type != "cuda")):
+        parser.error("--cuda-memory-fraction requires a CUDA device and a fraction in (0, 1]")
     recipe = json.loads(args.recipe.read_text())
-    model, provider = build(recipe, device=args.device)
+    if args.command == 'fit' and recipe.get('r16_10_posttrain') is not None:
+        parser.error('Use tools/thermal_r16_10_posttrain.py for the state-preserving post-training fit.')
+    configure_r16_5_execution(recipe, device=args.device)
+    if args.cuda_memory_fraction is not None:
+        torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device=args.device)
+    source_payload = None
+    if ((recipe.get("thermal_state_response", {}).get("enabled")
+         or recipe.get("r16_10_family") is not None
+         or recipe.get("training_profile") == "state_response")
+            and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
+        selector = args.checkpoint if args.command == "evaluate" else args.resume
+        source_payload = load_trusted_checkpoint(resolve_checkpoint(args.output, selector), map_location="cpu")
+        if source_payload["experiment_identity"]["recipe"] != recipe:
+            raise ValueError("The recipe differs from the saved run.")
+        if (args.extend_horizon and recipe.get("r16_10_family") is not None
+                and source_payload["experiment_identity"]["engine_config"]["total_epochs"] == 2000
+                and int(source_payload["epoch"]) != 2000):
+            raise ValueError("R16-10 extension requires a completed epoch 2000 state.")
+    options = {}
+    if source_payload is not None and (recipe.get("r16_10_family") is not None
+                                       or recipe.get("training_profile") == "state_response"):
+        options["resume_payload"] = source_payload
+    if source_payload is not None and recipe.get("thermal_state_response", {}).get("enabled"):
+        # Objective denominators are saved scientific state. Recomputing their
+        # last bits on another device must not change the restored objective.
+        options["response_scales"] = source_payload["experiment_identity"]["provider_identity"]["response_scales"]
+        if recipe.get("r16_5_warm_fork") is not None:
+            options["resume_payload"] = source_payload
+        elif recipe.get("r16_4_warm_fork") is None:
+            native_identity = source_payload["experiment_identity"]["provider_identity"]
+            options["saved_adapter_state"] = native_identity["adapter_state"]
+            options["saved_normalization_source"] = native_identity["source_binding"]["normalization_source"]
+    model, provider = build(recipe, device=args.device, **options)
     engine = (engine_for(recipe, device=args.device, execution_horizon=args.stop_after)
               if args.extend_horizon else engine_for(recipe, device=args.device))
     arm = recipe["member_routing"]["arm"] if isinstance(recipe.get("dataset"), dict) else recipe["architecture"]
@@ -110,14 +332,27 @@ def main(argv=None):
                   "train_cases": len(cases), "parameters": sum(p.numel() for p in model.parameters()),
                   "optimizer_groups": [spec.name for spec in provider.optimizer_groups(model, arm, "joint")]}
     elif args.command == "fit":
+        bind_training_budget(provider, recipe, args.output)
+        if recipe.get("training_profile") == "state_response":
+            prepare_profile_fit(recipe, args.output, model, engine,
+                                source_payload=source_payload, stop_after=args.stop_after)
         if recipe["dataset"] == "wind":
             print(json.dumps({"event": "wind_preparation_complete", "preparation": provider.preparation_summary()},
                              sort_keys=True, default=str, allow_nan=False), flush=True)
+        fit_options = {}
+        compact = args.compact_history
+        if compact is None:
+            compact = recipe.get("training", {}).get("compact_history")
+        if compact is not None:
+            if type(compact) is not bool:
+                raise ValueError("compact_history must be boolean.")
+            fit_options["compact_history"] = compact
         result = engine.fit(model, provider, args.output, identity=identity, arm=arm,
                             stop_after=args.stop_after, resume_checkpoint=args.resume,
-                            allow_horizon_extension=args.extend_horizon)
+                            allow_horizon_extension=args.extend_horizon, **fit_options)
     else:
-        saved = load_trusted_checkpoint(resolve_checkpoint(args.output, args.checkpoint), map_location="cpu")
+        saved = (source_payload if source_payload is not None else
+                 load_trusted_checkpoint(resolve_checkpoint(args.output, args.checkpoint), map_location="cpu"))
         saved_identity = saved["experiment_identity"]
         if saved_identity["recipe"] != recipe or saved_identity["provider_identity"] != dict(provider.identity_payload()):
             raise ValueError("The recipe or native provider differs from the saved run.")

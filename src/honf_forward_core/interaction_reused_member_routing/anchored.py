@@ -7,7 +7,6 @@ those indices remain connected to the applied final-cycle EM/EE tensors.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from contextlib import contextmanager
 import math
 from typing import Any, Mapping
 
@@ -17,6 +16,7 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from ..content_hypergraph.query_chunks_v1 import slice_query_v1
+from ..read_execution import read_execution, validate_read_mode
 from .core import InteractionJointOutput, InteractionReusedMemberRoutingCore, _pack_work_counts, _tensor_version
 from .primitives import build_joint_member_measure, prior_weighted_scores, read_probability
 
@@ -566,17 +566,9 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             del self.member_router.proposal_M
         self.architecture = self.architecture_name
 
-    @contextmanager
     def read_execution(self, mode: str):
-        """Select full or restricted member access."""
-        if mode not in ("full", "restricted"):
-            raise ValueError("Read execution must be 'full' or 'restricted'.")
-        previous = self._read_execution_override
-        self._read_execution_override = mode
-        try:
-            yield self
-        finally:
-            self._read_execution_override = previous
+        """Select full or restricted member access for this execution scope."""
+        return read_execution(self, mode)
 
     @staticmethod
     def _routing_features(features):
@@ -992,7 +984,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         return values[batch, slot], {}
 
     def _read_packed(self, prepared, query, qstates, qnorm, packed, union_keys, raw, *, return_trace,
-                     value_cache=None, physical_value_counts=None):
+                     value_cache=None, physical_value_counts=None, intervention=None, projection_cache=None):
         """Calibrate and normalize each located row/role, then coalesce values."""
         reads, rid = packed["reads"], packed["read_id"]
         read_count, groups = len(reads), 2 * len(reads)
@@ -1036,11 +1028,25 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                                   (prepared.scene.environment_mask & (prepared.scene.environment_measure > 0)).sum(-1)), -1)
         eligible = scene_count[b].to(scores)
         entropy = torch.where(eligible > 1, entropy / eligible.clamp_min(2).log(), torch.zeros_like(entropy))
+        evidence = None
+        if hasattr(self, "evidence_strength"):
+            if self.score_calibration == "inherited":
+                evidence_mean, evidence_variance = means, variance
+            else:
+                conditional_evidence = prior / mass[group].clamp_min(tiny)
+                evidence_mean = self._segment_sum(conditional_evidence * scores, group, groups)
+                evidence_variance = self._segment_sum(
+                    conditional_evidence * (scores - evidence_mean[group]).square(), group, groups)
+            evidence = torch.stack((mass.log1p(), evidence_mean.asinh(), evidence_variance.log1p()), -1)
+            evidence = evidence.reshape(read_count, 2, 3)
         strength_parts, gate_parts = [], []
         for role_index, role in enumerate(("M", "E")):
             gate_input = torch.cat((qnorm[b, q], expectation[:, role_index, None], entropy[:, role_index, None]), -1)
             logits = self.typed_read_gates[role](gate_input)
-            strength_parts.append(read_probability(logits[:, 0] - logits[:, 1]) * (mass.reshape(read_count, 2)[:, role_index] > 0))
+            contrast = logits[:, 0] - logits[:, 1]
+            if evidence is not None:
+                contrast = contrast + (evidence[:, role_index] * self.evidence_strength[role]).sum(-1)
+            strength_parts.append(read_probability(contrast) * (mass.reshape(read_count, 2)[:, role_index] > 0))
             gate_parts.append(logits)
         strength = torch.stack(strength_parts, -1)
         if packed.get("suppress_module_values", False):
@@ -1052,45 +1058,62 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         um = union_keys.remainder(total)
         ub = torch.div(uq, query.num_queries, rounding_mode="floor")
         contexts, counts = {}, {}
+        row_contexts = {} if getattr(self, "_uses_hyperedge_rows", False) else None
         for role_index, role in enumerate(("M", "E")):
-            selected = ((um < prepared.scene.num_modules) if role == "M" else (um >= prepared.scene.num_modules))
+            role_selected = ((um < prepared.scene.num_modules) if role == "M" else (um >= prepared.scene.num_modules))
             # Paired restricted reads share paid full scores, but reduce values
             # only for their own actual positive member coefficients.
-            selected = selected & (coalesced > 0)
+            selected = role_selected & (coalesced > 0)
             positions = selected.nonzero(as_tuple=False).flatten()
-            slot = um[positions] - (prepared.scene.num_modules if role == "E" else 0)
+            value_positions = positions
+            if row_contexts is not None:
+                # A row context precedes lambda. Even when a tiny coverage
+                # coefficient underflows in H0's coalesced blend, G still needs
+                # that row's actual messages and their rho/p gradients.
+                in_rows = torch.zeros_like(coalesced, dtype=torch.bool).scatter(0, union_index, True)
+                value_positions = (role_selected & in_rows).nonzero(as_tuple=False).flatten()
+            slot = um[value_positions] - (prepared.scene.num_modules if role == "E" else 0)
             if value_cache is None:
                 selected_values, value_counts = self._selected_member_values(
-                    prepared, query, qstates, role, ub[positions], uq[positions].remainder(query.num_queries), slot)
+                    prepared, query, qstates, role, ub[value_positions],
+                    uq[value_positions].remainder(query.num_queries), slot)
             else:
                 cached = value_cache.get(role)
                 if cached is None:
                     selected_values, value_counts = self._selected_member_values(
-                        prepared, query, qstates, role, ub[positions], uq[positions].remainder(query.num_queries), slot)
-                    value_cache[role] = (positions, selected_values)
+                        prepared, query, qstates, role, ub[value_positions],
+                        uq[value_positions].remainder(query.num_queries), slot)
+                    value_cache[role] = (value_positions, selected_values)
                 else:
                     old_positions, old_values = cached
-                    lookup = torch.searchsorted(old_positions, positions)
+                    lookup = torch.searchsorted(old_positions, value_positions)
                     if old_positions.numel():
                         safe = lookup.clamp_max(old_positions.numel() - 1)
-                        found = (lookup < old_positions.numel()) & (old_positions[safe] == positions)
+                        found = (lookup < old_positions.numel()) & (old_positions[safe] == value_positions)
                         selected_values = old_values[safe]
                     else:
-                        found = torch.zeros_like(positions, dtype=torch.bool)
-                        selected_values = qstates.new_zeros((positions.numel(), self.context_dim))
+                        found = torch.zeros_like(value_positions, dtype=torch.bool)
+                        selected_values = qstates.new_zeros((value_positions.numel(), self.context_dim))
                     missing = (~found).nonzero(as_tuple=False).flatten()
                     value_counts = {}
                     if missing.numel():
                         missing_values, value_counts = self._selected_member_values(
-                            prepared, query, qstates, role, ub[positions[missing]],
-                            uq[positions[missing]].remainder(query.num_queries), slot[missing])
+                            prepared, query, qstates, role, ub[value_positions[missing]],
+                            uq[value_positions[missing]].remainder(query.num_queries), slot[missing])
                         selected_values = selected_values.index_copy(0, missing, missing_values)
                 for name, value in value_counts.items():
                     physical_value_counts[name] = physical_value_counts.get(name, 0) + value
                 value_counts = {}
-            contributions = selected_values * coalesced[positions, None]
+            blended_values = (selected_values if row_contexts is None else
+                              selected_values[torch.searchsorted(value_positions, positions)])
+            contributions = blended_values * coalesced[positions, None]
             context = self._segment_sum(contributions, uq[positions], query.batch_size * query.num_queries)
             contexts[role] = context.reshape(query.batch_size, query.num_queries, self.context_dim)
+            if row_contexts is not None:
+                row_contexts[role], row_counts = self._hyperedge_role_rows(
+                    role, packed, union_index, value_positions, selected_values, probabilities, strength,
+                    projection_cache=projection_cache, physical_value_counts=physical_value_counts)
+                counts.update(row_counts)
             memberships = packed["is_module"] if role == "M" else ~packed["is_module"]
             counts[f"query_anchor_member_pairs_{role}"] = memberships.sum().detach()
             counts[f"query_anchor_normalization_rows_{role}"] = read_count
@@ -1099,7 +1122,14 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             counts[f"query_anchor_value_reduction_pairs_{role}"] = positions.numel()
             counts.update(value_counts)
         fused = torch.cat((qstates, contexts["M"], contexts["E"]), -1)
-        fields = self.member_router.joint_head(self.member_router.joint_trunk(fused))
+        trunk = self.member_router.joint_trunk(fused)
+        hyperedge_trace = None
+        if hasattr(self, "_hyperedge_correction"):
+            correction, hyperedge_counts, hyperedge_trace = self._hyperedge_correction(
+                query, packed, contexts, row_contexts, intervention or {}, return_trace=return_trace)
+            trunk = trunk + correction
+            counts.update(hyperedge_counts)
+        fields = self.member_router.joint_head(trunk)
         fields = fields * self._query_mask(query)[..., None].to(fields)
         counts["query_joint_field_head_rows"] = query.batch_size * query.num_queries
         trace = None
@@ -1118,11 +1148,20 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                      "anchored_applied_EE": prepared.anchored_applied_EE,
                      "context_M": contexts["M"], "context_E": contexts["E"], "joint_fields": fields}
             trace.update(self._directory_trace(prepared))
+            if hyperedge_trace is not None:
+                trace.update(hyperedge_trace)
+            if getattr(self, "reader_capability", None) == "all_native":
+                trace["read_capability"] = "all_native"
+            if evidence is not None:
+                trace["anchor_read_strength_evidence"] = evidence
             for role_index, role in enumerate(("M", "E")):
                 rho = fields.new_zeros(query.batch_size, query.num_queries, query.anchor_indices.shape[-1])
                 rho = rho.index_put((b, q, k), strength[:, role_index])
                 trace[f"anchor_read_strength_{role}"] = rho
-                trace[f"member_read_strength_{role}"] = (rho * query.anchor_weights).sum(-1)
+                if getattr(self, "reader_capability", None) == "all_native":
+                    trace[f"member_read_strength_{role}"] = rho.sum(-1)
+                else:
+                    trace[f"member_read_strength_{role}"] = (rho * query.anchor_weights).sum(-1)
                 role_mask = um < prepared.scene.num_modules if role == "M" else um >= prepared.scene.num_modules
                 positions = role_mask.nonzero(as_tuple=False).flatten()
                 trace[f"member_score_union_indices_{role}"] = union_keys[positions]
@@ -1138,8 +1177,9 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
 
     def _decode_tile(self, prepared, query, read_modes, *, return_trace=False, intervention=None):
         controls = {} if intervention is None else dict(intervention)
-        if set(controls) - {"read_mode", "access_intervention", "directory_intervention", "member_role",
-                            "member_id", "source_role", "source_id", "target_role", "target_id", "anchor_id"}:
+        if set(controls) - ({"read_mode", "access_intervention", "directory_intervention", "member_role",
+                            "member_id", "source_role", "source_id", "target_role", "target_id", "anchor_id"}
+                            | getattr(self, "_extra_read_interventions", set())):
             raise ValueError("Unsupported anchored read intervention.")
         qstates = self._query_states(prepared, query)
         directory = prepared.e_access_directory
@@ -1150,10 +1190,12 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         outputs = {}
         share_values = len(read_modes) > 1 and getattr(self, "_share_paired_selected_values", False)
         value_cache = {} if share_values else None
+        projection_cache = {} if share_values and getattr(self, "_uses_hyperedge_rows", False) else None
         for mode in read_modes:
             fields, trace, counts = self._read_packed(prepared, query, qstates, qnorm, packed[mode],
                                                      union_keys, raw, return_trace=return_trace,
-                                                     value_cache=value_cache, physical_value_counts=shared)
+                                                     value_cache=value_cache, physical_value_counts=shared,
+                                                     intervention=controls, projection_cache=projection_cache)
             outputs[mode] = (fields, trace, counts)
         return outputs, shared
 
@@ -1204,9 +1246,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             raise ValueError("Anchored joint prediction accepts no historical affine controls.")
         intervention = {} if intervention is None else dict(intervention)
         mode = intervention.get("read_mode", self._read_execution_override or "full")
-        valid_modes = ("full", "restricted")
-        if mode not in valid_modes:
-            raise ValueError("Unsupported anchored read mode.")
+        validate_read_mode(mode)
         outputs, shared = self._decode_requests(organization, query, (mode,), intervention=intervention,
                                                 return_trace=return_trace or trace_request is not None)
         output = outputs[mode]

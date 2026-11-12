@@ -18,7 +18,7 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
 
     def __init__(self, normalization_stats: Mapping[str, Any], *, core_config=None,
                  core=None, heat_scale: float = 1.0, nx=128, ny=64,
-                 environment_nx=24, environment_ny=8):
+                 environment_nx=24, environment_ny=8, prescribed_patch_mode="none"):
         if core is None:
             if not isinstance(core_config, Mapping):
                 raise TypeError("InteractionReusedMemberRoutingCore requires a saved model configuration.")
@@ -29,10 +29,16 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
                 core = InteractionReusedMemberRoutingCore.from_config(dict(core_config))
             else:
                 core = anchored_core_from_config(core_config)
+            if core.module_input_dim == 10:
+                # A fresh opt-in feature starts neutral; checkpoint loading can
+                # subsequently restore a trained coefficient in this column.
+                with torch.no_grad():
+                    core.module_encoder[0].weight[:, 9].zero_()
         if getattr(core, "schema", None) != self.CORE_SCHEMA:
             raise ValueError(f"Thermal member-routing adapter requires {self.CORE_SCHEMA}.")
         super().__init__(normalization_stats, core=core, heat_scale=heat_scale, nx=nx, ny=ny,
-                         environment_nx=environment_nx, environment_ny=environment_ny)
+                         environment_nx=environment_nx, environment_ny=environment_ny,
+                         prescribed_patch_mode=prescribed_patch_mode)
         if self.architecture not in self.ARCHITECTURES:
             raise ValueError(f"Member-routing architecture must be one of {self.ARCHITECTURES}.")
         if int(getattr(core, "output_dim", -1)) != 4:
@@ -45,6 +51,7 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
             "native_grid_nx_ny": [self.nx, self.ny],
             "environment_grid_nx_ny": [self.environment_nx, self.environment_ny],
             "heat_scale": self.heat_scale,
+            **({"prescribed_patch_mode": self.prescribed_patch_mode} if self.prescribed_patch_mode != "none" else {}),
         }
 
     def state_payload(self):
@@ -62,7 +69,8 @@ class ThermalInteractionReusedMemberRoutingAdapter(ThermalContextualJointAdapter
             raise ValueError("Member-routing checkpoint is missing environment grid dimensions.")
         model = cls(payload["normalization_stats"], core_config=payload["core"],
                     heat_scale=payload["heat_scale"], nx=grid[0], ny=grid[1],
-                    environment_nx=environment[0], environment_ny=environment[1])
+                    environment_nx=environment[0], environment_ny=environment[1],
+                    prescribed_patch_mode=payload.get("prescribed_patch_mode", "none"))
         if model.get_config() != {key: payload[key] for key in model.get_config()}:
             raise ValueError("Member-routing adapter payload differs from its reconstructed configuration.")
         if state_dict is not None:
@@ -116,4 +124,13 @@ class ThermalDetailAnchoredMemberRoutingAdapter(ThermalAnchoredMemberRoutingAdap
     ARCHITECTURES = ("R14-Detail-LocalECover",)
 
 
-__all__ = ["ThermalAnchoredMemberRoutingAdapter", "ThermalDetailAnchoredMemberRoutingAdapter", "ThermalInteractionReusedMemberRoutingAdapter"]
+class ThermalHyperedgeNonlinearReadAdapter(ThermalAnchoredMemberRoutingAdapter):
+    """Thermal adapter for the opt-in nonlinear C/G hyperedge reader."""
+
+    SCHEMA = "thermal_interaction_reused_nonlinear_hyperedge_member_routing_adapter_v1"
+    CORE_SCHEMA = "interaction_reused_nonlinear_hyperedge_member_routing_v1"
+    ARCHITECTURES = ("R16-4-Hyperedge-LocalECover",)
+
+
+__all__ = ["ThermalAnchoredMemberRoutingAdapter", "ThermalDetailAnchoredMemberRoutingAdapter",
+           "ThermalHyperedgeNonlinearReadAdapter", "ThermalInteractionReusedMemberRoutingAdapter"]

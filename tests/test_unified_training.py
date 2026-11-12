@@ -524,6 +524,80 @@ def test_curve_rng_is_preserved_and_sparse_resume_is_exact(tmp_path, monkeypatch
     assert summary["cumulative_case_visits"] == 50
 
 
+def test_response_history_records_unweighted_exposure_and_exact_resume(tmp_path, monkeypatch):
+    class ResponseProvider(_ToyProvider):
+        auxiliary_loss_names = ('response/endpoint', 'response/field_delta')
+
+        def __init__(self, coefficient=0.):
+            super().__init__()
+            self.coefficient = coefficient
+            self.seen_epoch = None
+            self.seen = []
+
+        def identity_payload(self):
+            return {**super().identity_payload(),
+                    'thermal_state_response': {'enabled': True, 'finite_response_coefficient': self.coefficient},
+                    'response_objective_weights': {'endpoint': .25, 'field_delta': self.coefficient},
+                    'response_scales': {'field': {'scale': 2.}}}
+
+        def auxiliary_update_terms(self, model, *, epoch, update_index, update_count):
+            if self.seen_epoch != epoch:
+                self.seen_epoch, self.seen = epoch, []
+            if update_index:
+                return
+            for family in range(4):
+                self.seen.append(f'family-{family}')
+                for action in range(4):
+                    yield {
+                        'response/endpoint': LossTerm(model.weight.square().sum(), 1, .25 * update_count / 16),
+                        'response/field_delta': LossTerm(torch.tensor(float(family + 1)), 1,
+                                                        self.coefficient * update_count / 16),
+                    }, {'response_actions': 1, 'response_families': int(action == 0)}
+
+        def auxiliary_diagnostic_values(self, terms, *, update_count):
+            return {'response/field_delta': float(terms['response/field_delta'].numerator) * update_count / 16}
+
+        def response_epoch_family_ids(self, epoch):
+            return tuple(self.seen) if self.seen_epoch == epoch else ()
+
+        def response_epoch_action_ids(self, epoch):
+            return tuple({'case_id': family, 'action': f'action-{action}', 'role': 'original_fit'}
+                         for family in self.response_epoch_family_ids(epoch) for action in range(4))
+
+    monkeypatch.setattr(runtime, '_render_loss_curves', lambda *args, **kwargs: None)
+    engine = TrainingEngine(replace(_config(), training_mode='joint', progress_enabled=False), device='cpu')
+    torch.manual_seed(3)
+    initial = copy.deepcopy(nn.Linear(1, 1).state_dict())
+    full = nn.Linear(1, 1)
+    full.load_state_dict(initial)
+    engine.fit(full, ResponseProvider(), tmp_path / 'full', identity={'run': 'response'}, arm='joint', stop_after=2)
+    split = nn.Linear(1, 1)
+    split.load_state_dict(initial)
+    output = tmp_path / 'split'
+    engine.fit(split, ResponseProvider(), output, identity={'run': 'response'}, arm='joint', stop_after=1)
+    engine.fit(split, ResponseProvider(), output, identity={'run': 'response'}, arm='joint', stop_after=2,
+               resume_checkpoint=_checkpoint(output))
+    saved = torch.load(_checkpoint(output), map_location='cpu', weights_only=False)
+    assert all(torch.equal(value, split.state_dict()[name]) for name, value in full.state_dict().items())
+    assert saved['experiment_identity']['provider_identity']['thermal_state_response']['finite_response_coefficient'] == 0.
+    assert saved['experiment_identity']['provider_identity']['response_scales']['field']['scale'] == 2.
+    for row in saved['history']:
+        assert row['response_fit_family_ids'] == [f'family-{i}' for i in range(4)]
+        assert row['case_ids'] == [str(case) for case in engine.epoch_case_order(ResponseProvider(), row['epoch'])[0]]
+        assert row['response_action_ids'] == [
+            {'case_id': f'family-{family}', 'action': f'action-{action}', 'role': 'original_fit'}
+            for family in range(4) for action in range(4)]
+        assert row['work_counts']['response_actions'] == 16
+        assert row['work_counts']['response_families'] == 4
+        assert row['train_losses']['response/field_delta'] == 0.
+        assert row['train_losses']['response/endpoint'] > 0.
+        assert row['train_diagnostics']['response/field_delta'] == pytest.approx(2.5)
+        assert not any(key.startswith('__train_diagnostic__/') for key in row['work_counts'])
+    with pytest.raises(ValueError):
+        engine.fit(split, ResponseProvider(.1), output, identity={'run': 'response'}, arm='joint', stop_after=3,
+                   resume_checkpoint=_checkpoint(output))
+
+
 def test_sparse_nonmilestone_clean_stop_saves_latest_without_extra_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
     output = tmp_path / "sparse_clean"

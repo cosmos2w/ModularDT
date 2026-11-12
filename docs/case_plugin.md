@@ -10,6 +10,10 @@ Define TRAIN, validation and test membership before fitting, accounting for repe
 
 The historical generic batch container is [`BatchData`](../src/honf_forward_core/config.py), containing module centers, presence, features, global context, query coordinates and optional environment, geometry, measure and identity fields. A model family may use a more specialized adapter instead; follow that family's actual interface. For a concrete independent example, electro-thermal's `HETMFTask` binds `HETMFDataset` and `ElectroThermalHONFAdapter` to `honf_runtime.field_training`; its [handoff](../Case_ElectroThermal/docs/COWORKER_HANDOFF.md) describes its HDF5 schema and joint fields.
 
+## State and finite-response fitting
+
+Cases that support paired design supervision supply baseline and edited TRAIN examples, native-unit observations, physical masks, original receiver alignment, response scales, sampling and any case-specific functionals. The shared `honf_runtime.state_response` module supplies configurable response weights and generic reductions; it does not prescribe a case's units, observations or functional names. Fit normalizers, response scales and any gradient balance from TRAIN only, and keep validation and TEST labels out of fitting. See [state and finite-response training](guides/State_Response_Training.md) for the interface and explicit native-only opt-out.
+
 ## Managed plugin workflow
 
 The generic historical `train.py` and `evaluate.py` entry points discover a `CasePlugin` through a factory named in the case configuration, such as `channelthermal.plugin:create_plugin`. The runtime protocol lives in [`case_protocol.py`](../src/honf_runtime/case_protocol.py). A plugin supplies `case_id`, `display_name`, `version`, `validate_config`, `inspect_launch`, `train`, and `evaluate`. Launch inspection validates external resources; training receives the composed configuration, common `WorkflowRequest`, and reserved run directory; evaluation receives the common request and case-specific arguments.
