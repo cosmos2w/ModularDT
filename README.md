@@ -33,7 +33,7 @@ Let $`\mathcal{V}=\mathcal{M}\sqcup\mathcal{E}`$ contain the original module and
 For address $`a\in\mathcal{E}`$, let $`g_{ai}\geq0`$ combine its actual E-receiver gates with explicit positive own-E access. Let $`\mu_i`$ be the role-normalized inventory measure and $`r(i)\in\{M,E\}`$ the member's input role. The positive support of role $`r`$ is
 
 $$
-\mathcal{A}_r(a)=\left\{i\in\mathcal{V}_r:g_{ai}>0,\ \mu_i>0\right\}.
+\mathcal{A}_r(a)=\left\lbrace i\in\mathcal{V}_r:g_{ai}>0,\ \mu_i>0\right\rbrace.
 $$
 
 The two relation-anchored models differ in their access measure:
@@ -52,7 +52,7 @@ The full directory $`\Pi`$, retained directory $`D`$ and native hyperedge $`\mat
 $$
 \Pi_{ai}=\frac{g_{ai}\nu_{ai}}{\sum_jg_{aj}\nu_{aj}},\qquad
 D_{ai}=\Pi_{ai}\,\mathbf{1}\left[i\in\mathcal{S}_a\right],\qquad
-\mathcal{H}_a=\left\{i:D_{ai}>0\right\}.
+\mathcal{H}_a=\left\lbrace i:D_{ai}>0\right\rbrace.
 $$
 
 A zero-total row stays zero. The retention rule selects $`\mathcal{S}_a`$ by joint M/E mass and preserves positive own-E access; the usual setting retains 95% mass. Stored weights are preserved during truncation. Hyperedges may overlap and retain individual members, coordinates and attributes. Their number and support are representation settings and learned access, respectively; neither is asserted to count physical subsystems.
