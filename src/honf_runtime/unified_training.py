@@ -883,7 +883,8 @@ def _diagnostic_age_branch_amendment(
 
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str,
                         loss_metadata: Mapping[str, Mapping[str, str]] | None = None,
-                        provider_identity: Mapping[str, Any] | None = None) -> None:
+                        provider_identity: Mapping[str, Any] | None = None,
+                        metadata_output: Path | None = None) -> None:
     """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -1910,7 +1911,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             "TRAIN and validation use the all-native reader; TRAIN averages macro-update means and validation pools valid elements."
         )
         metadata.pop("paired_work_series", None)
-    _atomic_json(output / "loss_curves_metadata.json", metadata)
+    metadata_output = output if metadata_output is None else metadata_output
+    metadata_output.mkdir(parents=True, exist_ok=True)
+    _atomic_json(metadata_output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"
         temporary = output / f".loss_curves.{os.getpid()}.tmp.{suffix}"
@@ -1922,8 +1925,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 initial_temporary = output / f".loss_curves_initial.{os.getpid()}.tmp.{suffix}"
                 initial_temporary.write_bytes(destination.read_bytes())
                 os.replace(initial_temporary, initial)
-    if len(history) == 1 and not (output / "loss_curves_initial_metadata.json").exists():
-        _atomic_json(output / "loss_curves_initial_metadata.json", metadata)
+    if len(history) == 1 and not (metadata_output / "loss_curves_initial_metadata.json").exists():
+        _atomic_json(metadata_output / "loss_curves_initial_metadata.json", metadata)
     figure.clear()
 
 @dataclass(frozen=True)
@@ -2241,7 +2244,11 @@ def _expand_training_history(rows: Sequence[Mapping[str, Any]], metadata: Mappin
     return expanded
 
 
-def _write_training_history(path: Path, history: Sequence[Mapping[str, Any]], *, compact: bool) -> None:
+def _write_training_history(path: Path, history: Sequence[Mapping[str, Any]], *, compact: bool,
+                            omit_stream_hashes: bool = False) -> None:
+    if omit_stream_hashes:
+        history = [{key: value for key, value in row.items()
+                    if key not in {"case_order_sha256", "query_sampling_sha256"}} for row in history]
     if not compact:
         _atomic_json(path, history)
         return
@@ -4100,7 +4107,7 @@ class TrainingEngine:
         joint_native_child: Mapping[str, Any] | None = None,
         numerical_pooling_amendment: Mapping[str, Any] | None = None,
         output_policy_amendment: Mapping[str, Any] | None = None,
-        compact_history: bool = False,
+        compact_history: bool | None = None,
         relation_guided_transfer: Mapping[str, Any] | None = None,
         joint_member_routing_transfer: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -4110,9 +4117,26 @@ class TrainingEngine:
         output.mkdir(parents=True, exist_ok=True)
         layout = RunLayout(output)
         layout.ensure()
+        marker_path = output / "artifact_layout.json"
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8")) if marker_path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            marker = {}
+        output_policy = (marker.get("training_output_policy") if resume_checkpoint is not None
+                         else "categorized_v2" if layout.canonical_writes else None)
+        modern_output = output_policy == "categorized_v2"
+        if modern_output and resume_checkpoint is not None:
+            saved_compact = marker.get("compact_history")
+            if type(saved_compact) is not bool:
+                raise ValueError("Saved output policy is missing its history serialization setting.")
+            if compact_history is not None and compact_history != saved_compact:
+                raise ValueError("Exact resume must preserve the saved history serialization setting.")
+            compact_history = saved_compact
+        elif compact_history is None:
+            compact_history = modern_output
         history_in_logs = bool(getattr(provider, "training_history_in_logs", False))
-        history_path = layout.write_path("history.json", category="logs") if history_in_logs else layout.write_path("history.json")
-        curve_path = layout.write_path("loss_curves.png", category="logs") if history_in_logs else layout.write_path("loss_curves.png")
+        history_path = layout.write_path("history.json", category="logs") if history_in_logs and not modern_output else layout.write_path("history.json")
+        curve_path = layout.write_path("loss_curves.png", category="logs") if history_in_logs and not modern_output else layout.write_path("loss_curves.png")
         if external_state_continuation and resume_checkpoint is None:
             raise ValueError("External full-state continuation requires an explicit saved checkpoint.")
         if resume_checkpoint is None:
@@ -5288,7 +5312,11 @@ class TrainingEngine:
         if (resume_checkpoint is None or external_state_continuation) and layout.canonical_writes:
             identity_path = layout.path("experiment_identity.json")
             marker_path = layout.path("artifact_layout.json")
-            if not marker_path.exists():
+            if modern_output:
+                _atomic_json(marker_path, {**marker, "artifact_layout_version": 1,
+                    "run_dir": str(output), "training_output_policy": "categorized_v2",
+                    "compact_history": compact_history})
+            elif not marker_path.exists():
                 _atomic_json(marker_path, {
                     "artifact_layout_version": 1,
                     "run_dir": str(output),
@@ -5301,7 +5329,14 @@ class TrainingEngine:
             source_state_path = layout.path("source_state.json")
             if not source_state_path.exists():
                 _atomic_json(source_state_path, source_state_snapshot(PROJECT_ROOT))
-        _atomic_json(layout.write_path("active_process.json"), active)
+        def write_active_process() -> None:
+            record = dict(active)
+            if modern_output:
+                record.pop("identity", None)
+                record["identity_path"] = str(layout.path("experiment_identity.json"))
+            _atomic_json(layout.write_path("active_process.json"), record)
+
+        write_active_process()
         if resume_checkpoint is not None:
             restored = {"event": "checkpoint_restored", "source_epoch": start_epoch - 1,
                 "next_epoch": start_epoch, "microbatch_cases": self.config.microbatch_cases,
@@ -5869,7 +5904,21 @@ class TrainingEngine:
                         or epoch in self.config.checkpoint_epochs):
                     row["post_epoch_frozen_state_audit"] = frozen_state_guard(model, epoch)
                 history.append(row)
-                print(json.dumps(row, sort_keys=True, default=str, allow_nan=False), flush=True)
+                if modern_output:
+                    console_row = {key: row[key] for key in (
+                        "epoch", "phase", "case_visits", "optimizer_updates", "learning_rates",
+                        "train_seconds", "train_losses") if key in row}
+                    if "response_fit_family_ids" in row:
+                        console_row["response_fit_family_count"] = len(row["response_fit_family_ids"])
+                    if "gradient_norm" in row.get("work_counts", {}):
+                        console_row["gradient_norm"] = row["work_counts"]["gradient_norm"]
+                    if isinstance(row.get("validation"), Mapping):
+                        console_row["validation"] = {key: row["validation"][key] for key in (
+                            "field_score", "flow_rmse_mean", "temperature_rmse_mean")
+                            if key in row["validation"]}
+                    print(json.dumps(console_row, sort_keys=True, default=str, allow_nan=False), flush=True)
+                else:
+                    print(json.dumps(row, sort_keys=True, default=str, allow_nan=False), flush=True)
                 milestone = ((review if self.config.checkpoint_epochs is None
                               else epoch in self.config.checkpoint_epochs)
                              or epoch == stop_after or improved_guarded)
@@ -5906,7 +5955,8 @@ class TrainingEngine:
                         payload["resume_amendments"] = resume_amendments
                     if branch_parent is not None:
                         payload["branch_parent"] = branch_parent
-                    _write_training_history(history_path, history, compact=compact_history)
+                    _write_training_history(history_path, history, compact=compact_history,
+                        omit_stream_hashes=modern_output and not bool(getattr(provider, "training_stream_hash_history", False)))
                     if milestone:
                         _atomic_torch_save(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
                     validation_sidecar_due = (
@@ -5937,7 +5987,8 @@ class TrainingEngine:
                     _atomic_torch_save(layout.write_path("latest_model.pt"), payload)
                     latest_epoch = epoch
                 if curve_due:
-                    _write_training_history(history_path, history, compact=compact_history)
+                    _write_training_history(history_path, history, compact=compact_history,
+                        omit_stream_hashes=modern_output and not bool(getattr(provider, "training_stream_hash_history", False)))
                     curve_identity = provider_identity
                     if provider_identity.get("state_response", {}).get("enabled", False):
                         metadata_reader = getattr(provider, "state_response_metadata", None)
@@ -5956,6 +6007,7 @@ class TrainingEngine:
                             if (provider_identity.get("thermal_state_response")
                                 or provider_identity.get("state_response", {}).get("enabled", False)
                                 or provider_identity.get("recipe", {}).get("r16_10_family")) else {}),
+                            **({"metadata_output": history_path.parent} if modern_output else {}),
                         )
                     finally:
                         restore_rng_state(curve_rng)
@@ -5990,7 +6042,7 @@ class TrainingEngine:
             active.update(status="clean_stopped" if clean_stopped else "completed",
                           completed_epoch=stopped_at, ended_unix=time.time(), engine_seconds=elapsed,
                           process_seconds=max(0.0, time.time() - float(active["started_unix"])))
-            _atomic_json(layout.write_path("active_process.json"), active)
+            write_active_process()
             guarded_summary = best_guarded if math.isfinite(best_guarded) else None
             best_field_summary, selector_status = _reported_best_field_score(
                 best_field, moment_hyperedge=identity_is_moment_hyperedge,
@@ -6007,11 +6059,16 @@ class TrainingEngine:
                 "best_response_guarded_score": guarded_summary,
                 "branch_parent": branch_parent,
             }
+            if modern_output:
+                summary.pop("identity", None)
+                summary["identity_path"] = str(layout.path("experiment_identity.json"))
             if selector_status is not None:
                 summary["best_field_selection_status"] = selector_status
             _atomic_json(layout.write_path("fit_summary.json"), summary)
             result = {**active, "completed_epoch": stopped_at, "best_field_score": best_field_summary,
                     "best_response_guarded_score": guarded_summary, "branch_parent": branch_parent}
+            if modern_output:
+                result["identity_path"] = str(layout.path("experiment_identity.json"))
             if selector_status is not None:
                 result["best_field_selection_status"] = selector_status
             return result
@@ -6021,7 +6078,7 @@ class TrainingEngine:
                           process_seconds=max(0.0, time.time() - float(active["started_unix"])),
                           exception_type=type(exc).__name__, exception_message=str(exc))
             try:
-                _atomic_json(layout.write_path("active_process.json"), active)
+                write_active_process()
             except OSError:
                 pass  # Preserve the original failure when its receipt cannot be written.
             raise

@@ -137,6 +137,8 @@ def _canonical_relative(name: str | Path, *, category: str | None = None) -> Pat
         return Path("environment") / basename
     if lower in {"flow_learning.pdf", "thermal_learning.pdf"}:
         return Path("plots/training") / basename
+    if lower in {"loss_curves_metadata.json", "loss_curves_initial_metadata.json"}:
+        return Path("metrics") / basename
     if lower.startswith(("loss_curve", "loss_curves", "training_curve", "training_curves")):
         return Path("plots/training") / basename
     if lower.startswith(("diagnostic_", "routing_", "support_", "interaction_")) and lower.endswith(
@@ -245,6 +247,12 @@ class RunLayout:
         else:
             candidates.append(self.run_dir / relative)
 
+        if basename.lower() == "history.json" or basename.lower() in {
+            "loss_curves_metadata.json", "loss_curves_initial_metadata.json"
+        }:
+            candidates.extend((self.run_dir / "logs" / basename,
+                               self.run_dir / "plots" / "training" / basename))
+
         # Older producers used both the run root and already-established
         # category directories. Check either spelling after the canonical path.
         candidates.append(self.run_dir / canonical_relative)
@@ -273,6 +281,17 @@ class RunLayout:
 
         canonical = self.path(name, category=category)
         candidates = [canonical]
+        basename = _safe_relative(name).name.lower()
+        if self.canonical_writes and category is None and basename in {
+            "loss_curves_metadata.json", "loss_curves_initial_metadata.json"
+        }:
+            marker_path = self.run_dir / "artifact_layout.json"
+            try:
+                policy = json.loads(marker_path.read_text(encoding="utf-8")).get("training_output_policy")
+            except (OSError, json.JSONDecodeError):
+                policy = None
+            if policy != "categorized_v2":
+                candidates.insert(0, self.run_dir / "plots" / "training" / basename)
         if not self.canonical_writes:
             canonical_category = canonical.relative_to(self.run_dir).parts[0]
             if canonical_category not in {"configs", "environment"}:

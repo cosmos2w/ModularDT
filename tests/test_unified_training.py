@@ -29,6 +29,9 @@ from honf_runtime.unified_training import (
 
 
 class _ToyProvider:
+    # Several sampling tests explicitly inspect the optional diagnostic hashes.
+    training_stream_hash_history = True
+
     def __init__(self, *, bad_prepass: bool = False):
         self.bad_prepass = bad_prepass
         self.validation_phases = []
@@ -486,7 +489,7 @@ def test_curve_rng_is_preserved_and_sparse_resume_is_exact(tmp_path, monkeypatch
                 prediction = prediction + torch.rand_like(prediction) * 0.05 + np.random.rand() * 0.05
             return prediction, auxiliary
 
-    def noisy_curve(*args):
+    def noisy_curve(*args, **kwargs):
         torch.rand(7)
         np.random.rand(7)
 
@@ -599,7 +602,7 @@ def test_response_history_records_unweighted_exposure_and_exact_resume(tmp_path,
 
 
 def test_sparse_nonmilestone_clean_stop_saves_latest_without_extra_snapshot(tmp_path, monkeypatch):
-    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args, **kwargs: None)
     output = tmp_path / "sparse_clean"
     output.mkdir()
     (output / "CLEAN_STOP_REQUEST.json").write_text(json.dumps({"request_id": "sparse-stop"}))
@@ -622,7 +625,7 @@ def test_unused_output_controls_preserve_legacy_checkpoint_identity():
 
 @pytest.mark.parametrize("failed_sidecar", ["epoch_0010_model.pt", "best_by_field_mse_model.pt"])
 def test_failed_terminal_sidecar_does_not_advance_latest_past_recoverable_age(tmp_path, monkeypatch, failed_sidecar):
-    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args, **kwargs: None)
     original_save = runtime._atomic_torch_save
 
     def fail_terminal(path, payload):
@@ -750,7 +753,7 @@ def test_exact_resume_cannot_rewind_to_an_old_monitoring_checkpoint(tmp_path):
 
 
 def test_legacy_exact_resume_uses_root_latest_over_stale_checkpoint_alias(tmp_path, monkeypatch):
-    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args, **kwargs: None)
     output = tmp_path / "legacy_resume"
     engine = TrainingEngine(_config(), device="cpu")
     model = nn.Linear(1, 1)
@@ -1094,7 +1097,7 @@ def test_packing_changes_preserve_samples_denominators_gradients_and_fp32_update
 
 
 def test_case_epoch_sampling_recipe_is_stored_and_resume_is_strict(tmp_path, monkeypatch):
-    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args, **kwargs: None)
     config = replace(_sparse_config(), sampling_version=SamplingKey.CASE_EPOCH_VERSION)
     identity = {"run": "case-epoch-resume"}
     torch.manual_seed(820)
@@ -1180,7 +1183,7 @@ def test_branch_requires_literal_warmup_boundary(tmp_path):
 
 
 def test_microbatch_amendment_preserves_weights_moments_history_and_future_exact_resume(tmp_path, monkeypatch):
-    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args: None)
+    monkeypatch.setattr(runtime, "_render_loss_curves", lambda *args, **kwargs: None)
     output = tmp_path / "continuation"
     model = nn.Linear(1, 1)
     config = _sparse_config()

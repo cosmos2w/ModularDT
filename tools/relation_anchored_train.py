@@ -362,6 +362,10 @@ def main(argv=None):
         if callable(restore):
             restore(saved.get("provider_training_state", {}))
         result = engine._evaluate(model, provider, arm, "joint", int(saved["epoch"]))
+    if args.command == "fit":
+        marker = Path(args.output) / "artifact_layout.json"
+        if marker.is_file() and json.loads(marker.read_text()).get("training_output_policy") == "categorized_v2":
+            result = {key: value for key, value in result.items() if key != "identity"}
     print(json.dumps(result, sort_keys=True, default=str, allow_nan=False), flush=True)
     return 0
 
