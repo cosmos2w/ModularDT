@@ -66,8 +66,10 @@ def test_tiled_capture_uses_anchored_directory_and_global_indices():
 
     class Directory:
         def row(self, batch, anchor):
-            return [NS(member_index=torch.tensor([0, 2]), access_weight=torch.tensor([.3, .7])),
-                    NS(member_index=torch.tensor([1, 3]), access_weight=torch.tensor([.4, .6]))][anchor]
+            return [NS(member_index=torch.tensor([0, 2]), access_weight=torch.tensor([.3, .7]),
+                       original_id=torch.tensor([10, 20]), is_module=torch.tensor([True, False])),
+                    NS(member_index=torch.tensor([1, 3]), access_weight=torch.tensor([.4, .6]),
+                       original_id=torch.tensor([11, 21]), is_module=torch.tensor([True, False]))][anchor]
 
     class Core:
         query_tile_size = 2
@@ -78,7 +80,16 @@ def test_tiled_capture_uses_anchored_directory_and_global_indices():
             assert q.num_queries <= 2 and q.anchor_indices is not None
             ids = q.query_ids[0].to(torch.float64)
             return {'member_weights_M': torch.stack((ids / 10, ids / 20), -1)[None],
-                    'anchor_indices': q.anchor_indices, 'anchor_weights': q.anchor_weights}
+                    'anchor_indices': q.anchor_indices, 'anchor_weights': q.anchor_weights,
+                    'anchor_read_member_index': torch.arange(q.num_queries * 2),
+                    'original_module_ids': organization.scene.module_ids,
+                    'original_environment_ids': organization.scene.environment_ids,
+                    'anchored_applied_EM': organization.anchored_applied_EM,
+                    'anchored_applied_EE': organization.anchored_applied_EE,
+                    'e_access_em_destination_ids': organization.scene.environment_ids,
+                    'e_access_em_donor_ids': organization.scene.module_ids,
+                    'e_access_ee_destination_ids': organization.scene.environment_ids,
+                    'e_access_ee_donor_ids': organization.scene.environment_ids}
 
     query = QueryBatch(coordinates=torch.zeros(1, 5, 2), query_ids=torch.arange(5)[None],
         anchor_indices=torch.tensor([[[0], [1], [0], [1], [0]]]), anchor_weights=torch.ones(1, 5, 1))
@@ -86,13 +97,20 @@ def test_tiled_capture_uses_anchored_directory_and_global_indices():
     provenance = {route: {'stage_identity': 'layer0/' + route, 'route': route,
                           'receiver_role': 'E', 'donor_role': donor}
                   for route, donor in [('em', 'M'), ('ee', 'E')]}
-    prepared = NS(query_batch=query, organization=NS(scene=scene, e_access_directory=NS(restricted=Directory()),
+    prepared = NS(query_batch=query, organization=NS(scene=scene, e_access_directory=NS(restricted=Directory(), retained_mass=.95),
         anchored_route_provenance=provenance, anchored_applied_EM=torch.ones(1, 2, 2),
         anchored_applied_EE=torch.eye(2)[None]))
-    got = capture_routing_scores(NS(core=Core()), None, prepared, [0, .25, 0, 0, .75])
+    got = capture_routing_scores(NS(core=Core()), None, prepared, [0, .25, 0, 0, .75],
+                                 strict_binding=True, retain_tiles=True)
     np.testing.assert_allclose(got['service'], [.325, .1625])
     np.testing.assert_allclose(got['joint_membership'], [[.3, 0, .7, 0], [0, .4, 0, .6]], rtol=1e-6)
     np.testing.assert_allclose(got['address_mass'], [.75, .25])
     assert got['query_indices'].tolist() == [1, 4]
     assert got['route_provenance']['em']['stage_identity'] == 'layer0/em'
     assert got['applied_ee'].shape == (2, 2)
+    assert got['traced_tiles'] == 2 and got['traced_query_rows'] == 3
+    assert got['traced_member_pairs'] == 6
+    assert got['trace_tiles'][1]['query_indices'].tolist() == [4]
+    prepared.organization.anchored_route_provenance['ee']['stage_identity'] = 'layer1/ee'
+    with pytest.raises(ValueError, match='contextual stage'):
+        capture_routing_scores(NS(core=Core()), None, prepared, [0, .25, 0, 0, .75], strict_binding=True)

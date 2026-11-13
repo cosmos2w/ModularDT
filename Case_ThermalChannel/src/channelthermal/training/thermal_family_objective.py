@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 from honf_runtime.state_response import (
@@ -17,6 +18,7 @@ from honf_runtime.state_response import (
 
 from ..native_functionals import native_design_functionals
 from .joint_member_routing_task import ThermalJointPairPredictions
+from .thermal_native_port_task import common_training_roi_support
 from .thermal_state_response_task import FIELD_ROLES, _field_components
 
 
@@ -85,14 +87,33 @@ def _split_family_prediction(prediction, count):
               branch_slice(prediction.restricted, i), {}) for i in range(count)]
 
 
+def family_reference_roi_deltas(batches, raw_baseline):
+    """Physical A/B deltas on one baseline-defined common training support."""
+    supports = common_training_roi_support(batches, raw_baseline)
+    values = {name: [batch.targets.field_targets[..., 4][mask].double().mean()
+                     for batch in batches] for name, mask in supports.items()}
+    deltas = {name: tuple(value - rows[0] for value in rows[1:])
+              for name, rows in values.items()}
+    return supports, deltas
+
+
+def roi_support_runs(mask):
+    """Encode exact ordered native-grid support as half-open index ranges."""
+    values = torch.as_tensor(mask, dtype=torch.bool).detach().cpu().numpy().reshape(-1)
+    edges = np.flatnonzero(np.diff(np.r_[False, values, False].astype(np.int8)))
+    return [[int(start), int(stop)] for start, stop in zip(edges[::2], edges[1::2])]
+
+
 class ThermalFamilyObjectiveMixin:
     def family_components(self, model, source, family, *, batched=True, components=None):
         """Evaluate selected losses; calibration may explicitly request all three."""
         names = frozenset(('endpoint', 'response', 'decision') if components is None else components)
-        if not names or not names <= {'endpoint', 'response', 'decision'}:
+        if not names or not names <= {'endpoint', 'response', 'functional', 'decision'}:
             raise ValueError('Unknown or empty family objective components.')
-        if names & {'response', 'decision'} and self.response_scales is None:
+        if names & {'response', 'functional', 'decision'} and self.response_scales is None:
             raise ValueError('Family response scales must be configured.')
+        if 'functional' in names and getattr(self, 'roi_scales', None) is None:
+            raise ValueError('Family ROI scales must be configured.')
         if 'decision' in names and (self.sensitivity is None or self.research_scales is None):
             raise ValueError('Family decision scales must be configured.')
         actions = self.actions(source, family)
@@ -128,7 +149,7 @@ class ThermalFamilyObjectiveMixin:
                 self.provider.endpoint_state_loss(p, b) if measure is None else
                 self.provider.endpoint_state_loss(p, b, auxiliary_measure=measure)
                 for p, b in zip(predictions, batches))
-        if names & {'response', 'decision'}:
+        if names & {'response', 'functional', 'decision'}:
             # Receiver identities/order and physical controls are checked when
             # the case-owned corpus constructs each native endpoint pair.
             functions = torch.stack([_endpoint_functionals(pred, batch, raw, self.tau)
@@ -169,6 +190,38 @@ class ThermalFamilyObjectiveMixin:
                 field_response_weight=.8, functional_weights={'J': .1, 'P': .1})
             result['response'] = combine_response_losses(equal_mean(field_losses),
                 {name: equal_mean(values) for name, values in functional_losses.items()}, config)
+        if 'functional' in names:
+            supports, reference = family_reference_roi_deltas(batches, raws[0])
+            recorded = getattr(self, 'roi_support_runs', None)
+            if recorded is not None and ({name: roi_support_runs(mask) for name, mask in supports.items()}
+                                         != recorded.get(family)):
+                raise ValueError('ROI common support differs from the fitted TRAIN scale profile.')
+            functional_losses = []
+            for view in range(2):
+                roi_values = {}
+                for name, mask in supports.items():
+                    values = []
+                    for prediction in views:
+                        branch = prediction[view]
+                        field = branch.native_main['pred_field'][..., 4]
+                        valid = branch.native_prepared.stencils['fluid'].valid.reshape_as(field)
+                        if field.shape != mask.shape or not bool(valid[mask].all()):
+                            raise ValueError('ROI support includes an invalid native prediction stencil.')
+                        if not bool(torch.isfinite(field[mask]).all()):
+                            raise ValueError('Nonfinite prediction on the common ROI support.')
+                        values.append(field[mask].double().mean())
+                    roi_values[name] = values
+                for action_index, label in enumerate(labels, start=1):
+                    terms = [normalized_delta_mse(
+                        functions[view, action_index, index] - functions[view, 0, index],
+                        float(label[name]), self.response_scales[name])
+                        for index, name in enumerate(('J', 'P'))]
+                    terms.extend(normalized_delta_mse(
+                        roi_values[name][action_index] - roi_values[name][0],
+                        reference[name][action_index - 1], self.roi_scales[name])
+                        for name in ('A', 'B'))
+                    functional_losses.append(equal_mean(terms))
+            result['functional'] = equal_mean(functional_losses)
         if 'decision' in names:
             truth = [[float(label[n]) for n in ('J', 'P')] for label in labels]
             from .r16_5_decision_task import decision_losses

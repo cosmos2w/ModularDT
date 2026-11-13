@@ -42,6 +42,14 @@
         "interface_target_names",
         "normalization"
       ]
+    },
+    "finite_responses": {
+      "description": "Source-preserving Thermal finite-response endpoints, records and native baseline catalogues.",
+      "format": "hdf5",
+      "schema": "thermal_finite_responses_v1",
+      "filename": "finite_responses.h5",
+      "associated_dataset": "thermal_channel_global_v1",
+      "required_keys": ["meta", "index", "families", "endpoints", "catalogues", "populations", "reference_baselines"]
     }
   }
 }

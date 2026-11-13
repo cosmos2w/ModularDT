@@ -42,6 +42,43 @@ class AuxiliaryFluidMeasure:
         return masked_weighted_mse(extracted, valid, self.weights)
 
 
+def common_training_roi_support(batches, raw_baseline):
+    """Return fixed A/B grid supports shared by every physical family endpoint.
+
+    Geometry is taken from the source-precision baseline configuration.  The
+    targets determine physical fluid validity and keep the selected effective
+    observation view, while the original Eulerian receiver order is retained.
+    """
+    from ..inverse.request_search import roi_mask
+
+    batches = tuple(batches)
+    if len(batches) < 2:
+        raise ValueError('A response family requires a baseline and edits.')
+    xy = batches[0].receivers.fluid_xy
+    if xy.ndim != 3 or xy.shape[0] != 1 or xy.shape[-1] != 2:
+        raise ValueError('ROI support requires one aligned native receiver grid.')
+    common = torch.ones(xy.shape[:-1], dtype=torch.bool, device=xy.device)
+    for batch in batches:
+        target = batch.targets.field_targets
+        if (not torch.equal(batch.receivers.fluid_xy, xy) or target.shape[:2] != xy.shape[:2]
+                or target.shape[-1] < 5 or batch.targets.point_weights.shape != xy.shape[:2]):
+            raise ValueError('ROI endpoints must share the ordered Eulerian receiver grid.')
+        common &= batch.targets.point_weights.bool() & torch.isfinite(target[..., 4])
+    config = raw_baseline['config']
+    domain, layout = config['domain'], config['layout']
+    points = xy[0].detach().cpu().numpy()
+    centers = np.asarray(layout['centers'], dtype=np.float64)
+    supports = {}
+    for name in ('A', 'B'):
+        safe = roi_mask(points, (domain['lx'], domain['ly']), centers,
+                        np.ones(len(centers), dtype=bool), float(domain['module_radius']), name)
+        mask = common & torch.as_tensor(safe, device=xy.device)[None]
+        if not bool(mask.any()):
+            raise ValueError(f'No common physical fluid receivers for ROI {name}.')
+        supports[name] = mask
+    return supports
+
+
 def _module_mean(error, mask):
     if not torch.isfinite(error[mask]).all():
         raise ValueError('Nonfinite prediction on valid physical ports.')

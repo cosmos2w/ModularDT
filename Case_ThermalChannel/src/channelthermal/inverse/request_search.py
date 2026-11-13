@@ -56,6 +56,8 @@ def routing_scores(query_weights, traces, membership):
     """
     w = np.asarray(query_weights, dtype=np.float64)
     D = np.asarray(membership, dtype=np.float64)
+    if w.ndim != 1 or not np.isfinite(w).all() or (w < 0).any() or not np.isclose(w.sum(), 1):
+        raise ValueError('request query weights must form a normalized physical measure')
     if D.ndim != 2 or (D < 0).any() or not np.isfinite(D).all():
         raise ValueError('invalid joint membership')
     seen = np.zeros(len(w), dtype=bool)
@@ -191,7 +193,7 @@ class SolveBudget:
         self._finished.add(key)
 
 
-def capture_routing_scores(model, provider, prepared, query_weights):
+def capture_routing_scores(model, provider, prepared, query_weights, *, strict_binding=False, retain_tiles=False):
     """Trace the actual P95 E-address directory in bounded union slices."""
     import torch
     from honf_forward_core.content_hypergraph.query_chunks_v1 import slice_query_v1
@@ -205,15 +207,42 @@ def capture_routing_scores(model, provider, prepared, query_weights):
     org = prepared.organization
     module_ids = org.scene.module_ids[0].detach().cpu().numpy()
     environment_ids = org.scene.environment_ids[0].detach().cpu().numpy()
+    provenance = {route: {'stage_identity': str(info['stage_identity']),
+                          'route': str(info['route']),
+                          'receiver_role': str(info['receiver_role']),
+                          'donor_role': str(info['donor_role'])}
+                  for route, info in org.anchored_route_provenance.items()}
+    if set(provenance) != {'em', 'ee'}:
+        raise ValueError('missing actual anchored EM/EE stage provenance')
+    if strict_binding:
+        for route, donor in (('em', 'M'), ('ee', 'E')):
+            info = provenance[route]
+            if (info['route'] != route or info['receiver_role'] != 'E' or info['donor_role'] != donor
+                    or not info['stage_identity'].endswith('/' + route)):
+                raise ValueError('invalid applied route provenance')
+        if provenance['em']['stage_identity'].rsplit('/', 1)[0] != provenance['ee']['stage_identity'].rsplit('/', 1)[0]:
+            raise ValueError('applied EM and EE do not share the final contextual stage')
     directory = org.e_access_directory.restricted
     m, e = len(module_ids), len(environment_ids)
+    if strict_binding and not np.isclose(org.e_access_directory.retained_mass, .95):
+        raise ValueError('request search requires the prepared P95 directory')
     membership = np.zeros((e, m + e), dtype=np.float64)
     for anchor in range(e):
         row = directory.row(0, anchor)
         indices = row.member_index.detach().cpu().numpy()
         weights = row.access_weight.detach().cpu().numpy()
+        if (indices < 0).any() or (indices >= m + e).any():
+            raise ValueError('directory refers to a missing original member')
+        if strict_binding:
+            actual_ids = row.original_id.detach().cpu().numpy()
+            actual_roles = row.is_module.detach().cpu().numpy()
+            if (not np.array_equal(actual_ids, np.concatenate((module_ids, environment_ids))[indices])
+                    or not np.array_equal(actual_roles, indices < m)):
+                raise ValueError('directory member identities or roles are inconsistent')
         np.add.at(membership[anchor], indices, weights)
     slices = []
+    recorded_tiles = []
+    trace_pairs = 0
     with torch.no_grad(), model.core.read_execution('restricted'):
         for start in range(0, len(w), tile):
             stop = min(start + tile, len(w))
@@ -221,6 +250,24 @@ def capture_routing_scores(model, provider, prepared, query_weights):
                 continue
             part = slice_query_v1(query, start, stop)
             trace = model.core.capture_interaction_routing_trace(org, part)
+            if 'anchor_read_member_index' in trace:
+                trace_pairs += int(trace['anchor_read_member_index'].numel())
+            elif strict_binding:
+                raise ValueError('bounded trace is missing its executed member-pair count')
+            if strict_binding:
+                expected = {'original_module_ids': org.scene.module_ids,
+                            'original_environment_ids': org.scene.environment_ids,
+                            'anchored_applied_EM': org.anchored_applied_EM,
+                            'anchored_applied_EE': org.anchored_applied_EE,
+                            'e_access_em_destination_ids': org.scene.environment_ids,
+                            'e_access_em_donor_ids': org.scene.module_ids,
+                            'e_access_ee_destination_ids': org.scene.environment_ids,
+                            'e_access_ee_donor_ids': org.scene.environment_ids}
+                if any(key not in trace or not torch.equal(trace[key], value) for key, value in expected.items()):
+                    raise ValueError('bounded trace is not bound to the applied stage and original IDs')
+                if (not torch.equal(trace['anchor_indices'], part.anchor_indices)
+                        or not torch.equal(trace['anchor_weights'], part.anchor_weights)):
+                    raise ValueError('bounded trace address coefficients differ from the executed query')
             beta = trace['member_weights_M'][0].detach().cpu().numpy()
             anchors = trace['anchor_indices'][0].detach().cpu().numpy()
             weights = trace['anchor_weights'][0].detach().cpu().numpy()
@@ -229,17 +276,16 @@ def capture_routing_scores(model, provider, prepared, query_weights):
             positive = weights > 0
             np.add.at(address, (rows[positive], anchors[positive]), weights[positive])
             slices.append((np.arange(start, stop), beta, address))
+            if retain_tiles:
+                recorded_tiles.append({'query_indices': np.arange(start, stop),
+                                       'member_coefficients_M': beta,
+                                       'anchor_indices': anchors, 'anchor_weights': weights})
     service, overlap, address = routing_scores(w, slices, membership[:, :m])
-    provenance = {route: {'stage_identity': str(info['stage_identity']),
-                          'route': str(info['route']),
-                          'receiver_role': str(info['receiver_role']),
-                          'donor_role': str(info['donor_role'])}
-                  for route, info in org.anchored_route_provenance.items()}
-    if set(provenance) != {'em', 'ee'}:
-        raise ValueError('missing actual anchored EM/EE stage provenance')
     return {'service': service, 'overlap': overlap, 'address_mass': address,
             'joint_membership': membership, 'module_ids': module_ids,
             'environment_ids': environment_ids, 'query_indices': np.flatnonzero(w > 0),
+            'traced_tiles': len(slices), 'traced_query_rows': sum(len(ids) for ids, _, _ in slices),
+            'traced_member_pairs': trace_pairs,
             'applied_em': org.anchored_applied_EM[0].detach().cpu().numpy(),
             'applied_ee': org.anchored_applied_EE[0].detach().cpu().numpy(),
-            'route_provenance': provenance}
+            'route_provenance': provenance, **({'trace_tiles': recorded_tiles} if retain_tiles else {})}

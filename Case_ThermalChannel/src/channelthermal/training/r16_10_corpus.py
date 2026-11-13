@@ -7,11 +7,18 @@ import numpy as np
 
 class EligibleFamilySchedule:
     """Separate deterministic source permutations and resumable presentation counts."""
-    def __init__(self, original, new, native_ids, *, seed=0):
+    def __init__(self, original, new, native_ids, *, seed=0, preserve_order=False):
         native = set(map(str, native_ids))
+        def eligible(values):
+            values = tuple(map(str, values))
+            if preserve_order:
+                if len(set(values)) != len(values):
+                    raise ValueError('Eligible family IDs must be unique.')
+                return tuple(value for value in values if value in native)
+            return tuple(sorted(set(values) & native))
         self.families = {
-            'original': tuple(sorted(set(map(str, original)) & native)),
-            'new': tuple(sorted(set(map(str, new)) & native)),
+            'original': eligible(original),
+            'new': eligible(new),
         }
         if any(not ids for ids in self.families.values()):
             raise ValueError('Both eligible FIT sources must be nonempty.')

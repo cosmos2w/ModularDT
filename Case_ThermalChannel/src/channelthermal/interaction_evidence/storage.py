@@ -213,6 +213,16 @@ def load_solve_record(directory: str | Path) -> SolveRecord:
 
     root = Path(directory).expanduser().resolve()
     metadata = json.loads((root / "record.json").read_text(encoding="utf-8"))
+    if metadata.get("output") is not None:
+        with np.load(root / "physical_output.npz", allow_pickle=False) as archive:
+            arrays = {name: np.array(archive[name], copy=True) for name in archive.files}
+    else:
+        arrays = {}
+    return solve_record_from_arrays(metadata, arrays)
+
+
+def solve_record_from_arrays(metadata: dict, archive: Mapping[str, np.ndarray]) -> SolveRecord:
+    """Reconstruct a saved typed record from exact metadata and array values."""
     if int(metadata.get("schema_version", -1)) != 1:
         raise ValueError("Unsupported persisted solve-record schema version.")
     design_data = metadata["design"]
@@ -230,29 +240,28 @@ def load_solve_record(directory: str | Path) -> SolveRecord:
     output_data = metadata["output"]
     output = None
     if output_data is not None:
-        with np.load(root / "physical_output.npz", allow_pickle=False) as archive:
-            roles = {}
-            for role_data in output_data["roles"]:
-                arrays = {
-                    name: np.array(archive[key], copy=True)
-                    for name, key in role_data["arrays"].items()
-                }
-                roles[role_data["role"]] = RoleOutput(
-                    role=role_data["role"],
-                    query_features=arrays["query_features"],
-                    values=arrays["values"],
-                    channel_names=tuple(role_data["channel_names"]),
-                    channel_units=tuple(role_data["channel_units"]),
-                    valid_mask=arrays["valid_mask"],
-                    quadrature_weights=arrays["quadrature_weights"],
-                    query_ids=tuple(role_data["query_ids"]),
-                    receiver_module_ids=(
-                        None if role_data["receiver_module_ids"] is None
-                        else tuple(role_data["receiver_module_ids"])
-                    ),
-                    coordinate_kind=role_data["coordinate_kind"],
-                    noise_floor=arrays.get("noise_floor"),
-                )
+        roles = {}
+        for role_data in output_data["roles"]:
+            arrays = {
+                name: np.array(archive[key], copy=True)
+                for name, key in role_data["arrays"].items()
+            }
+            roles[role_data["role"]] = RoleOutput(
+                role=role_data["role"],
+                query_features=arrays["query_features"],
+                values=arrays["values"],
+                channel_names=tuple(role_data["channel_names"]),
+                channel_units=tuple(role_data["channel_units"]),
+                valid_mask=arrays["valid_mask"],
+                quadrature_weights=arrays["quadrature_weights"],
+                query_ids=tuple(role_data["query_ids"]),
+                receiver_module_ids=(
+                    None if role_data["receiver_module_ids"] is None
+                    else tuple(role_data["receiver_module_ids"])
+                ),
+                coordinate_kind=role_data["coordinate_kind"],
+                noise_floor=arrays.get("noise_floor"),
+            )
         output = PhysicalSolveOutput(
             roles=roles,
             quantities={
@@ -288,5 +297,6 @@ __all__ = [
     "RecordPersistenceResult",
     "SerializationStatus",
     "load_solve_record",
+    "solve_record_from_arrays",
     "persist_solve_record",
 ]

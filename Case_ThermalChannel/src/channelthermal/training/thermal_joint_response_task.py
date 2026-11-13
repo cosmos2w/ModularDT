@@ -22,7 +22,7 @@ from honf_runtime.unified_training import LossTerm
 from ..physical_provenance import validate_thermal_endpoint_config
 from .r13_6_member_routing_task import _build_thermal_member_routing_task
 from .r13_8_anchored_task import _VARIANTS, ARM_DETAIL, DETAIL_CONFIG_SCHEMA, DETAIL_CORE_SCHEMA, DETAIL_SOURCE_KIND
-from .thermal_family_objective import ThermalFamilyObjectiveMixin
+from .thermal_family_objective import ThermalFamilyObjectiveMixin, family_reference_roi_deltas, roi_support_runs
 from .thermal_native_port_task import ThermalNativePortTask
 from .thermal_response_raw import load_raw_endpoint
 from .thermal_state_response_task import FIELD_ROLES, _native_endpoint_batch, _reference_delta_squares
@@ -47,7 +47,8 @@ def build_thermal_joint_response_config(base_recipe, *, fit_manifest=None, scale
         angle_count=64, outside_temperature_weight=.05, tau=.4149511814117432,
         enabled=True, endpoint_weight=1., response_weight=1., field_response_weight=.8,
         functional_weights=None, warmup_epochs=10, ramp_epochs=40,
-        coefficient_mode='gradient_norm', gradient_norm_ratios=None):
+        coefficient_mode='gradient_norm', gradient_norm_ratios=None, response_h5=None,
+        population=None, response_view='r17_1_raw'):
     """Return a portable recipe; paths and all physical scale choices are explicit.
 
     Exactly one of ``scale_floors``, ``response_scales`` and ``calibration_path``
@@ -73,7 +74,11 @@ def build_thermal_joint_response_config(base_recipe, *, fit_manifest=None, scale
     ResponseObjectiveConfig.from_mapping(response)
     selections = [(name, value) for name, value in (('fit', scale_floors),
                   ('explicit', response_scales), ('calibration', calibration_path)) if value is not None]
-    if enabled and (not fit_manifest or len(selections) != 1):
+    if fit_manifest and response_h5:
+        raise ValueError('Choose a FIT manifest or a direct response H5, not both.')
+    if response_h5 and (population not in ('TRAIN150', 'TRAIN600') or response_view != 'r17_1_raw'):
+        raise ValueError('Direct training requires an explicit population and R17-1 raw view.')
+    if enabled and (not (fit_manifest or response_h5) or len(selections) != 1):
         raise ValueError('Enabled state/response needs a FIT manifest and exactly one scale source.')
     if len(selections) > 1:
         raise ValueError('Choose only one response scale source.')
@@ -87,6 +92,31 @@ def build_thermal_joint_response_config(base_recipe, *, fit_manifest=None, scale
         'scales': scales, 'families_per_epoch': families_per_epoch, 'family_seed': family_seed,
         'native_ports': {'angle_count': angle_count, 'outside_temperature_weight': outside_temperature_weight},
         'tau': tau}
+    if response_h5:
+        recipe['thermal_joint_response']['h5'] = {'path': str(response_h5), 'population': population,
+                                                    'view': response_view}
+    return recipe
+
+
+def build_r17_2_response_config(base_recipe, *, variant, population, response_scales,
+        roi_profile, calibration_path, fit_manifest=None, response_h5=None, view='r17_1_raw'):
+    """Configure one fresh R17-2 paired recipe with a shared TRAIN calibration.
+
+    A raw manifest remains available for zero-update parity; formal recipes use
+    the direct H5 after dataset parity. The calibration file may be pending until
+    the declared common epoch-10 native snapshot has been measured.
+    """
+    if variant not in ('R-G', 'E', 'C', 'F') or population not in ('TRAIN150', 'TRAIN600'):
+        raise ValueError('Choose an R17-2 variant and a declared TRAIN population.')
+    if view != 'r17_1_raw' or not calibration_path or roi_profile is None:
+        raise ValueError('R17-2 requires its raw effective view, ROI profile and common calibration path.')
+    recipe = build_thermal_joint_response_config(base_recipe, fit_manifest=fit_manifest,
+        response_h5=response_h5, population=population, response_view=view,
+        response_scales=response_scales, response_weight=0. if variant == 'E' else 1.)
+    recipe['thermal_joint_response']['paired'] = {'variant': variant, 'population': population, 'view': view,
+        'measure': 'catalogue' if variant == 'C' else 'grid',
+        'roi_profile': str(roi_profile) if isinstance(roi_profile, Path) else copy.deepcopy(roi_profile),
+        'calibration_path': str(calibration_path)}
     return recipe
 
 
@@ -217,10 +247,10 @@ class ThermalFitFamilyCorpus:
         cache = self._family_cache if self._family_cache is not None and self._family_cache['family'] == family else None
         baseline = cache.get('baseline') if cache is not None else None
         if baseline is None:
-            baseline = load_raw_endpoint(case['source_case_dir'])
+            baseline = self._read_endpoint(family, 'baseline')
             if cache is not None:
                 cache['baseline'] = baseline
-        edited = load_raw_endpoint(row['raw_case_dir'])
+        edited = self._read_endpoint(family, action)
         config = case['source_config']
         self._verify_saved(case, config, baseline['config'], config['layout']['centers'])
         self._verify_saved(row, config, edited['config'], row['centers'])
@@ -251,6 +281,50 @@ class ThermalFitFamilyCorpus:
         return {'family_id': family, 'action': action, 'role': 'fit',
                 'baseline': base_batch, 'edited': edit_batch,
                 'raw_baseline': baseline, 'raw_edited': edited}
+
+    def _read_endpoint(self, family, action):
+        path = (self.cases[family]['source_case_dir'] if action == 'baseline'
+                else self.records[(family, action)]['raw_case_dir'])
+        return load_raw_endpoint(path)
+
+
+class ThermalH5FitFamilyCorpus(ThermalFitFamilyCorpus):
+    """FIT-only direct H5 view implementing the established family contract."""
+
+    def __init__(self, path, training_ids, *, population, view='r17_1_raw'):
+        from ..data.finite_responses import FiniteResponseStore
+
+        if population not in ('TRAIN150', 'TRAIN600') or view != 'r17_1_raw':
+            raise ValueError('Direct FIT training requires a declared population and R17-1 raw view.')
+        self.path = str(Path(path).expanduser())
+        self.population, self.view = population, view
+        self.store = FiniteResponseStore(self.path)
+        self.cases, self.records, self._actions, self._family_cache = {}, {}, {}, None
+        training = set(map(str, training_ids))
+        families = tuple(map(str, self.store.family_ids(role='fit', population=population)))
+        if not families or len(set(families)) != len(families) or not set(families) <= training:
+            raise ValueError('Direct FIT families must be unique selected TRAIN members.')
+        for family in families:
+            case = copy.deepcopy(self.store.family_metadata(family, role='fit', population=population))
+            if not isinstance(case.get('source_config'), dict) or case.get('source') not in ('original', 'new'):
+                raise ValueError('Direct FIT family lacks source controls or original/new identity.')
+            self.cases[family] = case
+            actions = tuple(self.store.actions(family, role='fit', population=population))
+            if not actions or len(set(actions)) != len(actions):
+                raise ValueError('Direct FIT actions must be nonempty and unique.')
+            self._actions[family] = list(actions)
+            for action in actions:
+                row = copy.deepcopy(self.store.action_metadata(family, action, role='fit', population=population))
+                labels = self.store.physical_delta(family, action, role='fit', population=population, kind='saved')
+                if (not isinstance(labels, dict) or set(labels) != set(FUNCTIONALS)
+                        or not all(math.isfinite(float(labels[name])) for name in FUNCTIONALS)
+                        or not isinstance(row.get('centers'), list)):
+                    raise ValueError('Direct FIT actions need saved finite J/P and ordered centers.')
+                row['physical_delta'] = {name: float(labels[name]) for name in FUNCTIONALS}
+                self.records[(family, action)] = row
+
+    def _read_endpoint(self, family, action):
+        return self.store.endpoint(family, action=action, role='fit', population=self.population, view=self.view)
 
 
 class ThermalFitFamilyObjective(ThermalFamilyObjectiveMixin):
@@ -332,6 +406,91 @@ def _fit_response_scales(provider, corpus, floors):
             for name, values in all_family.items()}
 
 
+def fit_training_roi_scales(provider, corpus, *, population, view, resolution, reference):
+    """Fit A/B scales over eligible TRAIN families with measured resolution floors.
+
+    ``reference`` identifies compatible saved TRAIN repeat/reference records;
+    this function never creates a solve or infers a missing resolution.
+    """
+    if population not in ('TRAIN150', 'TRAIN600') or view != 'r17_1_raw':
+        raise ValueError('ROI scale fitting requires a declared TRAIN population and observation view.')
+    if not isinstance(resolution, dict) or set(resolution) != {'A', 'B'}:
+        raise ValueError('Measured A/B repeat-reference resolution is required.')
+    measured = {name: float(value) for name, value in resolution.items()}
+    if any(not math.isfinite(value) or value <= 0 for value in measured.values()):
+        raise ValueError('Measured A/B resolution must be positive and finite.')
+    if (not isinstance(reference, dict) or reference.get('role') != 'train'
+            or reference.get('view') != view or not reference.get('source')
+            or not reference.get('native_case_ids')
+            or not set(map(str, reference['native_case_ids'])) <= set(map(str, provider.training_case_ids))):
+        raise ValueError('Resolution must identify compatible saved TRAIN references and their view.')
+    squares = {'A': [], 'B': []}
+    support_counts, support_runs = {}, {}
+    families = corpus.family_ids()
+    if not families or not set(families) <= set(map(str, provider.training_case_ids)):
+        raise ValueError('ROI scales require selected TRAIN FIT families only.')
+    for family in families:
+        with corpus.family_context(family):
+            pairs = [corpus.pair(provider, family, action) for action in corpus.actions(family)]
+            if not pairs:
+                raise ValueError('ROI scale fitting requires physical edits.')
+            batches = [pairs[0]['baseline']] + [pair['edited'] for pair in pairs]
+            support, deltas = family_reference_roi_deltas(batches, pairs[0]['raw_baseline'])
+            support_counts[family] = {name: int(mask.sum()) for name, mask in support.items()}
+            support_runs[family] = {name: roi_support_runs(mask) for name, mask in support.items()}
+            for name in squares:
+                squares[name].append(sum(float(delta.square()) for delta in deltas[name]) / len(deltas[name]))
+    rms = {name: math.sqrt(sum(values) / len(values)) for name, values in squares.items()}
+    return {'schema': 'thermal_training_roi_scales_v1', 'population': population, 'view': view,
+            'fit_family_ids': list(families), 'resolution': measured, 'resolution_reference': copy.deepcopy(reference),
+            'floors': {name: 4. * value for name, value in measured.items()}, 'rms': rms,
+            'scales': {name: max(rms[name], 4. * measured[name]) for name in squares},
+            'support_counts': support_counts, 'support_runs': support_runs}
+
+
+def _validated_roi_profile(profile, *, population, view, families, training_ids):
+    if isinstance(profile, (str, Path)):
+        profile = json.loads(Path(profile).expanduser().read_text())
+    if (not isinstance(profile, dict) or profile.get('schema') != 'thermal_training_roi_scales_v1'
+            or profile.get('population') != population or profile.get('view') != view
+            or tuple(map(str, profile.get('fit_family_ids', ()))) != tuple(families)):
+        raise ValueError('ROI scale profile must match the ordered TRAIN FIT population and view.')
+    reference = profile.get('resolution_reference', {})
+    if (reference.get('role') != 'train' or reference.get('view') != view or not reference.get('source')
+            or not reference.get('native_case_ids')
+            or not set(map(str, reference['native_case_ids'])) <= set(map(str, training_ids))):
+        raise ValueError('ROI resolution profile lacks compatible TRAIN reference provenance.')
+    for key in ('resolution', 'floors', 'rms', 'scales'):
+        if not isinstance(profile.get(key), dict) or set(profile[key]) != {'A', 'B'}:
+            raise ValueError(f'ROI profile requires A/B {key}.')
+    for name in ('A', 'B'):
+        resolution, floor, rms, scale = (float(profile[key][name]) for key in ('resolution', 'floors', 'rms', 'scales'))
+        if (not all(math.isfinite(value) for value in (resolution, floor, rms, scale))
+                or resolution <= 0 or rms < 0 or floor != 4. * resolution or scale != max(floor, rms)):
+            raise ValueError('ROI scale must equal the TRAIN RMS with its four-times-resolution floor.')
+    counts = profile.get('support_counts', {})
+    if set(counts) != set(families) or any(set(counts[family]) != {'A', 'B'}
+            or any(type(counts[family][name]) is not int or counts[family][name] < 1 for name in ('A', 'B'))
+            for family in families):
+        raise ValueError('ROI profile must record nonempty common supports for every FIT family.')
+    runs = profile.get('support_runs', {})
+    if set(runs) != set(families):
+        raise ValueError('ROI profile must record each ordered common support.')
+    for family in families:
+        if set(runs[family]) != {'A', 'B'}:
+            raise ValueError('ROI profile requires both region supports.')
+        for name in ('A', 'B'):
+            pairs = runs[family][name]
+            if (not isinstance(pairs, list) or not pairs
+                    or any(not isinstance(pair, list) or len(pair) != 2
+                           or type(pair[0]) is not int or type(pair[1]) is not int
+                           or pair[0] < 0 or pair[1] <= pair[0] for pair in pairs)
+                    or any(left[1] >= right[0] for left, right in zip(pairs, pairs[1:]))
+                    or sum(stop - start for start, stop in pairs) != counts[family][name]):
+                raise ValueError('ROI support ranges must reproduce their declared receiver counts.')
+    return copy.deepcopy(profile)
+
+
 def _norm(parameters, loss=None):
     if loss is None:
         gradients = (p.grad for p in parameters)
@@ -390,6 +549,86 @@ def calibrate_paired_response(model, provider, *, epoch, native_ids, fit_familie
             'gradient_diagnostics': result,
             'coefficients': {'endpoint': .25 * norms['native'] / norms['grid_endpoint'],
                              'response': .10 * norms['native'] / norms['grid_response']}}
+
+
+def _r17_2_panel(values):
+    values = tuple(values)
+    selected = set(np.random.default_rng(20261108).choice(
+        len(values), size=max(1, int(np.floor(.1 * len(values) + .5))), replace=False).tolist())
+    return tuple(value for index, value in enumerate(values) if index in selected)
+
+
+def calibrate_r17_2_response(model, provider, *, epoch, native_ids, fit_families):
+    """Measure the four common TRAIN-only coefficients without optimizer updates."""
+    from honf_runtime.unified_training import SamplingKey
+    from .r16_10_diagnostics import gradient_diagnostics, preserved_state
+    objective = provider.family_objective
+    native = tuple(map(str, native_ids))
+    panel = tuple((str(source), str(family)) for source, family in fit_families)
+    _, native_count, family_count = _paired_population(objective.schedule.families)
+    population = tuple((source, family) for source in ('original', 'new')
+                       for family in objective.schedule.families[source])
+    if (epoch != 10 or len(native) != native_count or len(panel) != family_count
+            or native != _r17_2_panel(provider.training_case_ids) or panel != _r17_2_panel(population)
+            or getattr(objective, 'roi_scales', None) is None):
+        raise ValueError(f'R17-2 calibration requires the fixed TRAIN{native_count}/FIT{family_count} panel and ROI scales.')
+    if (provider.sampling_version != SamplingKey.CASE_EPOCH_VERSION or provider.primary_queries != 1024
+            or provider.port_angle_count != 64):
+        raise ValueError('R17-2 calibration requires the sampled native TRAIN query and port semantics.')
+    # The case/epoch sampler deliberately ignores update and microbatch packing.
+    # Using singleton batches gives the equal-case panel mean while reproducing
+    # each case's literal epoch-10 native training draws.
+    sampling_key = SamplingKey(seed=provider.seed, epoch=epoch, update_index=0, microbatch_index=0,
+        stage='joint', arm=provider.recipe.get('training', {}).get('sampling_arm', 'R13-3-Relative'),
+        sampling_version=provider.sampling_version, dataset_id=provider.sampling_dataset_id)
+    native_draws = []
+    def native_loss():
+        for case_id in native:
+            batch = provider.make_batch((case_id,), sampling_key)
+            if (tuple(batch.case_keys) != (case_id,) or batch.targets.field_targets.shape[-2] != 1024
+                    or batch.targets.material_targets.shape[-1] != 32
+                    or batch.targets.interface_target.shape[-2] != 64 or batch.receivers.ntheta != 64):
+                raise ValueError('Calibration batch differs from sampled native TRAIN receivers.')
+            native_draws.append(case_id)
+            prediction, _ = provider.predict_native(model, batch.scene_inputs, batch.receivers,
+                                                     model.architecture, 'joint', epoch=epoch)
+            yield provider.endpoint_state_loss(prediction, batch) / len(native)
+    def family_loss(component, measure):
+        def pieces():
+            objective.auxiliary_fluid_measure = measure
+            for source, family in panel:
+                values, _ = objective.family_components(model, source, family, components=(component,))
+                yield values[component] / len(panel)
+        return pieces
+    losses = {'native': native_loss, 'endpoint': family_loss('endpoint', 'grid'),
+              'response_grid': family_loss('response', 'grid'),
+              'response_catalogue': family_loss('response', 'catalogue'),
+              'functional': family_loss('functional', 'grid')}
+    original_measure = objective.auxiliary_fluid_measure
+    original_training_samples = provider.training_samples
+    try:
+        with preserved_state(model):
+            model.train()
+            result = gradient_diagnostics(model, losses, require_nonzero=True)
+    finally:
+        objective.auxiliary_fluid_measure = original_measure
+        provider.training_samples = original_training_samples
+    if len(native_draws) != len(native):
+        raise ValueError('Calibration did not measure the complete sampled native panel exactly once.')
+    norms = result['groups']['global']['norms']
+    coefficients = {name: (.25 if name == 'endpoint' else .10) * norms['native'] / norms[name]
+                    for name in ('endpoint', 'response_grid', 'response_catalogue', 'functional')}
+    return {'schema': 'thermal_r17_2_calibration_v1', 'epoch': epoch,
+            'native_case_ids': list(native), 'fit_families': [list(row) for row in panel],
+            'response_scales': dict(objective.response_scales), 'roi_scales': dict(objective.roi_scales),
+            'native_sampling': {'seed': sampling_key.seed, 'epoch': sampling_key.epoch,
+                'sampling_version': sampling_key.sampling_version, 'dataset_id': sampling_key.dataset_id,
+                'stage': sampling_key.stage, 'arm': sampling_key.arm, 'update_index': sampling_key.update_index,
+                'microbatch_index': sampling_key.microbatch_index, 'cases_per_batch': 1,
+                'fluid_queries_per_case': 1024, 'material_queries_per_module': 32,
+                'surface_and_outside_angles': 64,
+                'semantics': 'case_epoch_v1 per-case native streams; update, microbatch, stage and arm do not affect draws'},
+            'gradient_diagnostics': result, 'coefficients': coefficients}
 
 
 def _attach_response(provider, objective, config, *, count, seed, restored_calibration=None,
@@ -501,6 +740,136 @@ def _attach_response(provider, objective, config, *, count, seed, restored_calib
         state['calibration'] = copy.deepcopy(restored)
     provider.training_state_dict = MethodType(training_state_dict, provider)
     provider.load_training_state_dict = MethodType(load_training_state_dict, provider)
+    return provider
+
+
+def _attach_r17_2_response(provider, objective, config, spec, *, population, view):
+    """Attach the four R17-2 recipes with one deferred population calibration."""
+    variants = {'R-G': ('grid', 'response', 'response_grid'),
+                'E': ('grid', None, None),
+                'C': ('catalogue', 'response', 'response_catalogue'),
+                'F': ('grid', 'functional', 'functional')}
+    variant = spec.get('variant')
+    if variant not in variants:
+        raise ValueError('R17-2 variant must be R-G, E, C or F.')
+    measure, component, coefficient = variants[variant]
+    if spec.get('measure', measure) != measure:
+        raise ValueError('R17-2 auxiliary measure does not match the declared recipe.')
+    if (config.warmup_epochs != 10 or config.ramp_epochs != 40 or config.endpoint_weight != 1.
+            or config.field_response_weight != .8 or dict(config.functional_weights) != {'J': .1, 'P': .1}
+            or config.response_weight not in ((0., 1.) if variant == 'E' else (1.,))):
+        raise ValueError('R17-2 needs the declared fixed endpoint, response and ramp semantics.')
+    sources = {name: [family for family, row in objective.corpus.cases.items()
+                      if row.get('source') == name] for name in ('original', 'new')}
+    counts, native_count, family_count = _paired_population(sources)
+    if ((population, native_count) not in (('TRAIN150', 15), ('TRAIN600', 60))
+            or len(provider.training_case_ids) != {'TRAIN150': 150, 'TRAIN600': 600}[population]):
+        raise ValueError('R17-2 native membership and FIT families must match the declared TRAIN population.')
+    if sum(map(len, sources.values())) != len(objective.corpus.cases):
+        raise ValueError('Each R17-2 FIT family must declare its original or new source.')
+    objective.schedule = EligibleFamilySchedule(sources['original'], sources['new'], provider.training_case_ids,
+                                                 seed=0, preserve_order=True)
+    if any(len(objective.actions(source, family)) != 4 for source in sources for family in sources[source]):
+        raise ValueError('Each R17-2 FIT family requires its four eligible edits.')
+    profile = _validated_roi_profile(spec.get('roi_profile'), population=population, view=view,
+        families=objective.corpus.family_ids(), training_ids=provider.training_case_ids)
+    objective.roi_scales = dict(profile['scales'])
+    objective.roi_support_runs = copy.deepcopy(profile['support_runs'])
+    objective.auxiliary_fluid_measure = measure
+    calibration_path = Path(spec['calibration_path']).expanduser()
+    names = ('endpoint',) if component is None else ('endpoint', component)
+    state = {'calibration': None}
+    provider.family_objective = objective
+    provider.roi_scale_profile = profile
+    provider.training_history_in_logs = True
+    provider.auxiliary_loss_names = tuple('family/' + name for name in names)
+    previous_metadata = provider.loss_metadata
+    def loss_metadata(self):
+        result = dict(previous_metadata())
+        for name in names:
+            result['family/' + name] = {'panel': 'physics', 'label': 'FIT family ' + name,
+                'unit': 'scaled squared error',
+                'formula': ('equal FIT family, five endpoints and paired full/P95 view mean' if name == 'endpoint'
+                            else 'equal FIT family/action and paired full/P95 view mean'),
+                'weight': 'fixed TRAIN calibration and epoch ramp'}
+        return result
+    provider.loss_metadata = MethodType(loss_metadata, provider)
+    def load_calibration():
+        receipt = json.loads(calibration_path.read_text())
+        native = tuple(map(str, receipt.get('native_case_ids', ())))
+        fit = tuple((str(row[0]), str(row[1])) for row in receipt.get('fit_families', ()))
+        family_population = tuple((source, family) for source in ('original', 'new')
+                                  for family in objective.schedule.families[source])
+        coeffs = receipt.get('coefficients', {})
+        if (receipt.get('schema') != 'thermal_r17_2_calibration_v1' or receipt.get('epoch') != 10
+                or len(native) != native_count or native != _r17_2_panel(provider.training_case_ids)
+                or len(fit) != family_count or fit != _r17_2_panel(family_population)
+                or _scales(receipt.get('response_scales')) != objective.response_scales
+                or receipt.get('roi_scales') != objective.roi_scales
+                or set(coeffs) != {'endpoint', 'response_grid', 'response_catalogue', 'functional'}
+                or any(not math.isfinite(float(value)) or float(value) <= 0 for value in coeffs.values())):
+            raise ValueError('R17-2 calibration must match the fixed TRAIN/FIT panel, scales and four measured coefficients.')
+        return copy.deepcopy(receipt)
+    def auxiliary_update_terms(self, model, *, epoch, update_index, update_count):
+        ramp = config.ramp(epoch)
+        if not ramp:
+            return
+        if state['calibration'] is None:
+            state['calibration'] = load_calibration()
+        selected = objective.schedule.epoch(epoch, counts)
+        slots = np.linspace(0, update_count - 1, len(selected), dtype=int)
+        for (source, family), slot in zip(selected, slots):
+            if int(slot) != update_index:
+                continue
+            components, work = objective.family_components(model, source, family, components=names)
+            weights = {'endpoint': state['calibration']['coefficients']['endpoint']}
+            if component is not None:
+                weights[component] = state['calibration']['coefficients'][coefficient]
+            terms = {'family/' + name: LossTerm(components[name], 1.,
+                     ramp * float(weights[name]) * update_count / len(selected)) for name in names}
+            work.update(family_presentations=1, edited_presentations=4)
+            yield terms, work
+    provider.auxiliary_update_terms = MethodType(auxiliary_update_terms, provider)
+    provider.state_response_metadata = MethodType(lambda self: {'calibration': copy.deepcopy(state['calibration'])}, provider)
+    provider.response_epoch_family_ids = MethodType(
+        lambda self, epoch: [f'{source}:{family}' for source, family in objective.schedule.current]
+        if epoch > 10 else [], provider)
+    def begin_training_epoch(self, model, epoch):
+        core = getattr(model, 'core', model)
+        if not hasattr(core, 'query_tile_size'):
+            raise ValueError('R17-2 paired execution requires an anchored query tile.')
+        core.query_tile_size = 128
+        return {'active_tile': 128}
+    provider.begin_training_epoch = MethodType(begin_training_epoch, provider)
+    old_state = getattr(provider, 'training_state_dict', lambda: {})
+    old_load = getattr(provider, 'load_training_state_dict', lambda saved: None)
+    def training_state_dict(self):
+        return {'native': old_state(), 'thermal_joint_response': {'calibration': copy.deepcopy(state['calibration']),
+                'schedule': objective.schedule.state_dict()}}
+    def load_training_state_dict(self, saved):
+        old_load(saved['native'])
+        paired = saved['thermal_joint_response']
+        objective.schedule.load_state_dict(paired['schedule'])
+        state['calibration'] = copy.deepcopy(paired['calibration'])
+        if state['calibration'] is not None and state['calibration'] != load_calibration():
+            raise ValueError('R17-2 calibration differs from the saved paired state.')
+    provider.training_state_dict = MethodType(training_state_dict, provider)
+    provider.load_training_state_dict = MethodType(load_training_state_dict, provider)
+    previous_identity = provider.identity_payload
+    def identity_payload(self):
+        result = dict(previous_identity())
+        result['native_only_training'] = False
+        result['response_training_family_ids'] = list(objective.corpus.family_ids())
+        result['response_supervision'] = 'explicit selected TRAIN FIT families'
+        result['objective'].update(response_training_families=list(objective.corpus.family_ids()), response_fit=True)
+        result['thermal_joint_response'] = {'schema': SCHEMA, 'response_source': objective.corpus.path,
+            'population': population, 'view': view, 'variant': variant,
+            'families': {source: list(ids) for source, ids in objective.schedule.families.items()},
+            'counts': counts, 'response_scales': dict(objective.response_scales),
+            'roi_profile': copy.deepcopy(profile), 'measure': measure,
+            'calibration_path': str(calibration_path), 'tau': objective.tau, 'query_tile_size': 128}
+        return result
+    provider.identity_payload = MethodType(identity_payload, provider)
     return provider
 
 
@@ -636,8 +1005,11 @@ def build_thermal_joint_response_task(recipe, *, arm=None, device='cpu', resume_
     spec = recipe.get('thermal_joint_response', {})
     if not isinstance(spec, dict) or spec.get('schema') != SCHEMA:
         raise ValueError(f'Expected {SCHEMA} case settings.')
-    if config.enabled and (not spec.get('fit_manifest') or not isinstance(spec.get('scales'), dict)):
-        raise ValueError('Enabled state/response requires a FIT family manifest, physical labels and scales.')
+    h5_spec = spec.get('h5')
+    if config.enabled and not spec.get('fit_manifest') and not h5_spec:
+        raise ValueError('Enabled state/response requires a FIT family manifest or direct response H5, physical labels and scales.')
+    if config.enabled and (bool(spec.get('fit_manifest')) == bool(h5_spec) or not isinstance(spec.get('scales'), dict)):
+        raise ValueError('Enabled state/response requires exactly one FIT source and physical scales.')
     arm = arm or recipe['member_routing'].get('arm', ARM_DETAIL)
     identity = (resume_payload or {}).get('experiment_identity', {}).get('provider_identity', {})
     formal = (spec.get('paired') is not None and recipe.get('training', {}).get('membership')
@@ -664,7 +1036,13 @@ def build_thermal_joint_response_task(recipe, *, arm=None, device='cpu', resume_
                                  else 'input_only_sample_of_declared_validation')
     if not config.enabled:
         return model, provider
-    corpus = ThermalFitFamilyCorpus(spec['fit_manifest'], provider.training_case_ids)
+    if h5_spec:
+        if not isinstance(h5_spec, dict):
+            raise ValueError('Direct H5 source must declare path, population and view.')
+        corpus = ThermalH5FitFamilyCorpus(h5_spec['path'], provider.training_case_ids,
+                                         population=h5_spec['population'], view=h5_spec['view'])
+    else:
+        corpus = ThermalFitFamilyCorpus(spec['fit_manifest'], provider.training_case_ids)
     corpus.verify_training_controls(provider)
     scale_spec = spec['scales']
     mode = scale_spec.get('mode')
@@ -708,10 +1086,19 @@ def build_thermal_joint_response_task(recipe, *, arm=None, device='cpu', resume_
     objective = objective_type(provider, corpus, scales, config, spec.get('tau', .4149511814117432))
     saved_state = (resume_payload or {}).get('provider_training_state', {}).get('thermal_joint_response', {})
     if paired is not None:
-        if config.warmup_epochs != 10 or config.ramp_epochs != 40 or paired.get('measure') not in ('grid', 'catalogue'):
-            raise ValueError('Paired training needs the declared ramp and grid or catalogue measure.')
-        objective.auxiliary_fluid_measure = paired['measure']
-        _attach_paired_response(provider, objective, config, paired, restored_state=saved_state)
+        if paired.get('variant') is not None:
+            population = paired.get('population')
+            view = paired.get('view', 'r17_1_raw')
+            if h5_spec and (h5_spec['population'] != population or h5_spec['view'] != view):
+                raise ValueError('R17-2 recipe population/view differs from its direct H5 source.')
+            if population not in ('TRAIN150', 'TRAIN600') or view != 'r17_1_raw':
+                raise ValueError('R17-2 requires the declared training population and R17-1 raw view.')
+            _attach_r17_2_response(provider, objective, config, paired, population=population, view=view)
+        else:
+            if config.warmup_epochs != 10 or config.ramp_epochs != 40 or paired.get('measure') not in ('grid', 'catalogue'):
+                raise ValueError('Paired training needs the declared ramp and grid or catalogue measure.')
+            objective.auxiliary_fluid_measure = paired['measure']
+            _attach_paired_response(provider, objective, config, paired, restored_state=saved_state)
     else:
         _attach_response(provider, objective, config, count=spec.get('families_per_epoch', 4),
                      seed=spec.get('family_seed', 0), restored_calibration=saved_state.get('calibration'),
