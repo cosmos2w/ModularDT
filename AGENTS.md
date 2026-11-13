@@ -1,3 +1,14 @@
+# Project-wide explanatory clarity and terminology
+
+- Apply these rules throughout this project to explanations, progress updates, plans, reports, reviews, prompts and figure captions, in both Chinese and English. Preserve the existing requirement that requested prompts and reports use English.
+- Explain the concrete object and operation before naming the concept: what input is changed, what the model predicts, where reference values come from, which physical positions are compared, and how the error is calculated. Include only the details needed for the question; do not substitute implementation jargon for an explanation.
+- Prefer ordinary descriptive phrases and established vocabulary. Introduce a new term, abbreviation or compact label only when a necessary distinction cannot be expressed clearly with existing words. Reuse one consistent name for each concept rather than adding near-synonyms.
+- When a necessary technical term first appears in an explanation, define its meaning in plain language and give a short concrete example when ambiguity remains. Translating a term between Chinese and English, expanding an acronym, or pointing to code does not by itself explain it.
+- Do not use ambiguous words such as "catalogue/directory / 目录", "endpoint / 端点" or "grid / 网格" as standalone explanations. State their actual referent. For example, say "the saved list of physical observation coordinates and weights"; "the physical fields for the original and each modified scene"; or "calculate errors at the valid cell centres of the physical-field array". Distinguish these from filesystem folders, spatial boundaries, time endpoints and model input records whenever relevant.
+- When comparing runs, state the shared setup and the actual changed operations. Distinguish changing model inputs, reference labels, positions/weights used to calculate training error, and model architecture. A change in error calculation must not be described as a new prediction architecture or as fewer executed predictions without evidence.
+- If the user says an explanation is unclear, start again with one small physical or numerical example. Do not repeat the same undefined terms, invent replacement labels, or add equations before explaining what the quantities mean. Equations and diagrams may support the explanation after that concrete meaning is clear.
+- Keep literal run names, code identifiers, schemas and historical scientific meanings intact; put a plain-language description beside them when needed. These communication rules do not authorize renaming artifacts, changing experiment semantics or rewriting historical evidence.
+
 # Repository completion and upload rule
 
 - After a round of code revision, commit the durable changes and push the current non-default working branch. Fetch or inspect the remote branch before pushing, then verify the remote and local branch tips match. A local commit alone does not finish the round.
