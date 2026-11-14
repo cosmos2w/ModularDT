@@ -98,7 +98,7 @@ def _canonical_relative(name: str | Path, *, category: str | None = None) -> Pat
     if lower.endswith((".pt", ".pth", ".ckpt")) or _EPOCH_CHECKPOINT.match(basename):
         return Path("checkpoints") / basename
 
-    if lower in {"metrics.csv", "loss_history.csv", "history.json", "summary.json", "fit_summary.json"}:
+    if lower in {"metrics.csv", "loss_history.csv", "history.csv", "validation.csv", "history.json", "summary.json", "fit_summary.json"}:
         return Path("metrics") / basename
     if lower == "best_by_response_guarded_selection.json":
         return Path("evaluations/selection") / basename
@@ -290,7 +290,7 @@ class RunLayout:
                 policy = json.loads(marker_path.read_text(encoding="utf-8")).get("training_output_policy")
             except (OSError, json.JSONDecodeError):
                 policy = None
-            if policy != "categorized_v2":
+            if policy not in {"categorized_v2", "csv_v3"}:
                 candidates.insert(0, self.run_dir / "plots" / "training" / basename)
         if not self.canonical_writes:
             canonical_category = canonical.relative_to(self.run_dir).parts[0]

@@ -884,7 +884,7 @@ def _diagnostic_age_branch_amendment(
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str,
                         loss_metadata: Mapping[str, Mapping[str, str]] | None = None,
                         provider_identity: Mapping[str, Any] | None = None,
-                        metadata_output: Path | None = None) -> None:
+                        metadata_output: Path | None = None, separate_totals: bool = False) -> None:
     """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -1184,6 +1184,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     # Each row records that epoch's weighted contributions; term inventories
     # can legitimately change between phases.
     total_axis = axes[0]
+    validation_total_axis = figure.add_subplot(1, 1, 1) if separate_totals else total_axis
 
     def recorded_sum(values: Any) -> float:
         if not isinstance(values, Mapping) or not values:
@@ -1205,7 +1206,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             color="C0", marker=".")
     if validation_rows:
         masked_count_total += plot_series(
-            total_axis, [row["epoch"] for row in validation_rows],
+            validation_total_axis, [row["epoch"] for row in validation_rows],
             [recorded_sum({"total": objective_at(row)["total"]})
              if "total" in objective_at(row) else recorded_sum(objective_at(row).get("terms"))
              for row in validation_rows],
@@ -1213,8 +1214,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             color="C1", linestyle="--", marker="o")
     else:
         pending = not any(isinstance(row.get("validation"), Mapping) and row["validation"] for row in history)
-        total_axis.text(0.02, 0.10, "Validation: first review pending" if pending else
-                        "Validation objective losses were not recorded.", transform=total_axis.transAxes, fontsize=8)
+        validation_total_axis.text(0.02, 0.10, "Validation: first review pending" if pending else
+                        "Validation objective losses were not recorded.", transform=validation_total_axis.transAxes, fontsize=8)
 
     # Keep a separate shared-name subtotal only when it differs in coverage.
     comparable_rows = []
@@ -1224,7 +1225,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         if (matched and type(row.get("epoch")) is int
                 and (matched != set(row.get("train_losses", {})) or matched != set(objective.get("terms", {})))):
             comparable_rows.append((int(row["epoch"]), objective))
-    if comparable_rows and not response_run:
+    if comparable_rows and not response_run and not separate_totals:
         for key, label, color, style, marker in (
             ("training_matched_total", "TRAIN: shared-term subtotal", "C0", ":", "."),
             ("validation_matched_total", "VALIDATION: shared-term subtotal", "C1", ":", "o"),
@@ -1612,7 +1613,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
 
     # Retain only measured panels and split the crowded native flow/thermal
     # family into readable groups. Historical histories use the same renderer.
-    visible_axes = [total_axis, selector_axis, native_axis, physics_axis, routing_axis]
+    visible_axes = ([total_axis, validation_total_axis] if separate_totals else [total_axis]) + [selector_axis, native_axis, physics_axis, routing_axis]
     native_names = [name for name in all_names if term_group(name) == 0]
     flow_names = [name for name in native_names if name.startswith("flow/")]
     thermal_names = [name for name in native_names if name.startswith("temperature/") or name == "q_proxy"]
@@ -1628,13 +1629,22 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         set_panel_title(thermal_axis, "Thermal prediction losses", "Sampled TRAIN and held-out validation")
         thermal_axis.set_ylabel("Weighted loss contribution (dimensionless)")
         visible_axes.insert(3, thermal_axis)
-    data_present = {axis: axis is total_axis or any(not line.get_label().startswith("_") for line in axis.lines)
+    data_present = {axis: axis is total_axis or (separate_totals and axis is validation_total_axis)
+                    or any(not line.get_label().startswith("_") for line in axis.lines)
                     for axis in visible_axes}
     # Concise labels keep definitions in the metadata sidecar. Work counters
     # remain in history/metadata rather than the default loss figure.
     total_axis.set_title("Optimized TRAIN and native validation totals" if response_run else
                          "Weighted loss totals (different reductions)")
     total_axis.set_ylabel("Weighted loss")
+    if separate_totals:
+        total_axis.set_title("Total TRAIN loss")
+        validation_total_axis.set_title("Total measurable validation loss")
+        validation_total_axis.set_xlabel("Completed epoch")
+        validation_total_axis.set_ylabel("Weighted loss")
+        validation_total_axis.grid(alpha=0.25, which="both")
+        if validation_total_axis.lines:
+            validation_total_axis.legend(fontsize=8, frameon=False)
     selector_axis.set_ylabel("Normalized MSE" if field_metric == "field_score" else "Selector metric")
     native_axis.set_title("Flow losses" if flow_names and thermal_names and len(native_names) > 5 else "Prediction losses")
     if flow_names and thermal_names and len(native_names) > 5:
@@ -1912,6 +1922,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         )
         metadata.pop("paired_work_series", None)
     metadata_output = output if metadata_output is None else metadata_output
+    output.mkdir(parents=True, exist_ok=True)
     metadata_output.mkdir(parents=True, exist_ok=True)
     _atomic_json(metadata_output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
@@ -2265,6 +2276,10 @@ def _write_training_history(path: Path, history: Sequence[Mapping[str, Any]], *,
 
 
 def read_training_history(path: Path) -> list[dict[str, Any]]:
+    if path.suffix.lower() == ".csv":
+        from .scalar_history import read_csv_training_history
+
+        return read_csv_training_history(path)
     rows = json.loads(path.read_text(encoding="utf-8"))
     sidecar = path.parent / "history_metadata.json"
     if rows and rows[0].get("history_metadata_version") == 1:
@@ -2273,6 +2288,53 @@ def read_training_history(path: Path) -> list[dict[str, Any]]:
             raise ValueError("Compact history metadata has an unsupported schema.")
         return _expand_training_history(rows, metadata)
     return rows
+
+
+def _publish_csv_checkpoint(layout: RunLayout, payload: Mapping[str, Any]) -> None:
+    """Finish references to an already committed latest state; safe to retry."""
+    pending = payload.get("pending_publications", {})
+    epoch = int(payload["epoch"])
+    latest = layout.write_path("latest_model.pt")
+
+    def link_latest(destination: Path) -> None:
+        # A later atomic latest replacement leaves this selected inode intact.
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.link")
+        temporary.unlink(missing_ok=True)
+        try:
+            os.link(latest, temporary)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    if pending.get("milestone"):
+        link_latest(layout.write_path(f"epoch_{epoch:04d}_model.pt"))
+    if pending.get("best_field"):
+        link_latest(layout.write_path("best_by_field_mse_model.pt"))
+    guarded = pending.get("guarded")
+    if guarded:
+        checkpoint = layout.write_path(f"epoch_{epoch:04d}_model.pt")
+        if not checkpoint.is_file():
+            link_latest(checkpoint)
+        _atomic_json(layout.write_path("best_by_response_guarded_selection.json"), {
+            **guarded, "checkpoint": str(checkpoint.relative_to(layout.run_dir)),
+            "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        })
+
+
+def _record_training_event(layout: RunLayout, event: Mapping[str, Any]) -> None:
+    path = layout.write_path("events.jsonl")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"unix": time.time(), **event}, allow_nan=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _record_recovery_event(layout: RunLayout, evidence: Sequence[Path], epoch: int) -> None:
+    if evidence:
+        _record_training_event(layout, {"event": "scalar_recovery", "checkpoint_epoch": epoch,
+            "evidence": [str(p.relative_to(layout.run_dir)) for p in evidence]})
 
 
 def _read_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
@@ -2721,6 +2783,14 @@ class TrainingEngine:
             ]))
             order = rng.permutation(len(ordered_cases)).tolist()
             ordered_cases = [ordered_cases[index] for index in order]
+        reorder = getattr(provider, "reorder_epoch_cases", None)
+        if callable(reorder):
+            from collections import Counter
+
+            reordered = list(reorder(tuple(ordered_cases), epoch=sampler_epoch, seed=self.config.seed))
+            if Counter(reordered) != Counter(ordered_cases):
+                raise ValueError("Provider case ordering must preserve the exact epoch membership.")
+            ordered_cases = reordered
         dataset_id = (
             _sampling_dataset_id(provider.identity_payload())
             if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION else ""
@@ -3630,7 +3700,10 @@ class TrainingEngine:
             )
         for batch in microbatches:
             batch_auxiliary = batch.auxiliary if isinstance(batch.auxiliary, Mapping) else {}
-            sample_hash = batch_auxiliary.get("query_sampling_sha256")
+            sample_hash = (batch_auxiliary.get("query_sampling_sha256")
+                           if getattr(provider, "training_output_policy", None) != "csv_v3"
+                           or bool(getattr(provider, "training_stream_hash_history", False))
+                           or bool(getattr(self, "_capture_training_stream", False)) else None)
             if sample_hash is not None:
                 if not isinstance(sample_hash, str) or len(sample_hash) != 64:
                     raise ValueError("Provider query-sampling receipt must be a SHA256 hex string.")
@@ -3978,10 +4051,19 @@ class TrainingEngine:
                     state_reader = getattr(provider, "training_state_dict", None)
                     state_restorer = getattr(provider, "load_training_state_dict", None)
                     provider_state = copy.deepcopy(state_reader()) if callable(state_reader) else None
+                    objective_rng = capture_rng_state()
+                    objective_mode = model.training
                     try:
+                        objective_predictor = getattr(provider, "validation_objective_predictions", None)
+                        loss_predictions, loss_auxiliary = predictions, auxiliary_state
+                        if callable(objective_predictor):
+                            loss_predictions, loss_auxiliary = objective_predictor(
+                                model, batch, arm=arm, epoch=epoch)
                         terms = validation_loss_fn(
-                            predictions, batch.targets, auxiliary_state, batch=batch, arm=arm)
+                            loss_predictions, batch.targets, loss_auxiliary, batch=batch, arm=arm)
                     finally:
+                        model.train(objective_mode)
+                        restore_rng_state(objective_rng)
                         if provider_state is not None and callable(state_restorer):
                             state_restorer(provider_state)
                     if not isinstance(terms, Mapping):
@@ -4013,6 +4095,32 @@ class TrainingEngine:
             if any(count != batch_count for count in loss_batch_counts.values()):
                 raise ValueError("Each validation objective term must be present in every validation batch.")
             result = dict(provider.reduce_native_metrics(records))
+            auxiliary_validation = getattr(provider, "validation_auxiliary_terms", None)
+            if callable(auxiliary_validation):
+                state_reader = getattr(provider, "training_state_dict", None)
+                state_restorer = getattr(provider, "load_training_state_dict", None)
+                provider_state = copy.deepcopy(state_reader()) if callable(state_reader) else None
+                auxiliary_rng = capture_rng_state()
+                auxiliary_mode = model.training
+                try:
+                    terms = auxiliary_validation(model, epoch=epoch, arm=arm)
+                finally:
+                    model.train(auxiliary_mode)
+                    restore_rng_state(auxiliary_rng)
+                    if provider_state is not None and callable(state_restorer):
+                        state_restorer(provider_state)
+                if not isinstance(terms, Mapping):
+                    raise TypeError("validation_auxiliary_terms must return a mapping of LossTerm values.")
+                for name, term in terms.items():
+                    if not isinstance(name, str) or not name or name in loss_totals:
+                        raise ValueError("Auxiliary validation terms need unique nonempty names.")
+                    if not isinstance(term, LossTerm) or not torch.is_tensor(term.numerator) or term.numerator.numel() != 1:
+                        raise ValueError(f"Auxiliary validation loss {name!r} must be a scalar LossTerm.")
+                    denominator = _denominator(term.denominator)
+                    numerator, weight = float(term.numerator.detach()), float(term.weight)
+                    if denominator <= 0 or not math.isfinite(numerator) or not math.isfinite(weight):
+                        raise ValueError(f"Auxiliary validation loss {name!r} has invalid values.")
+                    loss_totals[name] = {"numerator": numerator, "denominator": denominator, "weight": weight}
             extra_metrics = getattr(provider, "extra_validation_metrics", None)
             if callable(extra_metrics):
                 result.update(extra_metrics(model, arm, validation_phase))
@@ -4051,6 +4159,7 @@ class TrainingEngine:
         group_specs: Sequence[OptimizerGroupSpec],
         provider_training_state: Mapping[str, Any] | None = None,
         source_read_auxiliary_state: Mapping[str, Any] | None = None,
+        include_history: bool = True,
     ) -> dict[str, Any]:
         payload = {
             "checkpoint_schema_version": 1,
@@ -4063,13 +4172,17 @@ class TrainingEngine:
             "optimizer_state_by_name": named_optimizer_state(model, optimizer),
             "rng_state": _cpu_tree(capture_rng_state()),
             "sampler_state": _cpu_tree(sampler_state),
-            "history": _cpu_tree(list(history)),
             "best_field_score": float(best_field),
             "best_response_guarded_score": float(best_guarded),
             "optimizer_group_names": [group["group_name"] for group in optimizer.param_groups],
             "optimizer_schedule_contract": [_optimizer_spec_payload(spec) for spec in group_specs],
             "provider_training_state": _cpu_tree(provider_training_state or {}),
         }
+        if include_history:
+            payload["history"] = _cpu_tree(list(history))
+        else:
+            payload["history_path"] = "metrics/history.csv"
+            payload["checkpoint_schema_version"] = 2
         if source_read_auxiliary_state is not None:
             payload["source_read_auxiliary_state"] = _cpu_tree(source_read_auxiliary_state)
         return payload
@@ -4116,16 +4229,21 @@ class TrainingEngine:
         output = Path(output_dir).resolve()
         output.mkdir(parents=True, exist_ok=True)
         layout = RunLayout(output)
-        layout.ensure()
         marker_path = output / "artifact_layout.json"
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8")) if marker_path.is_file() else {}
         except (OSError, json.JSONDecodeError):
             marker = {}
         output_policy = (marker.get("training_output_policy") if resume_checkpoint is not None
-                         else "categorized_v2" if layout.canonical_writes else None)
-        modern_output = output_policy == "categorized_v2"
-        if modern_output and resume_checkpoint is not None:
+                         else getattr(provider, "training_output_policy", "categorized_v2")
+                         if layout.canonical_writes else None)
+        csv_output = output_policy == "csv_v3"
+        modern_output = output_policy in {"categorized_v2", "csv_v3"}
+        if not csv_output:
+            layout.ensure()
+        elif branch_from_checkpoint is not None or external_state_continuation:
+            raise ValueError("CSV recording supports fresh runs and their exact resumes; historical branches retain their original format.")
+        if output_policy == "categorized_v2" and resume_checkpoint is not None:
             saved_compact = marker.get("compact_history")
             if type(saved_compact) is not bool:
                 raise ValueError("Saved output policy is missing its history serialization setting.")
@@ -4135,7 +4253,9 @@ class TrainingEngine:
         elif compact_history is None:
             compact_history = modern_output
         history_in_logs = bool(getattr(provider, "training_history_in_logs", False))
-        history_path = layout.write_path("history.json", category="logs") if history_in_logs and not modern_output else layout.write_path("history.json")
+        history_path = (layout.write_path("history.csv") if csv_output else
+                        layout.write_path("history.json", category="logs") if history_in_logs and not modern_output
+                        else layout.write_path("history.json"))
         curve_path = layout.write_path("loss_curves.png", category="logs") if history_in_logs and not modern_output else layout.write_path("loss_curves.png")
         if external_state_continuation and resume_checkpoint is None:
             raise ValueError("External full-state continuation requires an explicit saved checkpoint.")
@@ -4144,6 +4264,7 @@ class TrainingEngine:
                 "latest_model.pt",
                 "last.pt",
                 "history.json",
+                "history.csv",
                 "fit_summary.json",
                 "active_process.json",
                 "progress.json",
@@ -4585,6 +4706,19 @@ class TrainingEngine:
             from honf_runtime.compat import load_trusted_checkpoint
 
             source_payload = load_trusted_checkpoint(source_path, map_location="cpu")
+            if csv_output and resume_checkpoint is not None and not external_state_continuation:
+                from .scalar_history import read_scalar_rows, recover_scalar_rows
+
+                boundary = int(source_payload["epoch"])
+                evidence = [item for path in (history_path, layout.write_path("validation.csv"))
+                            if (item := recover_scalar_rows(path, boundary, writer_lock_held=True)) is not None]
+                _record_recovery_event(layout, evidence, boundary)
+                saved_rows = read_training_history(history_path)
+                if [int(row["epoch"]) for row in saved_rows] != list(range(1, boundary + 1)):
+                    raise ValueError("CSV history is missing committed epochs; measurements cannot be reconstructed.")
+                if len(read_scalar_rows(layout.write_path("validation.csv"))) != source_payload.get("committed_validation_rows"):
+                    raise ValueError("CSV validation is missing committed measurements; they cannot be reconstructed.")
+                _publish_csv_checkpoint(layout, source_payload)
             if fresh_initialization is not None and (
                     source_payload.get("experiment_identity", {}).get("fresh_initialization")
                     != fresh_initialization):
@@ -4952,6 +5086,27 @@ class TrainingEngine:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
+        csv_columns: tuple[str, ...] = ()
+        if csv_output:
+            history_columns = getattr(provider, "training_history_columns", None)
+            if not callable(history_columns):
+                raise ValueError("CSV recording requires the provider's complete scheduled training_history_columns().")
+            declared = tuple(history_columns())
+            base_columns = ("epoch", "phase", "arm", "temperature", "case_visits", "optimizer_updates",
+                            "microbatches", "partial_update_cases", "train_seconds", "train_loss_total")
+            csv_columns = tuple(dict.fromkeys((*base_columns,
+                *(f"learning_rates.{group['group_name']}" for group in optimizer.param_groups), *declared)))
+            if any(not isinstance(name, str) or not name for name in csv_columns):
+                raise ValueError("Training history column names must be nonempty strings.")
+            definitions_path = output / "configs" / "metric_definitions.json"
+            if not definitions_path.exists():
+                metadata_reader = getattr(provider, "loss_metadata", None)
+                _atomic_json(definitions_path, {"training_columns": csv_columns,
+                    "training_reduction": "Mean of optimizer-update weighted contributions",
+                    "validation_reduction": "Provider-defined pooled validation measurements",
+                    "terms": dict(metadata_reader()) if callable(metadata_reader) else {}})
+            elif tuple(json.loads(definitions_path.read_text())["training_columns"]) != csv_columns:
+                raise ValueError("CSV training inventory changed during resume.")
         if identity_is_joint_native and branch_from_checkpoint is not None:
             from .joint_native_child import verify_joint_native_optimizer
             if identity_is_continuous_joint:
@@ -5090,7 +5245,9 @@ class TrainingEngine:
                 setattr(provider, "source_read_auxiliary_manager", source_read_manager)
         elif source_payload is not None and "source_read_auxiliary_state" in source_payload:
             raise ValueError("A non-sparse lineage cannot restore source-read auxiliary manager state.")
-        history = list(source_payload.get("history", [])) if source_payload is not None else []
+        history = (read_training_history(history_path) if csv_output and resume_checkpoint is not None
+                   and not external_state_continuation else
+                   list(source_payload.get("history", [])) if source_payload is not None else [])
         if fresh_initialization is not None and source_payload is not None:
             first_epoch_row = next((row for row in history if int(row.get("epoch", -1)) == 1), None)
             first_epoch_audit = (first_epoch_row.get("observed_stream_audit")
@@ -5314,8 +5471,8 @@ class TrainingEngine:
             marker_path = layout.path("artifact_layout.json")
             if modern_output:
                 _atomic_json(marker_path, {**marker, "artifact_layout_version": 1,
-                    "run_dir": str(output), "training_output_policy": "categorized_v2",
-                    "compact_history": compact_history})
+                    "run_dir": str(output), "training_output_policy": output_policy,
+                    **({"compact_history": compact_history} if not csv_output else {})})
             elif not marker_path.exists():
                 _atomic_json(marker_path, {
                     "artifact_layout_version": 1,
@@ -5337,6 +5494,9 @@ class TrainingEngine:
             _atomic_json(layout.write_path("active_process.json"), record)
 
         write_active_process()
+        if csv_output:
+            _record_training_event(layout, {"event": "resume" if resume_checkpoint is not None else "launch",
+                                           "start_epoch": start_epoch, "stop_after": int(stop_after)})
         if resume_checkpoint is not None:
             restored = {"event": "checkpoint_restored", "source_epoch": start_epoch - 1,
                 "next_epoch": start_epoch, "microbatch_cases": self.config.microbatch_cases,
@@ -5354,6 +5514,8 @@ class TrainingEngine:
         latest_epoch = int(source_payload["epoch"]) if resume_checkpoint is not None else 0
         completed_visits = sum(int(row["case_visits"]) for row in history)
         completed_updates = sum(int(row["optimizer_updates"]) for row in history)
+        validation_record_count = (int(source_payload.get("committed_validation_rows", 0))
+                                   if csv_output and source_payload is not None else 0)
         clean_stopped = False
         previous_phase = self.config.stage_for_epoch(start_epoch - 1) if start_epoch > 1 else None
         try:
@@ -5410,8 +5572,11 @@ class TrainingEngine:
                         or completed_updates + math.ceil(len(ordered_cases) / self.config.effective_cases)
                         > architecture_contract["scientific_update_limit"]):
                     raise ValueError("Architecture child case membership or optimizer update cap changed during fitting.")
-                order_hash = _case_order_digest(ordered_cases)
                 capture_fresh_stream = fresh_initialization is not None and epoch == 1
+                record_stream_hash = (not csv_output or capture_fresh_stream
+                                      or bool(getattr(provider, "training_stream_hash_history", False)))
+                self._capture_training_stream = record_stream_hash
+                order_hash = _case_order_digest(ordered_cases) if record_stream_hash else None
                 observed_mask_hashes: list[dict[str, Any]] = []
                 observed_query_hashes: list[dict[str, Any]] = []
                 observed_denominator_records: list[dict[str, Any]] = []
@@ -5570,8 +5735,9 @@ class TrainingEngine:
                     "train_seconds": train_seconds,
                     "train_losses": _mean_mapping([item["losses"] for item in update_rows]),
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
-                    "case_order_sha256": order_hash,
                 }
+                if order_hash is not None:
+                    row["case_order_sha256"] = order_hash
                 if epoch_executor is not None:
                     row["executor"] = copy.deepcopy(epoch_executor)
                 diagnostic_sums = _sum_mapping([item["diagnostics"] for item in update_rows])
@@ -5904,6 +6070,17 @@ class TrainingEngine:
                         or epoch in self.config.checkpoint_epochs):
                     row["post_epoch_frozen_state_audit"] = frozen_state_guard(model, epoch)
                 history.append(row)
+                if csv_output:
+                    from .scalar_history import (VALIDATION_COLUMNS, append_scalar_rows,
+                                                 training_scalar_row, validation_scalar_rows)
+
+                    row["train_loss_total"] = sum(float(value) for value in row["train_losses"].values())
+                    append_scalar_rows(history_path, csv_columns, [training_scalar_row(row, csv_columns)])
+                    if review:
+                        validation_records = validation_scalar_rows(row)
+                        append_scalar_rows(layout.write_path("validation.csv"), VALIDATION_COLUMNS,
+                                           validation_records)
+                        validation_record_count += len(validation_records)
                 if modern_output:
                     console_row = {key: row[key] for key in (
                         "epoch", "phase", "case_visits", "optimizer_updates", "learning_rates",
@@ -5926,18 +6103,25 @@ class TrainingEngine:
                     (epoch == 1 and (self.config.training_mode != "joint"
                                      or self.config.write_initial_artifacts))
                     or epoch % self.config.curve_every == 0 or epoch == stop_after or clean_stop_requested)
+                if csv_output:
+                    curve_due = (epoch == 1 or review or clean_stop_requested or epoch == stop_after
+                                 or (self.config.curve_every is not None and epoch % self.config.curve_every == 0))
                 should_save = (review or milestone or (curve_due and not identity_is_moment_hyperedge)
                                or (self.config.latest_every is not None and epoch % self.config.latest_every == 0))
+                if csv_output:
+                    should_save = (review or milestone or
+                                   (self.config.latest_every is not None and epoch % self.config.latest_every == 0))
                 if should_save:
                     sampler_state = {
                         "seed": self.config.seed,
                         "completed_epoch": epoch,
                         "next_epoch": epoch + 1,
                         "next_case_cursor": 0,
-                        "last_case_order_sha256": order_hash,
                         "case_visits_this_epoch": len(ordered_cases),
                         "optimizer_updates_this_epoch": len(update_rows),
                     }
+                    if order_hash is not None:
+                        sampler_state["last_case_order_sha256"] = order_hash
                     if sampler_epoch != epoch:
                         sampler_state["absolute_sampling_epoch"] = sampler_epoch
                     fit_sampler_reader = getattr(provider, "fit_sampler_epoch", None)
@@ -5950,15 +6134,16 @@ class TrainingEngine:
                         provider_training_state=getattr(provider, "training_state_dict", dict)(),
                         source_read_auxiliary_state=(
                             source_read_manager.state_dict() if source_read_manager is not None else None
-                        ))
+                        ), include_history=not csv_output)
                     if resume_amendments:
                         payload["resume_amendments"] = resume_amendments
                     if branch_parent is not None:
                         payload["branch_parent"] = branch_parent
-                    _write_training_history(history_path, history, compact=compact_history,
-                        omit_stream_hashes=modern_output and not bool(getattr(provider, "training_stream_hash_history", False)))
-                    if milestone:
-                        _atomic_torch_save(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
+                    if not csv_output:
+                        _write_training_history(history_path, history, compact=compact_history,
+                            omit_stream_hashes=modern_output and not bool(getattr(provider, "training_stream_hash_history", False)))
+                        if milestone:
+                            _atomic_torch_save(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)
                     validation_sidecar_due = (
                         epoch == stop_after or clean_stop_requested
                         or (self.config.checkpoint_epochs is None
@@ -5966,7 +6151,7 @@ class TrainingEngine:
                     )
                     if review and validation_sidecar_due:
                         _atomic_json(layout.write_path(f"validation_epoch_{epoch:04d}.json"), row["validation"])
-                    if review:
+                    if review and not csv_output:
                         if improved_field:
                             _atomic_torch_save(layout.write_path("best_by_field_mse_model.pt"), payload)
                         if improved_guarded:
@@ -5982,13 +6167,24 @@ class TrainingEngine:
                                 "checkpoint": str(selected_checkpoint.relative_to(output)),
                                 "checkpoint_sha256": hashlib.sha256(selected_checkpoint.read_bytes()).hexdigest(),
                             })
-                    # Advance the resume cursor only after required milestone
-                    # and selector artifacts exist, including the terminal age.
+                    if csv_output:
+                        payload["committed_validation_rows"] = validation_record_count
+                        guarded = None
+                        if improved_guarded:
+                            guarded = {"selector": "response_guarded_field_score",
+                                "field_metric": self.selection.field_metric, "field_score": field_score,
+                                "guard_metric": guard_key, "guard_value": float(metrics[guard_key]),
+                                "maximum_guard_ratio": self.selection.maximum_response_ratio, "epoch": int(epoch)}
+                        payload["pending_publications"] = {"milestone": milestone,
+                            "best_field": improved_field, "guarded": guarded}
                     _atomic_torch_save(layout.write_path("latest_model.pt"), payload)
+                    if csv_output:
+                        _publish_csv_checkpoint(layout, payload)
                     latest_epoch = epoch
                 if curve_due:
-                    _write_training_history(history_path, history, compact=compact_history,
-                        omit_stream_hashes=modern_output and not bool(getattr(provider, "training_stream_hash_history", False)))
+                    if not csv_output:
+                        _write_training_history(history_path, history, compact=compact_history,
+                            omit_stream_hashes=modern_output and not bool(getattr(provider, "training_stream_hash_history", False)))
                     curve_identity = provider_identity
                     if provider_identity.get("state_response", {}).get("enabled", False):
                         metadata_reader = getattr(provider, "state_response_metadata", None)
@@ -6008,6 +6204,7 @@ class TrainingEngine:
                                 or provider_identity.get("state_response", {}).get("enabled", False)
                                 or provider_identity.get("recipe", {}).get("r16_10_family")) else {}),
                             **({"metadata_output": history_path.parent} if modern_output else {}),
+                            **({"separate_totals": True} if csv_output else {}),
                         )
                     finally:
                         restore_rng_state(curve_rng)
@@ -6043,6 +6240,9 @@ class TrainingEngine:
                           completed_epoch=stopped_at, ended_unix=time.time(), engine_seconds=elapsed,
                           process_seconds=max(0.0, time.time() - float(active["started_unix"])))
             write_active_process()
+            if csv_output:
+                _record_training_event(layout, {"event": "clean_stop" if clean_stopped else "completed",
+                                               "completed_epoch": stopped_at})
             guarded_summary = best_guarded if math.isfinite(best_guarded) else None
             best_field_summary, selector_status = _reported_best_field_score(
                 best_field, moment_hyperedge=identity_is_moment_hyperedge,
@@ -6079,6 +6279,9 @@ class TrainingEngine:
                           exception_type=type(exc).__name__, exception_message=str(exc))
             try:
                 write_active_process()
+                if csv_output:
+                    _record_training_event(layout, {"event": "failure", "completed_epoch": stopped_at,
+                        "exception_type": type(exc).__name__, "exception_message": str(exc)})
             except OSError:
                 pass  # Preserve the original failure when its receipt cannot be written.
             raise

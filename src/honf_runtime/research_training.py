@@ -1972,14 +1972,16 @@ def assess(run_dir: str | Path, *, dataset: str = "thermal") -> dict[str, Any]:
     run = Path(run_dir).expanduser().resolve(strict=True)
     value, _ = _load_run_manifest(run)
     layout = RunLayout(run)
-    history_path = layout.read_path("history.json")
+    marker = run / "artifact_layout.json"
+    policy = json.loads(marker.read_text(encoding="utf-8")).get("training_output_policy") if marker.is_file() else None
+    history_path = layout.read_path("history.csv" if policy == "csv_v3" else "history.json")
     if history_path.is_file():
         from .unified_training import read_training_history
         history = read_training_history(history_path)
     else:
         history = []
     if not isinstance(history, list):
-        raise TypeError("Run history must be a JSON list.")
+        raise TypeError("Run history must be a list of epoch records.")
     checkpoints = {}
     for selector in ("latest", "best_by_field_mse"):
         try:

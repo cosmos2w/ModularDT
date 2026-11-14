@@ -19,7 +19,8 @@ from honf_runtime.contextual_frontier_evaluation import (
 )
 
 
-def evaluate_native_panel(model, provider, *, epoch, split, case_ids, mode, export_cases, output):
+def evaluate_native_panel(model, provider, *, epoch, split, case_ids, mode, export_cases, output,
+                          case_observer=None):
     """Use the maintained native receiver builder, metrics and reductions."""
     records, counts = [], {}
     if torch.cuda.is_available() and next(model.parameters()).is_cuda:
@@ -33,6 +34,8 @@ def evaluate_native_panel(model, provider, *, epoch, split, case_ids, mode, expo
             for name, value in provider.work_counts(batch, prediction, auxiliary).items():
                 counts[name] = counts.get(name, 0.) + float(value)
             case_id = str(batch.targets.case_ids[0])
+            if case_observer is not None:
+                case_observer(case_id, prediction, batch)
             if case_id in export_cases:
                 arrays = _native_export_arrays(prediction, batch, case_id)
                 arrays.update(fluid_xy=batch.receivers.fluid_xy[0].cpu().numpy(),

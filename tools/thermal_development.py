@@ -77,7 +77,7 @@ def development_profiles(*, first_run_id: int = 3101, stage: int = 100,
             "development_manifest": manifest_path,
             "development_manifest_sha256": None if manifest is None else manifest["manifest_sha256"],
         }
-        config["training"]["plot_every_epochs"] = 100
+        config["training"]["plot_every_epochs"] = 10
         campaign = config["training"]["campaign"]
         campaign.update(name="thermal_development25_v1", schedule_total_epochs=1000)
         available = campaign["response_stencils"]

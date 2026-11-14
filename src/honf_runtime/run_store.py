@@ -133,7 +133,6 @@ class RunStore:
         proposal.path.mkdir(exist_ok=False)
         config_dir = proposal.path / "configs"
         config_dir.mkdir()
-        RunLayout(proposal.path).ensure()
         atomic_write_json(config_dir / "core_source.json", bundle.core_source_payload or bundle.core)
         atomic_write_json(config_dir / "case_source.json", bundle.case_source_payload or bundle.case)
         if bundle.experiment_source is not None:
@@ -218,15 +217,20 @@ class RunStore:
         history_path = next(
             (
                 candidate
-                for name in ("metrics.csv", "loss_history.csv", "history.json")
+                for name in ("history.csv", "metrics.csv", "loss_history.csv", "history.json")
                 if (candidate := _preferred_artifact_path(layout, name)).is_file()
             ),
             None,
         )
         if history_path is not None:
             if history_path.suffix.lower() == ".csv":
-                with history_path.open(newline="", encoding="utf-8") as stream:
-                    rows = list(csv.DictReader(stream))
+                if history_path.name == "history.csv":
+                    from .scalar_history import read_scalar_rows
+
+                    rows = read_scalar_rows(history_path)
+                else:
+                    with history_path.open(newline="", encoding="utf-8") as stream:
+                        rows = list(csv.DictReader(stream))
             else:
                 payload = json.loads(history_path.read_text(encoding="utf-8"))
                 rows = payload if isinstance(payload, list) else []

@@ -240,8 +240,7 @@ def resolve_development_training(config: dict[str, Any], *, max_train_batches=No
             or any(isinstance(value, bool) or not isinstance(value, int) or value < 100 or value % 100 for value in milestones)
             or len(set(milestones)) != len(milestones)):
         raise ValueError("Development retained milestones must be multiples of 100; no inherited25 saves.")
-    if training.setdefault("plot_every_epochs", 100) != 100:
-        raise ValueError("Development plot cadence must be 100 epochs.")
+    training.setdefault("plot_every_epochs", 10)
     dataset_config["development_subset"] = copy.deepcopy(manifest)
     return manifest
 

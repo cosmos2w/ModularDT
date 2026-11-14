@@ -521,12 +521,13 @@ def _sample_primary(
     budget: Mapping[str, Any],
     device: torch.device,
     validation_sampling_indices: Mapping[str, int] | None = None,
-) -> tuple[Mapping[str, Any], str]:
+    sampling_audit: bool = True,
+) -> tuple[Mapping[str, Any], str | None]:
     """Sample the maintained native roles from one provider-owned RNG key."""
     from channelthermal.data.collation import ChannelThermalBatchCollator
 
     samples = []
-    sampling_hash = hashlib.sha256()
+    sampling_hash = hashlib.sha256() if sampling_audit else None
     for index in indices:
         original = cases[int(index)]
         case_id = str(original["case_id"])
@@ -571,11 +572,12 @@ def _sample_primary(
             "module_internal_temperature_points": original["module_internal_temperature_points"][:, material],
             "module_internal_query_points": original["module_internal_query_points"][material],
         })
-        sampling_hash.update(case_id.encode("utf-8") + b"\0")
-        sampling_hash.update(np.ascontiguousarray(fluid, dtype=np.int64).tobytes())
-        sampling_hash.update(np.ascontiguousarray(material, dtype=np.int64).tobytes())
+        if sampling_hash is not None:
+            sampling_hash.update(case_id.encode("utf-8") + b"\0")
+            sampling_hash.update(np.ascontiguousarray(fluid, dtype=np.int64).tobytes())
+            sampling_hash.update(np.ascontiguousarray(material, dtype=np.int64).tobytes())
     batch = _move_tree(ChannelThermalBatchCollator()(samples), device)
-    return batch, sampling_hash.hexdigest()
+    return batch, sampling_hash.hexdigest() if sampling_hash is not None else None
 
 
 def _native_receivers_for_counts(

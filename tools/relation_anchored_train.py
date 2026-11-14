@@ -44,8 +44,14 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     profile = recipe.get("training_profile")
-    if profile is not None and profile != "state_response":
+    if profile is not None and profile not in ("state_response", "native_pair"):
         raise ValueError(f"Unknown training profile {profile!r}.")
+    if profile == "native_pair":
+        if not thermal:
+            raise ValueError("Native-pair fitting currently requires the Thermal adapter.")
+        from channelthermal.training.thermal_native_pair_task import build_thermal_native_pair_task
+
+        return build_thermal_native_pair_task(recipe, device=device, resume_payload=resume_payload)
     if profile == "state_response":
         from honf_runtime.state_response import ResponseObjectiveConfig
 
@@ -241,6 +247,7 @@ def engine_for(recipe, *, device, execution_horizon=None):
         microbatch_cases=int(policy["microbatch_cases"] if thermal else recipe["microbatch_size"]),
         effective_cases=int(policy["effective_batch_size"] if thermal else recipe["effective_batch_size"]),
         total_epochs=horizon, monitor_every=int(policy.get("monitor_every", 100)),
+        monitor_epochs=tuple(policy.get("monitor_epochs", ())),
         checkpoint_epochs=tuple(checkpoints), latest_every=int(policy.get("latest_every", 1)),
         curve_every=int(policy.get("curve_every", 10)), progress_enabled=bool(policy.get("progress_enabled", True)),
         gradient_clip=float(recipe.get("optimizer", {}).get("gradient_clip", recipe.get("gradient_clip", 1.0))), sampling_version=SamplingKey.CASE_EPOCH_VERSION,
@@ -297,7 +304,7 @@ def main(argv=None):
     source_payload = None
     if ((recipe.get("thermal_state_response", {}).get("enabled")
          or recipe.get("r16_10_family") is not None
-         or recipe.get("training_profile") == "state_response")
+         or recipe.get("training_profile") in ("state_response", "native_pair"))
             and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
         selector = args.checkpoint if args.command == "evaluate" else args.resume
         source_payload = load_trusted_checkpoint(resolve_checkpoint(args.output, selector), map_location="cpu")
@@ -309,7 +316,7 @@ def main(argv=None):
             raise ValueError("R16-10 extension requires a completed epoch 2000 state.")
     options = {}
     if source_payload is not None and (recipe.get("r16_10_family") is not None
-                                       or recipe.get("training_profile") == "state_response"):
+                                       or recipe.get("training_profile") in ("state_response", "native_pair")):
         options["resume_payload"] = source_payload
     if source_payload is not None and recipe.get("thermal_state_response", {}).get("enabled"):
         # Objective denominators are saved scientific state. Recomputing their
@@ -333,7 +340,7 @@ def main(argv=None):
                   "optimizer_groups": [spec.name for spec in provider.optimizer_groups(model, arm, "joint")]}
     elif args.command == "fit":
         bind_training_budget(provider, recipe, args.output)
-        if recipe.get("training_profile") == "state_response":
+        if recipe.get("training_profile") in ("state_response", "native_pair"):
             prepare_profile_fit(recipe, args.output, model, engine,
                                 source_payload=source_payload, stop_after=args.stop_after)
         if recipe["dataset"] == "wind":
@@ -364,7 +371,7 @@ def main(argv=None):
         result = engine._evaluate(model, provider, arm, "joint", int(saved["epoch"]))
     if args.command == "fit":
         marker = Path(args.output) / "artifact_layout.json"
-        if marker.is_file() and json.loads(marker.read_text()).get("training_output_policy") == "categorized_v2":
+        if marker.is_file() and json.loads(marker.read_text()).get("training_output_policy") in ("categorized_v2", "csv_v3"):
             result = {key: value for key, value in result.items() if key != "identity"}
     print(json.dumps(result, sort_keys=True, default=str, allow_nan=False), flush=True)
     return 0

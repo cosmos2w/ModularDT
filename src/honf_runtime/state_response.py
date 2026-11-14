@@ -17,6 +17,103 @@ import torch
 import torch.nn.functional as F
 
 
+@dataclass(frozen=True)
+class NativePairScene:
+    """Input-only case identity and compatibility for selecting native pairs."""
+    case_id: str
+    split: str
+    compatibility_key: Any
+    descriptor: Any
+
+
+def select_native_pairs(scenes, distance, eligible):
+    """Greedy deterministic nearest disjoint matching, with case-owned eligibility.
+
+    Both callbacks must use prescribed inputs and physical support, never model
+    errors or observed response magnitudes. Infinite distance excludes duplicates.
+    """
+    scenes = tuple(scenes)
+    ids = [scene.case_id for scene in scenes]
+    if len(ids) != len(set(ids)) or any(not i for i in ids):
+        raise ValueError('Native scene IDs must be unique and nonempty.')
+    edges = []
+    for left, right in itertools.combinations(sorted(scenes, key=lambda row: row.case_id), 2):
+        if left.split != right.split or left.compatibility_key != right.compatibility_key:
+            continue
+        d = float(distance(left.descriptor, right.descriptor))
+        if not math.isfinite(d):
+            continue
+        if d < 0:
+            raise ValueError('Input distance must be nonnegative.')
+        if d > 0:
+            edges.append((d, left.case_id, right.case_id, left, right))
+    used, pairs = set(), []
+    for _, left_id, right_id, left, right in sorted(edges, key=lambda edge: edge[:3]):
+        if left_id not in used and right_id not in used and eligible(left, right):
+            pairs.append((left_id, right_id))
+            used.update((left_id, right_id))
+    return tuple(pairs), tuple(sorted(set(ids) - used))
+
+
+def scheduled_native_pairs(pairs, epoch, count, seed):
+    """Independently seeded rotation, preserving exact continuation by epoch."""
+    pairs = tuple(tuple(pair) for pair in pairs)
+    if type(epoch) is not int or epoch < 1 or type(count) is not int or not 1 <= count <= len(pairs):
+        raise ValueError('Pair schedule requires a positive epoch and feasible count.')
+    if type(seed) is not int or seed < 0:
+        raise ValueError('Pair seed must be a nonnegative integer.')
+    if any(len(pair) != 2 or pair[0] == pair[1] for pair in pairs):
+        raise ValueError('Each pair needs two different case IDs.')
+    # Concatenate independently shuffled cycles so the final short slice is not
+    # silently dropped and every epoch executes exactly the declared count.
+    start = (epoch - 1) * count
+    result, seen = [], set()
+    position = start
+    while len(result) < count:
+        cycle, offset = divmod(position, len(pairs))
+        order = np.random.default_rng(np.random.SeedSequence([seed, cycle])).permutation(len(pairs))
+        pair = pairs[int(order[offset])]
+        position += 1
+        if pair not in seen:
+            result.append(pair)
+            seen.add(pair)
+    return tuple(result)
+
+
+def validate_common_coordinates(coords_left, coords_right, masks):
+    """Intersect physical validity only after exact coordinate-frame alignment."""
+    left, right = np.asarray(coords_left), np.asarray(coords_right)
+    if left.ndim < 2 or left.shape != right.shape or not np.array_equal(left, right):
+        raise ValueError('Pair coordinates must match exactly in one physical frame.')
+    masks = tuple(np.asarray(mask, dtype=bool) for mask in masks)
+    if not masks or any(mask.shape != left.shape[:-1] for mask in masks):
+        raise ValueError('Physical masks must align with the coordinates.')
+    common = np.logical_and.reduce(masks)
+    if not common.any():
+        raise ValueError('Pair has no common physical support.')
+    return common
+
+
+def native_functional_contrast(predictions, references, scales):
+    """Equal mean of normalized squared changes across views, pairs and observables.
+
+    Prediction shape is [view, pair, scene, observable], reference shape is
+    [pair, scene, observable], with the two scenes in the same order.
+    """
+    if not torch.is_tensor(predictions) or predictions.ndim != 4 or predictions.shape[2] != 2:
+        raise ValueError('Predictions must have view, pair, two scenes, observable axes.')
+    reference = torch.as_tensor(references, device=predictions.device)
+    if tuple(reference.shape) != tuple(predictions.shape[1:]):
+        raise ValueError('Reference observations must match pairs, scenes and observables.')
+    scale = torch.as_tensor(scales, device=predictions.device, dtype=predictions.dtype)
+    if scale.shape != (predictions.shape[-1],) or not bool(torch.isfinite(scale).all()) or bool((scale <= 0).any()):
+        raise ValueError('Each observable needs a finite positive TRAIN scale.')
+    if predictions.numel() == 0 or not bool(torch.isfinite(reference).all()) or not bool(torch.isfinite(predictions).all()):
+        raise ValueError('Pair observations must be nonempty and finite.')
+    residual = (predictions[:, :, 1] - predictions[:, :, 0] - (reference[:, 1] - reference[:, 0])) / scale
+    return residual.square().mean()
+
+
 def _nonnegative(value: Real, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value < 0:
         raise ValueError(f'{name} must be finite and nonnegative.')

@@ -778,8 +778,16 @@ class WindRefinementTask:
         recipe: Mapping[str, Any] | None = None,
         sampling_dataset_fingerprint: str | None = None,
         catalogue_cache: NativeRoleCatalogueCache | None = None,
+        sampling_audit: bool | None = None,
+        training_output_policy: str | None = None,
     ) -> None:
         self.view = view
+        if training_output_policy not in (None, "csv_v3"):
+            raise ValueError("Wind training_output_policy must be csv_v3 when specified.")
+        self.sampling_audit = (training_output_policy != "csv_v3" if sampling_audit is None
+                               else bool(sampling_audit))
+        if training_output_policy is not None:
+            self.training_output_policy = training_output_policy
         self.train_rows = np.asarray(train_rows, dtype=np.int64)
         self.validation_rows = np.asarray(validation_rows, dtype=np.int64)
         self.normalizer = normalizer
@@ -1218,7 +1226,8 @@ class WindRefinementTask:
             targets=targets,
             auxiliary={
                 "role_names": ROLE_NAMES,
-                "query_sampling_sha256": _query_sampling_sha256(rows, sampled_rows, key),
+                **({"query_sampling_sha256": _query_sampling_sha256(rows, sampled_rows, key)}
+                   if self.sampling_audit else {}),
             },
             case_keys=rows,
         )
@@ -1437,6 +1446,15 @@ class WindRefinementTask:
             result[name] = LossTerm(numerator, denominator, weight=weight)
         return result
 
+    def training_history_columns(self) -> tuple[str, ...]:
+        """Declare all scheduled Wind loss and executed-work scalars."""
+        losses = [*(f"native_role/{role}" for role in ROLE_NAMES),
+                  "base_loss", "router_importance_loss", "expected_work"]
+        work = ("cheap_rows", "fine_rows", "near_rows", "gate_rows", "active_pairs",
+                "padded_fine_capacity", "selected_detail_rows", "complete_fine_values", "gradient_norm")
+        return tuple([*(f"train_losses.{name}" for name in losses),
+                      *(f"work_counts.{name}" for name in work)])
+
     def validation_loss_terms(
         self,
         predictions: WindPredictions,
@@ -1548,7 +1566,8 @@ class WindRefinementTask:
             targets=WindTargets(np.stack(target_rows), rows_tuple, tuple(metadata_rows)),
             auxiliary={
                 "role_names": ROLE_NAMES,
-                "query_sampling_sha256": _query_sampling_sha256(rows_tuple, sampled_rows, key),
+                **({"query_sampling_sha256": _query_sampling_sha256(rows_tuple, sampled_rows, key)}
+                   if self.sampling_audit else {}),
             },
             case_keys=rows_tuple,
         )
@@ -2254,6 +2273,8 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, WindRefinementTas
         sampling_dataset_fingerprint=None if recipe is None else manifest["manifest_sha256"],
         message_width=int(model_payload["message"]),
         catalogue_cache=catalogue_cache,
+        sampling_audit=bool(config.get("sampling_audit", config.get("training_output_policy") != "csv_v3")),
+        training_output_policy=config.get("training_output_policy"),
     )
     model.to(device)
     saved_provider_state = config.get("provider_training_state")

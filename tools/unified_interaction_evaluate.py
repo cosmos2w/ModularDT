@@ -621,7 +621,7 @@ def _load_training_validation_cache(
     from honf_runtime.run_layout import RunLayout
 
     cache_path = RunLayout(expected_directory).read_path(f"validation_epoch_{epoch:04d}.json")
-    if not cache_path.is_file() or cache_path.stat().st_mtime_ns < resolved_checkpoint.stat().st_mtime_ns:
+    if not cache_path.is_file():
         return None
     cached = json.loads(cache_path.read_text(encoding="utf-8"))
     if not isinstance(cached, dict):
@@ -642,12 +642,48 @@ def _load_training_validation_cache(
             or [int(row.get("row_index", -1)) for row in rows] != expected_rows
         ):
             return None
-    matching_history = [
-        row for row in payload.get("history", [])
-        if isinstance(row, Mapping) and int(row.get("epoch", -1)) == epoch
-    ]
-    if len(matching_history) != 1 or matching_history[0].get("validation") != cached:
-        return None
+    marker = expected_directory / "artifact_layout.json"
+    policy = json.loads(marker.read_text(encoding="utf-8")).get("training_output_policy") if marker.is_file() else None
+    if policy == "csv_v3":
+        # CSV rows are flushed before the atomic checkpoint. Reuse only for the
+        # latest recorded epoch, when both tables predate that checkpoint and
+        # every numeric value in the receipt matches the recorded measurement.
+        from honf_runtime.scalar_history import read_scalar_rows, validation_scalar_rows
+
+        layout = RunLayout(expected_directory)
+        training_path = layout.read_path("history.csv")
+        validation_path = layout.read_path("validation.csv")
+        if not training_path.is_file() or not validation_path.is_file():
+            return None
+        checkpoint_time = resolved_checkpoint.stat().st_mtime_ns
+        if max(training_path.stat().st_mtime_ns, validation_path.stat().st_mtime_ns) > checkpoint_time:
+            return None
+        if not all(path.read_bytes().endswith(b"\n") for path in (training_path, validation_path)):
+            return None
+        training_rows = read_scalar_rows(training_path)
+        if not training_rows or int(training_rows[-1]["epoch"]) != epoch:
+            return None
+        recorded = [row for row in read_scalar_rows(validation_path)
+                    if int(row["epoch"]) == epoch and row["metric"].startswith("validation.")]
+        expected = validation_scalar_rows({"epoch": epoch, "validation": cached})
+        def signature(row):
+            return (str(row["partition"]), str(row["case_id"]), str(row["member_id"]),
+                    str(row["metric"]), float(row["value"]), str(row["count"]))
+        if not expected or sorted(map(signature, recorded)) != sorted(map(signature, expected)):
+            return None
+        association = "same epoch and ordered panel; exact numeric receipt matches checkpoint-bound CSV"
+        embedded = False
+    else:
+        if cache_path.stat().st_mtime_ns < resolved_checkpoint.stat().st_mtime_ns:
+            return None
+        matching_history = [
+            row for row in payload.get("history", [])
+            if isinstance(row, Mapping) and int(row.get("epoch", -1)) == epoch
+        ]
+        if len(matching_history) != 1 or matching_history[0].get("validation") != cached:
+            return None
+        association = "exact run directory, arm, literal monitor epoch, hard route, and ordered DEV membership"
+        embedded = True
     return cached, {
         "source": "same-run monitoring validation JSON",
         "cache_path": str(cache_path),
@@ -658,8 +694,8 @@ def _load_training_validation_cache(
         "checkpoint_path": str(resolved_checkpoint),
         "checkpoint_sha256": _sha256(resolved_checkpoint),
         "membership_rows": expected_count,
-        "matching": "exact run directory, arm, literal monitor epoch, hard route, and ordered DEV membership",
-        "checkpoint_embeds_exact_validation_metrics": True,
+        "matching": association,
+        "checkpoint_embeds_exact_validation_metrics": embedded,
     }
 
 

@@ -4,7 +4,9 @@ A run must keep the information needed to restore training, draw its curves and 
 
 ## Implementation status
 
-The contract below is the shared future-run target for R17-3. The current `honf_runtime.run_layout.RunLayout` already categorizes new outputs and the shared trainer has `categorized_v2` output handling. The current trainer still exports JSON history, computes some default sampling hashes and embeds complete history in checkpoints; those parts must be updated together with their real readers before this CSV contract is advertised as implemented. Historical producers, saved recipes and resume paths keep their existing behavior.
+The shared trainer supports an opt-in `csv_v3` policy for providers that declare their complete scheduled scalar columns. It appends training and validation tables, keeps the numerical history outside checkpoints, and reads it for exact resume and curves. The Thermal native-pair provider opts in; the Wind refinement provider accepts `training_output_policy: csv_v3` and declares its native-role, base, router and work terms. Generic providers still use `categorized_v2`; historical producers, saved recipes and resume paths keep their existing behavior.
+
+The run status and Thermal research assessment commands read the format declared by the run marker. The development evaluator can reuse a current-epoch validation receipt only when the run, arm, ordered panel, routing path and numeric receipt match the checkpoint-bound CSV; otherwise it recomputes. CSV child/fork conversion is unsupported. These implementation checks do not establish scientific performance or authorize training.
 
 ## File ownership and formats
 

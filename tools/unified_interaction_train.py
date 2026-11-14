@@ -327,7 +327,9 @@ def _command_status(args: argparse.Namespace) -> int:
                                                         else "running_receipt_liveness_unknown")
         else:
             result["status"] = active.get("status")
-    history = layout.read_path("history.json")
+    marker = run_dir / "artifact_layout.json"
+    policy = _read_json(marker).get("training_output_policy") if marker.is_file() else None
+    history = layout.read_path("history.csv" if policy == "csv_v3" else "history.json")
     if history.is_file():
         from honf_runtime.unified_training import read_training_history
         rows = read_training_history(history)

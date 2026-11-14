@@ -938,8 +938,8 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
         }
         history.append(row)
         _write_history(metrics_path, history)
-        plot_every = int(training_cfg.get("plot_every_epochs", 50))
-        if epoch == 1 or (plot_every > 0 and epoch % plot_every == 0) or epoch == epochs:
+        plot_every = int(training_cfg.get("plot_every_epochs", 10))
+        if epoch == 1 or (plot_every > 0 and epoch % plot_every == 0) or val_metrics or epoch == epochs:
             render_loss_history(
                 history,
                 loss_plot_path,

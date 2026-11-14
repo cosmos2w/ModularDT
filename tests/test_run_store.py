@@ -50,7 +50,7 @@ def test_run_store_writes_provenance_and_allows_timestamped_same_id(tmp_path, mo
     provenance = json.loads((run_dir / "configs" / "config_provenance.json").read_text())
     assert len(provenance["core_source_sha256"]) == 64
     assert (run_dir / "environment" / "software.json").is_file()
-    assert (run_dir / "checkpoints").is_dir()
+    assert not (run_dir / "checkpoints").exists()
     RunStore.update_status(run_dir, "failed", error_type="Injected", error_message="test", traceback="trace")
     RunStore.update_status(run_dir, "running")
     resumed = json.loads((run_dir / "run_manifest.json").read_text())

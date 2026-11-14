@@ -490,6 +490,7 @@ class ThermalContentHypergraphTask:
             training=True,
             budget=budget,
             device=self.device,
+            sampling_audit=getattr(self, "sampling_audit", True),
         )
         structure = _structure_only(sampled["structure"])
         case_ids = tuple(str(self.training_cases[index]["case_id"]) for index in indices)
@@ -792,6 +793,7 @@ class ThermalContentHypergraphTask:
                     "surface_stride": RESPONSE_SURFACE_STRIDE,
                 },
                 device=self.device,
+                sampling_audit=getattr(self, "sampling_audit", True),
             )
             indices = tuple(case_indices)
             case_ids = tuple(str(self.validation_cases[index]["case_id"]) for index in indices)
