@@ -12,7 +12,9 @@ The historical generic batch container is [`BatchData`](../src/honf_forward_core
 
 ## State and finite-response fitting
 
-Cases that support paired design supervision supply baseline and edited TRAIN examples, native-unit observations, physical masks, original receiver alignment, response scales, sampling and any case-specific functionals. The shared `honf_runtime.state_response` module supplies configurable response weights and generic reductions; it does not prescribe a case's units, observations or functional names. Fit normalizers, response scales and any gradient balance from TRAIN only, and keep validation and TEST labels out of fitting. See [state and finite-response training](guides/State_Response_Training.md) for the interface and explicit native-only opt-out.
+Native training requires only the base physical-field dataset. For optional response supervision, first pair existing TRAIN samples and derive changes through their native readers, preserving coordinates, masks, units and original identities without new simulations or duplicated fields. See the [base-dataset response interface](guides/Base_Dataset_Response_Pairs.md) for the R17-3 target and its implementation status. The shared `honf_runtime.state_response` helpers already supply generic reductions; the case owns observation extraction and physical correspondence. Fit scales and gradient balance on TRAIN only. The existing edited-scene provider in [state-response training](guides/State_Response_Training.md) remains available for explicit studies and historical loading, rather than becoming a required dataset for every collaborator.
+
+Use the [shared run-recording contract](guides/Run_Artifacts_and_Monitoring.md) for new maintained producers: scalar CSV histories under `metrics/`, small process records under `logs/`, configuration once, actual recovery state in checkpoints and figures under `plots/`. Reuse the common writer/readers rather than adding a case-specific recorder. Its CSV/checkpoint changes are an R17-3 implementation target; existing workflows and saved runs retain their current supported formats.
 
 ## Managed plugin workflow
 

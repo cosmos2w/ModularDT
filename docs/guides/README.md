@@ -5,15 +5,16 @@ The [project README](../../README.md) introduces the six model families, equatio
 | Guide | Purpose |
 | --- | --- |
 | [Global organization visualization](Global_Hypergraph_Organization_Visualization.md) | Actual relation provenance, three standard views and saved-evidence plotting. |
-| [Run artifacts and monitoring](Run_Artifacts_and_Monitoring.md) | Complete histories, meaningful loss panels, selectors and old layouts. |
+| [Run artifacts and monitoring](Run_Artifacts_and_Monitoring.md) | Shared CSV/small-JSON recording target, resumable state, loss panels and historical formats. |
 | [Query tiling](Query_Tiling.md) | Decoder speed/memory tradeoffs, testing on your own inputs and explicit resume scope. |
 | [Thermal development protocol](Thermal_Model_Development_Protocol.md) | Input-only membership, TRAIN-only normalization and fair epoch budgets. |
 | [Thermal relation-anchored training](Thermal_Relation_Anchored_Training.md) | Current public model selection, recipes and continuation. |
 | [Native case training](Case_Relation_Anchored_Training.md) | Wind and Thermal provider dispatch, native objectives and identity-preserving continuation. |
 | [Wind relation-anchored interface](../../Case_WindFarm/docs/relation_anchored.md) | Three-dimensional coverage, ragged turbine batches and native calibration. |
 | [Thermal port/local integration](Thermal_Port_Local_Integration.md) | One-pass angular ports, frozen local readout and strict checkpoint loading. |
-| [State and finite-response training](State_Response_Training.md) | Shared objective, TRAIN-only calibration, case-owned observations and historical recipe compatibility. |
-| [Thermal finite-response dataset](Thermal_Finite_Response_Dataset.md) | Versioned source-preserving endpoints, action roles, precision views and direct reader. |
+| [Response pairs from the base dataset](Base_Dataset_Response_Pairs.md) | No-new-solve supervision, the shared adapter target, physical correspondence and fair comparisons. |
+| [State and finite-response training](State_Response_Training.md) | Existing edited-scene provider, shared reductions, TRAIN-only calibration and historical compatibility. |
+| [Thermal finite-response dataset](Thermal_Finite_Response_Dataset.md) | Optional historical edited-scene corpus, source precision, roles and direct reader. |
 | [Physical response evaluation](Case_Response_Evaluation.md) | Fresh design preparation, physical-mask comparisons and resolved response metrics. |
 | [Wind native catalogue cache](Wind_Native_Catalogue_Cache.md) | Geometry/cache identity and native precision. |
 | [Root layout and compatibility](../Root_Layout_and_Compatibility.md) | Promoted paths, installation and old checkpoints. |

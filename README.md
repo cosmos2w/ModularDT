@@ -13,7 +13,7 @@ Objects, overlapping relationships and joint physical fields. The field textures
 | Joint physical-field prediction | `relation_anchored` and `relation_anchored_active` retain contextualized original members and reuse applied relations for query access. |
 | Native three-dimensional Wind fields | `WindRelationAnchoredAdapter` provides joint velocity prediction, configurable environment lattices, trilinear coverage, original turbine IDs and masked ragged batches. |
 | Thermal ports and local operators | Direct native-port supervision trains the joint predictor; the historical P64 composition can additionally use a compatible frozen local operator. |
-| State and finite-response training | Native field fitting with adjustable endpoint and finite-response supervision; cases provide the physical labels and observables. |
+| State and finite-response training | Native field fitting from the base dataset; optional change supervision with case-owned physical observations. |
 | Physical-response evaluation | Fresh baseline/edited preparations, actual relation traces, native-unit field comparisons, common-support finite changes and equal-family decision metrics. |
 | Execution and visualization | Query tiling, native-decode reuse, verified native catalogues, complete histories and original-member organization figures. |
 
@@ -129,7 +129,7 @@ For new models, start with `relation_anchored` (S) and its `inventory_unit_total
 
 ### State and finite-response training
 
-For the new state-response training profile, endpoint and finite-response supervision are enabled by default and adjustable. The case supplies paired TRAIN labels, physical scales and observations; the shared runtime provides the objective and balancing interface. Disable response supervision explicitly for a native-only baseline. Missing paired labels are an error when response training is enabled. The [state-response guide](docs/guides/State_Response_Training.md) explains the configuration, case contract and resume behavior.
+Native field training requires only the base dataset. For optional change supervision, prefer pairs of existing TRAIN scenes without new physical solves or copied fields. The [base-data response guide](docs/guides/Base_Dataset_Response_Pairs.md) defines the shared adapter target for R17-3 and its implementation status. The current edited-scene `state_response` constructor enables its auxiliary objective by default and requires its declared paired data; disabling it selects native-only fitting. That provider remains supported for historical reproduction and explicitly chosen studies, rather than becoming a requirement for every case. The [state-response guide](docs/guides/State_Response_Training.md) documents its actual settings and resume behavior.
 
 In a matched fresh Thermal TRAIN600 study at epoch 3000, adding endpoint and finite-response fitting reduced J and P mean absolute response errors by 65.1% and 90.8% on 56 edits from 14 of the 144 FIT families, compared with the native baseline. The arithmetic mean of nine equal-case validation field RMSE ratios (R over baseline) was 1.317, and performance on new families was uneven. These observations motivate the configurable training profile; they do not establish general response accuracy or inverse-design reliability. They do not select a replacement for the existing P64 port/local workflow.
 
