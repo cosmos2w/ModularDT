@@ -38,6 +38,53 @@ def build_native_pair_recipe(base_recipe, *, variant, validation_pairs=(), pair_
     return result
 
 
+def native_pair_schedule_amendment(saved, current, *, source_epoch, stop_after):
+    """Validate the R17-3 TRAIN150 schedule correction at an exact resume.
+
+    Existing TRAIN150 starts used a flat schedule. Both schedules have exactly
+    the same rate through the authorized 1000-epoch development horizon. This
+    changes only how a later authorized extension would decay the rate.
+    """
+    import copy
+    from honf_runtime.unified_training import ScheduleSpec
+    old, new = copy.deepcopy(saved), copy.deepcopy(current)
+    recipe = new.get('recipe', {})
+    training = recipe.get('training', {})
+    if (recipe.get('training_profile') != 'native_pair'
+            or recipe.get('thermal_native_pair', {}).get('variant') not in ('field_only', 'state_anchors', 'functional_contrast')
+            or training.get('membership') != 'fixed25_train150_dev22'
+            or training.get('local_horizon') != 1000
+            or training.get('optimizer_schedule_horizon') != 2000
+            or type(source_epoch) is not int or not 1 <= source_epoch <= 1000
+            or type(stop_after) is not int or not source_epoch < stop_after <= 1000):
+        raise ValueError('Schedule correction is limited to the existing R17-3 TRAIN150 development lineage through epoch 1000.')
+    expected_old = {'peak_lr': .0003, 'warmup_start_lr': .0003, 'warmup_epochs': 0,
+                    'hold_through_epoch': 1999, 'total_epochs': 2000, 'final_lr': .0003}
+    expected_new = {'peak_lr': .0003, 'warmup_start_lr': .0003, 'warmup_epochs': 0,
+                    'hold_through_epoch': 1000, 'total_epochs': 2000, 'final_lr': .00003}
+    try:
+        old_provider_schedule = old['provider_identity']['training']['optimizer_schedule']
+        new_provider_schedule = new['provider_identity']['training']['optimizer_schedule']
+        old_groups, new_groups = old['optimizer_schedule_contract'], new['optimizer_schedule_contract']
+        if (old_provider_schedule != expected_old or new_provider_schedule != expected_new
+                or len(old_groups) != 1 or len(new_groups) != 1
+                or old_groups[0]['schedule'] != expected_old or new_groups[0]['schedule'] != expected_new):
+            raise ValueError('Unexpected native optimizer schedule contract.')
+        old['provider_identity']['training']['optimizer_schedule'] = copy.deepcopy(expected_new)
+        old_groups[0]['schedule'] = copy.deepcopy(expected_new)
+    except (KeyError, TypeError, IndexError):
+        raise ValueError('Missing native optimizer schedule identity.') from None
+    if old != new:
+        raise ValueError('Schedule correction cannot change model, data, sampling, objective or other identity.')
+    old_schedule, new_schedule = ScheduleSpec(**expected_old), ScheduleSpec(**expected_new)
+    if any(old_schedule.value(epoch) != new_schedule.value(epoch) for epoch in range(1, 1001)):
+        raise ValueError('Learning rates are not exactly equal throughout the authorized development horizon.')
+    return {'kind': 'native_pair_train150_schedule_correction',
+            'schedule_before': expected_old, 'schedule_after': expected_new,
+            'identical_learning_rates_through_epoch': 1000,
+            'trajectory_note': 'All executed and authorized development learning rates are identical; the corrected cosine schedule applies only beyond epoch 1000 if separately authorized. Model, optimizer moments, RNG, sampler, data and objective are restored from the checkpoint.'}
+
+
 def describe_native_scene(case_id, split, config):
     """Describe compatibility using only prescribed physical inputs."""
     layout = config['layout']
@@ -287,6 +334,17 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
         # edited-family corpus or inheriting any historical weights.
         clean['thermal_joint_response']['paired'] = {}
     model, provider = build_thermal_joint_response_task(clean, arm=arm, device=device, resume_payload=resume_payload)
+    if int(clean.get('training', {}).get('optimizer_schedule_horizon', 0)) != 2000:
+        raise ValueError('R17-3 native pair training requires its 2000-epoch optimizer schedule.')
+    def native_pair_schedule(self):
+        lr = float(self.recipe['optimizer']['lr'])
+        final_lr = float(self.recipe['optimizer'].get('final_lr', 3e-5))
+        return {'peak_lr': lr, 'warmup_start_lr': lr, 'warmup_epochs': 0,
+                'hold_through_epoch': 1000, 'total_epochs': 2000, 'final_lr': final_lr}
+    provider._schedule_payload = MethodType(native_pair_schedule, provider)
+    provider.resume_identity_amendment = MethodType(
+        lambda self, saved, current, *, source_epoch, stop_after: native_pair_schedule_amendment(
+            saved, current, source_epoch=source_epoch, stop_after=stop_after), provider)
     provider.training_output_policy = 'csv_v3'
     provider.sampling_audit = bool(spec.get('sampling_audit', False))
     def history_columns(self):

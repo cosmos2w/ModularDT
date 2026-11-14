@@ -124,7 +124,7 @@ def test_pair_provider_exposure_and_calibration_resume(monkeypatch):
     monkeypatch.setattr(native, 'ThermalNativePairObjective', Objective)
     monkeypatch.setattr(diagnostics, 'gradient_diagnostics', lambda *a, **k:
                         {'groups': {'global': {'norms': {'native': 4., 'absolute': 2., 'contrast': 1.}}}})
-    base = {'initialization': {}, 'training': {}, 'thermal_native_pair':
+    base = {'initialization': {}, 'training': {'optimizer_schedule_horizon': 2000}, 'thermal_native_pair':
             {'variant': 'state_anchors', 'validation_pairs': [['v1', 'v2']], 'pair_seed': 9}}
     model, anchor = native.build_thermal_native_pair_task(base)
     contrast_recipe = {**base, 'thermal_native_pair': {**base['thermal_native_pair'], 'variant': 'functional_contrast'}}
@@ -155,3 +155,42 @@ def test_case_pair_colocation_preserves_each_visit_and_stable_order():
     assert colocate_native_pairs(order, pairs) == ('unpaired', 'third', 'fourth', 'first', 'second')
     with pytest.raises(ValueError):
         colocate_native_pairs(order, (('first', 'second'), ('first', 'third')))
+
+
+def test_train150_schedule_amendment_only_allows_equal_rate_identity_correction():
+    import copy
+    from channelthermal.training.thermal_native_pair_task import native_pair_schedule_amendment
+    from honf_runtime.unified_training import ScheduleSpec
+    old_schedule = {'peak_lr': .0003, 'warmup_start_lr': .0003, 'warmup_epochs': 0,
+                    'hold_through_epoch': 1999, 'total_epochs': 2000, 'final_lr': .0003}
+    new_schedule = {**old_schedule, 'hold_through_epoch': 1000, 'final_lr': .00003}
+    identity = {'workflow': 'relation_anchored_case_training_v1',
+                'recipe': {'training_profile': 'native_pair',
+                           'thermal_native_pair': {'variant': 'state_anchors'},
+                           'training': {'membership': 'fixed25_train150_dev22', 'local_horizon': 1000,
+                                        'optimizer_schedule_horizon': 2000}},
+                'provider_identity': {'training': {'optimizer_schedule': old_schedule}, 'data': 'fixed'},
+                'optimizer_schedule_contract': [{'name': 'joint', 'parameter_names': ['weight'],
+                    'schedule': old_schedule, 'weight_decay': 1e-5, 'betas': [.9, .999], 'eps': 1e-8}]}
+    corrected = copy.deepcopy(identity)
+    corrected['provider_identity']['training']['optimizer_schedule'] = copy.deepcopy(new_schedule)
+    corrected['optimizer_schedule_contract'][0]['schedule'] = copy.deepcopy(new_schedule)
+    result = native_pair_schedule_amendment(identity, corrected, source_epoch=100, stop_after=500)
+    assert result['kind'] == 'native_pair_train150_schedule_correction'
+    assert all(ScheduleSpec(**old_schedule).value(e) == ScheduleSpec(**new_schedule).value(e)
+               for e in range(1, 1001))
+    assert ScheduleSpec(**old_schedule).value(1001) != ScheduleSpec(**new_schedule).value(1001)
+    with pytest.raises(ValueError):
+        native_pair_schedule_amendment(identity, corrected, source_epoch=100, stop_after=1001)
+    modified = copy.deepcopy(corrected)
+    modified['provider_identity']['data'] = 'different'
+    with pytest.raises(ValueError):
+        native_pair_schedule_amendment(identity, modified, source_epoch=100, stop_after=500)
+    modified = copy.deepcopy(corrected)
+    modified['optimizer_schedule_contract'][0]['betas'] = [.8, .999]
+    with pytest.raises(ValueError):
+        native_pair_schedule_amendment(identity, modified, source_epoch=100, stop_after=500)
+    modified = copy.deepcopy(corrected)
+    modified['recipe']['training']['membership'] = 'full_train600'
+    with pytest.raises(ValueError):
+        native_pair_schedule_amendment(identity, modified, source_epoch=100, stop_after=500)

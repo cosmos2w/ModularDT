@@ -5025,10 +5025,18 @@ class TrainingEngine:
                     run_directory=str(output),
                 )
             else:
-                amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
-                    allow_microbatch_change=allow_microbatch_change,
-                    allow_horizon_extension=allow_horizon_extension,
-                    allow_query_tile_change=allow_query_tile_change)
+                saved_identity = source_payload.get("experiment_identity", {})
+                provider_amendment = getattr(provider, "resume_identity_amendment", None)
+                if (resume_checkpoint is not None and saved_identity != sealed_identity
+                        and callable(provider_amendment) and not allow_microbatch_change
+                        and not allow_horizon_extension and not allow_query_tile_change):
+                    amendment = provider_amendment(saved_identity, sealed_identity,
+                        source_epoch=int(source_payload["epoch"]), stop_after=int(stop_after))
+                else:
+                    amendment = _resume_identity_amendment(saved_identity, sealed_identity,
+                        allow_microbatch_change=allow_microbatch_change,
+                        allow_horizon_extension=allow_horizon_extension,
+                        allow_query_tile_change=allow_query_tile_change)
             if readout_extension_amendment is not None:
                 if amendment is not None:
                     raise ValueError("Round6 extension receipt cannot be combined with another resume amendment.")
@@ -5171,9 +5179,16 @@ class TrainingEngine:
             current_group_names = [group["group_name"] for group in optimizer.param_groups]
             saved_groups = source_payload["optimizer_state_by_name"].get("groups", [])
             current_groups = named_optimizer_state(model, optimizer).get("groups", [])
+            schedule_matches = (source_payload.get("optimizer_schedule_contract")
+                                == [_optimizer_spec_payload(spec) for spec in optimizer_specs])
+            if amendment is not None and amendment.get("kind") == "native_pair_train150_schedule_correction":
+                schedule_matches = (
+                    source_payload.get("optimizer_schedule_contract")
+                    == source_payload.get("experiment_identity", {}).get("optimizer_schedule_contract")
+                    and [_optimizer_spec_payload(spec) for spec in optimizer_specs]
+                    == sealed_identity.get("optimizer_schedule_contract"))
             if (saved_group_names != current_group_names or saved_groups != current_groups
-                    or source_payload.get("optimizer_schedule_contract")
-                    != [_optimizer_spec_payload(spec) for spec in optimizer_specs]):
+                    or not schedule_matches):
                 raise ValueError("Exact resume optimizer group membership/order differs from its checkpoint.")
         if restored_rng is not None:
             if joint_member_routing_transfer is not None:
@@ -5267,12 +5282,14 @@ class TrainingEngine:
                 "preserved_case_visits": sum(int(row["case_visits"]) for row in history),
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
-            if (amendment.get("kind") != "explicit_spatial_group_full_state_continuation"
+            if (amendment.get("kind") not in ("explicit_spatial_group_full_state_continuation",
+                                                "native_pair_train150_schedule_correction")
                     and relation_guided_transfer is None
                     and joint_member_routing_transfer is None):
                 amendment["source_checkpoint_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
             resume_amendments.append(amendment)
-            amendment_name = ('joint_member_routing_transfer' if joint_member_routing_transfer is not None else
+            amendment_name = ('native_pair_schedule_amendment' if amendment.get('kind') == 'native_pair_train150_schedule_correction' else
+                              'joint_member_routing_transfer' if joint_member_routing_transfer is not None else
                               'relation_guided_transfer' if relation_guided_transfer is not None else
                               'joint_native_child' if identity_is_joint_native and branch_from_checkpoint is not None else
                               'joint_native_resume' if identity_is_joint_native else
@@ -5293,7 +5310,7 @@ class TrainingEngine:
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if (relation_guided_transfer is not None or joint_member_routing_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
+                category='logs' if (amendment.get('kind') == 'native_pair_train150_schedule_correction' or relation_guided_transfer is not None or joint_member_routing_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
                                     or identity_is_native_budgeted
                                     or identity_is_native_retrieval

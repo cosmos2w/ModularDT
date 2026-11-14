@@ -209,3 +209,55 @@ def test_optional_case_reordering_preserves_membership():
     assert reordered == list(reversed(original))
     with pytest.raises(ValueError, match="exact epoch membership"):
         engine.epoch_case_order(Invalid(), 1)
+
+
+def test_schedule_correction_resume_preserves_complete_training_state(tmp_path, monkeypatch):
+    from channelthermal.training.thermal_native_pair_task import native_pair_schedule_amendment
+    from honf_runtime.unified_training import OptimizerGroupSpec, ScheduleSpec
+    monkeypatch.setattr(runtime, '_render_loss_curves', lambda *args, **kwargs: None)
+    recipe = {'training_profile': 'native_pair', 'thermal_native_pair': {'variant': 'state_anchors'},
+              'training': {'membership': 'fixed25_train150_dev22', 'local_horizon': 1000,
+                           'optimizer_schedule_horizon': 2000}}
+    class ScheduleProvider(CsvToyProvider):
+        def __init__(self, corrected):
+            super().__init__()
+            self.corrected = corrected
+        def schedule(self):
+            return ScheduleSpec(peak_lr=.0003, warmup_start_lr=.0003, warmup_epochs=0,
+                hold_through_epoch=1000 if self.corrected else 1999, total_epochs=2000,
+                final_lr=.00003 if self.corrected else .0003)
+        def identity_payload(self):
+            from dataclasses import asdict
+            return {**super().identity_payload(), 'training': {'optimizer_schedule': asdict(self.schedule())}}
+        def optimizer_groups(self, model, arm, stage):
+            return (OptimizerGroupSpec('predictor', ('weight', 'bias'), self.schedule(), weight_decay=0.),)
+        def resume_identity_amendment(self, saved, current, *, source_epoch, stop_after):
+            return native_pair_schedule_amendment(saved, current, source_epoch=source_epoch, stop_after=stop_after)
+    def fit(model, path, stop, corrected, resume=None):
+        return TrainingEngine(_config_for_test(), device='cpu').fit(model, ScheduleProvider(corrected), path,
+            identity={'run': 'schedule-correction-toy', 'recipe': recipe}, arm='adaptive_detail',
+            stop_after=stop, resume_checkpoint=resume)
+    torch.manual_seed(81)
+    initial = nn.Linear(1, 1).state_dict()
+    full = nn.Linear(1, 1); full.load_state_dict(initial)
+    random.seed(81); np.random.seed(81); torch.manual_seed(81)
+    fit(full, tmp_path / 'full', 4, False)
+    whole = torch.load(RunLayout(tmp_path / 'full').read_path('latest_model.pt'), weights_only=False)
+    resumed = nn.Linear(1, 1); resumed.load_state_dict(initial)
+    random.seed(81); np.random.seed(81); torch.manual_seed(81)
+    fit(resumed, tmp_path / 'resumed', 2, False)
+    layout = RunLayout(tmp_path / 'resumed')
+    fit(resumed, tmp_path / 'resumed', 4, True, layout.read_path('latest_model.pt'))
+    after = torch.load(layout.read_path('latest_model.pt'), weights_only=False)
+    assert all(torch.equal(v, after['model_state_dict'][k]) for k, v in whole['model_state_dict'].items())
+    for name, state in whole['optimizer_state_by_name']['state_by_name'].items():
+        assert all(torch.equal(value, after['optimizer_state_by_name']['state_by_name'][name][key])
+                   for key, value in state.items())
+    assert torch.equal(whole['rng_state']['torch_cpu'], after['rng_state']['torch_cpu'])
+    assert whole['sampler_state'] == after['sampler_state']
+    assert whole['provider_training_state'] == after['provider_training_state']
+    receipt = after['resume_amendments'][-1]
+    assert receipt['kind'] == 'native_pair_train150_schedule_correction'
+    assert receipt['identical_learning_rates_through_epoch'] == 1000
+    assert 'source_checkpoint_sha256' not in receipt
+    assert (tmp_path / 'resumed' / 'logs' / 'native_pair_schedule_amendment_epoch_0003.json').is_file()
