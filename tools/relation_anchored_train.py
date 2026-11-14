@@ -20,6 +20,16 @@ from honf_runtime.run_layout import resolve_checkpoint
 from honf_runtime.unified_training import EngineConfig, SamplingKey, SelectionPolicy, TrainingEngine
 
 
+def provider_identity_matches_for_inference(recipe, saved, current):
+    """Compare provider identity, including the narrow native schedule repair."""
+    if saved == current:
+        return True
+    if recipe.get('training_profile') == 'native_pair':
+        from channelthermal.training.thermal_native_pair_task import native_pair_inference_identity_matches
+        return native_pair_inference_identity_matches(recipe, saved, current)
+    return False
+
+
 def configure_r16_5_execution(recipe, *, device):
     """Select the declared replay-safe policy before any CUDA initialization."""
     if recipe.get("r16_5_warm_fork") is None:
@@ -361,7 +371,8 @@ def main(argv=None):
         saved = (source_payload if source_payload is not None else
                  load_trusted_checkpoint(resolve_checkpoint(args.output, args.checkpoint), map_location="cpu"))
         saved_identity = saved["experiment_identity"]
-        if saved_identity["recipe"] != recipe or saved_identity["provider_identity"] != dict(provider.identity_payload()):
+        if (saved_identity["recipe"] != recipe or not provider_identity_matches_for_inference(
+                recipe, saved_identity["provider_identity"], dict(provider.identity_payload()))):
             raise ValueError("The recipe or native provider differs from the saved run.")
         model.load_state_dict(saved["model_state_dict"], strict=True)
         model.to(args.device)

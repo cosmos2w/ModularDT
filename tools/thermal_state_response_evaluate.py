@@ -17,7 +17,7 @@ import torch
 
 from honf_runtime.compat import load_trusted_checkpoint
 from honf_runtime.run_layout import resolve_checkpoint
-from relation_anchored_train import build
+from relation_anchored_train import build, provider_identity_matches_for_inference
 from channelthermal.native_functionals import native_design_functionals
 from channelthermal.physical_response import compare_native_response, summarize_actions
 from channelthermal.training.thermal_state_response_task import (
@@ -68,7 +68,7 @@ def restore_model(recipe, run, checkpoint, device):
         options['saved_adapter_state'] = native_identity['adapter_state']
         options['saved_normalization_source'] = native_identity.get('source_binding', {}).get('normalization_source')
     model, provider = build(recipe, device=device, **options)
-    if identity['provider_identity'] != dict(provider.identity_payload()):
+    if not provider_identity_matches_for_inference(recipe, identity['provider_identity'], dict(provider.identity_payload())):
         raise ValueError('The recipe or native provider differs from the saved run.')
     model.load_state_dict(saved['model_state_dict'], strict=True)
     model.to(device)

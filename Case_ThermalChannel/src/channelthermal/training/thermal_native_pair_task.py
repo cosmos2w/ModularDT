@@ -85,6 +85,30 @@ def native_pair_schedule_amendment(saved, current, *, source_epoch, stop_after):
             'trajectory_note': 'All executed and authorized development learning rates are identical; the corrected cosine schedule applies only beyond epoch 1000 if separately authorized. Model, optimizer moments, RNG, sampler, data and objective are restored from the checkpoint.'}
 
 
+def native_pair_inference_identity_matches(recipe, saved, current):
+    """Accept the known old TRAIN150 schedule for read-only inference only."""
+    import copy
+    training = recipe.get('training', {})
+    if (recipe.get('training_profile') != 'native_pair'
+            or recipe.get('thermal_native_pair', {}).get('variant') not in ('field_only', 'state_anchors', 'functional_contrast')
+            or training.get('membership') != 'fixed25_train150_dev22'
+            or training.get('optimizer_schedule_horizon') != 2000):
+        return False
+    old_schedule = {'peak_lr': .0003, 'warmup_start_lr': .0003, 'warmup_epochs': 0,
+                    'hold_through_epoch': 1999, 'total_epochs': 2000, 'final_lr': .0003}
+    new_schedule = {'peak_lr': .0003, 'warmup_start_lr': .0003, 'warmup_epochs': 0,
+                    'hold_through_epoch': 1000, 'total_epochs': 2000, 'final_lr': .00003}
+    try:
+        if (saved['training']['optimizer_schedule'] != old_schedule
+                or current['training']['optimizer_schedule'] != new_schedule):
+            return False
+        comparison = copy.deepcopy(saved)
+        comparison['training']['optimizer_schedule'] = new_schedule
+        return comparison == current
+    except (KeyError, TypeError):
+        return False
+
+
 def describe_native_scene(case_id, split, config):
     """Describe compatibility using only prescribed physical inputs."""
     layout = config['layout']
