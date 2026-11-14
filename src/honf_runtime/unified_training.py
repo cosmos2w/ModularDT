@@ -378,6 +378,35 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             before = old.get("engine_config", {}).get("total_epochs")
             after = new.get("engine_config", {}).get("total_epochs")
             schedules = old.get("optimizer_schedule_contract", [])
+            native_training = recipe.get("training", {})
+            if (recipe.get("training_profile") == "native_pair"
+                    and isinstance(recipe.get("dataset"), dict)
+                    and recipe["dataset"].get("name") == "thermal"):
+                expected_schedule = {"peak_lr": 3e-4, "warmup_start_lr": 3e-4,
+                    "warmup_epochs": 0, "hold_through_epoch": 1000,
+                    "total_epochs": 2000, "final_lr": 3e-5}
+                if (allow_microbatch_change or allow_query_tile_change
+                        or recipe.get("thermal_native_pair", {}).get("variant") not in
+                        ("field_only", "state_anchors", "functional_contrast")
+                        or native_training.get("membership") != "full_train600"
+                        or native_training.get("local_horizon") != 100
+                        or native_training.get("optimizer_schedule_horizon") != 2000
+                        or type(before) is not int or type(after) is not int
+                        or not 100 <= before < after <= 2000
+                        or old["engine_config"].get("checkpoint_epochs") != list(range(100, before + 1, 100))
+                        or new["engine_config"].get("checkpoint_epochs") != list(range(100, after + 1, 100))
+                        or len(schedules) != 1 or schedules[0].get("schedule") != expected_schedule
+                        or old.get("provider_identity", {}).get("training", {}).get("optimizer_schedule") != expected_schedule):
+                    raise ValueError(message)
+                amended = copy.deepcopy(old)
+                amended["engine_config"]["total_epochs"] = after
+                amended["engine_config"]["checkpoint_epochs"] = new["engine_config"]["checkpoint_epochs"]
+                if amended != new:
+                    raise ValueError(message)
+                return {"kind": "explicit_native_pair_formal_horizon_extension",
+                        "previous_horizon": before, "execution_horizon": after,
+                        "optimizer_schedule_unchanged": True,
+                        "trajectory_note": "Only the execution horizon and future 100-epoch milestones change; the original 2000-epoch optimizer schedule and scientific identity are preserved."}
             wind_extension = (recipe.get("dataset") == "wind"
                               and recipe.get("schema") in ("wind_relation_anchored_r15_2_v2", "wind_relation_anchored_v1")
                               and type(before) is int and before >= (1000 if recipe.get("schema") == "wind_relation_anchored_r15_2_v2" else 100))
@@ -5027,6 +5056,10 @@ class TrainingEngine:
             else:
                 saved_identity = source_payload.get("experiment_identity", {})
                 provider_amendment = getattr(provider, "resume_identity_amendment", None)
+                if (allow_horizon_extension and saved_identity.get("recipe", {}).get("training_profile") == "native_pair"
+                        and (resume_checkpoint is None or int(source_payload["epoch"]) < 100
+                             or not int(source_payload["epoch"]) < int(stop_after) <= self.config.total_epochs <= 2000)):
+                    raise ValueError("Native-pair formal extension requires the same run's completed epoch-100 state and a later declared stop.")
                 if (resume_checkpoint is not None and saved_identity != sealed_identity
                         and callable(provider_amendment) and not allow_microbatch_change
                         and not allow_horizon_extension and not allow_query_tile_change):
@@ -5283,12 +5316,14 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             if (amendment.get("kind") not in ("explicit_spatial_group_full_state_continuation",
-                                                "native_pair_train150_schedule_correction")
+                                                "native_pair_train150_schedule_correction",
+                                                "explicit_native_pair_formal_horizon_extension")
                     and relation_guided_transfer is None
                     and joint_member_routing_transfer is None):
                 amendment["source_checkpoint_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
             resume_amendments.append(amendment)
-            amendment_name = ('native_pair_schedule_amendment' if amendment.get('kind') == 'native_pair_train150_schedule_correction' else
+            amendment_name = ('native_pair_horizon_extension' if amendment.get('kind') == 'explicit_native_pair_formal_horizon_extension' else
+                              'native_pair_schedule_amendment' if amendment.get('kind') == 'native_pair_train150_schedule_correction' else
                               'joint_member_routing_transfer' if joint_member_routing_transfer is not None else
                               'relation_guided_transfer' if relation_guided_transfer is not None else
                               'joint_native_child' if identity_is_joint_native and branch_from_checkpoint is not None else
@@ -5310,7 +5345,7 @@ class TrainingEngine:
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if (amendment.get('kind') == 'native_pair_train150_schedule_correction' or relation_guided_transfer is not None or joint_member_routing_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
+                category='logs' if (amendment.get('kind') in ('native_pair_train150_schedule_correction', 'explicit_native_pair_formal_horizon_extension') or relation_guided_transfer is not None or joint_member_routing_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
                                     or identity_is_native_budgeted
                                     or identity_is_native_retrieval

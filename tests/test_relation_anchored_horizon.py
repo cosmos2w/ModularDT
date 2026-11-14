@@ -143,3 +143,117 @@ def test_r16_10_rejects_nonmatching_saved_schedule_even_when_both_agree():
     old,new=r16_10_identities()
     for value in (old,new): value['optimizer_schedule_contract'][0]['schedule']['total_epochs']=3000
     with pytest.raises(ValueError): _resume_identity_amendment(old,new,allow_horizon_extension=True)
+
+
+def native_pair_formal_identities():
+    import json
+    from pathlib import Path
+    from channelthermal.training.thermal_native_pair_task import build_native_pair_recipe
+    from honf_runtime.unified_training import _engine_config_payload
+    from tools.relation_anchored_train import engine_for
+
+    recipe = json.loads((Path(__file__).resolve().parents[1] / 'configs/research' /
+                         'thermal_state_response_raster_area_train600.json').read_text())
+    recipe = build_native_pair_recipe(recipe, variant='functional_contrast')
+    recipe['training'].update(local_horizon=100, optimizer_schedule_horizon=2000, checkpoint_epochs=[100])
+    schedule = {'peak_lr': .0003, 'warmup_start_lr': .0003, 'warmup_epochs': 0,
+                'hold_through_epoch': 1000, 'total_epochs': 2000, 'final_lr': .00003}
+    old = {'workflow': 'relation_anchored_case_training_v1', 'recipe': recipe,
+           'engine_config': _engine_config_payload(engine_for(recipe, device='cpu').config),
+           'provider_identity': {'training': {'optimizer_schedule': schedule},
+                                 'normalization': {'original': [1., 2.]}, 'calibration': .3},
+           'optimizer_schedule_contract': [{'name': 'native_joint', 'schedule': copy.deepcopy(schedule)}]}
+    new = copy.deepcopy(old)
+    new['engine_config'] = _engine_config_payload(engine_for(recipe, device='cpu', execution_horizon=500).config)
+    return old, new
+
+
+def test_native_pair_formal_extension_uses_original_recipe_and_cosine_schedule():
+    from honf_runtime.unified_training import ScheduleSpec
+    from tools.relation_anchored_train import engine_for
+    old, new = native_pair_formal_identities()
+    with pytest.raises(ValueError):
+        _resume_identity_amendment(old, new)
+    receipt = _resume_identity_amendment(old, new, allow_horizon_extension=True)
+    assert receipt['kind'] == 'explicit_native_pair_formal_horizon_extension'
+    assert receipt['optimizer_schedule_unchanged']
+    assert old['recipe'] == new['recipe'] and old['provider_identity'] == new['provider_identity']
+    assert old['optimizer_schedule_contract'] == new['optimizer_schedule_contract']
+    schedule = ScheduleSpec(**old['optimizer_schedule_contract'][0]['schedule'])
+    assert schedule.value(100) == schedule.value(500) == schedule.value(1000) == .0003
+    assert schedule.value(2000) == .00003
+    engine = engine_for(old['recipe'], device='cpu', execution_horizon=500)
+    assert engine.config.checkpoint_epochs == (100, 200, 300, 400, 500)
+    assert engine.config.curve_every == 10 and engine.config.latest_every == 1
+
+
+@pytest.mark.parametrize('path,value', [
+    (('recipe', 'training', 'membership'), 'fixed25_train150_dev22'),
+    (('recipe', 'training', 'local_horizon'), 101),
+    (('recipe', 'training', 'optimizer_schedule_horizon'), 1000),
+    (('recipe', 'thermal_native_pair', 'variant'), 'unknown'),
+    (('provider_identity', 'calibration'), .4),
+    (('provider_identity', 'normalization', 'original'), [1., 3.]),
+    (('optimizer_schedule_contract', 0, 'schedule', 'hold_through_epoch'), 999),
+    (('engine_config', 'seed'), 42),
+    (('engine_config', 'checkpoint_epochs'), [500]),
+])
+def test_native_pair_formal_extension_rejects_other_identity_changes(path, value):
+    old, new = native_pair_formal_identities()
+    target = new
+    for key in path[:-1]: target = target[key]
+    target[path[-1]] = value
+    with pytest.raises(ValueError):
+        _resume_identity_amendment(old, new, allow_horizon_extension=True)
+
+
+def test_native_pair_formal_extension_rejects_invalid_schedule_or_target():
+    from tools.relation_anchored_train import engine_for
+    old, new = native_pair_formal_identities()
+    for value in (old, new):
+        value['optimizer_schedule_contract'][0]['schedule']['total_epochs'] = 3000
+    with pytest.raises(ValueError):
+        _resume_identity_amendment(old, new, allow_horizon_extension=True)
+    for target in (100, 2001, -1):
+        with pytest.raises(ValueError):
+            engine_for(old['recipe'], device='cpu', execution_horizon=target)
+
+
+def test_native_pair_cli_extension_restores_saved_payload_without_launch(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    import tools.relation_anchored_train as cli
+
+    old, new = native_pair_formal_identities()
+    recipe_path = tmp_path / 'recipe.json'
+    recipe_path.write_text(json.dumps(old['recipe']))
+    checkpoint = {'epoch': 100, 'experiment_identity': old, 'provider_training_state': {'calibration': 3}}
+    provider = SimpleNamespace()
+    model = object()
+    monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: tmp_path / 'latest.pt')
+    monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: checkpoint)
+    monkeypatch.setattr(cli, 'build', lambda recipe, *, device, resume_payload:
+                        (model, provider) if resume_payload is checkpoint else pytest.fail('lost saved provider state'))
+    monkeypatch.setattr(cli, 'bind_training_budget', lambda *args: None)
+    monkeypatch.setattr(cli, 'prepare_profile_fit', lambda *args, **kwargs: None)
+    calls = []
+    def fit(engine, actual_model, actual_provider, output, **kwargs):
+        calls.append((engine.config, actual_model, actual_provider, kwargs))
+        return {'completed_epoch': checkpoint['epoch']}
+    monkeypatch.setattr(cli.TrainingEngine, 'fit', fit)
+    args = ['fit', '--recipe', str(recipe_path), '--output', str(tmp_path / 'run'), '--device', 'cpu',
+            '--resume', 'latest', '--extend-horizon', '--stop-after', '500']
+    assert cli.main(args) == 0
+    config, actual_model, actual_provider, kwargs = calls[-1]
+    assert config.total_epochs == 500 and actual_model is model and actual_provider is provider
+    assert provider._round6_sampling_epoch_limit == 500
+    assert kwargs['resume_checkpoint'] == 'latest' and kwargs['allow_horizon_extension'] is True
+    assert kwargs['identity']['recipe'] == old['recipe'] and kwargs['stop_after'] == 500
+    for epoch, target in ((99, 500), (100, 100), (100, 2001), (101, 101)):
+        checkpoint['epoch'] = epoch
+        with pytest.raises(ValueError, match='completed formal epoch 100'):
+            cli.main(args[:-1] + [str(target)])
+    checkpoint['epoch'] = 200
+    checkpoint['experiment_identity'] = new
+    assert cli.main(args[:-1] + ['300']) == 0
+    assert calls[-1][0].total_epochs == 500 and calls[-1][3]['stop_after'] == 300

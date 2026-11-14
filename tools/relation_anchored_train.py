@@ -247,8 +247,16 @@ def engine_for(recipe, *, device, execution_horizon=None):
                             and policy.get("membership") == "full_train600" and horizon == 2000
                             and execution_horizon == 3000
                             and recipe.get("member_routing", {}).get("model", {}).get("access_measure") == "inventory_unit_total")
-        if (not (wind_extension or thermal_extension or r16_10_extension) or type(execution_horizon) is not int
-                or execution_horizon <= horizon or execution_horizon % 100):
+        native_pair_extension = (thermal and recipe.get("training_profile") == "native_pair"
+                                 and recipe.get("thermal_native_pair", {}).get("variant") in
+                                 ("field_only", "state_anchors", "functional_contrast")
+                                 and policy.get("membership") == "full_train600"
+                                 and horizon == 100 and policy.get("optimizer_schedule_horizon") == 2000
+                                 and tuple(checkpoints) == (100,))
+        if (not (wind_extension or thermal_extension or r16_10_extension or native_pair_extension)
+                or type(execution_horizon) is not int or execution_horizon <= horizon
+                or (native_pair_extension and execution_horizon > 2000)
+                or (not native_pair_extension and execution_horizon % 100)):
             raise ValueError("Unsupported explicit same-lineage horizon extension.")
         horizon = execution_horizon
         checkpoints = range(100, horizon + 1, 100)
@@ -317,18 +325,32 @@ def main(argv=None):
          or recipe.get("training_profile") in ("state_response", "native_pair"))
             and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
         selector = args.checkpoint if args.command == "evaluate" else args.resume
-        source_payload = load_trusted_checkpoint(resolve_checkpoint(args.output, selector), map_location="cpu")
+        source_checkpoint = resolve_checkpoint(args.output, selector)
+        if (args.extend_horizon and recipe.get("training_profile") == "native_pair"
+                and source_checkpoint != resolve_checkpoint(args.output, "latest")):
+            raise ValueError("Native-pair formal extension requires this run's latest checkpoint.")
+        source_payload = load_trusted_checkpoint(source_checkpoint, map_location="cpu")
         if source_payload["experiment_identity"]["recipe"] != recipe:
             raise ValueError("The recipe differs from the saved run.")
         if (args.extend_horizon and recipe.get("r16_10_family") is not None
                 and source_payload["experiment_identity"]["engine_config"]["total_epochs"] == 2000
                 and int(source_payload["epoch"]) != 2000):
             raise ValueError("R16-10 extension requires a completed epoch 2000 state.")
+        if args.extend_horizon and recipe.get("training_profile") == "native_pair":
+            training = recipe.get("training", {})
+            completed = int(source_payload["epoch"])
+            saved_horizon = source_payload["experiment_identity"]["engine_config"]["total_epochs"]
+            if (training.get("membership") != "full_train600" or training.get("local_horizon") != 100
+                    or training.get("optimizer_schedule_horizon") != 2000
+                    or type(saved_horizon) is not int or not 100 <= completed <= saved_horizon <= 2000
+                    or not completed < args.stop_after <= 2000):
+                raise ValueError("Native-pair extension requires a completed formal epoch 100 and a later stop at or before epoch 2000.")
     options = {}
     if source_payload is not None and (recipe.get("r16_10_family") is not None
                                        or recipe.get("training_profile") in ("state_response", "native_pair")):
         options["resume_payload"] = source_payload
-    if source_payload is not None and recipe.get("thermal_state_response", {}).get("enabled"):
+    if (source_payload is not None and recipe.get("training_profile") != "native_pair"
+            and recipe.get("thermal_state_response", {}).get("enabled")):
         # Objective denominators are saved scientific state. Recomputing their
         # last bits on another device must not change the restored objective.
         options["response_scales"] = source_payload["experiment_identity"]["provider_identity"]["response_scales"]
@@ -339,8 +361,15 @@ def main(argv=None):
             options["saved_adapter_state"] = native_identity["adapter_state"]
             options["saved_normalization_source"] = native_identity["source_binding"]["normalization_source"]
     model, provider = build(recipe, device=args.device, **options)
-    engine = (engine_for(recipe, device=args.device, execution_horizon=args.stop_after)
+    requested_horizon = args.stop_after
+    if args.extend_horizon and recipe.get("training_profile") == "native_pair":
+        requested_horizon = max(args.stop_after, saved_horizon)
+    engine = (engine_for(recipe, device=args.device, execution_horizon=requested_horizon)
               if args.extend_horizon else engine_for(recipe, device=args.device))
+    if args.extend_horizon and recipe.get("training_profile") == "native_pair":
+        # This existing provider runtime limit governs sample generation only;
+        # the scientific recipe, seed and optimizer schedule stay unchanged.
+        provider._round6_sampling_epoch_limit = engine.config.total_epochs
     arm = recipe["member_routing"]["arm"] if isinstance(recipe.get("dataset"), dict) else recipe["architecture"]
     identity = {"workflow": "relation_anchored_case_training_v1", "recipe": recipe}
     if args.command == "inspect":
