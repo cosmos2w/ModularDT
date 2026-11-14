@@ -8,6 +8,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | [Run artifacts and monitoring](Run_Artifacts_and_Monitoring.md) | Shared CSV/small-JSON recording target, resumable state, loss panels and historical formats. |
 | [Query tiling](Query_Tiling.md) | Decoder speed/memory tradeoffs, testing on your own inputs and explicit resume scope. |
 | [Thermal development protocol](Thermal_Model_Development_Protocol.md) | Input-only membership, TRAIN-only normalization and fair epoch budgets. |
+| [Thermal training budgets](Thermal_Training_Budget_Conventions.md) | Historical training lengths, staged TRAIN150/600 decisions, operational handoff and cost forecasts. |
 | [Thermal relation-anchored training](Thermal_Relation_Anchored_Training.md) | Current public model selection, recipes and continuation. |
 | [Native case training](Case_Relation_Anchored_Training.md) | Wind and Thermal provider dispatch, native objectives and identity-preserving continuation. |
 | [Wind relation-anchored interface](../../Case_WindFarm/docs/relation_anchored.md) | Three-dimensional coverage, ragged turbine batches and native calibration. |
