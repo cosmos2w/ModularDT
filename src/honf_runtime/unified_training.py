@@ -4939,6 +4939,26 @@ class TrainingEngine:
         calibration_adoption = None
         calibration_input = getattr(provider, "native_pair_calibration_input", None)
         calibration_output = getattr(provider, "native_pair_calibration_output", None)
+        if resume_checkpoint is not None and not calibration_input and not calibration_output:
+            reference_path = layout.read_path('native_pair_calibration_reference.json', category='configs')
+            if reference_path.is_file():
+                reference = json.loads(reference_path.read_text())
+                if (reference.get('schema') != 'thermal_native_pair_calibration_reference_v1'
+                        or reference.get('role') not in ('publisher', 'consumer')
+                        or not isinstance(reference.get('path'), str) or not reference['path']):
+                    raise ValueError('Saved native pair calibration reference is malformed.')
+                if reference['role'] == 'consumer':
+                    if not callable(getattr(provider, 'adopt_native_pair_calibration', None)):
+                        raise ValueError('This provider cannot restore a native calibration consumer reference.')
+                    calibration_input = reference['path']
+                    provider.native_pair_calibration_input = calibration_input
+                else:
+                    if not callable(getattr(provider, 'native_pair_calibration_record', None)):
+                        raise ValueError('This provider cannot restore a native calibration publisher reference.')
+                    calibration_output = reference['path']
+                    provider.native_pair_calibration_output = calibration_output
+                    provider.native_pair_calibration_source_run = str(output)
+                    provider.native_pair_calibration_source_checkpoint = str(source_path)
         if source_payload is not None:
             if external_state_continuation:
                 declaration = provider_identity.get("recipe", {}).get("continuation", {})

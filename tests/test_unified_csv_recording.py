@@ -281,11 +281,15 @@ def test_schedule_correction_resume_preserves_complete_training_state(tmp_path, 
 def test_calibration_adoption_is_recorded_and_restored_without_repeating_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, '_render_loss_curves', lambda *args, **kwargs: None)
     class CalibratedProvider(CsvToyProvider):
-        def __init__(self, source=None):
+        def __init__(self, source=None, crash=False):
             super().__init__()
             self.calibration = {'absolute': 1.}
             self.adoptions = []
             self.native_pair_calibration_input = source
+            self.crash = crash
+        def begin_training_epoch(self, model, epoch):
+            if self.crash and epoch == 3:
+                raise RuntimeError('simulated crash before adopted checkpoint')
         def training_state_dict(self):
             return {'completed': self.completed, 'calibration': self.calibration, 'adoptions': self.adoptions}
         def load_training_state_dict(self, state):
@@ -294,15 +298,17 @@ def test_calibration_adoption_is_recorded_and_restored_without_repeating_flag(tm
             assert path == '/shared/calibration.json'
             return {'absolute': 2.}
         def adopt_native_pair_calibration(self, path, *, source_epoch):
-            assert not self.adoptions
+            if self.adoptions:
+                assert self.adoptions[-1]['source'] == path and self.calibration == {'absolute': 2.}
+                return None
             entry = {'kind': 'native_pair_shared_calibration_adoption', 'source': path,
                      'source_epoch': source_epoch, 'previous_calibration': self.calibration,
                      'adopted_calibration': {'absolute': 2.}}
             self.calibration = {'absolute': 2.}
             self.adoptions.append(entry)
             return entry
-    def fit(model, path, stop, source=None, resume=None):
-        return TrainingEngine(_config_for_test(), device='cpu').fit(model, CalibratedProvider(source), path,
+    def fit(model, path, stop, source=None, resume=None, crash=False):
+        return TrainingEngine(_config_for_test(), device='cpu').fit(model, CalibratedProvider(source, crash), path,
             identity={'run': 'calibration-toy'}, arm='adaptive_detail', stop_after=stop, resume_checkpoint=resume)
     torch.manual_seed(52)
     model = nn.Linear(1, 1)
@@ -315,7 +321,11 @@ def test_calibration_adoption_is_recorded_and_restored_without_repeating_flag(tm
     path = tmp_path / 'run'
     fit(model, path, 2)
     layout = RunLayout(path)
-    fit(model, path, 3, source='/shared/calibration.json', resume=layout.read_path('latest_model.pt'))
+    with pytest.raises(RuntimeError, match='simulated crash'):
+        fit(model, path, 3, source='/shared/calibration.json',
+            resume=layout.read_path('latest_model.pt'), crash=True)
+    assert (path / 'logs' / 'native_pair_calibration_adoption_epoch_0003.json').is_file()
+    fit(model, path, 3, resume=layout.read_path('latest_model.pt'))
     checkpoint = torch.load(layout.read_path('latest_model.pt'), weights_only=False)
     assert checkpoint['provider_training_state']['calibration'] == {'absolute': 2.}
     assert checkpoint['resume_amendments'][-1]['source_epoch'] == 2
@@ -334,3 +344,35 @@ def test_calibration_adoption_is_recorded_and_restored_without_repeating_flag(tm
     assert final['provider_training_state']['calibration'] == {'absolute': 2.}
     assert len(final['provider_training_state']['adoptions']) == 1
     assert len([row for row in final['resume_amendments'] if row['kind'] == 'native_pair_shared_calibration_adoption']) == 1
+
+
+def test_publisher_reference_recovers_without_flag_before_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, '_render_loss_curves', lambda *args, **kwargs: None)
+    shared = tmp_path / 'shared.json'
+    class Publisher(CsvToyProvider):
+        def __init__(self, publish=False, crash=False):
+            super().__init__()
+            self.native_pair_calibration_output = str(shared) if publish else None
+            self.native_pair_calibration_source_run = str(tmp_path / 'run')
+            self.native_pair_calibration_source_checkpoint = str(tmp_path / 'run/checkpoints/latest_model.pt')
+            self.crash = crash
+        def native_pair_calibration_record(self, value, *, source_epoch):
+            return value
+        def begin_training_epoch(self, model, epoch):
+            if epoch == 3:
+                assert self.native_pair_calibration_output == str(shared)
+                assert self.native_pair_calibration_source_run == str((tmp_path / 'run').resolve())
+                if self.crash:
+                    shared.write_text('{"source":"published-before-checkpoint"}')
+                    raise RuntimeError('simulated publisher crash')
+                assert shared.read_text() == '{"source":"published-before-checkpoint"}'
+    def fit(model, stop, *, publish=False, crash=False, resume=None):
+        return TrainingEngine(_config_for_test(), device='cpu').fit(model, Publisher(publish, crash), tmp_path / 'run',
+            identity={'run': 'publisher-toy'}, arm='adaptive_detail', stop_after=stop, resume_checkpoint=resume)
+    model = nn.Linear(1, 1)
+    fit(model, 2, publish=True)
+    layout = RunLayout(tmp_path / 'run')
+    with pytest.raises(RuntimeError, match='publisher crash'):
+        fit(model, 3, crash=True, resume=layout.read_path('latest_model.pt'))
+    fit(model, 3, resume=layout.read_path('latest_model.pt'))
+    assert torch.load(layout.read_path('latest_model.pt'), weights_only=False)['epoch'] == 3

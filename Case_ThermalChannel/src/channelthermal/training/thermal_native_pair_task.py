@@ -492,12 +492,19 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
     def adopt_shared(self, path, *, source_epoch):
         from pathlib import Path
         before = copy.deepcopy(state['calibration'])
-        if state['adoptions']:
-            raise ValueError('This lineage has already adopted a shared native calibration.')
-        if source_epoch >= 11 and before is None:
-            raise ValueError('A completed auxiliary epoch requires the saved original calibration.')
         after = self.read_native_pair_calibration(path)
         source_record = json.loads(Path(path).expanduser().read_text())['source']
+        if state['adoptions']:
+            previous = state['adoptions'][-1]
+            canonical = str(Path(path).expanduser().resolve())
+            if (previous.get('source') != canonical
+                    or previous.get('calibration_source') != source_record
+                    or json.dumps(before, sort_keys=True) != json.dumps(after, sort_keys=True)
+                    or json.dumps(previous.get('adopted_calibration'), sort_keys=True) != json.dumps(after, sort_keys=True)):
+                raise ValueError('This lineage already adopted a different shared native calibration.')
+            return None
+        if source_epoch >= 11 and before is None:
+            raise ValueError('A completed auxiliary epoch requires the saved original calibration.')
         entry = {'kind': 'native_pair_shared_calibration_adoption',
                  'source': str(Path(path).expanduser().resolve()), 'source_epoch': int(source_epoch),
                  'calibration_source': source_record,

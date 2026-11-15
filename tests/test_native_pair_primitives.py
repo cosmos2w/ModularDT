@@ -138,7 +138,17 @@ def test_pair_provider_exposure_and_calibration_resume(monkeypatch, tmp_path):
     anchor.native_pair_calibration_output = str(shared_path)
     anchor.native_pair_calibration_source_run = '/anchor/run'
     anchor.native_pair_calibration_source_checkpoint = '/anchor/run/checkpoints/latest_model.pt'
+    pre_calibration = anchor.training_state_dict()
     anchor.begin_training_epoch(model, 11)
+    recovered_model, recovered_anchor = native.build_thermal_native_pair_task(base)
+    recovered_anchor.load_training_state_dict(pre_calibration)
+    recovered_anchor.native_pair_calibration_output = str(shared_path)
+    recovered_anchor.native_pair_calibration_source_run = '/anchor/run'
+    recovered_anchor.native_pair_calibration_source_checkpoint = '/anchor/run/checkpoints/latest_model.pt'
+    monkeypatch.setattr(diagnostics, 'gradient_diagnostics', lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError('must reuse the already published calibration')))
+    recovered_anchor.begin_training_epoch(recovered_model, 11)
+    assert recovered_anchor.training_state_dict()['native_pair']['calibration']['coefficients'] == anchor.training_state_dict()['native_pair']['calibration']['coefficients']
     contrast.native_pair_calibration_input = str(shared_path)
     contrast.begin_training_epoch(contrast_model, 11)
     assert (anchor.training_state_dict()['native_pair']['calibration']['coefficients']
@@ -185,8 +195,17 @@ def test_pair_provider_exposure_and_calibration_resume(monkeypatch, tmp_path):
     adoption = resumed_contrast.adopt_native_pair_calibration(shared_path, source_epoch=100)
     assert adoption['previous_calibration']['coefficients']['absolute'] == .9
     assert adoption['adopted_calibration']['coefficients'] == anchor.training_state_dict()['native_pair']['calibration']['coefficients']
-    with pytest.raises(ValueError, match='already adopted'):
+    assert resumed_contrast.adopt_native_pair_calibration(shared_path, source_epoch=100) is None
+    different_path = tmp_path / 'different_source.json'
+    different_path.write_text(shared_path.read_text())
+    with pytest.raises(ValueError, match='different shared'):
+        resumed_contrast.adopt_native_pair_calibration(different_path, source_epoch=100)
+    original_record = shared_path.read_text()
+    changed_source = json.loads(original_record); changed_source['source']['run'] = '/another/anchor'
+    shared_path.write_text(json.dumps(changed_source))
+    with pytest.raises(ValueError, match='different shared'):
         resumed_contrast.adopt_native_pair_calibration(shared_path, source_epoch=100)
+    shared_path.write_text(original_record)
     normal_model, normal_resume = native.build_thermal_native_pair_task(contrast_recipe)
     normal_resume.load_training_state_dict(resumed_contrast.training_state_dict())
     normal_resume.begin_training_epoch(normal_model, 101)
