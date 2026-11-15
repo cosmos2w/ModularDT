@@ -147,7 +147,7 @@ def evaluate_pair_panel(model, provider, *, epoch, split, case_ids, pairs, scale
             'source_resolution_floors': list(map(float, floors)), 'read_mode': mode, 'epoch': epoch,
             'complete_review_seconds': time.perf_counter() - started,
             'prediction_reuse': 'The same case predictions supply native metrics, four observables and common/change errors.',
-            'interpretation': 'Matched approximately ten percent development evidence; no fixed-heat edit or inverse-design claim.'}
+            'interpretation': 'Matched measurements on the declared panel; no fixed-heat edit or inverse-design claim.'}
 
 
 def main(argv=None):
