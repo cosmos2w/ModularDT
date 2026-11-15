@@ -18,6 +18,8 @@ from ..inverse.request_search import roi_mask
 
 TAU = 0.4149511814117432
 OBSERVABLES = ('J', 'P', 'A', 'B')
+NATIVE_LOSS_ORDER = ('flow/u', 'flow/v', 'flow/p', 'flow/omega', 'temperature/fluid',
+                     'temperature/surface', 'temperature/material', 'q_proxy')
 
 
 def native_calibration_record(provider, calibration, *, pairs, seed, scales, floors, source=None):
@@ -433,7 +435,7 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
     provider.training_output_policy = 'csv_v3'
     provider.sampling_audit = bool(spec.get('sampling_audit', False))
     def history_columns(self):
-        native_names = (*self.native_weights, 'port/outside_temperature')
+        native_names = (*NATIVE_LOSS_ORDER, 'port/outside_temperature')
         work_names = ('native_pair_presentations', 'native_pair_scenes', 'gradient_norm',
             'paired_query_unique_union_raw_score_pairs_M', 'paired_query_unique_union_raw_score_pairs_E',
             'paired_query_relative_value_pairs_M', 'paired_query_relative_value_pairs_E',

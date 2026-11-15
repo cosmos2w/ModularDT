@@ -38,6 +38,137 @@ _TRAIN_GROUPS = ("train_losses", "learning_rates", "work_counts", "train_diagnos
 _INTEGER_FIELDS = {"epoch", "case_visits", "optimizer_updates", "microbatches", "partial_update_cases"}
 
 
+def column_differences(saved: Iterable[str], incoming: Iterable[str]) -> str:
+    """Describe membership and position changes without conflating them."""
+    saved, incoming = list(saved), list(incoming)
+    return (f"added={sorted(set(incoming) - set(saved))}; "
+            f"missing={sorted(set(saved) - set(incoming))}; "
+            f"reordered={[(name, saved.index(name), incoming.index(name)) for name in saved
+                          if name in incoming and saved.index(name) != incoming.index(name)]}")
+
+
+def training_recording_definitions(
+    columns: Iterable[str], terms: Mapping[str, Mapping[str, object]],
+    overrides: Mapping[str, Mapping[str, str]] | None = None,
+) -> dict[str, object]:
+    """Describe a provider's explicit column sequence, never configuration key order."""
+    columns = list(columns)
+    if (not columns or columns[0] != "epoch" or len(columns) != len(set(columns))
+            or any(not isinstance(name, str) or not name for name in columns)):
+        raise ValueError("Training columns must be unique nonempty strings starting with epoch")
+    base = {
+        "epoch": ("int", "epochs", "Completed training epoch"),
+        "phase": ("str", "1", "Training schedule phase"),
+        "arm": ("str", "1", "Executed prediction path"),
+        "temperature": ("float", "1", "Routing temperature at this epoch"),
+        "case_visits": ("int", "cases", "Training case visits in this epoch"),
+        "optimizer_updates": ("int", "updates", "Optimizer updates in this epoch"),
+        "microbatches": ("int", "microbatches", "Training microbatches in this epoch"),
+        "partial_update_cases": ("int", "cases", "Cases in the final incomplete optimizer update"),
+        "train_seconds": ("float", "s", "Training duration for this epoch, excluding validation"),
+        "train_loss_total": ("float", "weighted objective units", "Sum of recorded weighted TRAIN components in training_total_order"),
+    }
+    definitions = {}
+    for column in columns:
+        if column in base:
+            dtype, unit, meaning = base[column]
+        elif column.startswith("train_losses."):
+            name = column.removeprefix("train_losses.")
+            metadata = terms.get(name, {})
+            dtype, unit, meaning = ("float", metadata.get("unit", "provider-defined"),
+                metadata.get("meaning", metadata.get("formula", f"Provider-defined weighted loss {name}")))
+        elif column.startswith("learning_rates."):
+            dtype, unit, meaning = "float", "optimizer learning-rate units", f"Applied learning rate for {column.split('.', 1)[1]}"
+        elif column == "work_counts.gradient_norm":
+            dtype, unit, meaning = "float", "gradient units", "Sum of pre-clipping parameter gradient L2 norms over optimizer updates"
+        else:
+            dtype, unit, meaning = "float", "provider-defined", f"Provider scalar {column}; epoch reduction follows the provider and trainer"
+        definitions[column] = {"dtype": dtype, "unit": unit, "meaning": meaning}
+    for column, definition in (overrides or {}).items():
+        if column not in definitions:
+            raise ValueError(f"Column definition has no declared training column: {column!r}")
+        if set(definition) != {"dtype", "unit", "meaning"} or any(
+                not isinstance(value, str) or not value for value in definition.values()):
+            raise ValueError(f"Column {column!r} requires explicit dtype, unit and meaning strings")
+        definitions[column] = dict(definition)
+    validation_specs = (
+        ("int", "epochs", "Completed training epoch"),
+        ("str", "1", "Dataset partition"),
+        ("str", "1", "Original case identifier, blank for pooled measurements"),
+        ("str", "1", "Original member identifier, blank for pooled measurements"),
+        ("str", "1", "Provider metric or validation objective name"),
+        ("float", "metric-dependent", "Measured value in the named metric's units"),
+        ("float", "metric-dependent count", "Provider count, blank when not supplied"),
+    )
+    loss_order = [name.removeprefix("train_losses.") for name in columns if name.startswith("train_losses.")]
+    return {
+        "training_columns": columns,
+        "training_column_definitions": definitions,
+        "training_loss_order": loss_order,
+        "training_total_order": loss_order,
+        "validation_columns": list(VALIDATION_COLUMNS),
+        "validation_column_definitions": {name: dict(zip(("dtype", "unit", "meaning"), spec))
+                                          for name, spec in zip(VALIDATION_COLUMNS, validation_specs)},
+        "training_reduction": "Mean of optimizer-update weighted contributions",
+        "validation_reduction": "Provider-defined pooled validation measurements",
+        "validation_total_order": "Lexicographic order of matched TRAIN and validation loss names",
+        "terms": dict(terms),
+    }
+
+
+def resolve_training_recording(saved: Mapping[str, object], incoming: Mapping[str, object]) -> tuple[tuple[str, ...], tuple[str, ...] | None]:
+    """Validate content and reuse saved order; legacy definitions stay untouched."""
+    columns, requested = tuple(saved["training_columns"]), tuple(incoming["training_columns"])
+    differences = column_differences(columns, requested)
+    changed = []
+    if len(columns) != len(set(columns)) or not columns or columns[0] != "epoch":
+        changed.append("saved training_columns are not unique or do not start with epoch")
+    # Lists carry order; mappings carry meaning. Incoming display order is immaterial.
+    for field in ("training_column_definitions", "validation_column_definitions",
+                  "training_reduction", "validation_reduction", "validation_total_order", "validation_columns"):
+        if field in saved and saved[field] != incoming.get(field):
+            if isinstance(saved[field], Mapping) and isinstance(incoming.get(field), Mapping):
+                before, after = saved[field], incoming[field]
+                for name in sorted(set(before) | set(after)):
+                    if before.get(name) != after.get(name):
+                        changed.append(f"{field}.{name}: saved={before.get(name)!r}, incoming={after.get(name)!r}")
+            else:
+                changed.append(f"{field}: saved={saved[field]!r}, incoming={incoming.get(field)!r}")
+    before_terms, after_terms = saved.get("terms", {}), incoming.get("terms", {})
+    semantic_keys = ("unit", "meaning", "formula", "weight", "reduction")
+    for name in sorted(set(before_terms) | set(after_terms)):
+        before = {key: value for key, value in before_terms.get(name, {}).items() if key in semantic_keys}
+        after = {key: value for key, value in after_terms.get(name, {}).items() if key in semantic_keys}
+        if before != after:
+            changed.append(f"terms.{name}: saved={before!r}, incoming={after!r}")
+    loss_names = tuple(name.removeprefix("train_losses.") for name in columns if name.startswith("train_losses."))
+    # Older providers were not required to declare columns in reduction order.
+    # Preserve their computational path rather than inventing a historical order.
+    order = tuple(saved["training_loss_order"]) if "training_loss_order" in saved else None
+    if order is not None and (len(order) != len(set(order)) or set(order) != set(loss_names)):
+        changed.append(f"saved training_loss_order={order!r} does not enumerate loss columns={loss_names!r}")
+    total_order = tuple(saved.get("training_total_order", sorted(loss_names)))
+    if len(total_order) != len(set(total_order)) or set(total_order) != set(loss_names):
+        changed.append(f"saved training_total_order={total_order!r} does not enumerate loss columns={loss_names!r}")
+    if set(columns) != set(requested) or changed:
+        raise ValueError(f"Incompatible training recording: {differences}; "
+                         f"numerical meaning changed={bool(changed)}; " + "; ".join(changed))
+    return columns, order
+
+
+def validate_scalar_header(path: str | Path, columns: Iterable[str]) -> None:
+    """Check existing append positions before fitting, without changing the table."""
+    path = Path(path)
+    if not path.exists() or not path.stat().st_size:
+        return
+    with path.open(encoding="utf-8", newline="") as stream:
+        header = next(csv.reader(stream), [])
+    if header != list(columns):
+        raise ValueError("Scalar table header differs from saved recording: "
+                         + column_differences(columns, header)
+                         + "; saved definitions unchanged; positional append would mislabel values")
+
+
 def training_scalar_row(row: Mapping[str, object], columns: tuple[str, ...]) -> dict[str, object]:
     """Extract declared per-epoch scalars, failing on undeclared loss terms."""
     result: dict[str, object] = {name: row.get(name) for name in columns if "." not in name}
@@ -138,9 +269,7 @@ def append_scalar_rows(path: str | Path, columns: tuple[str, ...], rows: Iterabl
         complete, trailing = _complete_bytes(path)
         if trailing:
             raise ValueError("Torn scalar table requires locked recovery before append")
-        header = next(csv.reader(io.StringIO(complete.decode("utf-8"), newline="")), None)
-        if header != list(columns):
-            raise ValueError("Scalar table header differs from the declared schema")
+        validate_scalar_header(path, columns)
     else:
         with path.open("w", encoding="utf-8", newline="") as stream:
             csv.writer(stream).writerow(columns)

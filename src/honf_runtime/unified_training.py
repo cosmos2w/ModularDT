@@ -3645,6 +3645,16 @@ class TrainingEngine:
             "arms": results,
         }
 
+    def _ordered_training_terms(self, terms: Mapping[str, Any]) -> dict[str, Any]:
+        """Use the run's saved reduction order, including inactive scheduled terms."""
+        order = getattr(self, "_recorded_loss_order", None)
+        if order is None:
+            return dict(terms)
+        extra = set(terms) - set(order)
+        if extra:
+            raise ValueError(f"Losses missing from saved training recording: {sorted(extra)}")
+        return {name: terms[name] for name in order if name in terms}
+
     def _run_update(
         self,
         model: nn.Module,
@@ -3664,7 +3674,8 @@ class TrainingEngine:
     ) -> tuple[dict[str, float], dict[str, float], dict[str, float], str | None]:
         planned = {
             name: _denominator(value)
-            for name, value in provider.loss_denominators(microbatches, phase, arm).items()
+            for name, value in self._ordered_training_terms(
+                provider.loss_denominators(microbatches, phase, arm)).items()
         }
         if any(not name for name in planned):
             raise ValueError("Loss term names must be nonempty.")
@@ -3815,6 +3826,7 @@ class TrainingEngine:
             terms = provider.loss_terms(predictions, batch.targets, phase, auxiliary_state)
             if not isinstance(terms, Mapping):
                 raise TypeError("loss_terms must return a mapping of names to LossTerm values.")
+            terms = self._ordered_training_terms(terms)
             native_diagnostic = getattr(provider, "diagnose_native_training_terms", None)
             if callable(native_diagnostic):
                 native_diagnostic(model, terms, planned, epoch=epoch,
@@ -3985,7 +3997,7 @@ class TrainingEngine:
                     model, epoch=epoch, update_index=update_index,
                     update_count=epoch_update_count):
                 objective = None
-                for name, term in terms.items():
+                for name, term in self._ordered_training_terms(terms).items():
                     if name not in auxiliary_names:
                         raise ValueError(f"Undeclared auxiliary loss {name!r}.")
                     denominator = _denominator(term.denominator)
@@ -4278,6 +4290,7 @@ class TrainingEngine:
                          else getattr(provider, "training_output_policy", "categorized_v2")
                          if layout.canonical_writes else None)
         csv_output = output_policy == "csv_v3"
+        self._recorded_loss_order = None
         modern_output = output_policy in {"categorized_v2", "csv_v3"}
         if not csv_output:
             layout.ensure()
@@ -5170,25 +5183,37 @@ class TrainingEngine:
             model, provider, arm, start_epoch, optimizer_seed, group_specs=group_specs)
         csv_columns: tuple[str, ...] = ()
         if csv_output:
+            from .scalar_history import (VALIDATION_COLUMNS, training_recording_definitions,
+                                         resolve_training_recording, validate_scalar_header)
+
             history_columns = getattr(provider, "training_history_columns", None)
             if not callable(history_columns):
                 raise ValueError("CSV recording requires the provider's complete scheduled training_history_columns().")
             declared = tuple(history_columns())
             base_columns = ("epoch", "phase", "arm", "temperature", "case_visits", "optimizer_updates",
                             "microbatches", "partial_update_cases", "train_seconds", "train_loss_total")
-            csv_columns = tuple(dict.fromkeys((*base_columns,
-                *(f"learning_rates.{group['group_name']}" for group in optimizer.param_groups), *declared)))
-            if any(not isinstance(name, str) or not name for name in csv_columns):
-                raise ValueError("Training history column names must be nonempty strings.")
+            csv_columns = (*base_columns,
+                *(f"learning_rates.{group['group_name']}" for group in optimizer.param_groups), *declared)
+            metadata_reader = getattr(provider, "loss_metadata", None)
+            column_reader = getattr(provider, "training_column_definitions", None)
+            incoming_definitions = training_recording_definitions(csv_columns,
+                dict(metadata_reader()) if callable(metadata_reader) else {},
+                dict(column_reader()) if callable(column_reader) else {})
             definitions_path = output / "configs" / "metric_definitions.json"
             if not definitions_path.exists():
-                metadata_reader = getattr(provider, "loss_metadata", None)
-                _atomic_json(definitions_path, {"training_columns": csv_columns,
-                    "training_reduction": "Mean of optimizer-update weighted contributions",
-                    "validation_reduction": "Provider-defined pooled validation measurements",
-                    "terms": dict(metadata_reader()) if callable(metadata_reader) else {}})
-            elif tuple(json.loads(definitions_path.read_text())["training_columns"]) != csv_columns:
-                raise ValueError("CSV training inventory changed during resume.")
+                if resume_checkpoint is not None:
+                    raise ValueError(f"Missing saved recording definitions: {definitions_path}")
+                _atomic_json(definitions_path, incoming_definitions)
+            saved_definitions = json.loads(definitions_path.read_text())
+            csv_columns, self._recorded_loss_order = resolve_training_recording(
+                saved_definitions, incoming_definitions)
+            # Historical CSV totals used _mean_mapping's lexicographic order.
+            # Recover that behavior without migrating the saved definitions.
+            recorded_total_order = tuple(saved_definitions.get(
+                "training_total_order", sorted(name.removeprefix("train_losses.")
+                    for name in csv_columns if name.startswith("train_losses."))))
+            validate_scalar_header(history_path, csv_columns)
+            validate_scalar_header(layout.write_path("validation.csv"), VALIDATION_COLUMNS)
         if identity_is_joint_native and branch_from_checkpoint is not None:
             from .joint_native_child import verify_joint_native_optimizer
             if identity_is_continuous_joint:
@@ -6192,7 +6217,9 @@ class TrainingEngine:
                     from .scalar_history import (VALIDATION_COLUMNS, append_scalar_rows,
                                                  training_scalar_row, validation_scalar_rows)
 
-                    row["train_loss_total"] = sum(float(value) for value in row["train_losses"].values())
+                    row["train_losses"] = self._ordered_training_terms(row["train_losses"])
+                    row["train_loss_total"] = sum(float(row["train_losses"][name])
+                        for name in recorded_total_order if name in row["train_losses"])
                     append_scalar_rows(history_path, csv_columns, [training_scalar_row(row, csv_columns)])
                     if review:
                         validation_records = validation_scalar_rows(row)

@@ -47,6 +47,20 @@ Do not collect default case-order/query-sampling SHA summaries, repeated allocat
 
 A shared recorder needs only to append training scalars, append validation scalars, read recorded history and write small status/events. Objective definitions and naming come from the provider/configuration. Avoid a generalized database, event bus, compression/expansion scheme or new identity-freezing service.
 
+## Saved recording definitions and resume
+
+At run creation, save the explicit ordered training and validation column definitions, including each column's type, units and meaning, as well as the order in which loss components are accumulated. Save these definitions once with the run so a later process can recover the original recording and numerical semantics without depending on incidental mapping iteration order.
+
+For the shared `csv_v3` recorder, `configs/metric_definitions.json` records `training_columns`, `training_column_definitions` with `dtype`, `unit` and `meaning`, `training_loss_order` for gradient loss accumulation, and `training_total_order` for the recorded TRAIN total. `validation_columns` and `validation_column_definitions` describe the fixed validation table; matched TRAIN and validation totals use lexicographic loss-name order. A provider may supply `training_column_definitions` overrides. When a provider does not supply a meaning or unit, the definition says it is provider-defined instead of inventing physical units.
+
+For legacy saved definitions without explicit orders, retain the provider's original loss accumulation path and the historical lexicographic TRAIN total order. Column order alone cannot establish an older provider's gradient accumulation order. The Thermal native-pair loader rebuilds an unchanged recipe from the checkpoint to preserve its original mapping order; other legacy providers retain their existing loading behavior. Do not add metadata to or rewrite those saved files during ordinary resume.
+
+On resume, the checkpoint restores the model, optimizer, RNG, sampler and other recovery state; the run's saved recording definitions own the append schema and loss accumulation order. Compare the incoming configuration with the saved definitions by scientific content. JSON whitespace, formatting and object-key order alone are not scientific changes. When content is incompatible, report concrete added, missing, reordered or semantically changed definitions and their relevant values so the difference can be reviewed. Do not silently reinterpret an existing column or rebuild its order from a newly loaded mapping.
+
+An ordinary resume, permitted device change or authorized extension of the epoch horizon does not migrate or rewrite logs. Continue the existing run's format and history, subject to the existing locked interruption recovery rules and any separately authorized output-only change.
+
+A resume regression must exercise a real process boundary: save a checkpoint and definitions, start a fresh process, reload the saved configuration, resume and append, and compare the result with an uninterrupted run. Check the saved column order and meanings, loss accumulation, appended values and relevant recovery state. A same-process test or a test that reconstructs an equivalent configuration in memory does not cover serialization and reload ordering.
+
 ## Checkpoints and interruption recovery
 
 A new checkpoint format retains model parameters, optimizer state, normalization needed by inference, RNG state, sampler/provider and relevant auxiliary state, completed epoch, schedule position, selectors and cumulative counters needed for resume. Include a compact configuration/data reference and necessary small configuration for loading the model. Do not embed the entire history, full region arrays or a second large experiment identity. Standalone inference must still work with its declared input resources; exact continuation also needs the run's original configuration and records.
