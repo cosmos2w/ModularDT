@@ -276,3 +276,61 @@ def test_schedule_correction_resume_preserves_complete_training_state(tmp_path, 
     assert receipt['identical_learning_rates_through_epoch'] == 1000
     assert 'source_checkpoint_sha256' not in receipt
     assert (tmp_path / 'resumed' / 'logs' / 'native_pair_schedule_amendment_epoch_0003.json').is_file()
+
+
+def test_calibration_adoption_is_recorded_and_restored_without_repeating_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, '_render_loss_curves', lambda *args, **kwargs: None)
+    class CalibratedProvider(CsvToyProvider):
+        def __init__(self, source=None):
+            super().__init__()
+            self.calibration = {'absolute': 1.}
+            self.adoptions = []
+            self.native_pair_calibration_input = source
+        def training_state_dict(self):
+            return {'completed': self.completed, 'calibration': self.calibration, 'adoptions': self.adoptions}
+        def load_training_state_dict(self, state):
+            self.completed, self.calibration, self.adoptions = state['completed'], state['calibration'], state['adoptions']
+        def read_native_pair_calibration(self, path):
+            assert path == '/shared/calibration.json'
+            return {'absolute': 2.}
+        def adopt_native_pair_calibration(self, path, *, source_epoch):
+            assert not self.adoptions
+            entry = {'kind': 'native_pair_shared_calibration_adoption', 'source': path,
+                     'source_epoch': source_epoch, 'previous_calibration': self.calibration,
+                     'adopted_calibration': {'absolute': 2.}}
+            self.calibration = {'absolute': 2.}
+            self.adoptions.append(entry)
+            return entry
+    def fit(model, path, stop, source=None, resume=None):
+        return TrainingEngine(_config_for_test(), device='cpu').fit(model, CalibratedProvider(source), path,
+            identity={'run': 'calibration-toy'}, arm='adaptive_detail', stop_after=stop, resume_checkpoint=resume)
+    torch.manual_seed(52)
+    model = nn.Linear(1, 1)
+    initial = {key: value.clone() for key, value in model.state_dict().items()}
+    uninterrupted = nn.Linear(1, 1); uninterrupted.load_state_dict(initial)
+    random.seed(52); np.random.seed(52); torch.manual_seed(52)
+    fit(uninterrupted, tmp_path / 'uninterrupted', 4)
+    expected = torch.load(RunLayout(tmp_path / 'uninterrupted').read_path('latest_model.pt'), weights_only=False)
+    random.seed(52); np.random.seed(52); torch.manual_seed(52)
+    path = tmp_path / 'run'
+    fit(model, path, 2)
+    layout = RunLayout(path)
+    fit(model, path, 3, source='/shared/calibration.json', resume=layout.read_path('latest_model.pt'))
+    checkpoint = torch.load(layout.read_path('latest_model.pt'), weights_only=False)
+    assert checkpoint['provider_training_state']['calibration'] == {'absolute': 2.}
+    assert checkpoint['resume_amendments'][-1]['source_epoch'] == 2
+    assert (path / 'logs' / 'native_pair_calibration_adoption_epoch_0003.json').is_file()
+    assert (path / 'configs' / 'native_pair_calibration_reference.json').is_file()
+    fit(model, path, 4, resume=layout.read_path('latest_model.pt'))
+    final = torch.load(layout.read_path('latest_model.pt'), weights_only=False)
+    assert all(torch.equal(value, final['model_state_dict'][name]) for name, value in expected['model_state_dict'].items())
+    for name, state in expected['optimizer_state_by_name']['state_by_name'].items():
+        assert all(torch.equal(value, final['optimizer_state_by_name']['state_by_name'][name][key])
+                   for key, value in state.items())
+    assert torch.equal(expected['rng_state']['torch_cpu'], final['rng_state']['torch_cpu'])
+    assert expected['rng_state']['python'] == final['rng_state']['python']
+    np.testing.assert_array_equal(expected['rng_state']['numpy'][1], final['rng_state']['numpy'][1])
+    assert expected['sampler_state'] == final['sampler_state']
+    assert final['provider_training_state']['calibration'] == {'absolute': 2.}
+    assert len(final['provider_training_state']['adoptions']) == 1
+    assert len([row for row in final['resume_amendments'] if row['kind'] == 'native_pair_shared_calibration_adoption']) == 1

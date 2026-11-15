@@ -10,6 +10,12 @@ The shared `honf_runtime.state_response` module provides native-pair selection, 
 
 The supported development order is native field loading and prediction, optional comparisons drawn from that same dataset, then any explicitly requested specialized intervention study. No extra edited-scene H5, physical solve, synthetic field label or Thermal-specific manifest may become a requirement of the shared native-pair interface. Existing extra-response data must not silently enter fitting, normalization, response scales or calibration in a base-only experiment.
 
+## Share one TRAIN calibration
+
+For matched Thermal anchor and contrast runs, use one calibration measured from the anchor's epoch-10 TRAIN state. Pass `--native-pair-calibration-output PATH` to the anchor's `tools/relation_anchored_train.py fit` command. Under the run's existing writer lock, the anchor atomically publishes the record before its first auxiliary update, or at the first resumed epoch if its calibration is already saved. Start the contrast only after that record exists, and pass `--native-pair-calibration-input PATH` to its fit command. The contrast uses the exact published absolute and contrast coefficients; it does not independently recalibrate. The record checks native TRAIN membership, dataset binding, matching, scales, sampling and objective definition. Both flags are runtime paths and do not alter the resolved recipe.
+
+An existing contrast lineage may explicitly adopt the shared record on a same-run resume by passing the input flag once. Its model, optimizer, RNG and sampler continue from the saved checkpoint. The run retains `configs/native_pair_calibration_reference.json`, an atomic before/after adoption receipt in `logs/`, and the adopted calibration in provider checkpoint state. Later resumes need no calibration flag. The source run and completed epoch in the shared record identify when it was published; a latest-checkpoint alias can subsequently advance. Report any earlier independently calibrated epochs and their actual coefficients in the local experiment report rather than rewriting those checkpoints or histories.
+
 ## What the comparison learns
 
 For an observable extracted by the case, write its prediction error in scene i as e_i = predicted value minus saved reference value. A normalized pair penalty is `(e_B - e_A)^2 / s^2`, where s is a positive scale obtained from TRAIN. Absolute supervision of the two scenes is still necessary: the same wrong offset in both predictions disappears from their difference.

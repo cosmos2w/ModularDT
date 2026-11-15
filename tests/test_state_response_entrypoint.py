@@ -201,3 +201,13 @@ def test_invalid_profile_stop_writes_no_storage_or_alias(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match='epoch horizon'):
         cli.prepare_profile_fit({}, output, object(), engine, source_payload=None, stop_after=101)
     assert not output.exists()
+
+
+@pytest.mark.parametrize('variant', ['state_anchors', 'functional_contrast'])
+def test_fresh_formal_native_pair_requires_shared_calibration_path(tmp_path, variant):
+    recipe = {'training_profile': 'native_pair', 'thermal_native_pair': {'variant': variant},
+              'training': {'membership': 'full_train600'}}
+    path = tmp_path / 'recipe.json'
+    path.write_text(json.dumps(recipe))
+    with pytest.raises(SystemExit):
+        cli.main(['fit', '--recipe', str(path), '--output', str(tmp_path / 'run'), '--stop-after', '100'])

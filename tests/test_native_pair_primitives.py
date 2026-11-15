@@ -79,7 +79,7 @@ def test_native_resolution_floors_are_plain_json_scalars(monkeypatch):
     assert json.loads(json.dumps({'floors': objective.floors}))['floors'] == objective.floors
 
 
-def test_pair_provider_exposure_and_calibration_resume(monkeypatch):
+def test_pair_provider_exposure_and_calibration_resume(monkeypatch, tmp_path):
     from types import SimpleNamespace
     import channelthermal.training.thermal_native_pair_task as native
     import channelthermal.training.thermal_joint_response_task as historical
@@ -96,6 +96,9 @@ def test_pair_provider_exposure_and_calibration_resume(monkeypatch):
             self.sampling_dataset_id = 'native'
             self.recipe = {'training': {}}
             self.native_weights = {'field': 1.}
+            self.primary_queries = 1024
+            self.outside_temperature_weight = .05
+            self.port_angle_count = 64
             self.data_path = 'native.h5'
         def identity_payload(self):
             return {}
@@ -108,6 +111,8 @@ def test_pair_provider_exposure_and_calibration_resume(monkeypatch):
             self.weight = torch.nn.Parameter(torch.tensor(1.))
             self.core = SimpleNamespace(query_tile_size=0)
             self.architecture = 'joint'
+        def state_payload(self):
+            return {'normalization': {'scale': 1.}}
 
     class Objective:
         def __init__(self, provider, pairs, *, training_scales=None):
@@ -129,9 +134,28 @@ def test_pair_provider_exposure_and_calibration_resume(monkeypatch):
     model, anchor = native.build_thermal_native_pair_task(base)
     contrast_recipe = {**base, 'thermal_native_pair': {**base['thermal_native_pair'], 'variant': 'functional_contrast'}}
     contrast_model, contrast = native.build_thermal_native_pair_task(contrast_recipe)
+    shared_path = tmp_path / 'shared.json'
+    anchor.native_pair_calibration_output = str(shared_path)
+    anchor.native_pair_calibration_source_run = '/anchor/run'
+    anchor.native_pair_calibration_source_checkpoint = '/anchor/run/checkpoints/latest_model.pt'
     anchor.begin_training_epoch(model, 11)
+    contrast.native_pair_calibration_input = str(shared_path)
     contrast.begin_training_epoch(contrast_model, 11)
-    assert anchor.training_state_dict()['native_pair'] == contrast.training_state_dict()['native_pair']
+    assert (anchor.training_state_dict()['native_pair']['calibration']['coefficients']
+            == contrast.training_state_dict()['native_pair']['calibration']['coefficients'])
+    import copy, json
+    record = json.loads(shared_path.read_text())
+    for key, replacement in (('training_case_ids', ['wrong']), ('pairs', [['bad', 'pair']]),
+                             ('scales', [5., 1., 1., 1.]), ('definition', {}),
+                             ('adapter_state', {'normalization': {'scale': 2.}})):
+        changed = copy.deepcopy(record); changed[key] = replacement
+        path = tmp_path / f'bad_{key}.json'; path.write_text(json.dumps(changed))
+        with pytest.raises(ValueError, match='does not match'):
+            contrast.read_native_pair_calibration(path)
+    changed = copy.deepcopy(record); changed['calibration']['coefficients']['absolute'] *= 2
+    path = tmp_path / 'bad_coefficient.json'; path.write_text(json.dumps(changed))
+    with pytest.raises(ValueError, match='invalid epoch, pairs, gradients or coefficients'):
+        contrast.read_native_pair_calibration(path)
     def presentations(provider, model):
         return [row for slot in range(4) for row in provider.auxiliary_update_terms(
             model, epoch=50, update_index=slot, update_count=4)]
@@ -144,8 +168,30 @@ def test_pair_provider_exposure_and_calibration_resume(monkeypatch):
     saved = anchor.training_state_dict()
     resumed_model, resumed = native.build_thermal_native_pair_task(base)
     resumed.load_training_state_dict(saved)
+    resumed_path = tmp_path / 'resumed_anchor.json'
+    resumed.native_pair_calibration_output = str(resumed_path)
+    resumed.native_pair_calibration_source_run = '/anchor/run'
+    resumed.native_pair_calibration_source_checkpoint = '/anchor/run/checkpoints/latest_model.pt'
+    resumed.begin_training_epoch(resumed_model, 101)
+    assert json.loads(resumed_path.read_text())['source']['completed_epoch'] == 100
+    assert resumed.read_native_pair_calibration(resumed_path)['coefficients'] == saved['native_pair']['calibration']['coefficients']
     resumed.begin_training_epoch(resumed_model, 51)
     assert [w['case_pair'] for _, w in presentations(resumed, resumed_model)] == [w['case_pair'] for _, w in rows]
+    old_contrast = contrast.training_state_dict()
+    old_contrast['native_pair']['calibration']['coefficients']['absolute'] = .9
+    old_contrast['native_pair']['adoptions'] = []
+    resumed_contrast_model, resumed_contrast = native.build_thermal_native_pair_task(contrast_recipe)
+    resumed_contrast.load_training_state_dict(old_contrast)
+    adoption = resumed_contrast.adopt_native_pair_calibration(shared_path, source_epoch=100)
+    assert adoption['previous_calibration']['coefficients']['absolute'] == .9
+    assert adoption['adopted_calibration']['coefficients'] == anchor.training_state_dict()['native_pair']['calibration']['coefficients']
+    with pytest.raises(ValueError, match='already adopted'):
+        resumed_contrast.adopt_native_pair_calibration(shared_path, source_epoch=100)
+    normal_model, normal_resume = native.build_thermal_native_pair_task(contrast_recipe)
+    normal_resume.load_training_state_dict(resumed_contrast.training_state_dict())
+    normal_resume.begin_training_epoch(normal_model, 101)
+    assert (normal_resume.training_state_dict()['native_pair']['calibration']['coefficients']
+            == anchor.training_state_dict()['native_pair']['calibration']['coefficients'])
 
 
 def test_case_pair_colocation_preserves_each_visit_and_stable_order():

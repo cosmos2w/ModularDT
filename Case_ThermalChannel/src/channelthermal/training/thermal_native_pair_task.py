@@ -6,6 +6,7 @@ scenes, and its input-only assignment does not imply material identity.
 from __future__ import annotations
 
 import json
+import math
 import h5py
 import numpy as np
 import torch
@@ -17,6 +18,66 @@ from ..inverse.request_search import roi_mask
 
 TAU = 0.4149511814117432
 OBSERVABLES = ('J', 'P', 'A', 'B')
+
+
+def native_calibration_record(provider, calibration, *, pairs, seed, scales, floors, source=None):
+    """Compact, source-specific definition of one native TRAIN calibration."""
+    from pathlib import Path
+    return {'schema': 'thermal_native_pair_calibration_v1',
+            'training_case_ids': list(map(str, provider.training_case_ids)),
+            'native_data_path': str(Path(provider.data_path).expanduser().resolve()),
+            'sampling_dataset_id': provider.sampling_dataset_id,
+            'sampling_version': provider.sampling_version, 'native_seed': int(provider.seed),
+            'native_weights': dict(provider.native_weights),
+            'outside_temperature_weight': float(provider.outside_temperature_weight),
+            'port_angle_count': int(provider.port_angle_count),
+            'architecture': provider.model.architecture,
+            'adapter_state': provider.model.state_payload(),
+            'pairs': [list(pair) for pair in pairs], 'pair_seed': int(seed),
+            'scales': list(map(float, scales)), 'floors': list(map(float, floors)),
+            'tau': TAU, 'native_queries': int(provider.primary_queries),
+            'definition': {'epoch': 10, 'absolute_gradient_ratio': .25,
+                           'contrast_gradient_ratio': .10, 'warmup_epochs': 10,
+                           'ramp_epochs': 40, 'views': ['full', 'restricted'],
+                           'observables': list(OBSERVABLES)},
+            'source': source, 'calibration': calibration}
+
+
+def validate_native_calibration_record(provider, record, *, pairs, seed, scales, floors):
+    """Require matching native membership, complete pairs, scales and definition."""
+    import copy
+    if not isinstance(record, dict):
+        raise ValueError('Shared native calibration must be a JSON object.')
+    candidate = copy.deepcopy(record)
+    calibration = candidate.pop('calibration', None)
+    source = candidate.pop('source', None)
+    expected = native_calibration_record(provider, None, pairs=pairs, seed=seed,
+                                         scales=scales, floors=floors)
+    expected.pop('calibration')
+    expected.pop('source')
+    if (not isinstance(source, dict) or not isinstance(source.get('run'), str)
+            or not source['run'] or not isinstance(source.get('checkpoint'), str)
+            or not source['checkpoint'] or type(source.get('completed_epoch')) is not int
+            or source['completed_epoch'] < 10):
+        raise ValueError('Shared calibration requires its source run and completed epoch.')
+    if candidate != expected or not isinstance(calibration, dict):
+        raise ValueError('Shared calibration does not match the native TRAIN membership, pairs, scales or definition.')
+    from honf_runtime.state_response import scheduled_native_pairs
+    expected_pairs = scheduled_native_pairs(pairs, 10, {150: 3, 600: 12}[len(provider.training_case_ids)], seed)
+    try:
+        actual_pairs = tuple(tuple(pair) for pair in calibration['pairs'])
+        norms, coefficients = calibration['norms'], calibration['coefficients']
+        if (calibration['epoch'] != 10 or actual_pairs != expected_pairs
+                or set(norms) != {'native', 'absolute', 'contrast'}
+                or set(coefficients) != {'absolute', 'contrast'}
+                or any(not math.isfinite(float(value)) or float(value) <= 0
+                       for value in (*norms.values(), *coefficients.values()))
+                or float(coefficients['absolute']) != .25 * float(norms['native']) / float(norms['absolute'])
+                or float(coefficients['contrast']) != .10 * float(norms['native']) / float(norms['contrast'])):
+            raise ValueError('Shared native calibration has invalid epoch, pairs, gradients or coefficients.')
+    except (KeyError, TypeError, ZeroDivisionError):
+        raise ValueError('Shared native calibration is incomplete.') from None
+    return copy.deepcopy(calibration)
 
 
 def build_native_pair_recipe(base_recipe, *, variant, validation_pairs=(), pair_seed=0):
@@ -408,11 +469,43 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
         return model, provider
     objective = ThermalNativePairObjective(provider, pairs)
     provider.native_pair_objective = objective
-    state = {'calibration': None}
+    state = {'calibration': None, 'adoptions': []}
     schedule_seed = int(spec.get('pair_seed', 0))
     config = ResponseObjectiveConfig()
     names = ('absolute', 'contrast') if variant == 'functional_contrast' else ('absolute',)
     provider.auxiliary_loss_names = tuple('native_pair/' + name for name in names)
+    def shared_record(self, calibration, *, source_epoch):
+        return native_calibration_record(self, calibration, pairs=pairs, seed=schedule_seed,
+            scales=objective.scales, floors=objective.floors,
+            source={'run': str(self.native_pair_calibration_source_run),
+                    'checkpoint': str(self.native_pair_calibration_source_checkpoint),
+                    'checkpoint_note': 'The latest checkpoint alias may advance after publication.',
+                    'completed_epoch': int(source_epoch)})
+    def read_shared(self, path):
+        from pathlib import Path
+        record = json.loads(Path(path).expanduser().read_text())
+        return validate_native_calibration_record(self, record, pairs=pairs, seed=schedule_seed,
+                                                   scales=objective.scales, floors=objective.floors)
+    provider.native_pair_calibration_record = MethodType(shared_record, provider)
+    provider.read_native_pair_calibration = MethodType(read_shared, provider)
+
+    def adopt_shared(self, path, *, source_epoch):
+        from pathlib import Path
+        before = copy.deepcopy(state['calibration'])
+        if state['adoptions']:
+            raise ValueError('This lineage has already adopted a shared native calibration.')
+        if source_epoch >= 11 and before is None:
+            raise ValueError('A completed auxiliary epoch requires the saved original calibration.')
+        after = self.read_native_pair_calibration(path)
+        source_record = json.loads(Path(path).expanduser().read_text())['source']
+        entry = {'kind': 'native_pair_shared_calibration_adoption',
+                 'source': str(Path(path).expanduser().resolve()), 'source_epoch': int(source_epoch),
+                 'calibration_source': source_record,
+                 'previous_calibration': before, 'adopted_calibration': copy.deepcopy(after)}
+        state['calibration'] = after
+        state['adoptions'].append(entry)
+        return copy.deepcopy(entry)
+    provider.adopt_native_pair_calibration = MethodType(adopt_shared, provider)
     validation_pairs = tuple(tuple(map(str, pair)) for pair in spec.get('validation_pairs', ()))
     allowed_validation = set(map(str, provider.validation_case_ids))
     if not validation_pairs or any(len(pair) != 2 or not set(pair) <= allowed_validation for pair in validation_pairs):
@@ -421,8 +514,37 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
 
     def begin_training_epoch(self, current_model, epoch):
         current_model.core.query_tile_size = 128
+        destination = getattr(self, 'native_pair_calibration_output', None)
+        if destination and state['calibration'] is not None:
+            from pathlib import Path
+            from honf_runtime.unified_training import _atomic_json
+            path = Path(destination).expanduser()
+            record = self.native_pair_calibration_record(state['calibration'], source_epoch=epoch - 1)
+            if path.exists():
+                existing = json.loads(path.read_text())
+                self.read_native_pair_calibration(path)
+                if (existing['source']['run'] != record['source']['run']
+                        or json.dumps(existing['calibration'], sort_keys=True)
+                        != json.dumps(record['calibration'], sort_keys=True)):
+                    raise ValueError('Existing shared calibration differs from this anchor calibration.')
+            else:
+                _atomic_json(path, record)
+            self.native_pair_calibration_output = None
         if epoch != 11 or state['calibration'] is not None:
             return None
+        source = getattr(self, 'native_pair_calibration_input', None)
+        if source:
+            self.adopt_native_pair_calibration(source, source_epoch=10)
+            self.native_pair_calibration_input = None
+            return None
+        if destination:
+            from pathlib import Path
+            path = Path(destination).expanduser()
+            if path.exists():
+                if json.loads(path.read_text()).get('source', {}).get('run') != str(self.native_pair_calibration_source_run):
+                    raise ValueError('Existing shared calibration belongs to a different anchor run.')
+                state['calibration'] = self.read_native_pair_calibration(path)
+                return None
         selected = scheduled_native_pairs(pairs, 10, count, schedule_seed)
         case_ids = tuple(case_id for pair in selected for case_id in pair)
         key = SamplingKey(seed=self.seed, epoch=10, update_index=0, microbatch_index=0,
@@ -456,6 +578,10 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
         state['calibration'] = {'epoch': 10, 'pairs': selected, 'norms': norms,
             'coefficients': {'absolute': .25 * norms['native'] / norms['absolute'],
                              'contrast': .10 * norms['native'] / norms['contrast']}}
+        if destination:
+            from honf_runtime.unified_training import _atomic_json
+            _atomic_json(path, self.native_pair_calibration_record(state['calibration'], source_epoch=10))
+            self.native_pair_calibration_output = None
         return None
     provider.begin_training_epoch = MethodType(begin_training_epoch, provider)
 
@@ -489,10 +615,12 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
     old_state = getattr(provider, 'training_state_dict', lambda: {})
     old_load = getattr(provider, 'load_training_state_dict', lambda saved: None)
     def training_state_dict(self):
-        return {'native': old_state(), 'native_pair': {'calibration': copy.deepcopy(state['calibration'])}}
+        return {'native': old_state(), 'native_pair': {'calibration': copy.deepcopy(state['calibration']),
+                                                       'adoptions': copy.deepcopy(state['adoptions'])}}
     def load_training_state_dict(self, saved):
         old_load(saved['native'])
         state['calibration'] = copy.deepcopy(saved['native_pair']['calibration'])
+        state['adoptions'] = copy.deepcopy(saved['native_pair'].get('adoptions', []))
     provider.training_state_dict = MethodType(training_state_dict, provider)
     provider.load_training_state_dict = MethodType(load_training_state_dict, provider)
     previous_identity = provider.identity_payload

@@ -4936,6 +4936,9 @@ class TrainingEngine:
         if self.config.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
+        calibration_adoption = None
+        calibration_input = getattr(provider, "native_pair_calibration_input", None)
+        calibration_output = getattr(provider, "native_pair_calibration_output", None)
         if source_payload is not None:
             if external_state_continuation:
                 declaration = provider_identity.get("recipe", {}).get("continuation", {})
@@ -5134,6 +5137,13 @@ class TrainingEngine:
                 amendment["exact_non_arm_provider_state_verified"] = True
             if callable(restore_provider_state):
                 restore_provider_state(provider_state)
+            calibration_source = getattr(provider, "native_pair_calibration_input", None)
+            if resume_checkpoint is not None and calibration_source:
+                adopter = getattr(provider, "adopt_native_pair_calibration", None)
+                if not callable(adopter):
+                    raise ValueError("This provider cannot adopt native pair calibration.")
+                calibration_adoption = adopter(calibration_source, source_epoch=int(source_payload["epoch"]))
+                provider.native_pair_calibration_input = None
         if resume_checkpoint is not None:
             _consume_acknowledged_clean_stop(output, clean_stop_name, layout)
         optimizer, optimizer_specs = self._make_optimizer(
@@ -5366,6 +5376,29 @@ class TrainingEngine:
                                     or inherited_attention_sparse_child is not None
                                     or numerical_pooling_amendment is not None
                                     or output_policy_amendment is not None) else None), amendment)
+        if calibration_input or calibration_output:
+            if calibration_input:
+                provider.read_native_pair_calibration(calibration_input)
+            calibration_reference = {'schema': 'thermal_native_pair_calibration_reference_v1',
+                'role': 'consumer' if calibration_input else 'publisher',
+                'path': str(calibration_input or calibration_output)}
+            reference_path = layout.write_path('native_pair_calibration_reference.json', category='configs')
+            if reference_path.exists():
+                if json.loads(reference_path.read_text()) != calibration_reference:
+                    raise ValueError('This run already references a different shared native calibration.')
+            else:
+                _atomic_json(reference_path, calibration_reference)
+        if calibration_adoption is not None:
+            calibration_adoption = {**calibration_adoption, 'next_epoch': start_epoch}
+            receipt_path = layout.write_path(f'native_pair_calibration_adoption_epoch_{start_epoch:04d}.json',
+                                             category='logs')
+            if receipt_path.exists():
+                if (json.dumps(json.loads(receipt_path.read_text()), sort_keys=True)
+                        != json.dumps(calibration_adoption, sort_keys=True)):
+                    raise ValueError('Existing native calibration adoption receipt differs.')
+            else:
+                _atomic_json(receipt_path, calibration_adoption)
+            resume_amendments.append(calibration_adoption)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
         branch_parent = (copy.deepcopy(source_payload.get("branch_parent"))

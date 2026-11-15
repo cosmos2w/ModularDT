@@ -303,6 +303,10 @@ def main(argv=None):
                         help="Optional output-only history format; retain every recorded epoch")
     parser.add_argument("--cuda-memory-fraction", type=float,
                         help="Optional process-local CUDA allocator limit; does not change training populations")
+    parser.add_argument("--native-pair-calibration-input", type=Path,
+                        help="Read the matched native-TRAIN calibration published by the anchor run")
+    parser.add_argument("--native-pair-calibration-output", type=Path,
+                        help="Atomically publish this anchor run's native-TRAIN calibration")
     args = parser.parse_args(argv)
     if args.extend_horizon and (args.command != "fit" or not args.resume or args.stop_after is None):
         parser.error("--extend-horizon requires fit, --resume and --stop-after")
@@ -314,6 +318,19 @@ def main(argv=None):
             and (not 0 < args.cuda_memory_fraction <= 1 or torch.device(args.device).type != "cuda")):
         parser.error("--cuda-memory-fraction requires a CUDA device and a fraction in (0, 1]")
     recipe = json.loads(args.recipe.read_text())
+    if args.native_pair_calibration_input or args.native_pair_calibration_output:
+        variant = recipe.get('thermal_native_pair', {}).get('variant')
+        if (args.command != 'fit' or recipe.get('training_profile') != 'native_pair'
+                or bool(args.native_pair_calibration_input) == bool(args.native_pair_calibration_output)
+                or (args.native_pair_calibration_input and variant != 'functional_contrast')
+                or (args.native_pair_calibration_output and variant != 'state_anchors')):
+            parser.error('Native pair calibration input requires a contrast fit; output requires an anchor fit; choose only one.')
+    if (args.command == 'fit' and not args.resume and recipe.get('training_profile') == 'native_pair'
+            and recipe.get('training', {}).get('membership') == 'full_train600'):
+        variant = recipe.get('thermal_native_pair', {}).get('variant')
+        if ((variant == 'state_anchors' and not args.native_pair_calibration_output)
+                or (variant == 'functional_contrast' and not args.native_pair_calibration_input)):
+            parser.error('Fresh formal native pairs require the shared anchor calibration output or contrast input path.')
     if args.command == 'fit' and recipe.get('r16_10_posttrain') is not None:
         parser.error('Use tools/thermal_r16_10_posttrain.py for the state-preserving post-training fit.')
     configure_r16_5_execution(recipe, device=args.device)
@@ -361,6 +378,13 @@ def main(argv=None):
             options["saved_adapter_state"] = native_identity["adapter_state"]
             options["saved_normalization_source"] = native_identity["source_binding"]["normalization_source"]
     model, provider = build(recipe, device=args.device, **options)
+    if args.native_pair_calibration_input:
+        provider.native_pair_calibration_input = str(args.native_pair_calibration_input.expanduser().resolve())
+    if args.native_pair_calibration_output:
+        provider.native_pair_calibration_output = str(args.native_pair_calibration_output.expanduser().resolve())
+        provider.native_pair_calibration_source_run = str(args.output.expanduser().resolve())
+        provider.native_pair_calibration_source_checkpoint = str(
+            source_checkpoint if source_payload is not None else args.output.expanduser().resolve() / 'checkpoints/latest_model.pt')
     requested_horizon = args.stop_after
     if args.extend_horizon and recipe.get("training_profile") == "native_pair":
         requested_horizon = max(args.stop_after, saved_horizon)
