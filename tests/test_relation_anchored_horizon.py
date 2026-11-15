@@ -219,21 +219,31 @@ def test_native_pair_formal_extension_rejects_invalid_schedule_or_target():
             engine_for(old['recipe'], device='cpu', execution_horizon=target)
 
 
-def test_native_pair_cli_extension_restores_saved_payload_without_launch(tmp_path, monkeypatch):
+@pytest.mark.parametrize('sorted_recipe_json', [False, True])
+def test_native_pair_cli_extension_restores_saved_payload_without_launch(tmp_path, monkeypatch, sorted_recipe_json):
     import json
     from types import SimpleNamespace
     import tools.relation_anchored_train as cli
 
     old, new = native_pair_formal_identities()
+    weights = old['recipe']['objective']['native_weights']
+    old['recipe']['objective']['native_weights'] = dict(reversed(sorted(weights.items())))
     recipe_path = tmp_path / 'recipe.json'
-    recipe_path.write_text(json.dumps(old['recipe']))
+    recipe_path.write_text(json.dumps(old['recipe'], sort_keys=sorted_recipe_json))
     checkpoint = {'epoch': 100, 'experiment_identity': old, 'provider_training_state': {'calibration': 3}}
     provider = SimpleNamespace()
     model = object()
     monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: tmp_path / 'latest.pt')
     monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: checkpoint)
-    monkeypatch.setattr(cli, 'build', lambda recipe, *, device, resume_payload:
-                        (model, provider) if resume_payload is checkpoint else pytest.fail('lost saved provider state'))
+    def build(recipe, *, device, resume_payload):
+        assert resume_payload is checkpoint
+        # Equal JSON mappings must also preserve the saved loss-reduction and
+        # recorder order, which sorted resolved configs cannot represent.
+        saved_recipe = checkpoint['experiment_identity']['recipe']
+        assert list(recipe['objective']['native_weights']) == list(saved_recipe['objective']['native_weights'])
+        assert recipe == saved_recipe
+        return model, provider
+    monkeypatch.setattr(cli, 'build', build)
     monkeypatch.setattr(cli, 'bind_training_budget', lambda *args: None)
     monkeypatch.setattr(cli, 'prepare_profile_fit', lambda *args, **kwargs: None)
     calls = []

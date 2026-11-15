@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 import sys
@@ -349,6 +350,10 @@ def main(argv=None):
         source_payload = load_trusted_checkpoint(source_checkpoint, map_location="cpu")
         if source_payload["experiment_identity"]["recipe"] != recipe:
             raise ValueError("The recipe differs from the saved run.")
+        if args.command == "fit" and recipe.get("training_profile") == "native_pair":
+            # Resolved JSON sorts mapping keys. Retain the checkpoint's loss
+            # reduction and CSV column order after checking the same recipe.
+            recipe = copy.deepcopy(source_payload["experiment_identity"]["recipe"])
         if (args.extend_horizon and recipe.get("r16_10_family") is not None
                 and source_payload["experiment_identity"]["engine_config"]["total_epochs"] == 2000
                 and int(source_payload["epoch"]) != 2000):
