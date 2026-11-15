@@ -1,4 +1,5 @@
 import random
+import json
 from dataclasses import replace
 
 import numpy as np
@@ -82,6 +83,9 @@ def test_csv_exact_resume_and_curves(tmp_path, monkeypatch):
     assert curves == [(1, True), (2, True), (3, True), (4, True),
                       (1, True), (2, True), (3, True), (4, True)]
     assert not (tmp_path / "resume" / "comparisons").exists()
+    summary = json.loads(layout.read_path("fit_summary.json").read_text())
+    assert summary["cuda_allocator_peak"] == {"allocated_bytes": None, "reserved_bytes": None,
+                                              "scope": "unavailable on CPU"}
     assert layout.read_path("epoch_0004_model.pt").stat().st_ino == layout.read_path("latest_model.pt").stat().st_ino
 
 
@@ -209,6 +213,17 @@ def test_optional_case_reordering_preserves_membership():
     assert reordered == list(reversed(original))
     with pytest.raises(ValueError, match="exact epoch membership"):
         engine.epoch_case_order(Invalid(), 1)
+
+
+def test_cuda_peak_reports_allocator_counters_without_reset(monkeypatch):
+    device = torch.device("cuda:0")
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda supplied: 123 if supplied == device else 0)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda supplied: 456 if supplied == device else 0)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda *args: pytest.fail("must not reset"))
+    peak = runtime._cuda_allocator_peak(device)
+    assert peak["allocated_bytes"] == 123 and peak["reserved_bytes"] == 456
+    assert "build, resume and calibration" in peak["scope"]
+    assert "outside the PyTorch allocator" in peak["scope"]
 
 
 def test_schedule_correction_resume_preserves_complete_training_state(tmp_path, monkeypatch):

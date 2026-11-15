@@ -2366,6 +2366,17 @@ def _record_recovery_event(layout: RunLayout, evidence: Sequence[Path], epoch: i
             "evidence": [str(p.relative_to(layout.run_dir)) for p in evidence]})
 
 
+def _cuda_allocator_peak(device: torch.device) -> dict[str, Any]:
+    """Return this process's PyTorch allocator peak without resetting it."""
+    if device.type != "cuda":
+        return {"allocated_bytes": None, "reserved_bytes": None, "scope": "unavailable on CPU"}
+    return {"allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+            "reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+            "scope": ("PyTorch allocator peak on this process and device since initialization or its last "
+                      "external reset; includes build, resume and calibration performed in this process. "
+                      "Excludes allocations outside the PyTorch allocator.")}
+
+
 def _read_clean_stop_request(output: Path, name: str) -> dict[str, Any] | None:
     request_path = output / name
     if not request_path.is_file():
@@ -5601,7 +5612,8 @@ class TrainingEngine:
                 training_memory = None
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
-                    torch.cuda.reset_peak_memory_stats(self.device)
+                    if not csv_output:
+                        torch.cuda.reset_peak_memory_stats(self.device)
                     training_memory = {
                         "baseline_allocated_bytes": torch.cuda.memory_allocated(self.device),
                         "baseline_reserved_bytes": torch.cuda.memory_reserved(self.device),
@@ -5771,7 +5783,8 @@ class TrainingEngine:
                             torch.cuda.get_per_process_memory_fraction(self.device)
                             if hasattr(torch.cuda, "get_per_process_memory_fraction") else None
                         ),
-                        "scope": "complete epoch including data transfer, forward, backward and optimizer; excludes monitoring",
+                        "scope": ("process allocator peak since initialization or last external reset" if csv_output else
+                                  "complete epoch including data transfer, forward, backward and optimizer; excludes monitoring"),
                     })
                 train_seconds = time.perf_counter() - epoch_started
                 row: dict[str, Any] = {
@@ -6314,6 +6327,8 @@ class TrainingEngine:
             if modern_output:
                 summary.pop("identity", None)
                 summary["identity_path"] = str(layout.path("experiment_identity.json"))
+            if csv_output:
+                summary["cuda_allocator_peak"] = _cuda_allocator_peak(self.device)
             if selector_status is not None:
                 summary["best_field_selection_status"] = selector_status
             _atomic_json(layout.write_path("fit_summary.json"), summary)
