@@ -61,6 +61,29 @@ def test_prefix_rejects_legacy_sampling_explicitly(tmp_path, monkeypatch):
         native_prefix_branch.initialize_native_prefix_child(source, tmp_path / 'child', {}, None, None, engine)
 
 
+def test_prefix_rejects_mismatched_earlier_visit_count(tmp_path):
+    recipe = {'training_profile': 'field_response', 'thermal_field_response': {'variant': 'field_only'},
+              'terms': {'zeta': {'weight': 1., 'unit': 'scaled', 'meaning': 'zeta error'},
+                        'alpha': {'weight': .5, 'unit': 'scaled', 'meaning': 'alpha error'}}}
+    recipe_file = tmp_path / 'recipe.json'
+    recipe_file.write_text(json.dumps(recipe))
+    parent = tmp_path / 'parent'
+    _run('parent', recipe_file, parent, 10)
+    history = RunLayout(parent).read_path('history.csv')
+    with history.open(newline='') as stream:
+        reader = csv.DictReader(stream)
+        columns, rows = reader.fieldnames, list(reader)
+    rows[0]['case_visits'] = str(int(rows[0]['case_visits']) + 1)
+    with history.open('w', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+    recipe['thermal_field_response']['variant'] = 'field_response'
+    recipe_file.write_text(json.dumps(recipe))
+    with pytest.raises(subprocess.CalledProcessError):
+        _run('branch', recipe_file, tmp_path / 'child', RunLayout(parent).read_path('epoch_0010_model.pt'))
+
+
 @pytest.mark.parametrize('variant', ['field_anchors', 'field_response'])
 def test_prefix_children_and_fresh_process_resume(tmp_path, variant):
     recipe = {'training_profile': 'field_response', 'thermal_field_response': {'variant': 'field_only'},
@@ -69,7 +92,7 @@ def test_prefix_children_and_fresh_process_resume(tmp_path, variant):
     recipe_file = tmp_path / 'parent_recipe.json'
     recipe_file.write_text(json.dumps(recipe))
     parent = tmp_path / 'parent'
-    _run('parent', recipe_file, parent, 10)
+    _run('parent', recipe_file, parent, 12)
     parent_before = _hashes(parent)
     source = RunLayout(parent).read_path('epoch_0010_model.pt')
     recipe['thermal_field_response']['variant'] = variant
@@ -81,6 +104,7 @@ def test_prefix_children_and_fresh_process_resume(tmp_path, variant):
         layout = RunLayout(child)
         with layout.read_path('history.csv').open(newline='') as stream:
             rows = list(csv.DictReader(stream))
+        assert [int(row['epoch']) for row in rows] == list(range(1, 11))
         added = [name for name in rows[0] if name.startswith('train_losses.field_response/')]
         assert len(added) == (1 if variant == 'field_anchors' else 2)
         assert all(row[name] == '' for row in rows for name in added)

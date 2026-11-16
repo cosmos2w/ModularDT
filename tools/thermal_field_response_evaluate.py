@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
@@ -28,6 +29,22 @@ from honf_runtime.unified_training import _atomic_json
 CHANNELS = ('u', 'v', 'p', 'omega', 'temperature')
 UNITS = ('dataset velocity', 'dataset velocity', 'dataset pressure',
          'dataset vorticity', 'dataset temperature')
+ASSESSMENT9_CASES = ('0686', '0687', '0645', '0646', '0281', '0283', '0284', '0294', '0297')
+ASSESSMENT9_PAIRS = (('0686', '0687'), ('0645', '0646'), ('0283', '0284'), ('0294', '0297'))
+
+
+def bind_assessment9(provider):
+    """Bind the exposed original-test panel to a shallow evaluation-only provider."""
+    if any(provider.case_split_by_id.get(case_id) != 'test' for case_id in ASSESSMENT9_CASES):
+        raise ValueError('Assessment9 must contain only the declared original test records.')
+    if set(ASSESSMENT9_CASES) & set(provider.training_case_ids):
+        raise ValueError('Assessment9 cannot change or overlap training membership.')
+    bound = copy.copy(provider)
+    bound.validation_case_ids = ASSESSMENT9_CASES
+    bound._validation_ids = ASSESSMENT9_CASES
+    bound._validation_index_by_id = {case_id: i for i, case_id in enumerate(ASSESSMENT9_CASES)}
+    bound._validation_batches_cache = None
+    return bound
 
 
 def summarize_physical_field_changes(rows, scales, weights):
@@ -163,7 +180,8 @@ def main(argv=None):
     parser.add_argument('--recipe', required=True, type=Path)
     parser.add_argument('--run', required=True, type=Path)
     parser.add_argument('--checkpoint', default='latest')
-    parser.add_argument('--panels', required=True, type=Path)
+    parser.add_argument('--panels', type=Path)
+    parser.add_argument('--assessment9', action='store_true', help='Use the fixed historically exposed nine-case assessment.')
     parser.add_argument('--stage', required=True, choices=('development', 'formal'))
     parser.add_argument('--split', default='validation', choices=('train', 'validation'))
     parser.add_argument('--read-mode', default='restricted', choices=('restricted', 'full'))
@@ -174,17 +192,30 @@ def main(argv=None):
                         help='Also measure optional case-owned J/P and regional-temperature changes.')
     args = parser.parse_args(argv)
     recipe = json.loads(args.recipe.read_text())
-    panels = json.loads(args.panels.read_text())[args.stage]
-    cases, pairs = panels[args.split + '_case_ids'], panels[args.split + '_pairs']
+    if args.assessment9:
+        if args.panels is not None or args.split != 'validation':
+            parser.error('--assessment9 requires validation and excludes --panels')
+        cases, pairs = ASSESSMENT9_CASES, ASSESSMENT9_PAIRS
+    else:
+        if args.panels is None:
+            parser.error('--panels is required unless --assessment9 is selected')
+        panels = json.loads(args.panels.read_text())[args.stage]
+        cases, pairs = panels[args.split + '_case_ids'], panels[args.split + '_pairs']
     if len(args.export_case) > 4 or not set(args.export_case) <= set(cases):
         raise ValueError('Export at most four declared panel cases.')
     model, provider, saved, checkpoint = restore_model(recipe, args.run, args.checkpoint, args.device)
+    if args.assessment9:
+        provider = bind_assessment9(provider)
     model.core.query_tile_size = recipe['evaluation'].get('inference_query_tile_size', 1024)
     result = evaluate_field_response_panel(model, provider, epoch=saved['epoch'], split=args.split,
         case_ids=cases, pairs=pairs, mode=args.read_mode, export_cases=args.export_case, output=args.output,
         include_thermal_functionals=args.thermal_functionals)
     result.update(checkpoint=str(checkpoint), recipe=str(args.recipe), read_mode=args.read_mode,
                   epoch=saved['epoch'], stage=args.stage, evaluation_case_fraction='approximately 10% fixed IDs')
+    if args.assessment9:
+        result.update(panel='historically_exposed_assessment9', original_h5_split='test',
+                      exposure='historically exposed development evidence; not independent TEST',
+                      selection='fixed stratified panel; not a population estimate')
     _atomic_json(args.output, result)
     print(json.dumps({'output': str(args.output), 'epoch': saved['epoch'],
                       'D_delta': result['physical_field_response']['D_delta']}))

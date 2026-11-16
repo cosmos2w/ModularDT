@@ -207,6 +207,44 @@ def native_input_distance(left, right):
     return float(np.sqrt(cost[rows, cols].mean()))
 
 
+def describe_structure_control_pair(left_id, right_id, left_config, right_config, *, source_cell_size=None):
+    """Compare positions by geometry-only assignment, then assigned heat controls."""
+    from honf_runtime.state_response import InputPairDescription
+    left = describe_native_scene(left_id, 'train', left_config)
+    right = describe_native_scene(right_id, 'train', right_config)
+    if left.compatibility_key != right.compatibility_key:
+        raise ValueError('Pair requires equal prescribed physics and module count.')
+    lx = left_config['layout']
+    rx = right_config['layout']
+    domain = left_config['domain']
+    scale = np.asarray([domain['lx'], domain['ly']], dtype=np.float64)
+    first = np.asarray(lx['centers'], dtype=np.float64)
+    second = np.asarray(rx['centers'], dtype=np.float64)
+    delta = (first[:, None, :] - second[None, :, :]) / scale
+    cost = np.square(delta).sum(axis=-1)
+    rows, cols = linear_sum_assignment(cost)
+    displacement = cost[rows, cols]
+    heat_scale = float(left_config['thermal']['heat_power_max'] - left_config['thermal']['heat_power_min'])
+    heats = (np.asarray(lx['heat_powers'], dtype=np.float64)[rows]
+             - np.asarray(rx['heat_powers'], dtype=np.float64)[cols]) / heat_scale
+    participation = (float(displacement.sum() ** 2 / (len(rows) * np.square(displacement).sum()))
+                     if displacement.any() else None)
+    details = {'frame': 'physical domain coordinates', 'position_units': 'domain lengths',
+        'control': 'assigned heat powers', 'control_scale': heat_scale,
+        'assignment': 'geometry-only; not persistent member identity',
+        'displacement_participation': participation,
+        'other_prescribed_inputs': 'domain, flow, thermal and local_module match exactly'}
+    if source_cell_size is not None:
+        cell = float(source_cell_size)
+        if not math.isfinite(cell) or cell <= 0:
+            raise ValueError('Source-cell resolution must be finite and positive.')
+        details['source_cell_size'] = cell
+        details['members_moved_over_source_cell'] = int((np.linalg.norm(first[rows] - second[cols], axis=1) > cell).sum())
+    return InputPairDescription((str(left_id), str(right_id)), len(rows),
+        float(np.sqrt(displacement.mean())), float(np.sqrt(np.square(heats).mean())),
+        details)
+
+
 def colocate_native_pairs(case_order, pairs):
     """Place matched partners together while preserving first appearance order."""
     order = tuple(case_order)

@@ -26,6 +26,72 @@ class NativePairScene:
     descriptor: Any
 
 
+@dataclass(frozen=True)
+class InputPairDescription:
+    """Case-owned, input-only comparison in a declared physical frame."""
+    pair: tuple[str, str]
+    count: int
+    structure_distance: float
+    control_distance: float
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+
+def fit_input_pair_weights(descriptions, amplitude, *, count_band_boundaries=(3, 6)):
+    """Fit TRAIN geometry strata and tied-control ranks; return JSON-safe state."""
+    rows = tuple(descriptions)
+    amplitude = float(amplitude)
+    if not rows or not math.isfinite(amplitude) or not 0 <= amplitude <= 1:
+        raise ValueError('Input weighting needs TRAIN pairs and amplitude in [0, 1].')
+    if len({tuple(row.pair) for row in rows}) != len(rows):
+        raise ValueError('Input weighting pair IDs must be unique.')
+    boundaries_count = tuple(count_band_boundaries)
+    if (not boundaries_count or any(type(value) is not int or value < 1 for value in boundaries_count)
+            or tuple(sorted(set(boundaries_count))) != boundaries_count):
+        raise ValueError('Count-band boundaries must be strictly increasing positive integers.')
+    if any(type(row.count) is not int or row.count < 1 or not math.isfinite(row.structure_distance)
+           or not math.isfinite(row.control_distance) or min(row.structure_distance, row.control_distance) < 0
+           for row in rows):
+        raise ValueError('Input weighting descriptors must have valid counts and distances.')
+    boundaries = np.quantile([row.structure_distance for row in rows], [1/3, 2/3]).tolist()
+    cells = {}
+    for row in rows:
+        key = _input_pair_cell(row, boundaries, boundaries_count)
+        cells.setdefault(key, []).append(row)
+    maps, weights = {}, {}
+    for key, members in cells.items():
+        values = np.asarray([row.control_distance for row in members], dtype=np.float64)
+        unique, inverse, counts = np.unique(values, return_inverse=True, return_counts=True)
+        if len(unique) == 1:
+            scores = np.zeros(len(unique))
+        else:
+            ranks = np.cumsum(counts) - (counts - 1) / 2
+            scores = 1 - 2 * (ranks - 1) / (len(values) - 1)
+        maps[key] = {'control': unique.tolist(), 'score': scores.tolist(), 'count': len(values)}
+        for row, index in zip(members, inverse):
+            weights['|'.join(row.pair)] = float(1 + amplitude * scores[index])
+    return {'schema': 'input_pair_weighting_v1', 'amplitude': amplitude,
+            'geometry_tertiles': boundaries, 'count_band_boundaries': list(boundaries_count),
+            'cells': maps, 'train_weights': weights,
+            'train_descriptions': [{'pair': list(row.pair), 'count': row.count,
+                'structure_distance': row.structure_distance, 'control_distance': row.control_distance,
+                'details': dict(row.details)} for row in rows]}
+
+
+def _input_pair_cell(row, boundaries, count_band_boundaries=(3, 6)):
+    band = int(np.searchsorted(count_band_boundaries, row.count, side='left'))
+    return f'{band}:{int(np.searchsorted(boundaries, row.structure_distance, side="right"))}'
+
+
+def input_pair_weight(description, fitted):
+    """Apply a saved TRAIN rank map; unseen or constant cells remain neutral."""
+    cell = fitted['cells'].get(_input_pair_cell(description, fitted['geometry_tertiles'],
+                                               fitted['count_band_boundaries']))
+    if cell is None or len(cell['control']) < 2:
+        return 1.0
+    return float(1 + fitted['amplitude'] * np.interp(description.control_distance,
+                                                      cell['control'], cell['score']))
+
+
 def select_native_pairs(scenes, distance, eligible):
     """Greedy deterministic nearest disjoint matching, with case-owned eligibility.
 
@@ -114,6 +180,7 @@ class FieldResponsePair:
     references: Any
     mask: Any
     masses: Any
+    difference_weight: float = 1.0
 
 
 def field_response_losses(pairs, scales, channel_weights):
@@ -161,7 +228,9 @@ def field_response_losses(pairs, scales, channel_weights):
         error = (safe_pred - safe_ref.unsqueeze(0)) / scale
         channel_mass = mass * weights
         absolute.append((error.square().mean(dim=(0, 1)) * channel_mass).sum())
-        difference.append(((error[:, 1] - error[:, 0]).square().mean(dim=0) * channel_mass).sum())
+        beta = _nonnegative(pair.difference_weight, 'Difference weight')
+        difference_loss = ((error[:, 1] - error[:, 0]).square().mean(dim=0) * channel_mass).sum()
+        difference.append(difference_loss if beta == 1.0 else beta * difference_loss)
         counts += active.any(dim=0).to(dtype=torch.long)
     return {'absolute': torch.stack(absolute).mean(), 'difference': torch.stack(difference).mean(),
             'eligible_pair_counts': counts, 'effective_channel_weights': weights * counts / len(pairs)}

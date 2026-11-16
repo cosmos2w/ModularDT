@@ -99,3 +99,22 @@ def test_generic_attachment_uses_existing_hook_and_pair_weights():
     assert provider.auxiliary_loss_names == ('field_response/absolute', 'field_response/difference')
     assert emitted[0][0]['field_response/absolute'].weight == .25
     assert emitted[0][0]['field_response/difference'].weight == .1
+
+
+def test_train_rank_map_ties_and_difference_only_ragged_weights():
+    from honf_runtime.state_response import InputPairDescription, fit_input_pair_weights, input_pair_weight
+    rows = [InputPairDescription((f'left{i}', f'right{i}'), 2, .2, control)
+            for i, control in enumerate([.1, .1, .3, .4])]
+    fitted = fit_input_pair_weights(rows, .5)
+    values = [input_pair_weight(row, fitted) for row in rows]
+    assert values == pytest.approx([4/3, 4/3, 5/6, .5])
+    assert sum(values) == pytest.approx(4.)
+    assert input_pair_weight(InputPairDescription(('a', 'b'), 2, .2, .2), fitted) == pytest.approx(13/12)
+    assert input_pair_weight(InputPairDescription(('a', 'b'), 8, .2, .2), fitted) == 1.
+    one = fit_input_pair_weights(rows[:1], .7)
+    assert input_pair_weight(rows[0], one) == 1.
+    pred = torch.tensor([[[[0.]], [[2.]]]])
+    pair = FieldResponsePair(pred, np.zeros((2, 1, 1)), [[True]], [[2.]], .5)
+    result = field_response_losses([pair], [1.], [1.])
+    assert result['absolute'].item() == 4.
+    assert result['difference'].item() == 4.

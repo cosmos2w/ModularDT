@@ -27,15 +27,31 @@ _decoder_execution = ContextVar("anchored_decoder_execution", default="checkpoin
 
 
 @contextmanager
-def anchored_decoder_execution(mode: str):
+def anchored_decoder_execution(mode: str | float):
     """Scope tile activation handling to predictions in this runtime context."""
-    if mode not in ("checkpoint", "retain"):
-        raise ValueError("Anchored decoder execution must be 'checkpoint' or 'retain'.")
+    if isinstance(mode, str):
+        if mode not in ("checkpoint", "retain"):
+            raise ValueError("Anchored decoder execution must be 'checkpoint' or 'retain'.")
+        mode = 0.0 if mode == "checkpoint" else 1.0
+    if (isinstance(mode, bool) or not isinstance(mode, (float, int))
+            or not math.isfinite(float(mode)) or not 0 <= mode <= 1):
+        raise ValueError("Anchored decoder retained fraction must be finite and in [0, 1].")
     token = _decoder_execution.set(mode)
     try:
         yield
     finally:
         _decoder_execution.reset(token)
+
+
+def retained_decoder_tile_indices(tile_count: int, fraction: float) -> tuple[int, ...]:
+    """Evenly spaced tile centres; the final partial tile counts as one tile."""
+    if type(tile_count) is not int or tile_count < 0:
+        raise ValueError("Tile count must be a nonnegative integer.")
+    if (isinstance(fraction, bool) or not isinstance(fraction, (int, float))
+            or not math.isfinite(float(fraction)) or not 0 <= fraction <= 1):
+        raise ValueError("Decoder retained fraction must be finite and in [0, 1].")
+    count = min(tile_count, math.floor(tile_count * fraction + .5))
+    return tuple((2 * index + 1) * tile_count // (2 * count) for index in range(count))
 
 
 @dataclass(frozen=True)
@@ -1218,16 +1234,19 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
 
     def _decode_requests(self, prepared, query, modes, *, intervention=None, return_trace=False):
         self.validate_prepared_state(prepared, query)
-        checkpoint_tiles = _decoder_execution.get() == "checkpoint"
+        execution = _decoder_execution.get()
+        fraction = 0.0 if execution == "checkpoint" else float(execution)
+        tile_count = (query.num_queries + self.query_tile_size - 1) // self.query_tile_size
+        retained = set(retained_decoder_tile_indices(tile_count, fraction))
         if return_trace and query.num_queries > self.query_tile_size:
             raise ValueError("Anchored traces require an explicit query slice within query_tile_size.")
         fields = {mode: [] for mode in modes}
         counts = {mode: {} for mode in modes}
         shared_counts, traces = {}, {}
         count_keys = self._ANCHOR_COUNT_KEYS
-        for start in range(0, query.num_queries, self.query_tile_size):
+        for tile_index, start in enumerate(range(0, query.num_queries, self.query_tile_size)):
             tile = slice_query_v1(query, start, min(start + self.query_tile_size, query.num_queries))
-            if checkpoint_tiles and self.training and torch.is_grad_enabled() and not return_trace:
+            if tile_index not in retained and self.training and torch.is_grad_enabled() and not return_trace:
                 def execute(coordinates, anchor_weights, tile=tile):
                     local = replace(tile, coordinates=coordinates, anchor_weights=anchor_weights)
                     result, shared = self._decode_tile(prepared, local, modes, intervention=intervention)
@@ -1287,6 +1306,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
 __all__ = [
     "AnchoredMemberRoutingCore",
     "anchored_decoder_execution",
+    "retained_decoder_tile_indices",
     "AnchoredRoleRead",
     "EAccessDirectory",
     "EAccessRow",

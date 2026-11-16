@@ -1,6 +1,22 @@
 """Primary nomination score must average physical pair RMSE before channels."""
 import pytest
-from tools.thermal_field_response_evaluate import summarize_physical_field_changes, CHANNELS
+from types import SimpleNamespace
+from tools.thermal_field_response_evaluate import (summarize_physical_field_changes, CHANNELS,
+                                                    bind_assessment9, ASSESSMENT9_CASES)
+
+
+def test_assessment_binding_preserves_training_and_original_exposure():
+    provider = SimpleNamespace(training_case_ids=('0001',), validation_case_ids=('0686',),
+        case_split_by_id={case: 'test' for case in ASSESSMENT9_CASES}, _validation_batches_cache='old')
+    bound = bind_assessment9(provider)
+    assert bound is not provider
+    assert bound.training_case_ids == provider.training_case_ids == ('0001',)
+    assert provider.validation_case_ids == ('0686',)
+    assert bound.validation_case_ids == ASSESSMENT9_CASES
+    assert bound._validation_batches_cache is None
+    provider.case_split_by_id['0281'] = 'train'
+    with pytest.raises(ValueError, match='original test'):
+        bind_assessment9(provider)
 
 
 def test_physical_score_does_not_pool_pair_mse_or_renormalize_missing_pairs():

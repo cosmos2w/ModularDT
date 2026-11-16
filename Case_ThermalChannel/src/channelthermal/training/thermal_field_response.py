@@ -169,7 +169,17 @@ class ThermalFieldResponseObjective:
             available = bool((observation.total_masses[:, i] > 0).all())
             counts[f'field_response_eligible_{name}'] = int(available)
             counts[f'field_response_effective_weight_{name}'] = float(self.weights[i]) if available else 0.
-        return {'absolute': losses['absolute'], 'difference': losses['difference']}, counts
+        beta = 1.0
+        fitted = getattr(provider, 'field_response_weighting', None)
+        if fitted is not None:
+            from honf_runtime.state_response import input_pair_weight
+            from .thermal_native_pair_task import describe_structure_control_pair
+            description = describe_structure_control_pair(*pair, *configs)
+            beta = input_pair_weight(description, fitted)
+            counts['field_response_difference_unweighted'] = float(losses['difference'].detach())
+            counts['field_response_difference_pair_weight'] = beta
+        difference = losses['difference'] if beta == 1.0 else losses['difference'] * beta
+        return {'absolute': losses['absolute'], 'difference': difference}, counts
 
 
 def select_thermal_field_pairs(data_path, case_ids, *, case_split_by_id):
@@ -202,7 +212,8 @@ def select_thermal_field_pairs(data_path, case_ids, *, case_split_by_id):
 def build_thermal_field_response_task(recipe, *, device='cpu', resume_payload=None):
     """Bind field supervision without changing the ordinary native case order."""
     import copy
-    from honf_runtime.state_response import ResponseObjectiveConfig, attach_field_response, scheduled_native_pairs
+    from honf_runtime.state_response import (ResponseObjectiveConfig, attach_field_response,
+                                             scheduled_native_pairs, fit_input_pair_weights)
     from honf_runtime.unified_training import LossTerm, SamplingKey
     from .thermal_native_pair_task import build_thermal_native_pair_task
     from .r16_10_diagnostics import gradient_diagnostics, preserved_state
@@ -228,6 +239,26 @@ def build_thermal_field_response_task(recipe, *, device='cpu', resume_payload=No
     if len(set(pairs)) != len(pairs):
         raise ValueError('Field-response pairs must be unique.')
     provider.field_response_pairs = pairs
+    amplitude = spec.get('difference_weight_amplitude')
+    if amplitude is not None:
+        if variant != 'field_response':
+            raise ValueError('Difference weighting requires the field_response variant.')
+        from .thermal_native_pair_task import describe_structure_control_pair
+        with h5py.File(provider.data_path, 'r') as h5:
+            configs = {case_id: json.loads(h5['cases'][case_id]['case_config_json'][()])
+                       for pair in pairs for case_id in pair}
+            cells = {}
+            for pair in pairs:
+                group = h5['cases'][pair[0]]
+                spacing = [np.min(np.diff(np.unique(np.asarray(group[axis], dtype=np.float64))))
+                           for axis in ('x_grid', 'y_grid')]
+                cells[pair] = float(max(spacing))
+        descriptions = [describe_structure_control_pair(*pair, *(configs[case_id] for case_id in pair),
+                                                        source_cell_size=cells[pair])
+                        for pair in pairs]
+        provider.field_response_weighting = fit_input_pair_weights(descriptions, amplitude)
+    else:
+        provider.field_response_weighting = None
     seed = int(spec.get('pair_seed', 0))
     objective = ThermalFieldResponseObjective(provider, seed=seed)
     names = (() if variant == 'field_only' else ('absolute',) if variant == 'field_anchors'
@@ -242,6 +273,9 @@ def build_thermal_field_response_task(recipe, *, device='cpu', resume_payload=No
             'interpolation_corners', 'retained_weight_left', 'retained_weight_right',
             *('eligible_' + channel for channel in ('u', 'v', 'p', 'omega', 'temperature')),
             *('effective_weight_' + channel for channel in ('u', 'v', 'p', 'omega', 'temperature'))))
+        if provider.field_response_weighting is not None:
+            work += ('work_counts.field_response_difference_unweighted',
+                     'work_counts.field_response_difference_pair_weight')
         core = tuple(f'work_counts.field_response_{view}_{key}'
                      for view in ('shared', 'full', 'restricted') for key in model.core._ANCHOR_COUNT_KEYS)
         return (*native_columns, *work, *core)
@@ -254,13 +288,17 @@ def build_thermal_field_response_task(recipe, *, device='cpu', resume_payload=No
             if not column.startswith('work_counts.field_response_'):
                 continue
             name = column.removeprefix('work_counts.field_response_')
-            fractional = name.startswith(('retained_weight_', 'effective_weight_'))
+            fractional = name.startswith(('retained_weight_', 'effective_weight_', 'difference_'))
             if name.startswith('retained_weight_'):
                 meaning = 'Sum across executed pairs of the fraction of the source receiver-list weight on common fluid support'
             elif name.startswith('effective_weight_'):
                 meaning = 'Sum across executed pairs of the native channel weight when both receiver lists have valid channel mass'
             elif name.startswith('eligible_'):
                 meaning = 'Number of executed pairs with valid channel mass on both source receiver lists'
+            elif name == 'difference_unweighted':
+                meaning = 'Sum of unweighted field difference losses across executed pairs'
+            elif name == 'difference_pair_weight':
+                meaning = 'Sum of TRAIN-fitted difference-only pair weights across executed pairs'
             else:
                 meaning = 'Sum across executed field-response pairs of ' + name.replace('_', ' ')
             result[column] = {'dtype': 'float' if fractional else 'int',
@@ -271,9 +309,12 @@ def build_thermal_field_response_task(recipe, *, device='cpu', resume_payload=No
     state = {'calibration': copy.deepcopy(spec.get('calibration'))}
     old_identity = provider.identity_payload
     def identity_payload(self):
-        return {**old_identity(), 'field_response': {'variant': variant, 'pairs': pairs, 'pair_seed': seed,
+        response_identity = {'variant': variant, 'pairs': pairs, 'pair_seed': seed,
                 'validation_pairs': validation_pairs, 'sample_per_side': 128,
-                'scales': objective.scales.tolist(), 'weights': objective.weights.tolist()}}
+                'scales': objective.scales.tolist(), 'weights': objective.weights.tolist()}
+        if self.field_response_weighting is not None:
+            response_identity['difference_weighting'] = self.field_response_weighting
+        return {**old_identity(), 'field_response': response_identity}
     provider.identity_payload = MethodType(identity_payload, provider)
     old_state = getattr(provider, 'training_state_dict', lambda: {})
     old_load = getattr(provider, 'load_training_state_dict', lambda saved: None)
@@ -329,6 +370,8 @@ def build_thermal_field_response_task(recipe, *, device='cpu', resume_payload=No
             result['field_response/' + name] = {'panel': 'physics', 'label': 'field response ' + name,
                 'unit': 'scaled squared error', 'formula': 'symmetric weighted common positions, equal views',
                 'weight': 'epoch-10 TRAIN gradient calibration and linear ramp'}
+            if name == 'difference' and self.field_response_weighting is not None:
+                result['field_response/' + name]['formula'] += '; TRAIN-fitted pair-weighted difference'
         return result
     provider.loss_metadata = MethodType(loss_metadata, provider)
     if names:

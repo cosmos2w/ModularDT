@@ -41,6 +41,12 @@ For the maintained Thermal recipes, edit `member_routing.model.query_tile_size` 
 
 No convergence experiment is needed to measure execution cost. The short numerical comparison checks the tiling change; it does not establish final field accuracy on a new dataset.
 
+## Retain selected native decoder activations
+
+For a new field-response lineage, `execution_config.native_retention_fraction` selects the fraction of native decoder tiles whose activations remain available for backward. The default is zero, which retains the existing checkpointed execution. `tools/relation_anchored_train.py fit --native-retention-fraction 0.25` supplies the same runtime setting and saves it in the resolved configuration. Reload that saved configuration when resuming. Device selection and allocator limits remain runtime arguments.
+
+Tiles are selected deterministically at evenly distributed indices, counting the final partial tile. The rounded retained tile count can differ slightly from the requested fraction. The scope covers ordinary native predictions; the separate common-position auxiliary decoder remains checkpointed. It changes storage and backward recomputation, while retaining every physical prediction and loss term. A smaller microbatch must preserve the ordered effective batch, actual per-case query draws, loss denominators and auxiliary attachment. Check numerical agreement on physical support and complete-epoch time on the same device before selecting either change; reduced padding or one faster dense batch does not establish a complete-epoch gain.
+
 ## Existing checkpoints
 
 Ordinary loading and resume restore the saved tile value. Editing a fresh-run recipe does not change an existing lineage's saved configuration. The current Thermal CLI has no query-tile override argument.

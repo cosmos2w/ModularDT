@@ -292,7 +292,9 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
         if self._budget_binding is not None:
             elapsed+=time.monotonic()-self._segment_started
         self.state = copy.deepcopy(state)
-        self.state["training_elapsed_seconds"]=max(elapsed,self.state.get("training_elapsed_seconds",0.))
+        if (self._budget_binding is not None or "training_elapsed_seconds" in self.state
+                or elapsed != 0.):
+            self.state["training_elapsed_seconds"]=max(elapsed,self.state.get("training_elapsed_seconds",0.))
         self.training_samples=int(self.state.pop("training_samples",self.training_samples))
         self.validation_samples=int(self.state.pop("validation_samples",self.validation_samples))
         if "organizer" in self.state and self.organizer is not None:

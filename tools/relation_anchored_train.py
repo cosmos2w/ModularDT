@@ -40,6 +40,23 @@ def configure_r16_5_execution(recipe, *, device):
     configure(recipe, device=device)
 
 
+def configure_native_retention(provider, fraction):
+    """Scope runtime retention to native prediction, leaving auxiliary calls checkpointed."""
+    from honf_forward_core.interaction_reused_member_routing.anchored import anchored_decoder_execution
+
+    with anchored_decoder_execution(fraction):
+        pass  # validate even if no training call follows
+    if fraction == 0:
+        return
+    predict = provider.predict_native
+
+    def predict_native(*args, **kwargs):
+        with anchored_decoder_execution(fraction):
+            return predict(*args, **kwargs)
+
+    provider.predict_native = predict_native
+
+
 def build(recipe, *, device, response_scales=None, saved_adapter_state=None, saved_normalization_source=None,
           resume_payload=None):
     """Dispatch supported adapters while preserving their saved recipe schemas."""
@@ -62,7 +79,9 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
             raise ValueError("Field-response fitting currently requires the Thermal adapter.")
         from channelthermal.training.thermal_field_response import build_thermal_field_response_task
 
-        return build_thermal_field_response_task(recipe, device=device, resume_payload=resume_payload)
+        model, provider = build_thermal_field_response_task(recipe, device=device, resume_payload=resume_payload)
+        configure_native_retention(provider, recipe.get("execution_config", {}).get("native_retention_fraction", 0.0))
+        return model, provider
     if profile == "native_pair":
         if not thermal:
             raise ValueError("Native-pair fitting currently requires the Thermal adapter.")
@@ -315,6 +334,8 @@ def main(argv=None):
                         help="Optional output-only history format; retain every recorded epoch")
     parser.add_argument("--cuda-memory-fraction", type=float,
                         help="Optional process-local CUDA allocator limit; does not change training populations")
+    parser.add_argument("--native-retention-fraction", type=float,
+                        help="Native decoder tile fraction to retain for a new field-response run")
     parser.add_argument("--native-pair-calibration-input", type=Path,
                         help="Read the matched native-TRAIN calibration published by the anchor run")
     parser.add_argument("--native-pair-calibration-output", type=Path,
@@ -330,6 +351,13 @@ def main(argv=None):
             and (not 0 < args.cuda_memory_fraction <= 1 or torch.device(args.device).type != "cuda")):
         parser.error("--cuda-memory-fraction requires a CUDA device and a fraction in (0, 1]")
     recipe = json.loads(args.recipe.read_text())
+    if args.native_retention_fraction is not None:
+        if args.command != 'fit' or recipe.get('training_profile') != 'field_response':
+            parser.error('--native-retention-fraction requires a field-response fit')
+        from honf_forward_core.interaction_reused_member_routing.anchored import anchored_decoder_execution
+        with anchored_decoder_execution(args.native_retention_fraction):
+            pass
+        recipe.setdefault('execution_config', {})['native_retention_fraction'] = args.native_retention_fraction
     if args.native_pair_calibration_input or args.native_pair_calibration_output:
         variant = recipe.get('thermal_native_pair', {}).get('variant')
         if (args.command != 'fit' or recipe.get('training_profile') != 'native_pair'
