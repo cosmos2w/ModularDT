@@ -296,3 +296,59 @@ def test_native_pair_formal_500_to_3000_preserves_original_clamped_schedule(vari
     assert schedule.value(501) == schedule.value(1000) == .0003
     assert .00003 < schedule.value(1500) < .0003
     assert all(schedule.value(epoch) == .00003 for epoch in (2000, 2001, 2500, 3000))
+
+
+def test_native_pair_engine_actually_resumes_epoch500_past_schedule_horizon(tmp_path, monkeypatch):
+    import json
+    from dataclasses import asdict, replace
+
+    import torch
+    from torch import nn
+
+    import honf_runtime.unified_training as runtime
+    from tests.test_csv_resume_handoff import assert_tree_equal
+    from tests.test_unified_csv_recording import CsvToyProvider, _config_for_test
+
+    _, identity = native_pair_formal_identities()
+    schedule = runtime.ScheduleSpec(**identity['optimizer_schedule_contract'][0]['schedule'])
+
+    class NativePairRuntimeProvider(CsvToyProvider):
+        def identity_payload(self):
+            return {**super().identity_payload(), 'training': {'optimizer_schedule': asdict(schedule)}}
+
+        def optimizer_groups(self, model, arm, stage):
+            return tuple(replace(group, schedule=schedule)
+                         for group in super().optimizer_groups(model, arm, stage))
+
+    # Exercise the real fit loader and append path, with a tiny CPU dataset.
+    monkeypatch.setattr(runtime, '_render_loss_curves', lambda *args, **kwargs: None)
+    def fit(output, horizon, stop, *, resume=False):
+        torch.manual_seed(123)
+        recipe_path = output / 'configs/resolved_config.json'
+        if not resume:
+            runtime._atomic_json(recipe_path, identity['recipe'])
+        recipe = json.loads(recipe_path.read_text())
+        settings = replace(_config_for_test(), total_epochs=horizon, monitor_every=100,
+                           microbatch_cases=5, effective_cases=5, latest_every=None,
+                           curve_every=None, checkpoint_epochs=tuple(range(100, horizon + 1, 100)))
+        runtime.TrainingEngine(settings, device='cpu').fit(
+            nn.Linear(1, 1), NativePairRuntimeProvider(), output,
+            identity={'workflow': identity['workflow'], 'recipe': recipe},
+            arm='adaptive_detail', stop_after=stop,
+            resume_checkpoint=('latest' if resume else None), allow_horizon_extension=resume)
+        return torch.load(output / 'checkpoints/latest_model.pt', weights_only=False)
+
+    full, resumed = tmp_path / 'full', tmp_path / 'resumed'
+    expected = fit(full, 3000, 501)
+    source = fit(resumed, 500, 500)
+    history = resumed / 'metrics/history.csv'
+    definitions = resumed / 'configs/metric_definitions.json'
+    prefix, schema = history.read_bytes(), definitions.read_bytes()
+    actual = fit(resumed, 3000, 501, resume=True)
+    assert source['epoch'] == 500 and actual['epoch'] == 501
+    assert history.read_bytes().startswith(prefix) and definitions.read_bytes() == schema
+    assert actual['experiment_identity']['engine_config']['total_epochs'] == 3000
+    assert actual['optimizer_schedule_contract'] == source['optimizer_schedule_contract']
+    for key in ('model_state_dict', 'optimizer_state_by_name', 'rng_state', 'sampler_state',
+                'provider_training_state'):
+        assert_tree_equal(actual[key], expected[key])

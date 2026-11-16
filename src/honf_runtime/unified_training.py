@@ -5105,8 +5105,8 @@ class TrainingEngine:
                 provider_amendment = getattr(provider, "resume_identity_amendment", None)
                 if (allow_horizon_extension and saved_identity.get("recipe", {}).get("training_profile") == "native_pair"
                         and (resume_checkpoint is None or int(source_payload["epoch"]) < 100
-                             or not int(source_payload["epoch"]) < int(stop_after) <= self.config.total_epochs <= 2000)):
-                    raise ValueError("Native-pair formal extension requires the same run's completed epoch-100 state and a later declared stop.")
+                             or not int(source_payload["epoch"]) < int(stop_after) <= self.config.total_epochs)):
+                    raise ValueError("Native-pair formal extension requires the same run's completed state at or after epoch 100 and a later declared stop.")
                 if (resume_checkpoint is not None and saved_identity != sealed_identity
                         and callable(provider_amendment) and not allow_microbatch_change
                         and not allow_horizon_extension and not allow_query_tile_change):
