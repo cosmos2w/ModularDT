@@ -352,3 +352,63 @@ def test_native_pair_engine_actually_resumes_epoch500_past_schedule_horizon(tmp_
     for key in ('model_state_dict', 'optimizer_state_by_name', 'rng_state', 'sampler_state',
                 'provider_training_state'):
         assert_tree_equal(actual[key], expected[key])
+
+@pytest.mark.parametrize('variant', ['field_anchors', 'field_response'])
+def test_field_response_formal_extension_preserves_scientific_identity_and_rejects_changes(variant):
+    from honf_runtime.unified_training import _engine_config_payload
+    from tools.relation_anchored_train import engine_for
+    old, _ = native_pair_formal_identities()
+    old['recipe']['training_profile'] = 'field_response'
+    old['recipe']['thermal_field_response'] = {'variant': variant, 'calibration': {'absolute': .8}}
+    old['provider_identity']['field_response'] = {'variant': variant, 'scales': [1., 2.], 'weights': [.5, .5]}
+    new = copy.deepcopy(old)
+    new['engine_config'] = _engine_config_payload(engine_for(old['recipe'], device='cpu', execution_horizon=1000).config)
+    assert _resume_identity_amendment(old, new, allow_horizon_extension=True)['kind'] == 'explicit_field_response_formal_horizon_extension'
+    assert new['engine_config'].get('monitor_epochs', ()) == old['engine_config'].get('monitor_epochs', ())
+    for path, value in [(('provider_identity', 'field_response', 'weights'), [.4, .6]),
+                        (('recipe', 'thermal_field_response', 'calibration'), {'absolute': .9}),
+                        (('provider_identity', 'normalization', 'original'), [3., 2.]),
+                        (('engine_config', 'seed'), 7)]:
+        changed = copy.deepcopy(new)
+        target = changed
+        for key in path[:-1]: target = target[key]
+        target[path[-1]] = value
+        with pytest.raises(ValueError):
+            _resume_identity_amendment(old, changed, allow_horizon_extension=True)
+    later = copy.deepcopy(new)
+    later['engine_config'] = _engine_config_payload(engine_for(old['recipe'], device='cpu', execution_horizon=1200).config)
+    assert _resume_identity_amendment(new, later, allow_horizon_extension=True)['previous_horizon'] == 1000
+    assert _resume_identity_amendment(new, new, allow_horizon_extension=True) is None
+
+
+def test_field_response_cli_extension_reuses_saved_horizon_and_sampler(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    import tools.relation_anchored_train as cli
+    from honf_runtime.unified_training import _engine_config_payload
+    old, _ = native_pair_formal_identities()
+    old['recipe']['training_profile'] = 'field_response'
+    old['recipe']['thermal_field_response'] = {'variant': 'field_response'}
+    old['recipe']['thermal_state_response'] = {'enabled': False}
+    recipe = tmp_path/'recipe.json'; recipe.write_text(json.dumps(old['recipe'], sort_keys=True))
+    checkpoint = {'epoch': 100, 'experiment_identity': old, 'provider_training_state': {'field_response': {'calibration': .4}}}
+    provider = SimpleNamespace(); model = object(); calls = []
+    monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: tmp_path/'latest.pt')
+    monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: checkpoint)
+    monkeypatch.setattr(cli, 'build', lambda recipe, *, device, resume_payload: (model, provider) if resume_payload is checkpoint else None)
+    monkeypatch.setattr(cli, 'bind_training_budget', lambda *args: None)
+    monkeypatch.setattr(cli, 'prepare_profile_fit', lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.TrainingEngine, 'fit', lambda engine, *args, **kwargs: calls.append((engine.config, kwargs)) or {'completed_epoch': checkpoint['epoch']})
+    args = ['fit', '--recipe', str(recipe), '--output', str(tmp_path/'run'), '--device', 'cpu', '--resume', 'latest', '--extend-horizon', '--stop-after', '1000']
+    assert cli.main(args) == 0
+    assert calls[-1][0].total_epochs == provider._round6_sampling_epoch_limit == 1000
+    assert calls[-1][1]['identity']['recipe'] == old['recipe']
+    checkpoint['epoch'] = 300
+    checkpoint['experiment_identity'] = copy.deepcopy(old)
+    checkpoint['experiment_identity']['engine_config'] = _engine_config_payload(cli.engine_for(old['recipe'], device='cpu', execution_horizon=1000).config)
+    assert cli.main(args[:-1] + ['500']) == 0
+    assert calls[-1][0].total_epochs == 1000 and calls[-1][1]['stop_after'] == 500
+    changed = copy.deepcopy(old['recipe']); changed['training']['seed'] += 1
+    recipe.write_text(json.dumps(changed))
+    with pytest.raises(ValueError, match='recipe differs'):
+        cli.main(args)
