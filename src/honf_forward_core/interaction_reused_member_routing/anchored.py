@@ -7,6 +7,8 @@ those indices remain connected to the applied final-cycle EM/EE tensors.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
 from typing import Any, Mapping
 
@@ -19,6 +21,21 @@ from ..content_hypergraph.query_chunks_v1 import slice_query_v1
 from ..read_execution import read_execution, validate_read_mode
 from .core import InteractionJointOutput, InteractionReusedMemberRoutingCore, _pack_work_counts, _tensor_version
 from .primitives import build_joint_member_measure, prior_weighted_scores, read_probability
+
+
+_decoder_execution = ContextVar("anchored_decoder_execution", default="checkpoint")
+
+
+@contextmanager
+def anchored_decoder_execution(mode: str):
+    """Scope tile activation handling to predictions in this runtime context."""
+    if mode not in ("checkpoint", "retain"):
+        raise ValueError("Anchored decoder execution must be 'checkpoint' or 'retain'.")
+    token = _decoder_execution.set(mode)
+    try:
+        yield
+    finally:
+        _decoder_execution.reset(token)
 
 
 @dataclass(frozen=True)
@@ -1201,6 +1218,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
 
     def _decode_requests(self, prepared, query, modes, *, intervention=None, return_trace=False):
         self.validate_prepared_state(prepared, query)
+        checkpoint_tiles = _decoder_execution.get() == "checkpoint"
         if return_trace and query.num_queries > self.query_tile_size:
             raise ValueError("Anchored traces require an explicit query slice within query_tile_size.")
         fields = {mode: [] for mode in modes}
@@ -1209,7 +1227,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         count_keys = self._ANCHOR_COUNT_KEYS
         for start in range(0, query.num_queries, self.query_tile_size):
             tile = slice_query_v1(query, start, min(start + self.query_tile_size, query.num_queries))
-            if self.training and torch.is_grad_enabled() and not return_trace:
+            if checkpoint_tiles and self.training and torch.is_grad_enabled() and not return_trace:
                 def execute(coordinates, anchor_weights, tile=tile):
                     local = replace(tile, coordinates=coordinates, anchor_weights=anchor_weights)
                     result, shared = self._decode_tile(prepared, local, modes, intervention=intervention)
@@ -1268,6 +1286,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
 
 __all__ = [
     "AnchoredMemberRoutingCore",
+    "anchored_decoder_execution",
     "AnchoredRoleRead",
     "EAccessDirectory",
     "EAccessRow",

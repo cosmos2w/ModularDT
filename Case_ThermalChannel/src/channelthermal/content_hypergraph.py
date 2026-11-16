@@ -404,6 +404,7 @@ class ThermalContentHypergraphAdapter(nn.Module):
         fluid_xy: torch.Tensor,
         local_query_points: torch.Tensor | None,
         ntheta: int,
+        field_only: bool = False,
     ) -> tuple[QueryBatch, NativeGridUnion, dict[str, NativeStencil], torch.Tensor, NativeCurlReadStencil,
                torch.Tensor, torch.Tensor, torch.Tensor, dict[str, tuple[int, ...]]]:
         if type(ntheta) is not int or ntheta not in (THERMAL_CONTENT_SURFACE_POINTS, THERMAL_CONTENT_NATIVE_THETA_COUNT):
@@ -429,11 +430,12 @@ class ThermalContentHypergraphAdapter(nn.Module):
             ntheta, device=centers.device, dtype=centers.dtype
         ) * (2 * torch.pi / ntheta)
         normals = torch.stack((theta.cos(), theta.sin()), -1)
-        roles = {
-            "fluid": fluid_xy,
-            "surface": centers[:, :, None] + radius[:, None, :, None] * normals[None, None],
-            "outside": centers[:, :, None] + (radius + delta)[:, None, :, None] * normals[None, None],
-        }
+        roles = {"fluid": fluid_xy}
+        if not field_only:
+            roles.update(surface=centers[:, :, None] + radius[:, None, :, None] * normals[None, None],
+                         outside=centers[:, :, None] + (radius + delta)[:, None, :, None] * normals[None, None])
+        if field_only and local_query_points is not None:
+            raise ValueError("Field-only extraction does not consume material receivers.")
         if local_query_points is not None:
             local = torch.as_tensor(local_query_points, device=centers.device, dtype=centers.dtype)
             if local.ndim == 3:
@@ -448,9 +450,14 @@ class ThermalContentHypergraphAdapter(nn.Module):
         solid_mask = build_native_solid_mask(
             centers, present, radius, lengths, nx=self.nx, ny=self.ny
         )
-        curl = build_native_curl_read_stencil(
-            fluid_xy, lengths, solid_mask, nx=self.nx, ny=self.ny
-        )
+        curl_xy = fluid_xy
+        if field_only:
+            # Compute curl at each interpolation corner, then interpolate the
+            # physical field back to the original (possibly off-centre) point.
+            corners = stencils['fluid'].indices
+            curl_xy = torch.stack((corners % self.nx + .5, corners // self.nx + .5), -1).to(fluid_xy)
+            curl_xy = (curl_xy * (lengths / lengths.new_tensor([self.nx, self.ny]))[:, None, None]).reshape(centers.shape[0], -1, 2)
+        curl = build_native_curl_read_stencil(curl_xy, lengths, solid_mask, nx=self.nx, ny=self.ny)
         union = merge_native_grid_receiver_union(
             stencils,
             roles,
@@ -582,6 +589,7 @@ class ThermalContentHypergraphAdapter(nn.Module):
         forced_frontier: Mapping[int, Any] | None = None,
         context_message_removal: Mapping[str, Any] | None = None,
         capture_context_trace: bool = False,
+        field_only: bool = False,
     ) -> PreparedThermalContentHypergraph:
         """Prepare one shared edge bank and union for all native output roles."""
         scene_batch = self.scene_batch(structure, scene_key=scene_key)
@@ -601,7 +609,7 @@ class ThermalContentHypergraphAdapter(nn.Module):
             organization = (self.core.prepare(scene_batch, **options) if forced_frontier is None else
                             self.core.prepare(scene_batch, forced_frontier=forced_frontier, **options))
         (query, union, stencils, solid_mask, curl_stencil, lengths, delta,
-         conductivity, role_shapes) = self._query_union(scene_batch, fluid_xy, local_query_points, ntheta)
+         conductivity, role_shapes) = self._query_union(scene_batch, fluid_xy, local_query_points, ntheta, field_only)
         if getattr(self.core, "locator_mode", None) is not None:
             if query.anchor_indices is None or query.anchor_weights is None:
                 raise ValueError("Anchored Thermal preparation omitted its E coverage carrier.")
@@ -702,8 +710,16 @@ class ThermalContentHypergraphAdapter(nn.Module):
             mean = self.field_mean.to(device=flow_normalized.device, dtype=flow_normalized.dtype)
             std = self.field_std.to(device=flow_normalized.device, dtype=flow_normalized.dtype)
             fluid_flow = physical_uvp_native_curl(flow_normalized, prepared.curl_stencil, mean, std)
+            if "surface" not in prepared.stencils:
+                stencil = prepared.stencils['fluid']
+                fluid_flow = (fluid_flow.reshape(*stencil.weights.shape, 4)
+                              * stencil.weights.to(fluid_flow)[..., None]).sum(-2)
+                fluid_flow = fluid_flow * stencil.valid[..., None]
         fluid_temperature = interpolate_native(physical_temperature[..., None], prepared.stencils["fluid"])
         pred_field = torch.cat((fluid_flow, fluid_temperature), dim=-1)
+
+        if "surface" not in prepared.stencils:
+            return {"pred_field": pred_field, "fluid_temperature": fluid_temperature}
 
         surface_shape = prepared.role_shapes["surface"]
         surface_temperature = interpolate_native(

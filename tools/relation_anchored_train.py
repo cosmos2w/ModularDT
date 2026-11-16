@@ -55,8 +55,14 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     profile = recipe.get("training_profile")
-    if profile is not None and profile not in ("state_response", "native_pair"):
+    if profile is not None and profile not in ("state_response", "native_pair", "field_response"):
         raise ValueError(f"Unknown training profile {profile!r}.")
+    if profile == "field_response":
+        if not thermal:
+            raise ValueError("Field-response fitting currently requires the Thermal adapter.")
+        from channelthermal.training.thermal_field_response import build_thermal_field_response_task
+
+        return build_thermal_field_response_task(recipe, device=device, resume_payload=resume_payload)
     if profile == "native_pair":
         if not thermal:
             raise ValueError("Native-pair fitting currently requires the Thermal adapter.")
@@ -339,7 +345,7 @@ def main(argv=None):
     source_payload = None
     if ((recipe.get("thermal_state_response", {}).get("enabled")
          or recipe.get("r16_10_family") is not None
-         or recipe.get("training_profile") in ("state_response", "native_pair"))
+         or recipe.get("training_profile") in ("state_response", "native_pair", "field_response"))
             and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
         selector = args.checkpoint if args.command == "evaluate" else args.resume
         source_checkpoint = resolve_checkpoint(args.output, selector)
@@ -349,7 +355,7 @@ def main(argv=None):
         source_payload = load_trusted_checkpoint(source_checkpoint, map_location="cpu")
         if source_payload["experiment_identity"]["recipe"] != recipe:
             raise ValueError("The recipe differs from the saved run.")
-        if args.command == "fit" and recipe.get("training_profile") == "native_pair":
+        if args.command == "fit" and recipe.get("training_profile") in ("native_pair", "field_response"):
             # Resolved JSON sorts mapping keys. Retain the checkpoint's loss
             # reduction and CSV column order after checking the same recipe.
             recipe = copy.deepcopy(source_payload["experiment_identity"]["recipe"])
@@ -368,7 +374,7 @@ def main(argv=None):
                 raise ValueError("Native-pair extension requires at least a completed formal epoch 100 and a later stop.")
     options = {}
     if source_payload is not None and (recipe.get("r16_10_family") is not None
-                                       or recipe.get("training_profile") in ("state_response", "native_pair")):
+                                       or recipe.get("training_profile") in ("state_response", "native_pair", "field_response")):
         options["resume_payload"] = source_payload
     if (source_payload is not None and recipe.get("training_profile") != "native_pair"
             and recipe.get("thermal_state_response", {}).get("enabled")):
@@ -407,7 +413,7 @@ def main(argv=None):
                   "optimizer_groups": [spec.name for spec in provider.optimizer_groups(model, arm, "joint")]}
     elif args.command == "fit":
         bind_training_budget(provider, recipe, args.output)
-        if recipe.get("training_profile") in ("state_response", "native_pair"):
+        if recipe.get("training_profile") in ("state_response", "native_pair", "field_response"):
             prepare_profile_fit(recipe, args.output, model, engine,
                                 source_payload=source_payload, stop_after=args.stop_after)
         if recipe["dataset"] == "wind":

@@ -44,7 +44,8 @@ def summarize_changes(rows, scales):
 
 
 def evaluate_pair_panel(model, provider, *, epoch, split, case_ids, pairs, scales, floors,
-                        mode, export_cases, output):
+                        mode, export_cases, output, case_observer=None,
+                        allow_missing_field_channels=False):
     """Reuse each native prediction for its scalar and common-fluid diagnostics."""
     pairs = tuple(tuple(map(str, pair)) for pair in pairs)
     cases = tuple(map(str, case_ids))
@@ -62,6 +63,8 @@ def evaluate_pair_panel(model, provider, *, epoch, split, case_ids, pairs, scale
             raise ValueError('Pair domain, controls, material and module count must be compatible.')
 
     def observe(case_id, prediction, batch):
+        if case_observer is not None:
+            case_observer(case_id, prediction, batch)
         if case_id not in needed:
             return
         raw = {'config': configs[case_id]}
@@ -119,12 +122,19 @@ def evaluate_pair_panel(model, provider, *, epoch, split, case_ids, pairs, scale
                 a = left['field'][mask, component].astype(float) - left['target'][mask, component].astype(float)
                 b = right['field'][mask, component].astype(float) - right['target'][mask, component].astype(float)
                 if not len(a):
+                    if allow_missing_field_channels:
+                        residuals.append({'field': name, 'available': False, 'valid_positions': 0})
+                        continue
                     raise ValueError('No common valid fluid positions for residual diagnostics.')
                 common_mse = float(np.square((a + b) / 2).mean())
                 change_mse = float(np.square(b - a).mean())
                 endpoint_mse = float(((np.square(a) + np.square(b)) / 2).mean())
                 residuals.append({'field': name, 'common_rmse': common_mse ** .5,
                                   'change_rmse': change_mse ** .5, 'equal_scene_rmse': endpoint_mse ** .5,
+                                  'change_mae': float(np.abs(b - a).mean()),
+                                  'reference_change_rmse': float(np.sqrt(np.square(
+                                      right['target'][mask, component].astype(float)
+                                      - left['target'][mask, component].astype(float)).mean())),
                                   'squared_error_identity_residual': endpoint_mse - common_mse - .25 * change_mse,
                                   'valid_positions': int(mask.sum())})
             config = configs[pair[0]]

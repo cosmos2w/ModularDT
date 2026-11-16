@@ -414,7 +414,8 @@ class ThermalNativePairObjective:
         return {'absolute': absolute, 'contrast': contrast}, work
 
 
-def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_payload=None):
+def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_payload=None,
+                                   _field_response_base=False):
     """Build fresh native-only, matched-anchor or matched-contrast training."""
     import copy
     from types import MethodType
@@ -476,6 +477,8 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
         finally:
             current_model.train(mode)
     provider.validation_objective_predictions = MethodType(validation_objective_predictions, provider)
+    if _field_response_base:
+        return model, provider
     pairs, unmatched = select_thermal_native_pairs(provider.data_path, provider.training_case_ids)
     population = len(provider.training_case_ids)
     count = {150: 3, 600: 12}.get(population)

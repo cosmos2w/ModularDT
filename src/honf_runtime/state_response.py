@@ -55,6 +55,155 @@ def select_native_pairs(scenes, distance, eligible):
     return tuple(pairs), tuple(sorted(set(ids) - used))
 
 
+def select_degree_two_native_pairs(scenes, distance, eligible):
+    """Extend greedy matching with local edges, bounded to degree two.
+
+    Each compatibility group's added distances lie within its matched distance
+    range. Eligibility and distance must depend only on inputs and support.
+    Returns the disjoint matching, extended matching and all eligible edges
+    (ID pairs with their distance), in deterministic selection order.
+    """
+    scenes = tuple(sorted(scenes, key=lambda row: row.case_id))
+    ids = [row.case_id for row in scenes]
+    if len(ids) != len(set(ids)) or any(not value for value in ids):
+        raise ValueError('Native scene IDs must be unique and nonempty.')
+    edges = []
+    for left, right in itertools.combinations(scenes, 2):
+        if left.split != right.split or left.compatibility_key != right.compatibility_key:
+            continue
+        d = float(distance(left.descriptor, right.descriptor))
+        if not math.isfinite(d):
+            continue
+        if d < 0:
+            raise ValueError('Input distance must be nonnegative.')
+        if d > 0 and eligible(left, right):
+            edges.append((d, left.case_id, right.case_id, left))
+    edges.sort(key=lambda row: row[:3])
+    degree = {value: 0 for value in ids}
+    matching = []
+    for edge in edges:
+        _, left_id, right_id, _ = edge
+        if not degree[left_id] and not degree[right_id]:
+            matching.append(edge)
+            degree[left_id] += 1
+            degree[right_id] += 1
+    selected = list(matching)
+    for edge in edges:
+        d, left_id, right_id, scene = edge
+        group_distances = [item[0] for item in matching
+                           if item[3].split == scene.split and item[3].compatibility_key == scene.compatibility_key]
+        if (edge not in matching and group_distances and min(group_distances) <= d <= max(group_distances)
+                and degree[left_id] < 2 and degree[right_id] < 2):
+            selected.append(edge)
+            degree[left_id] += 1
+            degree[right_id] += 1
+    pair_ids = lambda rows: tuple((row[1], row[2]) for row in rows)
+    return pair_ids(matching), pair_ids(selected), tuple((row[1], row[2], row[0]) for row in edges)
+
+
+@dataclass(frozen=True)
+class FieldResponsePair:
+    """Ragged common-position observations for one pair of saved scenes.
+
+    Predictions are [view, scene, receiver, channel], references are
+    [scene, receiver, channel], and mask/masses are [receiver, channel].
+    Masses are final integration coefficients, including sampling correction;
+    they are deliberately not renormalized by the sampled mass.
+    """
+    predictions: torch.Tensor
+    references: Any
+    mask: Any
+    masses: Any
+
+
+def field_response_losses(pairs, scales, channel_weights):
+    """Reduce common-support absolute and difference errors per channel.
+
+    Pair losses retain the declared channel weights when a channel is absent,
+    and use equal views, scenes (absolute only), and scheduled pairs. Invalid
+    reference values outside the mask are never used in arithmetic.
+    """
+    pairs = tuple(pairs)
+    if not pairs:
+        raise ValueError('At least one field-response pair is required.')
+    first = pairs[0].predictions
+    if not torch.is_tensor(first) or not first.is_floating_point():
+        raise TypeError('Predictions must be floating-point tensors.')
+    scale = torch.as_tensor(scales, dtype=first.dtype, device=first.device)
+    weights = torch.as_tensor(channel_weights, dtype=first.dtype, device=first.device)
+    if scale.ndim != 1 or not scale.numel() or weights.shape != scale.shape:
+        raise ValueError('Channel scales and weights must be aligned vectors.')
+    if not bool(torch.isfinite(scale).all()) or bool((scale <= 0).any()):
+        raise ValueError('Channel scales must be finite and positive.')
+    if not bool(torch.isfinite(weights).all()) or bool((weights < 0).any()):
+        raise ValueError('Channel weights must be finite and nonnegative.')
+    counts = torch.zeros_like(scale, dtype=torch.long)
+    absolute, difference = [], []
+    for pair in pairs:
+        pred = pair.predictions
+        if (not torch.is_tensor(pred) or pred.device != first.device or pred.dtype != first.dtype
+                or pred.ndim != 4 or pred.shape[0] < 1 or pred.shape[1] != 2
+                or pred.shape[2] < 1 or pred.shape[3] != scale.numel()):
+            raise ValueError('Predictions need aligned [view, two scenes, receiver, channel] axes.')
+        ref = torch.as_tensor(pair.references, device=pred.device, dtype=pred.dtype)
+        mask = torch.as_tensor(pair.mask, device=pred.device, dtype=torch.bool)
+        mass = torch.as_tensor(pair.masses, device=pred.device, dtype=pred.dtype)
+        if ref.shape != pred.shape[1:] or mask.shape != pred.shape[2:] or mass.shape != mask.shape:
+            raise ValueError('References, masks and masses must align with pair predictions.')
+        if not bool(torch.isfinite(mass).all()) or bool((mass < 0).any()) or bool((mass[~mask] != 0).any()):
+            raise ValueError('Masses must be finite, nonnegative and zero outside valid support.')
+        active = mask & (mass > 0)
+        if not bool(torch.isfinite(ref[:, mask]).all()) or not bool(torch.isfinite(pred[:, :, mask]).all()):
+            raise ValueError('Predictions and references must be finite on valid support.')
+        # Select before subtraction: missing reference entries can be NaN.
+        safe_ref = torch.where(active.unsqueeze(0), ref, torch.zeros_like(ref))
+        safe_pred = torch.where(active[None, None], pred, torch.zeros_like(pred))
+        error = (safe_pred - safe_ref.unsqueeze(0)) / scale
+        channel_mass = mass * weights
+        absolute.append((error.square().mean(dim=(0, 1)) * channel_mass).sum())
+        difference.append(((error[:, 1] - error[:, 0]).square().mean(dim=0) * channel_mass).sum())
+        counts += active.any(dim=0).to(dtype=torch.long)
+    return {'absolute': torch.stack(absolute).mean(), 'difference': torch.stack(difference).mean(),
+            'eligible_pair_counts': counts, 'effective_channel_weights': weights * counts / len(pairs)}
+
+
+def attach_field_response(provider, *, pairs, count, seed, component_names, components,
+                          calibration, ramp, prefix='field_response/'):
+    """Attach case-supplied field comparisons to the existing trainer hook.
+
+    ``components(model, pair, epoch=...)`` returns named scalar losses and a
+    trainer work record. ``calibration()`` returns their saved coefficients;
+    the case owns observations, calibration measurements and state recording.
+    Native visit order and native query sampling are not changed here.
+    """
+    from types import MethodType
+    from .unified_training import LossTerm
+
+    pairs, names = tuple(pairs), tuple(component_names)
+    if not pairs or not names or len(set(names)) != len(names):
+        raise ValueError('Field-response attachment needs pairs and distinct components.')
+    if type(count) is not int or not 1 <= count <= len(pairs):
+        raise ValueError('Field-response pair count must be feasible.')
+    provider.auxiliary_loss_names = tuple(prefix + name for name in names)
+
+    def auxiliary_update_terms(self, model, *, epoch, update_index, update_count):
+        factor = float(ramp(epoch))
+        if not factor:
+            return
+        coefficients = calibration()
+        if not isinstance(coefficients, Mapping) or any(name not in coefficients for name in names):
+            raise ValueError('Saved field-response calibration is missing component coefficients.')
+        chosen = scheduled_native_pairs(pairs, epoch, count, seed)
+        for pair, slot in zip(chosen, np.linspace(0, update_count - 1, len(chosen), dtype=int)):
+            if int(slot) == update_index:
+                values, work = components(model, pair, epoch=epoch)
+                yield ({prefix + name: LossTerm(values[name], 1., factor *
+                       float(coefficients[name]) * update_count / len(chosen)) for name in names}, work)
+
+    provider.auxiliary_update_terms = MethodType(auxiliary_update_terms, provider)
+    return provider
+
+
 def scheduled_native_pairs(pairs, epoch, count, seed):
     """Independently seeded rotation, preserving exact continuation by epoch."""
     pairs = tuple(tuple(pair) for pair in pairs)
