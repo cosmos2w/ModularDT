@@ -216,7 +216,7 @@ def build_thermal_field_response_task(recipe, *, device='cpu', resume_payload=No
                                              scheduled_native_pairs, fit_input_pair_weights)
     from honf_runtime.unified_training import LossTerm, SamplingKey
     from .thermal_native_pair_task import build_thermal_native_pair_task
-    from .r16_10_diagnostics import gradient_diagnostics, preserved_state
+    from honf_runtime.gradient_diagnostics import gradient_diagnostics, preserved_state
 
     spec = recipe.get('thermal_field_response', {})
     variant = spec.get('variant')

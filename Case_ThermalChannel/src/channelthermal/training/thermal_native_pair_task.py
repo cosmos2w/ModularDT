@@ -460,7 +460,7 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
     from honf_runtime.state_response import ResponseObjectiveConfig, scheduled_native_pairs
     from honf_runtime.unified_training import LossTerm, SamplingKey
     from .thermal_joint_response_task import build_thermal_joint_response_task
-    from .r16_10_diagnostics import gradient_diagnostics, preserved_state
+    from honf_runtime.gradient_diagnostics import gradient_diagnostics, preserved_state
 
     spec = recipe.get('thermal_native_pair', {})
     variant = spec.get('variant')

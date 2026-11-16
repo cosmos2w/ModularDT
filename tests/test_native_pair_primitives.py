@@ -83,7 +83,7 @@ def test_pair_provider_exposure_and_calibration_resume(monkeypatch, tmp_path):
     from types import SimpleNamespace
     import channelthermal.training.thermal_native_pair_task as native
     import channelthermal.training.thermal_joint_response_task as historical
-    import channelthermal.training.r16_10_diagnostics as diagnostics
+    import honf_runtime.gradient_diagnostics as diagnostics
 
     class Provider:
         def __init__(self, model):
