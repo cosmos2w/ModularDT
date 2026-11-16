@@ -214,7 +214,7 @@ def test_native_pair_formal_extension_rejects_invalid_schedule_or_target():
         value['optimizer_schedule_contract'][0]['schedule']['total_epochs'] = 3000
     with pytest.raises(ValueError):
         _resume_identity_amendment(old, new, allow_horizon_extension=True)
-    for target in (100, 2001, -1):
+    for target in (100, 100.5, -1):
         with pytest.raises(ValueError):
             engine_for(old['recipe'], device='cpu', execution_horizon=target)
 
@@ -259,7 +259,7 @@ def test_native_pair_cli_extension_restores_saved_payload_without_launch(tmp_pat
     assert provider._round6_sampling_epoch_limit == 500
     assert kwargs['resume_checkpoint'] == 'latest' and kwargs['allow_horizon_extension'] is True
     assert kwargs['identity']['recipe'] == old['recipe'] and kwargs['stop_after'] == 500
-    for epoch, target in ((99, 500), (100, 100), (100, 2001), (101, 101)):
+    for epoch, target in ((99, 500), (100, 100), (101, 101)):
         checkpoint['epoch'] = epoch
         with pytest.raises(ValueError, match='completed formal epoch 100'):
             cli.main(args[:-1] + [str(target)])
@@ -267,3 +267,32 @@ def test_native_pair_cli_extension_restores_saved_payload_without_launch(tmp_pat
     checkpoint['experiment_identity'] = new
     assert cli.main(args[:-1] + ['300']) == 0
     assert calls[-1][0].total_epochs == 500 and calls[-1][3]['stop_after'] == 300
+    checkpoint['epoch'] = 500
+    assert cli.main(args[:-1] + ['3000']) == 0
+    assert calls[-1][0].total_epochs == provider._round6_sampling_epoch_limit == 3000
+    assert calls[-1][0].checkpoint_epochs == tuple(range(100, 3001, 100))
+    assert calls[-1][3]['stop_after'] == 3000
+
+
+@pytest.mark.parametrize('variant', ['state_anchors', 'functional_contrast'])
+def test_native_pair_formal_500_to_3000_preserves_original_clamped_schedule(variant):
+    from honf_runtime.unified_training import ScheduleSpec, _engine_config_payload
+    from tools.relation_anchored_train import engine_for
+
+    _, old = native_pair_formal_identities()
+    old['recipe']['thermal_native_pair']['variant'] = variant
+    new = copy.deepcopy(old)
+    new['engine_config'] = _engine_config_payload(engine_for(
+        old['recipe'], device='cpu', execution_horizon=3000).config)
+    snapshot = copy.deepcopy(old)
+    with pytest.raises(ValueError):
+        _resume_identity_amendment(old, new)
+    receipt = _resume_identity_amendment(old, new, allow_horizon_extension=True)
+    assert (receipt['previous_horizon'], receipt['execution_horizon']) == (500, 3000)
+    assert old == snapshot and receipt['optimizer_schedule_unchanged']
+    assert old['recipe'] == new['recipe'] and old['provider_identity'] == new['provider_identity']
+    assert old['optimizer_schedule_contract'] == new['optimizer_schedule_contract']
+    schedule = ScheduleSpec(**old['optimizer_schedule_contract'][0]['schedule'])
+    assert schedule.value(501) == schedule.value(1000) == .0003
+    assert .00003 < schedule.value(1500) < .0003
+    assert all(schedule.value(epoch) == .00003 for epoch in (2000, 2001, 2500, 3000))

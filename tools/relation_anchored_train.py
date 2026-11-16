@@ -256,7 +256,6 @@ def engine_for(recipe, *, device, execution_horizon=None):
                                  and tuple(checkpoints) == (100,))
         if (not (wind_extension or thermal_extension or r16_10_extension or native_pair_extension)
                 or type(execution_horizon) is not int or execution_horizon <= horizon
-                or (native_pair_extension and execution_horizon > 2000)
                 or (not native_pair_extension and execution_horizon % 100)):
             raise ValueError("Unsupported explicit same-lineage horizon extension.")
         horizon = execution_horizon
@@ -364,9 +363,9 @@ def main(argv=None):
             saved_horizon = source_payload["experiment_identity"]["engine_config"]["total_epochs"]
             if (training.get("membership") != "full_train600" or training.get("local_horizon") != 100
                     or training.get("optimizer_schedule_horizon") != 2000
-                    or type(saved_horizon) is not int or not 100 <= completed <= saved_horizon <= 2000
-                    or not completed < args.stop_after <= 2000):
-                raise ValueError("Native-pair extension requires a completed formal epoch 100 and a later stop at or before epoch 2000.")
+                    or type(saved_horizon) is not int or not 100 <= completed <= saved_horizon
+                    or not completed < args.stop_after):
+                raise ValueError("Native-pair extension requires at least a completed formal epoch 100 and a later stop.")
     options = {}
     if source_payload is not None and (recipe.get("r16_10_family") is not None
                                        or recipe.get("training_profile") in ("state_response", "native_pair")):

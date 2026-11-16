@@ -392,7 +392,7 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                         or native_training.get("local_horizon") != 100
                         or native_training.get("optimizer_schedule_horizon") != 2000
                         or type(before) is not int or type(after) is not int
-                        or not 100 <= before < after <= 2000
+                        or not 100 <= before < after
                         or old["engine_config"].get("checkpoint_epochs") != list(range(100, before + 1, 100))
                         or new["engine_config"].get("checkpoint_epochs") != list(range(100, after + 1, 100))
                         or len(schedules) != 1 or schedules[0].get("schedule") != expected_schedule
@@ -406,7 +406,7 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                 return {"kind": "explicit_native_pair_formal_horizon_extension",
                         "previous_horizon": before, "execution_horizon": after,
                         "optimizer_schedule_unchanged": True,
-                        "trajectory_note": "Only the execution horizon and future 100-epoch milestones change; the original 2000-epoch optimizer schedule and scientific identity are preserved."}
+                        "trajectory_note": "Only the execution horizon and future 100-epoch milestones change; the original 2000-epoch optimizer schedule and scientific identity are preserved. After its schedule ends, the existing final learning rate remains clamped."}
             wind_extension = (recipe.get("dataset") == "wind"
                               and recipe.get("schema") in ("wind_relation_anchored_r15_2_v2", "wind_relation_anchored_v1")
                               and type(before) is int and before >= (1000 if recipe.get("schema") == "wind_relation_anchored_r15_2_v2" else 100))

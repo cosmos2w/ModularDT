@@ -59,6 +59,8 @@ On resume, the checkpoint restores the model, optimizer, RNG, sampler and other 
 
 An ordinary resume, permitted device change or authorized extension of the epoch horizon does not migrate or rewrite logs. Continue the existing run's format and history, subject to the existing locked interruption recovery rules and any separately authorized output-only change.
 
+For an existing Thermal native-pair formal run, `--resume latest --extend-horizon --stop-after <total-epochs>` extends the execution stop and its future 100-epoch milestones without editing the saved recipe. An explicitly authorized stop may exceed the original optimizer schedule horizon: the schedule keeps its original hold and decay, then remains at its saved final learning rate. It is not stretched or restarted to fit the new stop. The extension flag enables this operation; training authority still comes from the user's requested horizon.
+
 A resume regression must exercise a real process boundary: save a checkpoint and definitions, start a fresh process, reload the saved configuration, resume and append, and compare the result with an uninterrupted run. Check the saved column order and meanings, loss accumulation, appended values and relevant recovery state. A same-process test or a test that reconstructs an equivalent configuration in memory does not cover serialization and reload ordering.
 
 ## Checkpoints and interruption recovery
