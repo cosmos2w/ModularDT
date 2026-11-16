@@ -97,8 +97,15 @@ def build_native_pair_recipe(base_recipe, *, variant, validation_pairs=(), pair_
     result.pop('thermal_joint_response', None)
     result['training_profile'] = 'native_pair'
     result['thermal_native_pair'] = {'variant': variant, 'label': labels[variant],
-        'pair_seed': pair_seed, 'validation_pairs': [list(pair) for pair in validation_pairs]}
+        'pair_seed': pair_seed, 'validation_pairs': [list(pair) for pair in validation_pairs],
+        'prediction_batching': 'paired'}
     return result
+
+
+def _validate_prediction_batching(value):
+    if value not in ('serial', 'paired'):
+        raise ValueError("thermal_native_pair.prediction_batching must be 'serial' or 'paired'.")
+    return value
 
 
 def native_pair_schedule_amendment(saved, current, *, source_epoch, stop_after):
@@ -319,6 +326,8 @@ class ThermalNativePairObjective:
     """Dense absolute and four-observable losses on native scenes."""
     def __init__(self, provider, pairs, *, training_scales=None):
         self.provider = provider
+        self.prediction_batching = _validate_prediction_batching(
+            getattr(provider, 'native_pair_prediction_batching', 'serial'))
         self.pairs = tuple(tuple(pair) for pair in pairs)
         self.references = native_pair_references(provider.data_path, self.pairs)
         field_std = provider.model.field_std.detach().cpu().reshape(-1).double()
@@ -333,7 +342,9 @@ class ThermalNativePairObjective:
 
     def observe_pair(self, model, pair, *, epoch):
         """Return prediction views and native references in J/P/A/B order."""
-        from .thermal_family_objective import _endpoint_functionals, _views
+        from .thermal_family_objective import (
+            _endpoint_functionals, _split_family_prediction, _stack_family_batches, _views,
+        )
         pair = tuple(pair)
         splits = {self.provider.case_split_by_id[case_id] for case_id in pair}
         if len(splits) != 1:
@@ -345,10 +356,15 @@ class ThermalNativePairObjective:
             configs = [json.loads(group['case_config_json'][()]) for group in groups]
             regions = native_pair_support(groups[0], groups[1], configs[0])
         predictions, work = [], {}
-        for batch in batches:
+        batching = _validate_prediction_batching(self.prediction_batching)
+        prediction_batches = [_stack_family_batches(batches)] if batching == 'paired' else batches
+        for batch in prediction_batches:
             pred, auxiliary = self.provider.predict_native(model, batch.scene_inputs, batch.receivers,
                 model.architecture, 'joint', epoch=epoch)
-            predictions.append(pred)
+            if batching == 'paired':
+                predictions.extend(_split_family_prediction(pred, len(batches), allow_single=True))
+            else:
+                predictions.append(pred)
             for name, value in auxiliary.get('work', {}).items():
                 if isinstance(value, (int, float)):
                     key = 'native_pair_' + name
@@ -411,6 +427,7 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
     variant = spec.get('variant')
     if variant not in ('field_only', 'state_anchors', 'functional_contrast'):
         raise ValueError('Choose a declared native-pair variant.')
+    prediction_batching = _validate_prediction_batching(spec.get('prediction_batching', 'serial'))
     clean = copy.deepcopy(recipe)
     clean['training_profile'] = 'state_response'
     clean['state_response'] = {'enabled': False}
@@ -421,6 +438,7 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
         # edited-family corpus or inheriting any historical weights.
         clean['thermal_joint_response']['paired'] = {}
     model, provider = build_thermal_joint_response_task(clean, arm=arm, device=device, resume_payload=resume_payload)
+    provider.native_pair_prediction_batching = prediction_batching
     if int(clean.get('training', {}).get('optimizer_schedule_horizon', 0)) != 2000:
         raise ValueError('R17-3 native pair training requires its 2000-epoch optimizer schedule.')
     def native_pair_schedule(self):

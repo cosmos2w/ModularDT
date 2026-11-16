@@ -322,15 +322,15 @@ def main(argv=None):
         variant = recipe.get('thermal_native_pair', {}).get('variant')
         if (args.command != 'fit' or recipe.get('training_profile') != 'native_pair'
                 or bool(args.native_pair_calibration_input) == bool(args.native_pair_calibration_output)
-                or (args.native_pair_calibration_input and variant != 'functional_contrast')
+                or (args.native_pair_calibration_input and variant not in ('state_anchors', 'functional_contrast'))
                 or (args.native_pair_calibration_output and variant != 'state_anchors')):
-            parser.error('Native pair calibration input requires a contrast fit; output requires an anchor fit; choose only one.')
+            parser.error('Native pair calibration input requires an anchor or contrast fit; output requires an anchor fit; choose only one.')
     if (args.command == 'fit' and not args.resume and recipe.get('training_profile') == 'native_pair'
             and recipe.get('training', {}).get('membership') == 'full_train600'):
         variant = recipe.get('thermal_native_pair', {}).get('variant')
-        if ((variant == 'state_anchors' and not args.native_pair_calibration_output)
+        if ((variant == 'state_anchors' and not (args.native_pair_calibration_output or args.native_pair_calibration_input))
                 or (variant == 'functional_contrast' and not args.native_pair_calibration_input)):
-            parser.error('Fresh formal native pairs require the shared anchor calibration output or contrast input path.')
+            parser.error('Fresh formal native pairs require a shared calibration input or an anchor calibration output path.')
     if args.command == 'fit' and recipe.get('r16_10_posttrain') is not None:
         parser.error('Use tools/thermal_r16_10_posttrain.py for the state-preserving post-training fit.')
     configure_r16_5_execution(recipe, device=args.device)

@@ -72,7 +72,7 @@ def _stack_family_batches(batches):
         case_keys=sum((batch.case_keys for batch in batches), ()))
 
 
-def _split_family_prediction(prediction, count):
+def _split_family_prediction(prediction, count, *, allow_single=False):
     """Take differentiable views of the fields and masks consumed by family losses."""
     def branch_slice(branch, index):
         prepared = branch.native_prepared
@@ -82,6 +82,8 @@ def _split_family_prediction(prediction, count):
         return SimpleNamespace(native_prepared=local_prepared,
             native_main={name: value[index:index + 1] for name, value in branch.native_main.items()})
     if not isinstance(prediction, ThermalJointPairPredictions):
+        if allow_single:
+            return [branch_slice(prediction, i) for i in range(count)]
         raise TypeError('Batched family execution requires paired access views.')
     return [ThermalJointPairPredictions(branch_slice(prediction.full, i),
               branch_slice(prediction.restricted, i), {}) for i in range(count)]
