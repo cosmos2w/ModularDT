@@ -13,10 +13,10 @@ import torch
 
 from honf_inverse_core.contracts import PhysicalDesign
 from honf_inverse_core.request_schema import GeometryConstraints
+from honf_runtime.state_response import evaluate_candidate_pool
 
 from ..interaction_evidence.reference_adapter import operating_context_from_config, operating_context_to_named
 from ..native_design import build_native_design, score_native_design
-from ..physical_response import evaluate_thermal_candidate_pool
 from .geometry import evaluate_geometry
 
 
@@ -27,6 +27,28 @@ FINITE_RESPONSE = "finite_response"
 MODEL_POLICIES = (*METHODS, FINITE_RESPONSE)
 REFERENCE_POLL = "reference_poll"
 FULL_POOL = "full_pool"
+
+
+def _regional_caps(panel):
+    regions = panel.get("regional_caps", {})
+    if not isinstance(regions, dict):
+        raise ValueError("regional_caps must map observation names to their bounds, reduction and allowance.")
+    for name, region in regions.items():
+        if not isinstance(name, str) or not name or name in FUNCTIONALS or not isinstance(region, dict):
+            raise ValueError("Each regional cap needs a distinct observation name other than J or P.")
+        bounds = np.asarray(region.get("bounds"), dtype=float)
+        allowance = region.get("allowance")
+        if (bounds.shape != (4,) or not np.isfinite(bounds).all() or np.any(bounds < 0.) or np.any(bounds > 1.)
+                or np.any(bounds[:2] >= bounds[2:]) or region.get("reduction") not in ("max", "mean")
+                or isinstance(allowance, bool) or not isinstance(allowance, (int, float))
+                or not math.isfinite(allowance) or allowance < 0.):
+            raise ValueError(f"Invalid regional cap {name!r}. Use ordered normalized bounds, max or mean, and a nonnegative allowance.")
+    return regions
+
+
+def _region_bounds(domain, region):
+    lengths = np.array([domain["lx"], domain["ly"]], dtype=float)
+    return np.asarray(region["bounds"]) * np.tile(lengths, 2)
 
 
 def _hot_material_weights(scored, tau):
@@ -72,7 +94,7 @@ def _module_relevance(design, scored, tau, mode, method):
     return relevance.cpu().numpy()
 
 
-def _family_actions(case, rows):
+def _family_actions(case, rows, regions):
     config = case["source_config"]
     domain, layout = config["domain"], config["layout"]
     radius = float(domain["module_radius"])
@@ -87,7 +109,8 @@ def _family_actions(case, rows):
     configs = {BASELINE: config}
     edits = {}
     changed = {}
-    physical = {BASELINE: dict.fromkeys(FUNCTIONALS, 0.0)}
+    observations = (*FUNCTIONALS, *regions)
+    physical = {BASELINE: dict.fromkeys(observations, 0.0)}
     for row in rows:
         action = row["action"]
         if not isinstance(action, str) or not action or action in configs:
@@ -105,11 +128,11 @@ def _family_actions(case, rows):
         configs[action] = {**config, "layout": {**layout, "centers": centers.tolist()}}
         labels = row.get("physical_delta")
         if labels is not None:
-            if set(labels) != set(FUNCTIONALS) or any(
+            if not isinstance(labels, dict) or set(labels) != set(observations) or any(
                 isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
                 for v in labels.values()
             ):
-                raise ValueError(f"{action} needs finite reference deltas for J and P.")
+                raise ValueError(f"{action} needs finite reference deltas for {', '.join(observations)}.")
             physical[action] = labels
 
     if not edits or len(physical) not in (1, len(configs)):
@@ -118,6 +141,12 @@ def _family_actions(case, rows):
         design = PhysicalDesign(endpoint["layout"]["centers"], np.ones(count), heat)
         if not evaluate_geometry(design, context, constraints).valid:
             raise ValueError(f"{case['case_id']}/{action} violates disk separation or channel bounds.")
+        for name, region in regions.items():
+            bounds = _region_bounds(domain, region)
+            centers = design.module_centers
+            nearest = np.clip(centers, bounds[:2], bounds[2:])
+            if np.any(np.linalg.norm(centers - nearest, axis=-1) <= radius):
+                raise ValueError(f"{case['case_id']}/{action} intersects fixed fluid region {name!r}.")
     return configs, edits, changed, physical if len(physical) > 1 else None
 
 
@@ -143,8 +172,20 @@ def _probe_plan(order, changed, capacity):
     return list(probes), covered
 
 
-def _functionals(scored):
-    return {name: float(scored["functionals"][name]) for name in FUNCTIONALS}
+def _functionals(scored, design, domain, regions):
+    values = {name: float(scored["functionals"][name]) for name in FUNCTIONALS}
+    if regions:
+        fluid = scored["fields"]["temperature/fluid"]
+        xy = design.fluid_xy_source
+        for name, region in regions.items():
+            bounds = _region_bounds(domain, region)
+            inside = ((xy >= bounds[:2]) & (xy <= bounds[2:])).all(axis=-1)
+            selected = torch.as_tensor(inside, device=fluid["mask"].device)
+            if not selected.any() or not fluid["mask"].reshape(-1)[selected].all():
+                raise ValueError(f"{design.case_id}/{name} needs nonempty, fully valid native fluid support.")
+            temperatures = fluid["prediction"].reshape(-1)[selected].to(torch.float64)
+            values[name] = float(temperatures.amax() if region["reduction"] == "max" else temperatures.mean())
+    return values
 
 
 def _material_max(scored):
@@ -152,18 +193,19 @@ def _material_max(scored):
     return float(material["prediction"].masked_fill(~material["mask"], -torch.inf).amax())
 
 
-def _evaluate_shortlist(predicted, physical, *, pressure_allowance, resolution):
-    scores = evaluate_thermal_candidate_pool(
+def _evaluate_shortlist(predicted, physical, *, pressure_allowance, resolution, regional_allowances=None):
+    caps = {"P": pressure_allowance, **(regional_allowances or {})}
+    scores = evaluate_candidate_pool(
         predicted, None if physical is None else {name: physical[name] for name in predicted},
-        objective="J", constraint_caps={"P": pressure_allowance}, objective_scale=1.0,
-        sensitivity={"J": resolution / 4., "P": 0.},
+        objective="J", constraint_caps=caps, objective_scale=1.0,
+        sensitivity={"J": resolution / 4., **dict.fromkeys(caps, 0.)},
     )
     scores.update(_reference_result(scores["model_selected_action"], predicted, physical,
-                                    pressure_allowance=pressure_allowance, resolution=resolution))
+                                    caps=caps, resolution=resolution))
     return scores
 
 
-def _reference_result(selected, scored, physical, *, pressure_allowance, resolution):
+def _reference_result(selected, scored, physical, *, caps, resolution):
     edited = selected is not None and selected != BASELINE
     decision = {"reference_checks": int(physical is not None and edited),
                 "reference_outcome": "unavailable" if physical is None else "kept baseline"}
@@ -171,21 +213,23 @@ def _reference_result(selected, scored, physical, *, pressure_allowance, resolut
         return decision
 
     trial = physical[selected] if edited else None
-    over_cap = edited and trial["P"] > pressure_allowance
+    violations = [name for name, cap in caps.items() if edited and trial[name] > cap]
     accepted = BASELINE
-    if over_cap:
-        decision["reference_outcome"] = "over pressure cap"
+    if violations:
+        decision["reference_outcome"] = "over pressure cap" if "P" in violations else "over regional cap"
     elif edited and trial["J"] < -resolution:
         accepted = selected
         decision["reference_outcome"] = "accepted edit"
     elif edited:
         decision["reference_outcome"] = "no resolved improvement"
 
-    full_best = min(row["J"] for row in physical.values() if row["P"] <= pressure_allowance)
-    shortlist_best = min(physical[name]["J"] for name in scored if physical[name]["P"] <= pressure_allowance)
+    feasible = {name: row["J"] for name, row in physical.items() if all(row[key] <= cap for key, cap in caps.items())}
+    full_best = min(feasible.values())
+    shortlist_best = min(feasible[name] for name in scored if name in feasible)
     final = physical[accepted]["J"]
     decision.update(verified_incumbent=accepted, verified_improvement=-final,
-                    checked_reference_delta=trial, reference_cap_violation=over_cap,
+                    checked_reference_delta=trial, reference_cap_violation="P" in violations,
+                    reference_violations=violations,
                     full_pool_regret=final - full_best, shortlist_loss=shortlist_best - full_best,
                     decision_loss=final - shortlist_best)
     return decision
@@ -209,8 +253,8 @@ def _summarize(cases, views):
                 "reference_checks": sum(row["decision"]["reference_checks"] for row in rows),
                 "mean_verified_improvement": mean(row["verified_improvement"] for row in measured) if measured else None,
                 "resolved_improvements": sum(row["verified_incumbent"] != BASELINE for row in measured) if measured else None,
-                "selected_over_cap": sum(row["reference_cap_violation"] for row in measured) if measured else None,
-                "false_feasible_selections": (sum(row["reference_cap_violation"] for row in measured)
+                "selected_over_cap": sum(bool(row["reference_violations"]) for row in measured) if measured else None,
+                "false_feasible_selections": (sum(bool(row["reference_violations"]) for row in measured)
                                               if measured and method != REFERENCE_POLL else None),
                 "mean_full_pool_regret": mean(row["full_pool_regret"] for row in measured) if measured else None,
                 "mean_shortlist_loss": mean(row["shortlist_loss"] for row in measured) if measured else None,
@@ -230,12 +274,12 @@ def _summarize(cases, views):
     return summaries
 
 
-def _response_accuracy(predicted, physical, *, pressure_allowance, resolution):
+def _response_accuracy(predicted, physical, *, caps, resolution):
     if physical is None:
         return None
     labels = [name for name in predicted if name != BASELINE]
     resolved = [name for name in labels if abs(physical[name]["J"]) > resolution]
-    feasible = sorted((name for name in labels if physical[name]["P"] <= pressure_allowance),
+    feasible = sorted((name for name in labels if all(physical[name][key] <= cap for key, cap in caps.items())),
                       key=lambda name: physical[name]["J"])
     resolved_pairs = correct_order = 0
     for cooler, warmer in combinations(feasible, 2):
@@ -262,6 +306,10 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
         raise ValueError("Expected a thermal_response_families_v1 panel.")
     if "tau" in panel and panel["tau"] != tau:
         raise ValueError("Panel reference deltas use a different J smoothing scale.")
+    regions = _regional_caps(panel)
+    regional_allowances = {name: region["allowance"] for name, region in regions.items()}
+    caps = {"P": pressure_allowance, **regional_allowances}
+    observations = (*FUNCTIONALS, *regions)
     cases = {row["case_id"]: row for row in panel["cases"]}
     if not cases or len(cases) != len(panel["cases"]) or any(not isinstance(k, str) or not k for k in cases):
         raise ValueError("Panel cases need unique nonempty string IDs.")
@@ -273,23 +321,25 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
 
     rng = np.random.default_rng(seed)
     result = {}
-    families = {case_id: _family_actions(case, rows[case_id]) for case_id, case in cases.items()}
+    families = {case_id: _family_actions(case, rows[case_id], regions) for case_id, case in cases.items()}
     for case_id, (configs, edits, changed, physical) in families.items():
         labels = sorted(edits)
         order = rng.permutation(labels).tolist()
         started = perf_counter()
         design = build_native_design(configs[BASELINE], case_id, device=device)
         anchor = score_native_design(model, design, tau=tau, mode=mode)
-        absolute = _functionals(anchor)
+        domain = configs[BASELINE]["domain"]
+        absolute = _functionals(anchor, design, domain, regions)
         material_max = _material_max(anchor)
         anchor_seconds = perf_counter() - started
         capacity = min(budget, len(labels))
         methods = {}
-        reference_settings = {"pressure_allowance": pressure_allowance, "resolution": resolution}
+        reference_settings = {"pressure_allowance": pressure_allowance, "resolution": resolution,
+                              "regional_allowances": regional_allowances}
 
         def run_method(method, capacity):
             started = perf_counter()
-            predicted = {BASELINE: dict.fromkeys(FUNCTIONALS, 0.0)}
+            predicted = {BASELINE: dict.fromkeys(observations, 0.0)}
             maxima = {BASELINE: material_max}
             work = defaultdict(int)
             relevance = None
@@ -304,7 +354,8 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
                     if not torch.equal(anchor["fields"]["temperature/material"]["mask"],
                                        score["fields"]["temperature/material"]["mask"]):
                         raise ValueError(f"{case_id}/{label} changed valid material receiver support.")
-                    predicted[label] = {name: value - absolute[name] for name, value in _functionals(score).items()}
+                    predicted[label] = {name: value - absolute[name]
+                                        for name, value in _functionals(score, trial, domain, regions).items()}
                     maxima[label] = _material_max(score)
                     for name, value in score["work"].items():
                         work[name] += value
@@ -316,8 +367,8 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
                 probes, covered = _probe_plan(order, changed, capacity)
                 scoring_seconds += score_actions(probes)
                 estimates = {label: {name: sum(predicted[probe][name] for probe in components)
-                                     for name in FUNCTIONALS} for label, components in covered.items()}
-                plausible = [label for label in estimates if estimates[label]["P"] <= pressure_allowance]
+                                     for name in observations} for label, components in covered.items()}
+                plausible = [label for label in estimates if all(estimates[label][key] <= cap for key, cap in caps.items())]
                 plausible.sort(key=lambda label: (estimates[label]["J"], estimates[label]["P"]))
                 prioritized = set(plausible)
                 ranked = plausible + [label for label in order if label not in prioritized]
@@ -342,7 +393,7 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
             methods[method] = run_method(method, capacity)
         poll = next((label for label in order if len(changed[label]) == 1), None)
         poll_shortlist = [poll] if poll is not None else []
-        poll_decision = _reference_result(poll, [BASELINE, *poll_shortlist], physical, **reference_settings)
+        poll_decision = _reference_result(poll, [BASELINE, *poll_shortlist], physical, caps=caps, resolution=resolution)
         poll_decision["model_selected_action"] = None
         poll_decision["polled_action"] = poll
         family = {"role": cases[case_id].get("role"), "legal_pool_size": len(labels),
@@ -352,7 +403,7 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
         if full_pool:
             diagnostic = run_method(FULL_POOL, len(labels))
             diagnostic["response_accuracy"] = _response_accuracy(diagnostic["predicted_deltas"], physical,
-                                                                 **reference_settings)
+                                                                 caps=caps, resolution=resolution)
             family[FULL_POOL] = diagnostic
         result[case_id] = family
 
@@ -361,7 +412,7 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
         views += (FULL_POOL,)
     return {"schema": "thermal_native_placement_benchmark_v1", "seed": seed, "budget": budget,
             "pressure_allowance": pressure_allowance, "j_resolution": resolution, "tau": tau,
-            "mode": mode, "cases": result, "by_role": _summarize(result, views)}
+            "mode": mode, "regional_caps": regions, "cases": result, "by_role": _summarize(result, views)}
 
 
 def benchmark_placement_curve(model, panel, *, budgets, full_pool=False, **settings):
@@ -399,6 +450,9 @@ def benchmark_placement_curve(model, panel, *, budgets, full_pool=False, **setti
                     events.append("recommendation changed")
                     if decision.get("reference_cap_violation"):
                         events.append("reference pressure exceeded cap")
+                    for region in decision.get("reference_violations", []):
+                        if region != "P":
+                            events.append(f"reference {region} exceeded cap")
                 if probes and not previous_probes:
                     events.append("signed probes used")
                 if cooling is not None and cooling > 0 and not found_improvement:

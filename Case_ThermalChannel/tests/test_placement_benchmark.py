@@ -1,7 +1,9 @@
 """Check native policy execution and reference-only acceptance on a small panel."""
 
 from copy import deepcopy
+from io import BytesIO
 
+import numpy as np
 import pytest
 import torch
 
@@ -182,3 +184,60 @@ def test_signed_probes_count_against_budget_and_reference_stays_blind(monkeypatc
     report = format_curve_summary({"Controlled fixture": curve}, "cpu")
     assert "| Uniform sample (blue) | 0 | 0.5 | 2 |" in report
     assert "Critical decisions by family" in report
+
+
+def test_fixed_regional_caps_and_field_curve(monkeypatch):
+    from channelthermal.inverse import placement_benchmark as placement
+    from channelthermal.inverse import placement_visualization as visualization
+
+    panel, model = native_fixture()
+    panel["regional_caps"] = {
+        "intake_peak": {"bounds": [.85, 0., 1., .4], "reduction": "max", "allowance": .1},
+        "intake_mean": {"bounds": [.85, .6, 1., 1.], "reduction": "mean", "allowance": .1},
+    }
+    for row in panel["actions"]:
+        row["physical_delta"]["intake_peak"] = .4 if row["action"] == "move_0" else 0.
+        row["physical_delta"]["intake_mean"] = .2 if row["action"] == "move_0" else 0.
+
+    native_score = placement.score_native_design
+
+    def score(model, design, *, tau, mode):
+        result = native_score(model, design, tau=tau, mode=mode)
+        x, y = design.fluid_xy.unbind(-1)
+        result["fields"]["temperature/fluid"]["prediction"] = x + y
+        moved = design.structure["module_centers"][0, 0, 0] > 2.
+        result["functionals"] = {"J": float(-moved.to(torch.int32)), "P": 0.}
+        return result
+
+    monkeypatch.setattr(placement, "score_native_design", score)
+    monkeypatch.setattr(visualization, "score_native_design", score)
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        curve = placement.benchmark_placement_curve(model, panel, budgets=(2, 3), tau=.4,
+                                                    pressure_allowance=.2, resolution=.1)
+        run = curve["runs"][-1]
+        decision = run["cases"]["control"]["methods"]["uniform"]["decision"]
+        assert decision["model_selected_action"] == "move_0"
+        assert decision["verified_incumbent"] == "baseline" and not decision["reference_cap_violation"]
+        assert decision["reference_violations"] == ["intake_peak", "intake_mean"]
+        assert run["cases"]["control"]["baseline_prediction"]["intake_peak"] == 13.
+        assert run["cases"]["control"]["baseline_prediction"]["intake_mean"] == 16.
+        evidence = visualization.collect_placement_fields(model, panel, curve, case_id="control",
+                                                           policy="uniform", budget=3)
+        proposal = evidence["fields"]["move_0"]
+        proposal["reference"] = (proposal["prediction"] + .25, proposal["mask"])
+        figure = visualization.plot_placement_fields_and_curve(curve, evidence, budget=3, policy="uniform",
+                                                                checkpoint="Synthetic fixture")
+        assert any("RMSE 0.25" in axis.get_title() for axis in figure.axes)
+        assert any("Error unavailable" in axis.get_title() for axis in figure.axes)
+        buffer = BytesIO()
+        figure.savefig(buffer, format="pdf")
+        assert buffer.getvalue().startswith(b"%PDF")
+
+        invalid = deepcopy(panel)
+        invalid["regional_caps"]["intake_peak"]["bounds"] = [.7, .5, .85, .9]
+        with pytest.raises(ValueError, match="intersects fixed fluid region"):
+            benchmark_placement(model, invalid, budget=2, tau=.4, pressure_allowance=.2, resolution=.1)
+    finally:
+        torch.set_num_threads(threads)

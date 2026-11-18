@@ -104,6 +104,24 @@ xychart-beta
 
 Each point restarts from the same baseline with that budget. A decline is possible because a larger budget can change the recommendation. In a separate rejection check, changing the joint edit's reference pressure rise to `0.30` against a `0.20` cap sends the uniform curve from `0.5` at two forwards back to `0` at three. The benchmark records the rejected edit and retained baseline at that point. [Curve and rejection tests](../../Case_ThermalChannel/tests/test_placement_benchmark.py#L130)
 
+## Downstream temperature protection
+
+The extended replay can protect a downstream intake while cooling the heated modules. One task adds a cap on the peak fluid temperature in a lower intake rectangle. A second task also caps mean temperature in a separate upper intake. The two reductions use fixed Eulerian fluid receivers, while the material objective follows the disks. The geometry check excludes any layout that intersects an intake. [Regional cap and matched label format](../../Case_ThermalChannel/scripts/inverse/README.md#fixed-downstream-temperature-constraints)
+
+The combined figure shows baseline and recommended fluid-temperature predictions, the recommended layout's reference and signed error when available, and the policy yield curves. The outlines identify the fixed intake regions. The figure marks a selected budget on the curves and shows the proposed geometry at that point, including a proposal that the reference rejected. Each plotted error uses fluid field RMSE in native temperature units. [Field and curve figure](../../Case_ThermalChannel/scripts/inverse/README.md#fixed-downstream-temperature-constraints)
+
+An in-memory analytic fixture exercised both tasks on a common bank of nine single- and two-module edits, with budgets of 1, 2, 3, 5 and 8 forwards. It used an untrained native adapter for prepared access and separately parameterized analytic temperature and pressure responses for the predictor and fixture reference. The pressure rise allowance was `0.10`, and the lower intake peak allowance was `0.04`. The second task added an upper intake mean allowance of `0.01`, in fixture units. [Regional cap implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_benchmark.py)
+
+| Uniform policy at three forwards | One intake cap | Two intake caps |
+| --- | --- | --- |
+| Retained design | A down and C up | B down and C up |
+| Material cooling | 0.352 | 0.0295 |
+| Lower intake peak change | −0.0578 | −0.0319 |
+| Upper intake mean change | +0.0124 | +0.00931 |
+| Proposed fluid-field RMSE | 0.00582 | 0.00619 |
+
+The upper intake cap screens out the original joint move. Under both caps, proximity reaches `0.290` cooling at two forwards. Uniform and signed response reach the same cooling at eight. These values characterize the analytic fixture. Physical adoption requires the matched released-panel evaluation. [Field and curve implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_visualization.py)
+
 ## Evidence and open measurements
 
 | Question | Evidence available |

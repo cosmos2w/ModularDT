@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+from io import BytesIO
 import json
 from pathlib import Path
 
 from channelthermal.inverse.placement_benchmark import benchmark_placement, benchmark_placement_curve
 from channelthermal.member_routing import ThermalDetailAnchoredMemberRoutingAdapter
 from honf_runtime.compat import load_trusted_checkpoint
+from honf_runtime.storage_policy import verify_storage
 
 
 METHOD_NAMES = {
@@ -44,6 +46,9 @@ def format_summary(results, device):
                       f"Read mode `{result['mode']}`. Seed {result['seed']}. "
                       f"Up to {result['budget']} forwards. Pressure rise cap `{result['pressure_allowance']:g}`. "
                       f"Minimum resolved decrease in J `{result['j_resolution']:g}`. J smoothing scale `{result['tau']:g}`.", ""])
+        for name, region in result.get("regional_caps", {}).items():
+            lines.extend([f"Regional cap `{name}` uses {region['reduction']} over `{region['bounds']}` "
+                          f"with allowed temperature rise `{region['allowance']:g}`.", ""])
         for role, methods in result["by_role"].items():
             families = methods["uniform"]["family_count"]
             labeled = methods["uniform"]["reference_family_count"]
@@ -95,6 +100,9 @@ def format_curve_summary(results, device):
         lines.extend([f"## {checkpoint}", "", f"Seed {run['seed']}. Read mode `{run['mode']}`. "
                       f"Pressure rise cap `{run['pressure_allowance']:g}`. J resolution `{run['j_resolution']:g}`. "
                       f"J smoothing scale `{run['tau']:g}`.", ""])
+        for name, region in run.get("regional_caps", {}).items():
+            lines.extend([f"Regional cap `{name}` uses {region['reduction']} over `{region['bounds']}` "
+                          f"with allowed temperature rise `{region['allowance']:g}`.", ""])
         budgets = result["budgets"]
         for role, curves in result["curves"].items():
             labeled = curves["uniform"][0]["reference_family_count"]
@@ -147,6 +155,21 @@ def restore_checkpoint(path, device):
     return model.requires_grad_(False).eval(), saved.get("epoch")
 
 
+def _figure_storage(path):
+    root = Path("/data2/wanglz/ModularDT")
+    limit = 16 * 1024**2
+    path = path.expanduser().resolve()
+    if path.suffix.lower() not in {".pdf", ".png"} or not path.is_relative_to(root):
+        raise ValueError("Use a PDF or PNG destination under /data2/wanglz/ModularDT.")
+    if path.exists():
+        raise FileExistsError(path)
+    storage = {"output_root": path.parent, "minimum_free_headroom_bytes": 1024**3,
+               "max_output_bytes": limit, "max_peak_temporary_bytes": 0}
+    snapshot = verify_storage({"storage": storage}, output=path, estimated_bytes=limit,
+                              tree_bytes=lambda _: 0)
+    return path, snapshot
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--panel", type=Path, required=True)
@@ -162,8 +185,19 @@ def main(argv=None):
     parser.add_argument("--mode", choices=("restricted", "full"), default="restricted")
     parser.add_argument("--full-pool", action="store_true", help="Score all edits separately for a matched predictor diagnostic.")
     parser.add_argument("--format", choices=("json", "markdown"), default="json", help="Detailed JSON or a readable summary.")
+    parser.add_argument("--figure-out", type=Path, help="Save a combined field and curve PDF or PNG on DATA2.")
+    parser.add_argument("--figure-family", help="Source family to show on the field panels.")
+    parser.add_argument("--figure-policy", choices=tuple(METHOD_NAMES), default="finite_response")
+    parser.add_argument("--figure-budget", type=int, help="Budget point for the fields. Defaults to the largest budget.")
     args = parser.parse_args(argv)
     panel = json.loads(args.panel.read_text())
+    if args.figure_out is not None:
+        if args.budgets is None or len(args.checkpoint) != 1 or args.figure_family is None:
+            parser.error("A field figure needs --budgets, one --checkpoint and --figure-family.")
+        figure_budget = args.figure_budget if args.figure_budget is not None else max(args.budgets)
+        if figure_budget not in args.budgets or not any(row["case_id"] == args.figure_family for row in panel["cases"]):
+            parser.error("The figure family and budget must occur in the requested comparison.")
+        figure_path, figure_storage = _figure_storage(args.figure_out)
     results = {}
     for item in args.checkpoint:
         label, separator, path = item.partition("=")
@@ -178,11 +212,30 @@ def main(argv=None):
             result = benchmark_placement(model, panel, budget=args.budget, **settings)
         else:
             result = benchmark_placement_curve(model, panel, budgets=args.budgets, **settings)
+        if args.figure_out is not None:
+            from channelthermal.inverse.placement_visualization import collect_placement_fields, plot_placement_fields_and_curve
+
+            evidence = collect_placement_fields(model, panel, result, case_id=args.figure_family,
+                                                policy=args.figure_policy, budget=figure_budget, device=args.device)
+            figure = plot_placement_fields_and_curve(result, evidence, budget=figure_budget,
+                                                     policy=args.figure_policy, checkpoint=label)
+            payload = BytesIO()
+            figure.savefig(payload, format=figure_path.suffix[1:].lower(), dpi=140)
+            if payload.tell() > figure_storage["output_budget_bytes"]:
+                raise RuntimeError("Figure exceeds its verified DATA2 byte budget.")
+            figure_path.parent.mkdir(parents=True, exist_ok=True)
+            with figure_path.open("xb") as stream:
+                stream.write(payload.getbuffer())
+            result["figure"] = {"path": str(figure_path), "family": args.figure_family, "policy": args.figure_policy,
+                                "budget": figure_budget, "extra_forwards": evidence["extra_forwards"],
+                                "storage": figure_storage, "bytes": payload.tell()}
         results[label] = {"checkpoint": str(checkpoint), "epoch": epoch, **result}
         del model
     if args.format == "markdown":
         formatter = format_summary if args.budgets is None else format_curve_summary
         print(formatter(results, args.device))
+        if args.figure_out is not None:
+            print(f"Field and curve figure saved to `{figure_path}` using {evidence['extra_forwards']} display-only forwards.")
     else:
         print(json.dumps({"panel": str(args.panel.resolve()), "device": args.device, "checkpoints": results},
                          indent=2, allow_nan=False))

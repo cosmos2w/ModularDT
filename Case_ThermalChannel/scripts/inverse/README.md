@@ -65,3 +65,20 @@ The policy replay uses stored labels for reference checks and the offline diagno
 Replace `--budget 4` with `--budgets 1 2 3 4` to compare policies across increasing candidate-forward budgets. Each point repeats the one-edit replay from the original baseline with the same cases, seed, scorer and reference rule. The curve reports mean verified cooling over labeled families in each panel role, including zero when the baseline is retained. The reference-only poll uses zero model forwards throughout. The Markdown report includes a chart, exact sampled values and a collapsible family-level event table. It marks first accepted improvements, changed recommendations, pressure failures, signed-probe activation and changes in cooling.
 
 Curve points are separate budget experiments. A larger shortlist can change the recommendation and reduce reference-verified cooling. The JSON preserves actual forwards, probes, reference checks, both loss terms, per-budget results and critical steps. `--full-pool` scores the unrestricted action pool once per checkpoint and family at the largest budget, outside the policy budgets. [Worked yield curves](../../../design_investigation/Case_ThermalChannel/README.md#cooling-yield-versus-forward-budget)
+
+### Fixed downstream temperature constraints
+
+Add `regional_caps` at the top level of the panel to protect one or several fluid footprints while minimizing material `J` under the pressure allowance.
+
+```json
+{
+  "regional_caps": {
+    "lower_intake_peak": {"bounds": [0.85, 0.06, 1.0, 0.43], "reduction": "max", "allowance": 0.04},
+    "upper_intake_mean": {"bounds": [0.85, 0.57, 1.0, 0.98], "reduction": "mean", "allowance": 0.01}
+  }
+}
+```
+
+Bounds are `[x0, y0, x1, y1]` normalized by channel size. Each rectangle must remain fluid across the baseline and every edit, and must contain valid native grid receivers. The allowance is a nonnegative maximum temperature rise from a reference-feasible baseline. Include a matched delta under each region name alongside `J` and `P` on each labeled action. Extract the reference values using the same mask and reduction. These constraints apply to the model screen, reference check and finite-pool comparisons. Use a common legal action pool when comparing requests with different intake geometry.
+
+To save a combined field and yield figure, run a budget sweep with one checkpoint and append `--figure-family FAMILY --figure-policy uniform --figure-budget 3 --figure-out /data2/wanglz/ModularDT/path/placement.pdf`. The plot uses the baseline and recommended layout at that curve point, including a rejected recommendation when applicable. It marks the inspected budget and the policy's critical decisions for the chosen family on the role-level curve. The native field passes made for display are recorded separately from the policy budget. Provide converged raw endpoint directories in the panel's `source_case_dir` and `raw_case_dir` for a reference field and signed error. The RMSE uses the plotted common valid fluid mask. When a matched field reference is unavailable, the figure labels the error unavailable and displays the predicted change over common fluid receivers. Use a new destination on verified DATA2. The writer records a 16 MiB limit for the figure and keeps a minimum 1 GiB of free space.
