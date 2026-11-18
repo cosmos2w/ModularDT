@@ -128,7 +128,7 @@ An in-memory analytic fixture exercised both tasks on a common bank of nine sing
 | Upper intake mean change | +0.0124 | +0.00931 |
 | Proposed fluid-field RMSE | 0.00582 | 0.00619 |
 
-The upper intake cap screens out the original joint move. Under both caps, proximity reaches `0.290` cooling at two forwards. Uniform and signed response reach the same cooling at eight. These values characterize the analytic fixture. Physical adoption requires the matched released-panel evaluation. [Field and curve implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_visualization.py)
+The upper intake cap screens out the original joint move. Under both caps, proximity reaches `0.290` cooling at two forwards. Uniform and signed response reach the same cooling at eight. These values characterize the analytic fixture. The released FIT replay below tests these constraints on stored physical endpoints. [Field and curve implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_visualization.py)
 
 ## Eight heat sources and simultaneous constraints
 
@@ -166,22 +166,32 @@ Signed response is the first policy to retain an improvement at the sampled budg
 
 | Question | Evidence available |
 | --- | --- |
-| Can the predictor rank real edits? | The additional full-pool fixture run scores four edits, matches all four resolved directions and all six feasible pair orderings. The scripted predictions equal their labels by construction. The B0/R comparison on matched released families is pending. |
-| What does organization contribute? | Environment access follows hot receiver weights through the environment-address cover and prepared directory to prioritize original modules. Equal-magnitude opposite moves of a module tie at shortlisting. Fresh forward scoring can distinguish their predicted responses. An advantage over proximity and signed response on real families is unmeasured. |
+| Can the predictor rank real edits? | The additional full-pool fixture run scores four edits, matches all four resolved directions and all six feasible pair orderings. The scripted predictions equal their labels by construction. The released FIT replay below measures ranking against stored physical endpoints. |
+| What does organization contribute? | Environment access follows hot receiver weights through the environment-address cover and prepared directory to prioritize original modules. Equal-magnitude opposite moves of a module tie at shortlisting. Fresh forward scoring can distinguish their predicted responses. The released FIT replay below compares shortlists at equal budgets. |
 | Does the inverse policy return better verified layouts? | The fixture retains the `2.0` scripted cooling edit and exercises pressure rejection and the minimum improvement threshold. The prospective comparison with the case solver is pending. |
 | Does it save work? | The replay counts candidate forwards and executor work. End-to-end reference solver savings and performance under full access remain unmeasured. |
 
 ## R16 B0 and R refresh
 
-**Released-checkpoint replay pending.** The documented `/data/public/ModularDT-HONF-ThermalChannel/v1` mount and matched edited references are unavailable on the workspace host. The physical refresh uses the released B0 and R checkpoints at saved epoch 3000. Inspect both files for the saved arm, epoch, lineage, native grid and family exposure before evaluating. Match the source layouts and reference fields to the saved native grid and use the normalization supplied with each checkpoint. [Checkpoint inspection](../../Case_ThermalChannel/scripts/inverse/README.md#inspect-the-released-r16-checkpoint-pair) · [Dataset binding](../../Case_ThermalChannel/Dataset/README.md)
+The epoch-3000 checkpoints were replayed on eight physical edits from the released R16 FIT corpus. With pressure as the only constraint, R identified the best stored edit for both layouts when all four candidates per family were available. B0 identified it for one. Adding intake protection eliminated every resolved cooling opportunity in this bank.
 
-| Previous design task | Matched released-panel comparison |
-| --- | --- |
-| Material cooling with a pressure limit | Score the same legal placement edits from reference-feasible baselines under the same pressure allowance. Compare full-pool response ranking, pressure screening and accepted cooling. |
-| Downstream intake protection | Add the peak and mean temperature constraints on common fluid footprints. Use the same footprint masks and reductions for both checkpoints and their matched references. |
-| Dense layouts with outlet uniformity | Use released higher-module-count families with sufficient legal edits and add the outlet population-standard-deviation cap. Keep the same action bank across requests when comparing the effect of the cap. |
+**Families and controls.** From `data/response/new/fit_corpus.json` in the v1 release, take the first four-module and nine-module families in corpus order with four legal edits whose baseline and endpoints clear all three fixed fluid footprints above. This selects `0112` and `0204` by geometry before scoring. Both checkpoints record the baselines among their 600 training cases. R also records both families in its eligible response training set. Both saved adapters match the 128 × 64 endpoint grid. Each replay used restricted access, seed 0, the saved transforms, smoothing scale 0.4149511814117432, pressure-rise allowance 0.010 and minimum resolved cooling 0.012. Pressure and temperature changes use native dataset units. Regional deltas use the released baseline and edited final frames on identical fluid receivers. [Benchmark runner](../../tools/thermal_placement_benchmark.py) · [Native reductions](../../Case_ThermalChannel/src/channelthermal/inverse/placement_benchmark.py)
 
-For each released task, report separate B0 and R policy curves at matched budgets and pair field panels with the selected family, policy and budget. Use the matched reference field and display masked error on the same physical support. The stored-reference replay needs matched endpoints and labels. Prospective solver checks additionally require the external analytic-wake and shared-grid thermal solver. [Response alignment](../../docs/guides/Case_Response_Evaluation.md) · [Figure export](../../Case_ThermalChannel/scripts/inverse/README.md#fixed-downstream-temperature-constraints) · [Reference adapter](../../Case_ThermalChannel/src/channelthermal/interaction_evidence/reference_adapter.py)
+**Predictor.** With pressure as the only cap, six of eight edits had a resolved temperature change. R predicted all six directions and correctly ordered 10 of 11 resolved within-family feasible pairs. B0 got five directions and six orderings correct. Mean absolute pressure-change error was 0.000118 for R and 0.00147 for B0. Both chose `0204_a4`, which cooled the nine-module layout by 0.4583. On the four-module layout R chose `0112_a2`, which cooled it by 0.3481. B0 predicted 0.3512 cooling for `0112_a4`; the stored endpoint cooled by only 0.00031, so the baseline was retained.
+
+**Organizer and inverse decisions.** Entries are mean reference-verified cooling across both families under the pressure cap. Each budget starts again from the baseline. The baseline forward and separate full-pool diagnostic are outside each policy budget.
+
+| Policy | B0, 1 forward | B0, 2 | B0, 4 | R, 1 forward | R, 2 | R, 4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Uniform | 0.2291 | 0.2291 | 0.2291 | 0.2291 | 0.2291 | 0.4032 |
+| Hot-receiver proximity | 0 | 0.0187 | 0.2291 | 0 | 0.1927 | 0.4032 |
+| HONF environment access | 0 | 0.2291 | 0.2291 | 0.1741 | 0.4032 | 0.4032 |
+| Signed response | 0.2291 | 0.2291 | 0.2291 | 0.2291 | 0.2291 | 0.4032 |
+| Reference-only poll | 0 | 0 | 0 | 0 | 0 | 0 |
+
+R's environment-access shortlist reached the best available mean cooling with two candidates per family. Uniform reached it with four. At one candidate, uniform gave higher mean cooling. These action banks have no single-coordinate probe endpoints, so signed response used its uniform fallback and the reference-only poll had no eligible move. The counts measure candidate evaluations. End-to-end sparse executor savings and prospective solver savings remain unmeasured.
+
+**Intake and outlet constraints.** Requiring zero rise in the lower-intake peak and upper-intake mean reduced mean verified cooling to zero for every policy and budget. The lower-intake peaks rose by 0.1061 for `0112_a2` and 0.1936 for `0204_a4`. A smaller cooling move, `0204_a1`, raised the upper-intake mean by 0.00050. Adding zero rise in outlet temperature spread left the same result. A larger edit bank is needed to distinguish policies under these constraints. Held-out ranking requires matched physical endpoints for families outside R's response training set. The v1 release omits the historical holdout endpoint payloads.
 
 **Fixture refresh, 2026-11-18.** Rerunning the two three-disk intake requests and the three eight-disk requests reproduced all 140 sampled policy-budget cooling values exactly. The 55 placement and native-response tests and 49 targeted R16 and reference-policy tests passed. One dataset-dependent test skipped because its local dataset and manifest were unavailable. One filesystem-output launcher test was outside this check. [Placement tests](../../Case_ThermalChannel/tests/test_placement_benchmark.py) · [R16 native tests](../../tests/test_r16_10_native.py)
 
