@@ -162,6 +162,10 @@ The outlet cap alone removes four feasible edits and the measured yield curves m
 
 Signed response is the first policy to retain an improvement at the sampled budgets under the tightened request. At 20 forwards, proximity finds the best reference-feasible edit in this finite bank by moving A, E and G down. These results illustrate how the budget and active constraints change which policy is effective in this fixture. [Field and curve implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_visualization.py)
 
+## Comparing inverse algorithms
+
+The expanded comparison evaluates direct physical search, geometry-only response regression and frozen-field screening on 96 released FIT families. It measures how pressure limits, candidate budgets and access to previous physical observations change the value of each algorithm. [Inverse algorithm comparison](Inverse_algorithm_comparison.md)
+
 ## Evidence and open measurements
 
 | Question | Evidence available |
