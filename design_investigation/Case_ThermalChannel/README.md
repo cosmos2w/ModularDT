@@ -112,6 +112,14 @@ The combined figure shows baseline and recommended fluid-temperature predictions
 
 An in-memory analytic fixture exercised both tasks on a common bank of nine single- and two-module edits, with budgets of 1, 2, 3, 5 and 8 forwards. It used an untrained native adapter for prepared access and separately parameterized analytic temperature and pressure responses for the predictor and fixture reference. The pressure rise allowance was `0.10`, and the lower intake peak allowance was `0.04`. The second task added an upper intake mean allowance of `0.01`, in fixture units. [Regional cap implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_benchmark.py)
 
+<p align="center"><img src="../../docs/assets/readme/thermal_inverse_one_intake.png" alt="Synthetic lower-intake case with baseline and edited fluid-temperature fields, a reference and signed error, and five cooling yield curves. The marked uniform policy retains A down and C up at three forwards." width="1056"></p>
+
+**One intake cap.** At three forwards, uniform retains A down and C up. The fixture reference gives `0.352` material cooling and a `0.0578` decrease in lower-intake peak temperature. The proposed fluid-field RMSE is `0.00582` in synthetic temperature units. The marker links the plotted fields to the indicated budget and policy.
+
+<p align="center"><img src="../../docs/assets/readme/thermal_inverse_two_intakes.png" alt="Synthetic two-intake case with matched fluid-temperature fields, reference and signed error, and five cooling yield curves. The marked uniform policy retains B down and C up at three forwards." width="1056"></p>
+
+**Two intake caps.** At the same budget, uniform retains B down and C up. The fixture reference gives `0.0295` material cooling and a `0.00931` rise in the upper intake mean, within the `0.010` allowance. The proposed fluid-field RMSE is `0.00619` in synthetic temperature units. Both figures share temperature, signed-error and cooling scales.
+
 | Uniform policy at three forwards | One intake cap | Two intake caps |
 | --- | --- | --- |
 | Retained design | A down and C up | B down and C up |

@@ -15,6 +15,7 @@ Objects, overlapping relationships and joint physical fields. The field textures
 | Thermal ports and local operators | Direct native-port supervision trains the joint predictor; the historical P64 composition can additionally use a compatible frozen local operator. |
 | State and finite-response training | Native field fitting with adjustable endpoint and finite-response supervision; cases provide the physical labels and observables. |
 | Physical-response evaluation | Fresh baseline/edited preparations, actual relation traces, native-unit field comparisons, common-support finite changes and equal-family decision metrics. |
+| Thermal inverse design | Budgeted layout search under pressure and intake-temperature caps, with [paired temperature fields and yield curves](design_investigation/Case_ThermalChannel/README.md#downstream-temperature-protection). |
 | Execution and visualization | Query tiling, native-decode reuse, verified native catalogues, complete histories and original-member organization figures. |
 
 The shared core produces all configured physical channels through one joint field head. Input roles describe ownership of geometry and controls, rather than separate output physics. Physical accuracy, response accuracy and runtime are measured separately; learned relations alone do not establish a physical causal graph or a design-guidance advantage.

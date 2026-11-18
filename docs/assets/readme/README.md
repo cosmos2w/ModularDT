@@ -36,4 +36,13 @@ Both errors are recomputed from the saved plotted prediction/reference and the s
 
 The literal source checkpoint is `thermal_r14_detail_train600_v1/checkpoints/epoch_0500_model.pt`. Physical arrays and restricted-directory/contextual arrays were exported together for the source layouts, with the checkpoint's saved train-fitted normalization. The local R14 evidence retains those arrays, exact selection/connection mappings and `readme_asset_provenance.json`; numerical data, checkpoints and one-time renderers remain outside this curated directory.
 
-Retain only these selected PNG/PDF pairs here. Use relative links, meaningful alternative text, explicit display widths and preserved aspect ratios. Inspect PNGs, rasterized PDF masters and the rendered README after replacement. Detailed reconstruction figures carry their measured physical error; conceptual overview artwork follows its explicitly stated introductory purpose.
+Retain the selected forward PNG/PDF pairs and the inverse-design PNG previews here. Use relative links, meaningful alternative text, explicit display widths and preserved aspect ratios. Inspect PNGs, rasterized PDF masters where available, and the rendered README after replacement. Detailed reconstruction figures carry their measured physical error; conceptual overview artwork follows its explicitly stated introductory purpose.
+
+## Inverse-design previews
+
+The inverse-design case README shows a separately parameterized analytic predictor and reference on a three-disk fixture. These PNGs share temperature, signed-error and cooling scales and mark the uniform policy at three forward calls. Fluid-field RMSE uses the displayed common valid fluid receivers in synthetic temperature units. [Benchmark and captions](../../../design_investigation/Case_ThermalChannel/README.md#downstream-temperature-protection)
+
+| Request | Preview |
+| --- | --- |
+| Lower intake peak cap and pressure cap | [PNG](thermal_inverse_one_intake.png) |
+| Lower intake peak, upper intake mean and pressure caps | [PNG](thermal_inverse_two_intakes.png) |
