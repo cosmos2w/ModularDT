@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from channelthermal.inverse.placement_benchmark import benchmark_placement
+from channelthermal.inverse.placement_benchmark import benchmark_placement, benchmark_placement_curve
 from channelthermal.member_routing import ThermalDetailAnchoredMemberRoutingAdapter
 from honf_runtime.compat import load_trusted_checkpoint
 
@@ -18,6 +18,13 @@ METHOD_NAMES = {
     "environment_access": "HONF environment access",
     "finite_response": "Signed finite response",
     "reference_poll": "Reference-only poll",
+}
+CURVE_COLORS = {
+    "uniform": ("blue", "#3764a8"),
+    "proximity": ("orange", "#b54f10"),
+    "environment_access": ("green", "#137c60"),
+    "finite_response": ("purple", "#843894"),
+    "reference_poll": ("gray", "#656b72"),
 }
 
 
@@ -69,6 +76,66 @@ def format_summary(results, device):
     return "\n".join(lines)
 
 
+def format_curve_summary(results, device):
+    def number(value):
+        return "—" if value is None else f"{abs(value) if value == 0 else value:g}"
+
+    lines = ["# ThermalChannel placement yield curves", "",
+             f"Device `{device}`. Each budget starts a separate replay from the same baseline and seed. "
+             "Cooling is the reference decrease in J of the retained layout. The reference-only poll uses zero "
+             "candidate forwards at every budget. Axes match across checkpoints for each family role. "
+             "Sampled budgets are shown as equally spaced checkpoints.", ""]
+    max_cooling = {}
+    for result in results.values():
+        for role, curves in result["curves"].items():
+            values = (point["mean_verified_improvement"] for points in curves.values() for point in points)
+            max_cooling[role] = max(max_cooling.get(role, 0.), max((v for v in values if v is not None), default=0.))
+    for checkpoint, result in results.items():
+        run = result["runs"][-1]
+        lines.extend([f"## {checkpoint}", "", f"Seed {run['seed']}. Read mode `{run['mode']}`. "
+                      f"Pressure rise cap `{run['pressure_allowance']:g}`. J resolution `{run['j_resolution']:g}`. "
+                      f"J smoothing scale `{run['tau']:g}`.", ""])
+        budgets = result["budgets"]
+        for role, curves in result["curves"].items():
+            labeled = curves["uniform"][0]["reference_family_count"]
+            lines.extend([f"### {role}", "", f"Families with reference labels {labeled}/{curves['uniform'][0]['family_count']}.", ""])
+            if labeled:
+                palette = ",".join(value[1] for value in CURVE_COLORS.values())
+                lines.extend(["```mermaid", f'%%{{init: {{"themeVariables": {{"xyChart": {{"plotColorPalette": "{palette}"}}}}}}}}%%',
+                              "xychart-beta", f'    x-axis "Candidate-forward budget" {json.dumps([str(v) for v in budgets])}',
+                              f'    y-axis "Mean cooling in native units" 0 --> {max_cooling[role] or 1.:g}'])
+                for method in METHOD_NAMES:
+                    values = ", ".join(number(point["mean_verified_improvement"]) for point in curves[method])
+                    lines.append(f"    line [{values}]")
+                lines.extend(["```", ""])
+            lines.extend(["| Policy | " + " | ".join(str(v) for v in budgets) + " |",
+                          "| --- | " + " | ".join("---:" for _ in budgets) + " |"])
+            for method, name in METHOD_NAMES.items():
+                values = " | ".join(number(point["mean_verified_improvement"]) for point in curves[method])
+                lines.append(f"| {name} ({CURVE_COLORS[method][0]}) | {values} |")
+            lines.append("")
+            steps = [step for step in result["critical_steps"] if step["role"] == role]
+            if steps:
+                lines.extend(["<details>", "<summary>Critical decisions by family</summary>", "",
+                              "| Budget | Family | Policy | Event | Recommended → retained | Proposed centers | Cooling | Reference pressure rise |",
+                              "| ---: | --- | --- | --- | --- | --- | ---: | ---: |"])
+                for step in steps:
+                    event = ", ".join(step["events"])
+                    pressure = (step["reference_delta"] or {}).get("P")
+                    centers = " · ".join(f"{move['slot']} to ({number(move['to'][0])}, {number(move['to'][1])})"
+                                        for move in step["moves"])
+                    lines.append(f"| {step['budget']} | {step['family']} | {METHOD_NAMES[step['policy']]} | {event} | "
+                                 f"{step['recommended']} → {step['retained'] or '—'} | {centers or '—'} | "
+                                 f"{number(step['verified_improvement'])} | {number(pressure)} |")
+                lines.extend(["", "</details>", ""])
+            full_pool = run["by_role"][role].get("full_pool")
+            if full_pool is not None:
+                lines.extend([f"The separate full-pool check at budget {budgets[-1]} used "
+                              f"{number(full_pool['mean_candidate_scores'])} additional forwards per family on average. "
+                              "Its predictor metrics are included in the JSON.", ""])
+    return "\n".join(lines)
+
+
 def restore_checkpoint(path, device):
     saved = load_trusted_checkpoint(path, map_location="cpu")
     adapter = saved.get("adapter_state")
@@ -84,7 +151,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--panel", type=Path, required=True)
     parser.add_argument("--checkpoint", action="append", required=True, metavar="LABEL=PATH")
-    parser.add_argument("--budget", type=int, required=True, help="Maximum candidate forwards per model policy and family, including probes.")
+    budget_options = parser.add_mutually_exclusive_group(required=True)
+    budget_options.add_argument("--budget", type=int, help="Maximum candidate forwards per model policy and family, including probes.")
+    budget_options.add_argument("--budgets", type=int, nargs="+", metavar="N", help="Increasing forward budgets for a matched yield curve.")
     parser.add_argument("--tau", type=float, required=True, help="Native material smooth-peak temperature scale.")
     parser.add_argument("--pressure-allowance", type=float, required=True, help="Maximum pressure rise from the baseline.")
     parser.add_argument("--j-resolution", type=float, required=True, help="Minimum resolved reference decrease in J.")
@@ -102,15 +171,18 @@ def main(argv=None):
             parser.error("Each checkpoint must use a distinct LABEL=PATH.")
         checkpoint = Path(path).expanduser().resolve(strict=True)
         model, epoch = restore_checkpoint(checkpoint, args.device)
-        result = benchmark_placement(
-            model, panel, budget=args.budget, pressure_allowance=args.pressure_allowance,
-            tau=args.tau, resolution=args.j_resolution, seed=args.seed, device=args.device, mode=args.mode,
-            full_pool=args.full_pool,
-        )
+        settings = {"pressure_allowance": args.pressure_allowance, "tau": args.tau,
+                    "resolution": args.j_resolution, "seed": args.seed, "device": args.device,
+                    "mode": args.mode, "full_pool": args.full_pool}
+        if args.budgets is None:
+            result = benchmark_placement(model, panel, budget=args.budget, **settings)
+        else:
+            result = benchmark_placement_curve(model, panel, budgets=args.budgets, **settings)
         results[label] = {"checkpoint": str(checkpoint), "epoch": epoch, **result}
         del model
     if args.format == "markdown":
-        print(format_summary(results, args.device))
+        formatter = format_summary if args.budgets is None else format_curve_summary
+        print(formatter(results, args.device))
     else:
         print(json.dumps({"panel": str(args.panel.resolve()), "device": args.device, "checkpoints": results},
                          indent=2, allow_nan=False))

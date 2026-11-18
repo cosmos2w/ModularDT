@@ -96,7 +96,7 @@ def test_matched_native_shortlists_do_not_observe_reference_labels():
 
 def test_signed_probes_count_against_budget_and_reference_stays_blind(monkeypatch):
     from channelthermal.inverse import placement_benchmark as placement
-    from tools.thermal_placement_benchmark import format_summary
+    from tools.thermal_placement_benchmark import format_curve_summary, format_summary
 
     panel, model = native_fixture()
     config = panel["cases"][0]["source_config"]
@@ -133,6 +133,12 @@ def test_signed_probes_count_against_budget_and_reference_stays_blind(monkeypatc
     try:
         result = benchmark_placement(model, panel, **options)
         blind_result = benchmark_placement(model, blind, **options)
+        curve_options = {name: value for name, value in options.items() if name != "budget"}
+        curve = placement.benchmark_placement_curve(model, panel, budgets=(1, 2, 3), **curve_options)
+        rejected_panel = deepcopy(panel)
+        rejected_panel["actions"][-1]["physical_delta"]["P"] = .3
+        rejected_curve = placement.benchmark_placement_curve(model, rejected_panel, budgets=(1, 2, 3),
+                                                             **{**curve_options, "full_pool": False})
     finally:
         torch.set_num_threads(threads)
 
@@ -160,3 +166,19 @@ def test_signed_probes_count_against_budget_and_reference_stays_blind(monkeypatc
     text = format_summary({"Controlled fixture": {"epoch": None, **result}}, "cpu")
     assert "Signed finite response | 3 | 2 | 1/1 | 0/1 | 2 | 0 | 0" in text
     assert "Correct direction on 4/4" in text
+    assert [point["mean_verified_improvement"] for point in curve["curves"]["synthetic"]["uniform"]] == [0., .5, 2.]
+    assert [point["mean_verified_improvement"] for point in rejected_curve["curves"]["synthetic"]["uniform"]] == [0., .5, 0.]
+    assert all("full_pool" not in run["cases"]["control"] for run in curve["runs"][:-1])
+    assert "full_pool" in curve["runs"][-1]["cases"]["control"]
+    rejected = next(row for row in rejected_curve["critical_steps"] if row["budget"] == 3 and row["policy"] == "uniform")
+    assert rejected["recommended"] == "joint" and rejected["retained"] == "baseline"
+    assert rejected["reference_delta"]["P"] == .3
+    assert "reference pressure exceeded cap" in rejected["events"]
+    assert "verified cooling decreased" in rejected["events"]
+    signed_step = next(row for row in curve["critical_steps"] if row["budget"] == 3 and row["policy"] == "finite_response")
+    assert "signed probes used" in signed_step["events"] and len(signed_step["probe_actions"]) == 2
+    assert signed_step["moves"] == [{"slot": 0, "from": [2., 2.], "to": [2.25, 2.]},
+                                   {"slot": 1, "from": [5., 3.], "to": [5., 2.75]}]
+    report = format_curve_summary({"Controlled fixture": curve}, "cpu")
+    assert "| Uniform sample (blue) | 0 | 0.5 | 2 |" in report
+    assert "Critical decisions by family" in report

@@ -362,3 +362,66 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
     return {"schema": "thermal_native_placement_benchmark_v1", "seed": seed, "budget": budget,
             "pressure_allowance": pressure_allowance, "j_resolution": resolution, "tau": tau,
             "mode": mode, "cases": result, "by_role": _summarize(result, views)}
+
+
+def benchmark_placement_curve(model, panel, *, budgets, full_pool=False, **settings):
+    """Replay the same families independently at each candidate-forward budget."""
+    budgets = tuple(budgets)
+    if (len(budgets) < 2 or any(type(budget) is not int or budget < 1 for budget in budgets)
+            or any(left >= right for left, right in zip(budgets, budgets[1:]))):
+        raise ValueError("Curve budgets must be distinct positive integers in increasing order.")
+    runs = [benchmark_placement(model, panel, budget=budget,
+                                full_pool=full_pool and budget == budgets[-1], **settings) for budget in budgets]
+    methods = (*MODEL_POLICIES, REFERENCE_POLL)
+    curves = {
+        role: {method: [{"budget": run["budget"], **run["by_role"][role][method]} for run in runs]
+               for method in methods}
+        for role in runs[0]["by_role"]
+    }
+    baseline_centers = {case["case_id"]: case["source_config"]["layout"]["centers"] for case in panel["cases"]}
+    candidate_centers = {(row["case_id"], row["action"]): row["centers"] for row in panel["actions"]}
+    steps = []
+    for case_id, family in runs[0]["cases"].items():
+        for method in methods:
+            previous_action = BASELINE
+            previous_cooling = 0.0
+            previous_probes = False
+            found_improvement = False
+            for run in runs:
+                result = run["cases"][case_id]
+                policy = result[REFERENCE_POLL] if method == REFERENCE_POLL else result["methods"][method]
+                decision = policy["decision"]
+                action = decision.get("polled_action") or decision["model_selected_action"] or BASELINE
+                cooling = decision.get("verified_improvement")
+                probes = policy.get("probe_actions", [])
+                events = []
+                if action != previous_action:
+                    events.append("recommendation changed")
+                    if decision.get("reference_cap_violation"):
+                        events.append("reference pressure exceeded cap")
+                if probes and not previous_probes:
+                    events.append("signed probes used")
+                if cooling is not None and cooling > 0 and not found_improvement:
+                    events.append("first accepted improvement")
+                    found_improvement = True
+                elif cooling is not None and previous_cooling is not None and cooling != previous_cooling:
+                    events.append("verified cooling increased" if cooling > previous_cooling else "verified cooling decreased")
+                if events:
+                    original = baseline_centers[case_id]
+                    proposed = candidate_centers.get((case_id, action), original)
+                    moves = [{"slot": slot, "from": list(map(float, before)), "to": list(map(float, after))}
+                             for slot, (before, after) in enumerate(zip(original, proposed, strict=True))
+                             if tuple(before) != tuple(after)]
+                    steps.append({"family": case_id, "role": family["role"] or "unspecified", "policy": method,
+                                  "budget": run["budget"], "candidate_scores": policy["candidate_scores"],
+                                  "events": events, "previous_recommendation": previous_action,
+                                  "recommended": action, "retained": decision.get("verified_incumbent"), "moves": moves,
+                                  "verified_improvement": cooling,
+                                  "reference_delta": decision.get("checked_reference_delta"),
+                                  "reference_outcome": decision["reference_outcome"], "probe_actions": probes})
+                previous_action = action
+                previous_cooling = cooling
+                previous_probes = bool(probes)
+    steps.sort(key=lambda row: (row["budget"], row["family"], row["policy"]))
+    return {"schema": "thermal_native_placement_curve_v1", "budgets": list(budgets), "curves": curves,
+            "critical_steps": steps, "runs": runs}

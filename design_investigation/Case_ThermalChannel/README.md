@@ -80,6 +80,30 @@ One synthetic family, four candidate edits, seed `0`, CPU and restricted HONF re
 
 All four model shortlists contain the best feasible edited layout in this fixture. Their measured shortlist and decision losses are both zero. The poll's shortlist misses `2.0` scripted temperature units of cooling, and keeping the baseline is the best decision within its one-move shortlist. This example verifies accounting and acceptance. The tie among model policies leaves the benefit of HONF shortlisting on real layout families open. [Comparison test](../../Case_ThermalChannel/tests/test_placement_benchmark.py#L139)
 
+## Cooling yield versus forward budget
+
+```mermaid
+%%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#3764a8,#b54f10,#137c60,#843894,#656b72"}}}}%%
+xychart-beta
+    x-axis "Candidate-forward budget" ["1", "2", "3"]
+    y-axis "Retained cooling in fixture units" 0 --> 2
+    line [0, 0.5, 2]
+    line [0, 1, 2]
+    line [0.5, 2, 2]
+    line [0, 0.5, 2]
+    line [0, 0, 0]
+```
+
+**Scripted replay, one family, seed 0.** Uniform is blue, proximity is orange, HONF environment access is green, signed response is purple, and the reference-only poll is gray. Uniform and signed response overlap. Environment access finds the joint move at two forwards. The other model policies reach it at three. At the larger budget, the curves tie and the selected action alone hides the difference in when they found it. [Curve implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_benchmark.py) · [Fixture](../../Case_ThermalChannel/tests/test_placement_benchmark.py#L97)
+
+| Forward budget | Critical decisions | Retained cooling |
+| ---: | --- | --- |
+| 1 | Environment access keeps B-down. The reference-only poll checks A-left and keeps the baseline. | `0.5` for environment access and `0` for the other policies. |
+| 2 | Environment access keeps the joint move. Proximity keeps A-right. Uniform and signed response keep B-down, with signed response still using its uniform fallback. | `2.0`, `1.0` and `0.5`, respectively. |
+| 3 | Signed response uses two component probes and one joint score. All four model policies keep the joint move. | `2.0` for each model policy. |
+
+Each point restarts from the same baseline with that budget. A decline is possible because a larger budget can change the recommendation. In a separate rejection check, changing the joint edit's reference pressure rise to `0.30` against a `0.20` cap sends the uniform curve from `0.5` at two forwards back to `0` at three. The benchmark records the rejected edit and retained baseline at that point. [Curve and rejection tests](../../Case_ThermalChannel/tests/test_placement_benchmark.py#L130)
+
 ## Evidence and open measurements
 
 | Question | Evidence available |
@@ -99,9 +123,9 @@ From the repository root after installing the shared and ThermalChannel packages
 python tools/thermal_placement_benchmark.py \
   --panel /path/to/matched-panel.json \
   --checkpoint B0=/path/to/b0.pt --checkpoint R=/path/to/r.pt \
-  --budget 4 --tau 0.4149511814117432 \
+  --budgets 1 2 3 4 --tau 0.4149511814117432 \
   --pressure-allowance 0.1 --j-resolution 0.01 \
   --full-pool --format markdown
 ```
 
-The numeric arguments illustrate the command. Use the matched panel's smoothing scale and native pressure and temperature thresholds. Supply the same legal edits and family partitions to both checkpoints. Within each checkpoint, the same seed and forward budget control the comparison among model policies. `--format json` exposes action IDs, predicted and reference deltas, counted work, and the two sources of loss. `--full-pool` adds a predictor comparison over identical edits outside the proposal budgets. [Panel format](../../configs/examples/thermal_response_families.example.json) · [CLI guide](../../Case_ThermalChannel/scripts/inverse/README.md#frozen-placement-benchmark) · [Project README](../../README.md)
+The numeric arguments illustrate the command. Use the matched panel's smoothing scale and native pressure and temperature thresholds. Supply the same legal edits and family partitions to both checkpoints. Within each checkpoint, the same seed and forward budget control the comparison among model policies. Expand **Critical decisions by family** for the events behind the plotted points. `--format json` exposes action IDs, predicted and reference deltas, counted work, and the two sources of loss. `--full-pool` adds a predictor comparison over identical edits at the largest budget outside the proposal budgets. Use `--budget 4` for the single-budget summary. [Panel format](../../configs/examples/thermal_response_families.example.json) · [CLI guide](../../Case_ThermalChannel/scripts/inverse/README.md#frozen-placement-benchmark) · [Project README](../../README.md)
