@@ -64,6 +64,12 @@ The shared `FieldResponsePair` accepts a separate, potentially different-length 
 - Keep interpolation, frame transformations and pressure reference conventions case-owned. Preserve source dtypes and coordinates; using FP64 for a reduction does not turn an FP32 saved field into a higher-precision observation.
 - Fit normalizers, response scales and gradient balance from native TRAIN data only. State physical units, scale floors and zero-variation components separately. Validation and TEST pairs must contain only cases in their own declared panels; never pair across splits.
 
+## Compatibility and provenance
+
+The case adapter determines compatibility from the actual prescribed physics, physical coordinate and measurement definitions, and source-generation provenance. Exact equality of every JSON key is not itself a physical law: a record may contain derived controls, settings for a different simulator, or metadata irrelevant to the saved field. For example, a change in Reynolds number and its derived viscosity describes one operating-condition change, not two independent interventions. Record every actual prescribed change and verify any physical equivalence from the source recipe.
+
+Missing historical settings are not established by inserting today's defaults. A verified historical default can support an explicitly documented comparison; otherwise retain the missing provenance and do not claim equivalence. Preserve the original JSON and numerical precision. Geometry assignment can identify similar sets of objects, but it does not establish persistent member identity; member-attached differences require independently verified correspondence. A case adapter supplies these meanings for its own dataset. Diagnostic metadata normalization does not alter existing pair graphs, identities or saved recipes.
+
 ## Pair selection and execution
 
 Choose pairs using prescribed inputs, without model errors, target differences, response signs or design outcomes. Useful choices include existing repeated layouts with different operating conditions, or similar layouts within compatible domain/material/control groups. Record all inputs that actually differ. Exclude identical-input duplicates from informative response edges while retaining their ordinary native supervision.
