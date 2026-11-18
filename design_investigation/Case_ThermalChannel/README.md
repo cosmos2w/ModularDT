@@ -13,7 +13,7 @@ flowchart LR
     class E accepted
 ```
 
-Each policy can recommend one edit from a supplied pool. Model policies have the same forward allowance. When a model ranks the baseline first, the replay keeps it without an edit check. Otherwise the final decision reads the selected edit's stored reference label if available. The completed result below is a scripted replay. The released B0/R comparison is pending. [Benchmark guide](../../Case_ThermalChannel/scripts/inverse/README.md#frozen-placement-benchmark)
+Each policy can recommend one edit from a supplied pool. Model policies have the same forward allowance. When a model ranks the baseline first, the replay keeps it without an edit check. Otherwise the final decision reads the selected edit's stored reference label if available. The examples below use scripted or analytic fixtures at their stated grids. [Released R16 replay status](#r16-b0-and-r-refresh) · [Benchmark guide](../../Case_ThermalChannel/scripts/inverse/README.md#frozen-placement-benchmark)
 
 ## What counts as a better design
 
@@ -171,9 +171,19 @@ Signed response is the first policy to retain an improvement at the sampled budg
 | Does the inverse policy return better verified layouts? | The fixture retains the `2.0` scripted cooling edit and exercises pressure rejection and the minimum improvement threshold. The prospective comparison with the case solver is pending. |
 | Does it save work? | The replay counts candidate forwards and executor work. End-to-end reference solver savings and performance under full access remain unmeasured. |
 
-Real-case execution requires the released B0/R checkpoints and matched edited endpoints. A prospective trial also needs the external analytic-wake and shared-grid thermal solver. This solver provides the benchmark reference fidelity. [Dataset binding](../../Case_ThermalChannel/Dataset/README.md) · [Reference adapter](../../Case_ThermalChannel/src/channelthermal/interaction_evidence/reference_adapter.py)
+## R16 B0 and R refresh
 
-The physical benchmark is anchored to the released R16 B0/R pair at saved epoch 3000. Inspect the checkpoint files to confirm their actual grids and lineage, then align the panel and matched references to that grid. The synthetic figures above remain smoke-test evidence at their declared fixture resolutions. [Checkpoint inspection](../../Case_ThermalChannel/scripts/inverse/README.md#inspect-the-released-r16-checkpoint-pair)
+**Released-checkpoint replay pending.** The documented `/data/public/ModularDT-HONF-ThermalChannel/v1` mount and matched edited references are unavailable on the workspace host. The physical refresh uses the released B0 and R checkpoints at saved epoch 3000. Inspect both files for the saved arm, epoch, lineage, native grid and family exposure before evaluating. Match the source layouts and reference fields to the saved native grid and use the normalization supplied with each checkpoint. [Checkpoint inspection](../../Case_ThermalChannel/scripts/inverse/README.md#inspect-the-released-r16-checkpoint-pair) · [Dataset binding](../../Case_ThermalChannel/Dataset/README.md)
+
+| Previous design task | Matched released-panel comparison |
+| --- | --- |
+| Material cooling with a pressure limit | Score the same legal placement edits from reference-feasible baselines under the same pressure allowance. Compare full-pool response ranking, pressure screening and accepted cooling. |
+| Downstream intake protection | Add the peak and mean temperature constraints on common fluid footprints. Use the same footprint masks and reductions for both checkpoints and their matched references. |
+| Dense layouts with outlet uniformity | Use released higher-module-count families with sufficient legal edits and add the outlet population-standard-deviation cap. Keep the same action bank across requests when comparing the effect of the cap. |
+
+For each released task, report separate B0 and R policy curves at matched budgets and pair field panels with the selected family, policy and budget. Use the matched reference field and display masked error on the same physical support. The stored-reference replay needs matched endpoints and labels. Prospective solver checks additionally require the external analytic-wake and shared-grid thermal solver. [Response alignment](../../docs/guides/Case_Response_Evaluation.md) · [Figure export](../../Case_ThermalChannel/scripts/inverse/README.md#fixed-downstream-temperature-constraints) · [Reference adapter](../../Case_ThermalChannel/src/channelthermal/interaction_evidence/reference_adapter.py)
+
+**Fixture refresh, 2026-11-18.** Rerunning the two three-disk intake requests and the three eight-disk requests reproduced all 140 sampled policy-budget cooling values exactly. The 55 placement and native-response tests and 49 targeted R16 and reference-policy tests passed. One dataset-dependent test skipped because its local dataset and manifest were unavailable. One filesystem-output launcher test was outside this check. [Placement tests](../../Case_ThermalChannel/tests/test_placement_benchmark.py) · [R16 native tests](../../tests/test_r16_10_native.py)
 
 ## Run the replay
 
