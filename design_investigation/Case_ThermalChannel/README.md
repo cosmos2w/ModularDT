@@ -173,6 +173,8 @@ Signed response is the first policy to retain an improvement at the sampled budg
 
 Real-case execution requires the released B0/R checkpoints and matched edited endpoints. A prospective trial also needs the external analytic-wake and shared-grid thermal solver. This solver provides the benchmark reference fidelity. [Dataset binding](../../Case_ThermalChannel/Dataset/README.md) · [Reference adapter](../../Case_ThermalChannel/src/channelthermal/interaction_evidence/reference_adapter.py)
 
+The physical benchmark is anchored to the released R16 B0/R pair at saved epoch 3000. Inspect the checkpoint files to confirm their actual grids and lineage, then align the panel and matched references to that grid. The synthetic figures above remain smoke-test evidence at their declared fixture resolutions. [Checkpoint inspection](../../Case_ThermalChannel/scripts/inverse/README.md#inspect-the-released-r16-checkpoint-pair)
+
 ## Run the replay
 
 From the repository root after installing the shared and ThermalChannel packages:

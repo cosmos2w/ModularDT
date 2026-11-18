@@ -2,6 +2,8 @@
 
 from copy import deepcopy
 from io import BytesIO
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -244,3 +246,28 @@ def test_fixed_regional_caps_and_field_curve(monkeypatch):
             benchmark_placement(model, invalid, budget=2, tau=.4, pressure_allowance=.2, resolution=.1)
     finally:
         torch.set_num_threads(threads)
+
+
+def test_inspect_checkpoint_reports_saved_r16_identity_without_scoring(monkeypatch, capsys):
+    from tools import thermal_placement_benchmark as cli
+
+    panel = {"cases": [{"case_id": "panel-case", "source_case_id": "0002", "family_id": "edit-family", "role": "fit",
+                       "source_config": {"domain": {"nx": 128, "ny": 64}}},
+                      {"case_id": "synthetic-case", "source_config": {"domain": {"nx": 54, "ny": 24}}}]}
+    adapter = {"schema": "test_adapter", "native_grid_nx_ny": [128, 64], "environment_grid_nx_ny": [24, 8]}
+    provider = {"adapter_state": adapter, "training_case_ids": ["0002"], "validation_case_ids": ["0684"],
+                "r16_10_family": {"arm": "R", "eligible_families": {"new": ["edit-family"]}}}
+    saved = {"epoch": 1000, "experiment_identity": {"provider_identity": provider,
+             "recipe": {"name": "continuation", "initialization": {"source_parent_age": 3000}}}}
+    monkeypatch.setattr(Path, "resolve", lambda path, **kwargs: path)
+    monkeypatch.setattr(Path, "read_text", lambda path: json.dumps(panel))
+    monkeypatch.setattr(cli, "load_trusted_checkpoint", lambda path, **kwargs: saved)
+    assert cli.main(["--inspect-checkpoints", "--checkpoint", "declared-label=/epoch-3000.pt", "--panel", "/panel.json"]) == 0
+    result = json.loads(capsys.readouterr().out)["checkpoints"]["declared-label"]
+    assert result["epoch"] == 1000 and result["source_parent_epoch"] == 3000
+    assert result["r16_arm"] == "R" and result["native_grid_nx_ny"] == [128, 64]
+    assert result["panels"][0] == {"case_id": "panel-case", "source_case_id": "0002", "family_id": "edit-family",
+                                   "role": "fit", "native_grid_nx_ny": [128, 64], "grid_matches": True,
+                                   "recorded_training_case": True, "recorded_validation_case": False,
+                                   "recorded_response_groups": ["new"]}
+    assert result["panels"][1]["grid_matches"] is False

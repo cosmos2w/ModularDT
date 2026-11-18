@@ -20,6 +20,22 @@ building, training, sampling, frozen-HONF verification, or artifact formats.
 
 ## Frozen placement benchmark
 
+### Inspect the released R16 checkpoint pair
+
+The real comparison uses the released R16 B0 and R checkpoints at saved epoch 3000. The release is documented under `/data/public/ModularDT-HONF-ThermalChannel/v1`. Read its README for the exact checkpoint paths, compatible revision, and exposure information. In particular, a separate historical R lineage records a B0 parent at epoch 3000 and its own continuation epoch. Use the saved arm, epoch and initialization lineage to identify which R was released. [Continuation lineage](../../src/channelthermal/training/r16_10_posttrain.py)
+
+Set `b0_checkpoint` and `r_checkpoint` to the exact trusted paths from the release README. Inspect them before scoring. `--panel` is optional in inspection mode.
+
+```bash
+python tools/thermal_placement_benchmark.py --inspect-checkpoints \
+  --checkpoint "B0=$b0_checkpoint" --checkpoint "R=$r_checkpoint" \
+  --panel /path/to/matched-panel.json
+```
+
+The JSON reports the saved epoch, R16 arm, native and environment grids, initialization lineage, case counts, and the recorded normalization identity when present. With a panel it also reports each source-grid match and exact ID matches to the saved training, validation and eligible response-family lists. A panel case can specify `source_case_id` and `family_id` when those identities differ from `case_id`. Interpret those matches with the release's exposure records. Score both checkpoints on the same released native grid with their own saved transforms and matched edited references. The normal benchmark JSON, Markdown summary and field figure record the checkpoint grid.
+
+### Run the matched replay
+
 Run the native finite-pool comparison from the repository root.
 
 ```bash

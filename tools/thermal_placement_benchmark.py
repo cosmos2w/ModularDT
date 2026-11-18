@@ -46,6 +46,7 @@ def format_summary(results, device):
                       f"Read mode `{result['mode']}`. Seed {result['seed']}. "
                       f"Up to {result['budget']} forwards. Pressure rise cap `{result['pressure_allowance']:g}`. "
                       f"Minimum resolved decrease in J `{result['j_resolution']:g}`. J smoothing scale `{result['tau']:g}`.", ""])
+        _append_checkpoint_grid(lines, result)
         for name, region in result.get("regional_caps", {}).items():
             lines.extend([f"Regional cap `{name}` uses {region['reduction']} over `{region['bounds']}` "
                           f"with allowed temperature rise `{region['allowance']:g}`.", ""])
@@ -97,9 +98,12 @@ def format_curve_summary(results, device):
             max_cooling[role] = max(max_cooling.get(role, 0.), max((v for v in values if v is not None), default=0.))
     for checkpoint, result in results.items():
         run = result["runs"][-1]
-        lines.extend([f"## {checkpoint}", "", f"Seed {run['seed']}. Read mode `{run['mode']}`. "
+        epoch = result.get("epoch")
+        lines.extend([f"## {checkpoint}", "", f"Checkpoint epoch {epoch if epoch is not None else 'unavailable'}. "
+                      f"Seed {run['seed']}. Read mode `{run['mode']}`. "
                       f"Pressure rise cap `{run['pressure_allowance']:g}`. J resolution `{run['j_resolution']:g}`. "
                       f"J smoothing scale `{run['tau']:g}`.", ""])
+        _append_checkpoint_grid(lines, result)
         for name, region in run.get("regional_caps", {}).items():
             lines.extend([f"Regional cap `{name}` uses {region['reduction']} over `{region['bounds']}` "
                           f"with allowed temperature rise `{region['allowance']:g}`.", ""])
@@ -144,11 +148,74 @@ def format_curve_summary(results, device):
     return "\n".join(lines)
 
 
-def restore_checkpoint(path, device):
+def _append_checkpoint_grid(lines, result):
+    identity = result.get("checkpoint_identity")
+    if identity is None:
+        return
+    grid = " × ".join(map(str, identity["native_grid_nx_ny"]))
+    lines.extend([f"Native grid {grid}. R16-10 arm {identity['r16_arm'] or 'unavailable'}.", ""])
+
+
+def _read_checkpoint(path):
     saved = load_trusted_checkpoint(path, map_location="cpu")
     adapter = saved.get("adapter_state")
     if adapter is None:
         adapter = saved["experiment_identity"]["provider_identity"]["adapter_state"]
+    return saved, adapter
+
+
+def _checkpoint_identity(saved, adapter, panel):
+    experiment = saved.get("experiment_identity", {})
+    provider = experiment.get("provider_identity", {})
+    recipe = experiment.get("recipe", {})
+    initialization = recipe.get("initialization", {})
+    responses = provider.get("r16_10_family", {})
+    train_ids = provider.get("training_case_ids")
+    validation_ids = provider.get("validation_case_ids")
+    response_ids = responses.get("eligible_families")
+    saved_grid = adapter.get("native_grid_nx_ny")
+    environment_grid = adapter.get("environment_grid_nx_ny")
+    grid = list(saved_grid) if isinstance(saved_grid, (list, tuple)) else None
+    identity = {
+        "epoch": saved.get("epoch"), "run_name": recipe.get("name"),
+        "r16_arm": recipe.get("r16_10_family", {}).get("arm", responses.get("arm")),
+        "initialization_kind": initialization.get("source_kind"),
+        "source_parent_epoch": initialization.get("source_parent_age"),
+        "adapter_schema": adapter.get("schema"),
+        "native_grid_nx_ny": grid,
+        "environment_grid_nx_ny": list(environment_grid) if isinstance(environment_grid, (list, tuple)) else None,
+        "saved_normalization_id": provider.get("normalization_stats_sha256"),
+        "training_case_count": None if train_ids is None else len(train_ids),
+        "validation_case_count": None if validation_ids is None else len(validation_ids),
+        "eligible_response_family_counts": None if response_ids is None else {
+            name: len(ids) for name, ids in response_ids.items()
+        },
+    }
+    if panel is None:
+        return identity
+
+    training = None if train_ids is None else set(map(str, train_ids))
+    validation = None if validation_ids is None else set(map(str, validation_ids))
+    eligible = None if response_ids is None else {key: set(map(str, ids)) for key, ids in response_ids.items()}
+    identity["panels"] = []
+    for case in panel["cases"]:
+        case_id = str(case["case_id"])
+        source_id = str(case.get("source_case_id", case_id))
+        family_id = str(case.get("family_id", case_id))
+        domain = case["source_config"]["domain"]
+        shape = [int(domain[axis]) if axis in domain else None for axis in ("nx", "ny")]
+        identity["panels"].append({
+            "case_id": case_id, "source_case_id": source_id, "family_id": family_id, "role": case.get("role"),
+            "native_grid_nx_ny": shape, "grid_matches": None if grid is None or None in shape else shape == grid,
+            "recorded_training_case": None if training is None else source_id in training,
+            "recorded_validation_case": None if validation is None else source_id in validation,
+            "recorded_response_groups": None if eligible is None else [group for group, ids in eligible.items() if family_id in ids],
+        })
+    return identity
+
+
+def restore_checkpoint(path, device, *, checkpoint_state=None):
+    saved, adapter = _read_checkpoint(path) if checkpoint_state is None else checkpoint_state
     model = ThermalDetailAnchoredMemberRoutingAdapter.from_state_payload(
         adapter, state_dict=saved["model_state_dict"], device=device,
     )
@@ -172,14 +239,15 @@ def _figure_storage(path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--panel", type=Path, required=True)
+    parser.add_argument("--panel", type=Path)
     parser.add_argument("--checkpoint", action="append", required=True, metavar="LABEL=PATH")
-    budget_options = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--inspect-checkpoints", action="store_true", help="Report saved checkpoint identities as JSON without scoring.")
+    budget_options = parser.add_mutually_exclusive_group()
     budget_options.add_argument("--budget", type=int, help="Maximum candidate forwards per model policy and family, including probes.")
     budget_options.add_argument("--budgets", type=int, nargs="+", metavar="N", help="Increasing forward budgets for a matched yield curve.")
-    parser.add_argument("--tau", type=float, required=True, help="Native material smooth-peak temperature scale.")
-    parser.add_argument("--pressure-allowance", type=float, required=True, help="Maximum pressure rise from the baseline.")
-    parser.add_argument("--j-resolution", type=float, required=True, help="Minimum resolved reference decrease in J.")
+    parser.add_argument("--tau", type=float, help="Native material smooth-peak temperature scale.")
+    parser.add_argument("--pressure-allowance", type=float, help="Maximum pressure rise from the baseline.")
+    parser.add_argument("--j-resolution", type=float, help="Minimum resolved reference decrease in J.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--mode", choices=("restricted", "full"), default="restricted")
@@ -190,7 +258,13 @@ def main(argv=None):
     parser.add_argument("--figure-policy", choices=tuple(METHOD_NAMES), default="finite_response")
     parser.add_argument("--figure-budget", type=int, help="Budget point for the fields. Defaults to the largest budget.")
     args = parser.parse_args(argv)
-    panel = json.loads(args.panel.read_text())
+    if args.inspect_checkpoints:
+        if args.budget is not None or args.budgets is not None or args.figure_out is not None:
+            parser.error("Checkpoint inspection takes no budgets or figure output.")
+    elif (any(value is None for value in (args.panel, args.tau, args.pressure_allowance, args.j_resolution))
+          or (args.budget is None and args.budgets is None)):
+        parser.error("Scoring requires --panel, --budget or --budgets, --tau, --pressure-allowance and --j-resolution.")
+    panel = None if args.panel is None else json.loads(args.panel.read_text())
     if args.figure_out is not None:
         if args.budgets is None or len(args.checkpoint) != 1 or args.figure_family is None:
             parser.error("A field figure needs --budgets, one --checkpoint and --figure-family.")
@@ -204,7 +278,14 @@ def main(argv=None):
         if not separator or not label or not path or label in results:
             parser.error("Each checkpoint must use a distinct LABEL=PATH.")
         checkpoint = Path(path).expanduser().resolve(strict=True)
-        model, epoch = restore_checkpoint(checkpoint, args.device)
+        saved, adapter = _read_checkpoint(checkpoint)
+        identity = _checkpoint_identity(saved, adapter, panel)
+        if args.inspect_checkpoints:
+            results[label] = {"checkpoint": str(checkpoint), **identity}
+            del saved, adapter
+            continue
+        model, epoch = restore_checkpoint(checkpoint, args.device, checkpoint_state=(saved, adapter))
+        del saved, adapter
         settings = {"pressure_allowance": args.pressure_allowance, "tau": args.tau,
                     "resolution": args.j_resolution, "seed": args.seed, "device": args.device,
                     "mode": args.mode, "full_pool": args.full_pool}
@@ -217,8 +298,10 @@ def main(argv=None):
 
             evidence = collect_placement_fields(model, panel, result, case_id=args.figure_family,
                                                 policy=args.figure_policy, budget=figure_budget, device=args.device)
+            epoch_label = f"epoch {epoch}" if epoch is not None else "epoch unavailable"
             figure = plot_placement_fields_and_curve(result, evidence, budget=figure_budget,
-                                                     policy=args.figure_policy, checkpoint=label)
+                                                     policy=args.figure_policy,
+                                                     checkpoint=f"{label} · {epoch_label} · {model.nx} × {model.ny}")
             payload = BytesIO()
             figure.savefig(payload, format=figure_path.suffix[1:].lower(), dpi=140)
             if payload.tell() > figure_storage["output_budget_bytes"]:
@@ -229,9 +312,13 @@ def main(argv=None):
             result["figure"] = {"path": str(figure_path), "family": args.figure_family, "policy": args.figure_policy,
                                 "budget": figure_budget, "extra_forwards": evidence["extra_forwards"],
                                 "storage": figure_storage, "bytes": payload.tell()}
-        results[label] = {"checkpoint": str(checkpoint), "epoch": epoch, **result}
+        results[label] = {"checkpoint": str(checkpoint), "epoch": epoch,
+                          "checkpoint_identity": identity, **result}
         del model
-    if args.format == "markdown":
+    if args.inspect_checkpoints:
+        print(json.dumps({"panel": None if args.panel is None else str(args.panel.resolve()), "checkpoints": results},
+                         indent=2, allow_nan=False))
+    elif args.format == "markdown":
         formatter = format_summary if args.budgets is None else format_curve_summary
         print(formatter(results, args.device))
         if args.figure_out is not None:
