@@ -22,6 +22,9 @@ from .unified_training import (_atomic_json, _atomic_torch_save, _engine_config_
 
 def _native_recipe(recipe):
     result = copy.deepcopy(recipe)
+    if result.get('training_profile') == 'local_multisecant_response':
+        result['training_profile'] = 'field_response'
+        result.pop('thermal_local_response', None)
     for key in ('name', 'storage', 'field_response_parent'):
         result.pop(key, None)
     response = result.get('thermal_field_response', {})
@@ -61,14 +64,19 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
         raise ValueError('The inactive prefix permits only the declared auxiliary weighting strengths.')
     parent_batch = parent_recipe.get('training', {}).get('microbatch_cases')
     child_batch = recipe.get('training', {}).get('microbatch_cases')
+    local_profile = recipe.get('training_profile') == 'local_multisecant_response'
+    if local_profile and parent_batch != child_batch:
+        raise ValueError('Local-response children must preserve the native prefix microbatch.')
     if parent_batch != child_batch and not (parent_batch == 24 and child_batch in (6, 12)
             and recipe.get('training', {}).get('effective_batch_size') == 48):
         raise ValueError('Only the declared effective-batch-preserving microbatch changes are supported.')
     if (source.get('epoch') != 10 or parent_recipe.get('training_profile') != 'field_response'
             or parent_recipe.get('thermal_field_response', {}).get('variant') != 'field_only'
-            or recipe.get('training_profile') != 'field_response'
-            or recipe.get('thermal_field_response', {}).get('variant') not in
-            ('field_anchors', 'field_response')):
+            or not ((recipe.get('training_profile') == 'field_response'
+                     and recipe.get('thermal_field_response', {}).get('variant') in
+                     ('field_anchors', 'field_response'))
+                    or (local_profile and recipe.get('thermal_local_response', {}).get('variant') in
+                        ('state_anchors', 'uniform_response', 'multisecant_response')))):
         raise ValueError('Field-response children require the completed native-only epoch-ten prefix.')
     if _native_recipe(parent_recipe) != _native_recipe(recipe):
         raise ValueError('Common-prefix branching cannot change native data, model, objective, sampling or schedule.')
@@ -97,7 +105,11 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
     native_state = copy.deepcopy(source.get('provider_training_state', {}))
     if native_state.get('field_response', {}).get('calibration') is not None:
         raise ValueError('The common prefix must have no auxiliary calibration or fitting.')
-    provider_state = {**native_state, 'field_response': {'calibration': copy.deepcopy(calibration)}}
+    if local_profile:
+        checked = provider.validate_local_calibration(calibration, source_checkpoint=source_path)
+        provider_state = provider.initialize_local_response_state(native_state, checked)
+    else:
+        provider_state = {**native_state, 'field_response': {'calibration': copy.deepcopy(calibration)}}
     provider.load_training_state_dict(provider_state)
     model.load_state_dict(source['model_state_dict'], strict=True)
     arm = source['arm']

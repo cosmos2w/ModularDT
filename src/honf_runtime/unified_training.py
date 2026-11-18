@@ -914,6 +914,16 @@ def _diagnostic_age_branch_amendment(
             "child_history_scope": "only new diagnostic visits and updates; inherited fitting exposure retained in parent identity"}
 
 
+def _curve_provider_identity(provider_identity: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Pass profile metadata only for renderers that define profile-specific labels."""
+    if (provider_identity.get('thermal_state_response')
+            or provider_identity.get('state_response', {}).get('enabled', False)
+            or provider_identity.get('recipe', {}).get('r16_10_family')
+            or provider_identity.get('local_response')):
+        return provider_identity
+    return None
+
+
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str,
                         loss_metadata: Mapping[str, Mapping[str, str]] | None = None,
                         provider_identity: Mapping[str, Any] | None = None,
@@ -937,6 +947,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     state_response_run = bool(provider_identity and
                               provider_identity.get("state_response", {}).get("enabled", False))
     response_run = legacy_response_run or scratch_family_run or state_response_run
+    local_response_run = bool(provider_identity and provider_identity.get('local_response'))
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
                                       "R13-4-Full", "R13-4-Guide"}
@@ -1243,12 +1254,16 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             [recorded_sum({"total": objective_at(row)["total"]})
              if "total" in objective_at(row) else recorded_sum(objective_at(row).get("terms"))
              for row in validation_rows],
-            label=("VALIDATION: native total" if response_run else "VALIDATION: recorded total"),
+            label=("VALIDATION: native-only subtotal" if local_response_run else
+                   "VALIDATION: native total" if response_run else "VALIDATION: recorded total"),
             color="C1", linestyle="--", marker="o")
     else:
         pending = not any(isinstance(row.get("validation"), Mapping) and row["validation"] for row in history)
         validation_total_axis.text(0.02, 0.10, "Validation: first review pending" if pending else
                         "Validation objective losses were not recorded.", transform=validation_total_axis.transAxes, fontsize=8)
+    if local_response_run:
+        validation_total_axis.text(0.02, 0.03, 'Full validation objective unavailable',
+                                   transform=validation_total_axis.transAxes, fontsize=8)
 
     # Keep a separate shared-name subtotal only when it differs in coverage.
     comparable_rows = []
@@ -1672,7 +1687,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     total_axis.set_ylabel("Weighted loss")
     if separate_totals:
         total_axis.set_title("Total TRAIN loss")
-        validation_total_axis.set_title("Total measurable validation loss")
+        validation_total_axis.set_title("Native-only validation subtotal" if local_response_run else
+                                        "Total measurable validation loss")
         validation_total_axis.set_xlabel("Completed epoch")
         validation_total_axis.set_ylabel("Weighted loss")
         validation_total_axis.grid(alpha=0.25, which="both")
@@ -1861,6 +1877,11 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         metadata["work_counter_definitions"].update(member_routing_work_definitions)
     response_terms = [name for name in all_names if name.startswith("response/") and
                       loss_metadata and name in loss_metadata]
+    if local_response_run:
+        metadata['panel_definitions']['weighted_loss_totals'] = (
+            'TRAIN sums the recorded native and local-response contributions. VALIDATION is a native-only '
+            'subtotal on the configured panel; local-response observations are not evaluated there. '
+            'Prediction paths and reductions differ.')
     if response_terms:
         metadata["panel_definitions"]["physics"] = (
             "TRAIN records weighted paired endpoint and finite-response loss contributions, including "
@@ -6351,9 +6372,7 @@ class TrainingEngine:
                             **({"loss_metadata": provider.loss_metadata()}
                                if callable(getattr(provider, "loss_metadata", None)) else {}),
                             **({"provider_identity": curve_identity}
-                            if (provider_identity.get("thermal_state_response")
-                                or provider_identity.get("state_response", {}).get("enabled", False)
-                                or provider_identity.get("recipe", {}).get("r16_10_family")) else {}),
+                               if _curve_provider_identity(curve_identity) is not None else {}),
                             **({"metadata_output": history_path.parent} if modern_output else {}),
                             **({"separate_totals": True} if csv_output else {}),
                         )

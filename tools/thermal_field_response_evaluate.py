@@ -22,8 +22,11 @@ import torch
 
 from channelthermal.native_observations import native_cell_center_stencil
 from channelthermal.training.thermal_native_pair_task import ThermalNativePairObjective
-from channelthermal.training.thermal_field_response import sample_thermal_field_observations
+from channelthermal.training.thermal_field_response import (sample_thermal_field_observations,
+                                                             select_thermal_field_pairs)
 from honf_runtime.state_response import FieldResponsePair, field_response_losses
+from honf_runtime.local_response_contrasts import build_local_contrast, build_uniform_contrast
+from channelthermal.training.thermal_local_response import thermal_chart
 from honf_runtime.unified_training import _atomic_json
 
 CHANNELS = ('u', 'v', 'p', 'omega', 'temperature')
@@ -31,6 +34,7 @@ UNITS = ('dataset velocity', 'dataset velocity', 'dataset pressure',
          'dataset vorticity', 'dataset temperature')
 ASSESSMENT9_CASES = ('0686', '0687', '0645', '0646', '0281', '0283', '0284', '0294', '0297')
 ASSESSMENT9_PAIRS = (('0686', '0687'), ('0645', '0646'), ('0283', '0284'), ('0294', '0297'))
+ASSESSMENT9_TRIPLE = ('0645', '0646', '0281')
 
 
 def bind_assessment9(provider):
@@ -78,8 +82,105 @@ def summarize_physical_field_changes(rows, scales, weights):
             'definition': 'Cell-area RMSE for each pair/channel, equal-pair mean within channel, native-weighted normalized channel mean; not a pooled MSE square root.'}
 
 
+def evaluation_functional_pairs(provider, recipe=None):
+    """Resolve historical TRAIN pairs solely for optional J/P reporting scales."""
+    existing = getattr(provider, 'field_response_pairs', None)
+    if existing is not None:
+        return existing
+    if not recipe or recipe.get('training_profile') != 'local_multisecant_response':
+        raise ValueError('The evaluation provider has no field-response TRAIN pair definitions.')
+    pairs = tuple(tuple(map(str, pair)) for pair in recipe.get('thermal_field_response', {}).get('pairs', ()))
+    if not pairs:
+        _, pairs, _ = select_thermal_field_pairs(provider.data_path, provider.training_case_ids,
+                                                 case_split_by_id=provider.case_split_by_id)
+        pairs = tuple(tuple(map(str, pair)) for pair in pairs)
+    allowed = set(map(str, provider.training_case_ids))
+    if (not pairs or len(set(pairs)) != len(pairs) or any(
+            len(pair) != 2 or pair[0] >= pair[1] or not set(pair) <= allowed for pair in pairs)):
+        raise ValueError('Evaluation scale pairs must be distinct ordered TRAIN pairs.')
+    return pairs
+
+
+def field_change_diagnostics(cache, targets, masks, coordinates, pairs):
+    """Use common cell support; source-dtype rounding defines the near-null floor."""
+    rows = []
+    for left, right in pairs:
+        if not np.array_equal(coordinates[left], coordinates[right]):
+            raise ValueError('Field changes require identical physical cell centres.')
+        fields = {}
+        for i, name in enumerate(CHANNELS):
+            valid = (masks[left] & masks[right] & torch.isfinite(targets[left][:, i])
+                     & torch.isfinite(targets[right][:, i]))
+            if not bool(valid.any()):
+                fields[name] = {'available': False, 'valid_positions': 0}
+                continue
+            source_left = targets[left][valid, i]
+            source_right = targets[right][valid, i]
+            prediction_left = cache[left][valid, i]
+            prediction_right = cache[right][valid, i]
+            values = [item.double() for item in (source_left, source_right, prediction_left, prediction_right)]
+            a, b, pa, pb = values
+            reference, predicted = b - a, pb - pa
+            rms = lambda value: float(value.square().mean().sqrt())
+            ref_norm, pred_norm = rms(reference), rms(predicted)
+            # Absolute per-element rounding bound for two saved source values,
+            # expressed as an RMS magnitude on exactly this physical support.
+            ref_floor = sum(torch.finfo(item.dtype).eps * rms(item.double())
+                            for item in (source_left, source_right))
+            pred_floor = sum(torch.finfo(item.dtype).eps * rms(item.double())
+                             for item in (prediction_left, prediction_right))
+            near_null = ref_norm <= ref_floor
+            prediction_near_null = pred_norm <= pred_floor
+            cosine = (float((reference * predicted).mean()) / (ref_norm * pred_norm)
+                      if not near_null and not prediction_near_null else None)
+            fields[name] = {'available': True, 'valid_positions': int(valid.sum()), 'unit': UNITS[i],
+                            'reference_change_rms': ref_norm, 'prediction_change_rms': pred_norm,
+                            'source_rounding_floor_rms': ref_floor,
+                            'prediction_rounding_floor_rms': pred_floor,
+                            'near_null_reference': near_null, 'near_null_prediction': prediction_near_null,
+                            'norm_ratio': pred_norm / ref_norm if not near_null else None,
+                            'cosine': cosine}
+        rows.append({'pair': [left, right], 'channels': fields})
+    return {'definition': 'Cell-area weighted field-change RMS ratio and cosine on common valid physical cell centres. Near-null means RMS does not exceed the sum of each stored value RMS times its dtype machine epsilon; ratios and cosines are withheld when their denominator is unresolved. This is a representation floor, not physical noise.',
+            'pairs': rows}
+
+
+def triple_contrast_diagnostics(cache, targets, masks, coordinates, configs, reynolds_range, scales, weights):
+    """Assess the one exposed triple using already computed aligned fields."""
+    ids = ASSESSMENT9_TRIPLE
+    if not all(np.array_equal(coordinates[ids[0]], coordinates[case]) for case in ids[1:]):
+        raise ValueError('Triple contrasts require identical physical cell centres.')
+    charts, errors, assignments, gaps = [], [], [], []
+    for case in ids:
+        chart, error, assignment, gap = thermal_chart(configs[ids[0]], configs[case], reynolds_range=reynolds_range)
+        charts.append(chart); errors.append(error); assignments.append(assignment); gaps.append(gap)
+    resolution = np.max(np.abs(np.stack(errors)), axis=0)
+    multi = build_local_contrast(np.stack(charts), resolution)
+    uniform = build_uniform_contrast(len(ids))
+    channel_results = {}
+    for i, name in enumerate(CHANNELS):
+        valid = torch.ones_like(masks[ids[0]], dtype=torch.bool)
+        for case in ids:
+            valid &= masks[case] & torch.isfinite(targets[case][:, i])
+        if not bool(valid.any()):
+            channel_results[name] = {'available': False, 'valid_positions': 0}
+            continue
+        residual = torch.stack([(cache[case][valid, i].double() - targets[case][valid, i].double())
+                                / float(scales[i]) for case in ids])
+        channel_results[name] = {'available': True, 'valid_positions': int(valid.sum()),
+            'uniform_normalized_contrast_mse': float((uniform.operator @ residual).square().sum(0).mean()),
+            'conditioned_normalized_contrast_mse': float((multi.operator @ residual).square().sum(0).mean()),
+            'native_weight': float(weights[i])}
+    return {'scene_ids': list(ids), 'anchor_id': ids[0], 'channels': channel_results,
+            'rank': multi.rank, 'singular_values': multi.singular_values.tolist(),
+            'numerical_floor': multi.numerical_floor, 'assignments': assignments,
+            'assignment_cost_gaps': gaps, 'reynolds_train_range': float(reynolds_range),
+            'definition': 'Exposed three-scene diagnostic on common valid fluid cell centres using existing aligned predictions; not a representative twelve-scene assessment or a derivative target.'}
+
+
 def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pairs,
-                                  mode, export_cases=(), output, include_thermal_functionals=False):
+                                  mode, export_cases=(), output, include_thermal_functionals=False,
+                                  local_contrast_diagnostics=False, recipe=None):
     """Reuse the complete physical-cell predictions for field and case measurements."""
     scales = provider.model.field_std.detach().cpu().reshape(-1).double().numpy()[:5]
     weights = np.asarray([provider.native_weights[name] for name in
@@ -114,7 +215,7 @@ def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pa
     # These optional Thermal summaries retain their existing definitions; they
     # are neither required channels of the shared interface nor training terms.
     if include_thermal_functionals:
-        optional = ThermalNativePairObjective(provider, provider.field_response_pairs)
+        optional = ThermalNativePairObjective(provider, evaluation_functional_pairs(provider, recipe))
         result = evaluate_pair_panel(model, provider, epoch=epoch, split=split,
             case_ids=case_ids, pairs=pairs, scales=optional.scales, floors=optional.floors,
             mode=mode, export_cases=export_cases, output=output, case_observer=observe,
@@ -151,6 +252,15 @@ def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pa
                     'common_rmse': float(((a+b)/2).square().mean().sqrt())})
             rows.append({'pair': [left, right], 'common_field_residuals': residuals})
         result = {'native': native, 'pairs': rows, 'thermal_functionals': {'available': False, 'reason': 'Not requested.'}}
+    if local_contrast_diagnostics:
+        result['field_change_diagnostics'] = field_change_diagnostics(cache, targets, masks, coordinates, pairs)
+        if set(ASSESSMENT9_TRIPLE) <= set(case_ids):
+            with h5py.File(provider.data_path, 'r') as h5:
+                training_re = [float(json.loads(h5['cases'][case]['case_config_json'][()])['flow']['re'])
+                               for case in provider.training_case_ids]
+            reynolds_range = max(training_re) - min(training_re)
+            result['assessment9_triple_contrasts'] = triple_contrast_diagnostics(
+                cache, targets, masks, coordinates, configs, reynolds_range, scales, weights)
     result['physical_field_response'] = summarize_physical_field_changes(result['pairs'], scales, weights)
     result['protected_near_object'] = {'definition': 'Valid fluid cell centres within two maximum cell widths outside any prescribed circular module boundary.',
                                        'per_case': protected}
@@ -190,6 +300,8 @@ def main(argv=None):
     parser.add_argument('--export-case', action='append', default=[])
     parser.add_argument('--thermal-functionals', action='store_true',
                         help='Also measure optional case-owned J/P and regional-temperature changes.')
+    parser.add_argument('--local-contrast-diagnostics', action='store_true',
+                        help='Use cached fields to measure change norms and the assessment9 triple when present.')
     args = parser.parse_args(argv)
     recipe = json.loads(args.recipe.read_text())
     if args.assessment9:
@@ -209,7 +321,8 @@ def main(argv=None):
     model.core.query_tile_size = recipe['evaluation'].get('inference_query_tile_size', 1024)
     result = evaluate_field_response_panel(model, provider, epoch=saved['epoch'], split=args.split,
         case_ids=cases, pairs=pairs, mode=args.read_mode, export_cases=args.export_case, output=args.output,
-        include_thermal_functionals=args.thermal_functionals)
+        include_thermal_functionals=args.thermal_functionals,
+        local_contrast_diagnostics=args.local_contrast_diagnostics, recipe=recipe)
     result.update(checkpoint=str(checkpoint), recipe=str(args.recipe), read_mode=args.read_mode,
                   epoch=saved['epoch'], stage=args.stage, evaluation_case_fraction='approximately 10% fixed IDs')
     if args.assessment9:
