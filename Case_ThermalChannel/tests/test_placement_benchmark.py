@@ -194,10 +194,12 @@ def test_fixed_regional_caps_and_field_curve(monkeypatch):
     panel["regional_caps"] = {
         "intake_peak": {"bounds": [.85, 0., 1., .4], "reduction": "max", "allowance": .1},
         "intake_mean": {"bounds": [.85, .6, 1., 1.], "reduction": "mean", "allowance": .1},
+        "outlet_spread": {"bounds": [.85, 0., 1., 1.], "reduction": "std", "allowance": .1},
     }
     for row in panel["actions"]:
         row["physical_delta"]["intake_peak"] = .4 if row["action"] == "move_0" else 0.
         row["physical_delta"]["intake_mean"] = .2 if row["action"] == "move_0" else 0.
+        row["physical_delta"]["outlet_spread"] = .3 if row["action"] == "move_0" else 0.
 
     native_score = placement.score_native_design
 
@@ -220,9 +222,10 @@ def test_fixed_regional_caps_and_field_curve(monkeypatch):
         decision = run["cases"]["control"]["methods"]["uniform"]["decision"]
         assert decision["model_selected_action"] == "move_0"
         assert decision["verified_incumbent"] == "baseline" and not decision["reference_cap_violation"]
-        assert decision["reference_violations"] == ["intake_peak", "intake_mean"]
+        assert decision["reference_violations"] == ["intake_peak", "intake_mean", "outlet_spread"]
         assert run["cases"]["control"]["baseline_prediction"]["intake_peak"] == 13.
         assert run["cases"]["control"]["baseline_prediction"]["intake_mean"] == 16.
+        assert run["cases"]["control"]["baseline_prediction"]["outlet_spread"] == pytest.approx(np.sqrt(19 / 6))
         evidence = visualization.collect_placement_fields(model, panel, curve, case_id="control",
                                                            policy="uniform", budget=3)
         proposal = evidence["fields"]["move_0"]

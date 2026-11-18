@@ -98,7 +98,10 @@ def plot_placement_fields_and_curve(curve, evidence, *, budget, policy, checkpoi
             x0, y0, x1, y1 = _region_bounds(domain, region)
             outline = ("#d45087", "#2271a5", "#986919")[index % 3]
             axis.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, ec=outline, ls="--", lw=1.5))
-            axis.text(x1 - .025 * extent[1], y1 - .025 * extent[3], label, ha="right", va="top", fontsize=8,
+            label_y = y1 - .025 * extent[3]
+            if x1 - x0 < .08 * extent[1] and y1 - y0 > .5 * extent[3]:
+                label_y = (y0 + y1) / 2
+            axis.text(x1 - .025 * extent[1], label_y, label, ha="right", va="top", fontsize=8,
                       color="#25364a", bbox={"facecolor": "white", "alpha": .86, "edgecolor": "none", "pad": 1.5})
         axis.set(xlabel="x (length units)", ylabel="y (length units)", title=title)
         return plotted

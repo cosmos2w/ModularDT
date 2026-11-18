@@ -130,6 +130,38 @@ An in-memory analytic fixture exercised both tasks on a common bank of nine sing
 
 The upper intake cap screens out the original joint move. Under both caps, proximity reaches `0.290` cooling at two forwards. Uniform and signed response reach the same cooling at eight. These values characterize the analytic fixture. Physical adoption requires the matched released-panel evaluation. [Field and curve implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_visualization.py)
 
+## Eight heat sources and simultaneous constraints
+
+The denser analytic fixture places eight disks on an `18 × 8` channel sampled on a `54 × 24` grid. Disk radius is `0.64` and each disk carries its prescribed heat load. One family supplies 56 legal edits, including 16 single-coordinate moves and 40 combined edits involving up to four disks. All policies see the same bank and seed `0`, with candidate-forward budgets of 1, 3, 5, 8, 12 and 20. The predictor and fixture reference use separately parameterized analytic responses, with an untrained native adapter supplying prepared access. The units are synthetic. [Replay implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_benchmark.py)
+
+The objective is material cooling. All three requests allow at most `0.010` pressure rise and require a resolved decrease in material `J` greater than `0.012`. The lower intake uses peak temperature, the upper intake uses mean temperature, and outlet uniformity uses population standard deviation. Their fixed normalized rectangles use `[x0, y0, x1, y1]` bounds of `[0.83, 0.05, 0.925, 0.43]`, `[0.83, 0.57, 0.925, 0.95]` and `[0.94, 0.07, 1.00, 0.93]`. [Regional reduction and label format](../../Case_ThermalChannel/scripts/inverse/README.md#fixed-downstream-temperature-constraints)
+
+| Request | Allowed rises in lower peak, upper mean, outlet spread | Reference-feasible edits |
+| --- | --- | ---: |
+| Intake protection | `0.018`, `0.012`, outlet spread unrestricted | 24 / 56 |
+| Intake protection plus outlet uniformity | `0.018`, `0.012`, `0` | 20 / 56 |
+| Tightened combined request | `0`, `0`, `0` | 6 / 56 |
+
+The outlet cap alone removes four feasible edits and the measured yield curves match those of intake protection. Tightening both intake caps as well changes which edits the policies retain. The figures compare these two endpoints of the request ladder. Module markers `0`–`7` correspond to A–H. The field, error and yield scales match across the pair. Diamonds mark increases in retained cooling for signed response, and the vertical line marks the eight-forward point whose fields are displayed.
+
+<p align="center"><img src="../../docs/assets/readme/thermal_inverse_eight_sources_intake.png" alt="Eight heat sources with lower peak and upper mean intake caps. Baseline, prediction, reference and signed temperature error are paired with five yield curves. Signed response retains a three-module move at eight forwards." width="1056"></p>
+
+**Intake protection.** With four probes and four follow-up scores, signed response retains A down, D up and E down. On the analytic reference this cools the material by `0.1803`, lowers the pressure drop by `0.0426` and raises lower-intake peak temperature by `0.00226`, within the allowed `0.018`. The proposed fluid-field RMSE is `0.01209` over 1,201 displayed common valid fluid cells.
+
+<p align="center"><img src="../../docs/assets/readme/thermal_inverse_eight_sources_uniformity.png" alt="Eight heat sources with zero allowed rises in both intake temperature statistics and outlet temperature spread. The field panels show the single-module edit retained by signed response. The matched yield curves show its first accepted improvement at eight forwards." width="1056"></p>
+
+**Tightened combined request.** At eight forwards, the same signed-response policy retains only A down. The reference records `0.0713` material cooling, `0.0173` lower pressure drop, `0.00989` lower intake peak, `0.00241` lower upper-intake mean and `0.00380` lower outlet temperature spread. The proposed fluid-field RMSE is `0.01218` over 1,201 displayed common valid fluid cells. The three-module edit's small lower-intake temperature increase exceeds this request's zero allowance.
+
+| Policy under the tightened request | Cooling at 8 forwards | Cooling at 20 forwards |
+| --- | ---: | ---: |
+| Uniform sample | 0 | 0.0963 |
+| Hot-receiver proximity | 0 | 0.2013 |
+| HONF environment access | 0 | 0 |
+| Signed finite response | 0.0713 | 0.0887 |
+| Reference-only poll | 0 | 0 |
+
+Signed response is the first policy to retain an improvement at the sampled budgets under the tightened request. At 20 forwards, proximity finds the best reference-feasible edit in this finite bank by moving A, E and G down. These results illustrate how the budget and active constraints change which policy is effective in this fixture. [Field and curve implementation](../../Case_ThermalChannel/src/channelthermal/inverse/placement_visualization.py)
+
 ## Evidence and open measurements
 
 | Question | Evidence available |

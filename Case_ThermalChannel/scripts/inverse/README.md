@@ -74,11 +74,12 @@ Add `regional_caps` at the top level of the panel to protect one or several flui
 {
   "regional_caps": {
     "lower_intake_peak": {"bounds": [0.85, 0.06, 1.0, 0.43], "reduction": "max", "allowance": 0.04},
-    "upper_intake_mean": {"bounds": [0.85, 0.57, 1.0, 0.98], "reduction": "mean", "allowance": 0.01}
+    "upper_intake_mean": {"bounds": [0.85, 0.57, 1.0, 0.98], "reduction": "mean", "allowance": 0.01},
+    "outlet_temperature_spread": {"bounds": [0.94, 0.07, 1.0, 0.93], "reduction": "std", "allowance": 0.0}
   }
 }
 ```
 
-Bounds are `[x0, y0, x1, y1]` normalized by channel size. Each rectangle must remain fluid across the baseline and every edit, and must contain valid native grid receivers. The allowance is a nonnegative maximum temperature rise from a reference-feasible baseline. Include a matched delta under each region name alongside `J` and `P` on each labeled action. Extract the reference values using the same mask and reduction. These constraints apply to the model screen, reference check and finite-pool comparisons. Use a common legal action pool when comparing requests with different intake geometry.
+Bounds are `[x0, y0, x1, y1]` normalized by channel size. Each rectangle must remain fluid across the baseline and every edit, and must contain valid native grid receivers. The allowance is a nonnegative maximum increase from a reference-feasible baseline. Use `std` for population standard deviation over the selected fluid receivers. A zero `std` allowance keeps outlet temperature uniformity at least as good as at the baseline. Include a matched delta under each region name alongside `J` and `P` on each labeled action. Extract the reference values using the same mask and reduction. These constraints apply to the model screen, reference check and finite-pool comparisons. Use a common legal action pool when comparing requests with different intake geometry.
 
 To save a combined field and yield figure, run a budget sweep with one checkpoint and append `--figure-family FAMILY --figure-policy uniform --figure-budget 3 --figure-out /data2/wanglz/ModularDT/path/placement.pdf`. The plot uses the baseline and recommended layout at that curve point, including a rejected recommendation when applicable. It marks the inspected budget and the policy's critical decisions for the chosen family on the role-level curve. The native field passes made for display are recorded separately from the policy budget. Provide converged raw endpoint directories in the panel's `source_case_dir` and `raw_case_dir` for a reference field and signed error. The RMSE uses the plotted common valid fluid mask. When a matched field reference is unavailable, the figure labels the error unavailable and displays the predicted change over common fluid receivers. Use a new destination on verified DATA2. The writer records a 16 MiB limit for the figure and keeps a minimum 1 GiB of free space.

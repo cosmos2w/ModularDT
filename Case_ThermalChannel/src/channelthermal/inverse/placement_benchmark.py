@@ -39,10 +39,11 @@ def _regional_caps(panel):
         bounds = np.asarray(region.get("bounds"), dtype=float)
         allowance = region.get("allowance")
         if (bounds.shape != (4,) or not np.isfinite(bounds).all() or np.any(bounds < 0.) or np.any(bounds > 1.)
-                or np.any(bounds[:2] >= bounds[2:]) or region.get("reduction") not in ("max", "mean")
+                or np.any(bounds[:2] >= bounds[2:]) or region.get("reduction") not in ("max", "mean", "std")
                 or isinstance(allowance, bool) or not isinstance(allowance, (int, float))
                 or not math.isfinite(allowance) or allowance < 0.):
-            raise ValueError(f"Invalid regional cap {name!r}. Use ordered normalized bounds, max or mean, and a nonnegative allowance.")
+            raise ValueError(f"Invalid regional cap {name!r}. Use ordered normalized bounds, max, mean or std, "
+                             "and a nonnegative allowance.")
     return regions
 
 
@@ -184,7 +185,14 @@ def _functionals(scored, design, domain, regions):
             if not selected.any() or not fluid["mask"].reshape(-1)[selected].all():
                 raise ValueError(f"{design.case_id}/{name} needs nonempty, fully valid native fluid support.")
             temperatures = fluid["prediction"].reshape(-1)[selected].to(torch.float64)
-            values[name] = float(temperatures.amax() if region["reduction"] == "max" else temperatures.mean())
+            reduction = region["reduction"]
+            if reduction == "max":
+                value = temperatures.amax()
+            elif reduction == "mean":
+                value = temperatures.mean()
+            else:
+                value = temperatures.std(correction=0)
+            values[name] = float(value)
     return values
 
 

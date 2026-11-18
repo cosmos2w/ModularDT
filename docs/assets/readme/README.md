@@ -40,9 +40,11 @@ Retain the selected forward PNG/PDF pairs and the inverse-design PNG previews he
 
 ## Inverse-design previews
 
-The inverse-design case README shows a separately parameterized analytic predictor and reference on a three-disk fixture. These PNGs share temperature, signed-error and cooling scales and mark the uniform policy at three forward calls. Fluid-field RMSE uses the displayed common valid fluid receivers in synthetic temperature units. [Benchmark and captions](../../../design_investigation/Case_ThermalChannel/README.md#downstream-temperature-protection)
+The inverse-design case README uses separately parameterized analytic predictors and references on three- and eight-disk fixtures. Within each pair the PNGs share temperature, signed-error and cooling scales. The three-disk pair highlights uniform sampling at three forward calls, and the eight-disk pair highlights signed finite response at eight. Fluid-field RMSE uses the displayed common valid fluid receivers in synthetic temperature units. [Three-disk captions](../../../design_investigation/Case_ThermalChannel/README.md#downstream-temperature-protection) · [Eight-disk captions](../../../design_investigation/Case_ThermalChannel/README.md#eight-heat-sources-and-simultaneous-constraints)
 
-| Request | Preview |
-| --- | --- |
-| Lower intake peak cap and pressure cap | [PNG](thermal_inverse_one_intake.png) |
-| Lower intake peak, upper intake mean and pressure caps | [PNG](thermal_inverse_two_intakes.png) |
+| Heat sources | Request | Preview |
+| ---: | --- | --- |
+| 3 | Lower intake peak cap and pressure cap | [PNG](thermal_inverse_one_intake.png) |
+| 3 | Lower intake peak, upper intake mean and pressure caps | [PNG](thermal_inverse_two_intakes.png) |
+| 8 | Bounded rises in both intake statistics and pressure | [PNG](thermal_inverse_eight_sources_intake.png) |
+| 8 | Zero allowable rise in both intake statistics and outlet spread, with pressure cap | [PNG](thermal_inverse_eight_sources_uniformity.png) |
