@@ -25,13 +25,14 @@ Run the native finite-pool comparison from the repository root.
 ```bash
 python tools/thermal_placement_benchmark.py --panel /path/to/placement-panel.json \
   --checkpoint B0=/path/to/b0.pt --checkpoint R=/path/to/r.pt \
-  --budget 2 --tau 0.4149511814117432 \
-  --pressure-allowance 0.1 --j-resolution 0.01
+  --budget 4 --tau 0.4149511814117432 \
+  --pressure-allowance 0.1 --j-resolution 0.01 --full-pool --format markdown
 ```
 
 The numeric arguments illustrate the interface. Use the smoothing scale of
 the supplied reference labels and choose the pressure allowance and
-temperature resolution in the dataset's native units.
+temperature resolution in the dataset's native units. J is smooth peak
+material temperature. P is the inlet-to-outlet pressure drop.
 
 The tool reads an explicit [response-family panel](../../../configs/examples/thermal_response_families.example.json).
 Each case contains its prescribed source configuration and ordered module
@@ -41,21 +42,20 @@ Supply either all reference J/P deltas for a family or omit them all for a
 surrogate-only run. An optional panel-level `tau` checks the label convention.
 Panel roles describe exposure and are summarized independently.
 
-Three methods shortlist the same number of edits from each legal pool.
-Uniform samples without replacement. Proximity scores the moved modules by
-their distance to hot material receivers. Environment access uses the same
-receiver weights, distributes them through the native interpolation stencils
-and E-address cover, and accumulates learned access weight back to the
-original modules. Both guided methods use the fraction of each edit's total
-movement at each module. A fresh native HONF pass scores each shortlisted
-layout. The shared baseline prediction anchors temperature and pressure
-deltas. The pressure allowance is measured relative to a feasible baseline.
-Set the candidate budget below the pool size to measure a shortlisting effect.
+Each checkpoint evaluates the same supplied cases, edits, seed and budgets. The proposal policies use frozen weights and require no fitting. The geometry check and baseline forward are shared. Each model policy uses at most the same number of fresh candidate forwards, including probes. Set the budget below the size of the legal pool to measure the value of shortlisting.
 
-The JSON on stdout includes candidate and baseline work, timings, predicted
-hard temperature maxima, and reference outcomes when matched labels are
-provided. Reference deltas do not enter selection. A reference result must
-satisfy the pressure allowance and improve J beyond its stated resolution
-to replace the baseline. Regret is relative to the best feasible action in
-the supplied pool. This replay consumes already supplied reference labels.
-It is distinct from evaluation of a live optimizer with a solver budget.
+| Policy | How it chooses edits |
+| --- | --- |
+| Uniform sample | Draws from the legal pool without replacement. |
+| Hot-receiver proximity | Favors moving modules near the anchor's high-temperature material receivers. |
+| HONF environment access | Uses the same receiver weights and follows their prepared E-address directory weights back to the original modules. |
+| Signed finite response | Uses single-coordinate probes to estimate combined moves by adding predicted J/P changes. It checks the actual combined layout with a fresh forward. |
+| Reference-only poll | Selects the first single-coordinate move in the shared seeded order, uses zero model forwards, and reads at most one edited reference label to decide whether to keep the move. |
+
+For an active finite-response comparison, include combined moves and their exact single-coordinate component moves as separate legal actions in the panel. Keep original slot order and use the same edited coordinate values in each component and its combined move. For example, to test moving module A right and module B down together, supply A-right, B-down, and A-right plus B-down. A budget of at least three permits two probes and one combined move. Probe predictions remain eligible for the final decision without a second forward. A family falls back to the uniform shortlist if the budget or bank cannot support any complete set of probes. The JSON records the probes, prioritized moves, estimates and fallback used.
+
+Each scored model layout is built and evaluated freshly. The baseline prediction anchors J/P deltas. The model selects one ranked candidate under the pressure allowance or keeps the baseline. With complete matched labels the replay reads the selected edit's reference result and keeps it only if the pressure increase is within the allowance and J decreases by more than its resolution. The reference baseline must be feasible. The pressure allowance specifies a rise relative to that baseline in native units.
+
+`--format markdown` shows mean forwards and probes, the fraction of labeled families with an accepted improvement, pressure failures among checked edits, and mean cooling. The loss columns distinguish improvement missed by shortlisting from improvement lost in the final decision, screening and verification. Both compare against finite-pool reference quantities. The default JSON adds selected actions and deltas, actual counted model work, timings and predicted hard temperature maxima. With `--full-pool`, each checkpoint separately scores every edit for a matched predictor comparison. This diagnostic reports the direction of resolved temperature changes, ordering of feasible edits and pressure error, with its extra forwards outside the policy budgets.
+
+The policy replay uses stored labels for reference checks and the offline diagnostics use the full set of supplied labels. These labels should record matched converged references from a declared family partition and observation convention. Supply the same held-out panel for each checkpoint. Neither the replay nor the predictor diagnostic executes the reference solver, so reference solver runtime and prospective optimizer performance need a live comparison.

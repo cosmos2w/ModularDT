@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from itertools import combinations
 from statistics import mean
 from time import perf_counter
 
@@ -22,6 +23,10 @@ from .geometry import evaluate_geometry
 BASELINE = "baseline"
 FUNCTIONALS = ("J", "P")
 METHODS = ("uniform", "proximity", "environment_access")
+FINITE_RESPONSE = "finite_response"
+MODEL_POLICIES = (*METHODS, FINITE_RESPONSE)
+REFERENCE_POLL = "reference_poll"
+FULL_POOL = "full_pool"
 
 
 def _hot_material_weights(scored, tau):
@@ -81,6 +86,7 @@ def _family_actions(case, rows):
     original = np.asarray(layout["centers"], dtype=np.float64)
     configs = {BASELINE: config}
     edits = {}
+    changed = {}
     physical = {BASELINE: dict.fromkeys(FUNCTIONALS, 0.0)}
     for row in rows:
         action = row["action"]
@@ -95,6 +101,7 @@ def _family_actions(case, rows):
         if not movement.sum() > 0:
             raise ValueError(f"{action} has no finite layout edit.")
         edits[action] = movement / movement.sum()
+        changed[action] = tuple((slot, axis, centers[slot, axis]) for slot, axis in np.argwhere(centers != original))
         configs[action] = {**config, "layout": {**layout, "centers": centers.tolist()}}
         labels = row.get("physical_delta")
         if labels is not None:
@@ -111,7 +118,29 @@ def _family_actions(case, rows):
         design = PhysicalDesign(endpoint["layout"]["centers"], np.ones(count), heat)
         if not evaluate_geometry(design, context, constraints).valid:
             raise ValueError(f"{case['case_id']}/{action} violates disk separation or channel bounds.")
-    return configs, edits, physical if len(physical) > 1 else None
+    return configs, edits, changed, physical if len(physical) > 1 else None
+
+
+def _probe_plan(order, changed, capacity):
+    """Find signed single-coordinate endpoints that cover legal combined edits."""
+    singles = {}
+    for name in order:
+        if len(changed[name]) == 1:
+            singles.setdefault(changed[name][0], name)
+    probes = {}
+    covered = {}
+    # Reserve at least one forward to check the actual combined move.
+    limit = min(capacity - 1, max(2, capacity // 2))
+    for name in order:
+        coordinates = changed[name]
+        if len(coordinates) < 2 or any(point not in singles for point in coordinates):
+            continue
+        components = tuple(singles[point] for point in coordinates)
+        missing = [probe for probe in components if probe not in probes]
+        if len(probes) + len(missing) <= limit:
+            probes.update(dict.fromkeys(missing))
+            covered[name] = components
+    return list(probes), covered
 
 
 def _functionals(scored):
@@ -129,40 +158,99 @@ def _evaluate_shortlist(predicted, physical, *, pressure_allowance, resolution):
         objective="J", constraint_caps={"P": pressure_allowance}, objective_scale=1.0,
         sensitivity={"J": resolution / 4., "P": 0.},
     )
-    if physical is None:
-        return scores
-    accepted = scores["accepted_action"] if scores["numerically_resolved_improvement"] else BASELINE
-    best_delta = min(row["J"] for row in physical.values() if row["P"] <= pressure_allowance)
-    scores.update(verified_incumbent=accepted, verified_improvement=-physical[accepted]["J"],
-                  full_pool_regret=physical[accepted]["J"] - best_delta)
+    scores.update(_reference_result(scores["model_selected_action"], predicted, physical,
+                                    pressure_allowance=pressure_allowance, resolution=resolution))
     return scores
 
 
-def _summarize(cases):
+def _reference_result(selected, scored, physical, *, pressure_allowance, resolution):
+    edited = selected is not None and selected != BASELINE
+    decision = {"reference_checks": int(physical is not None and edited),
+                "reference_outcome": "unavailable" if physical is None else "kept baseline"}
+    if physical is None:
+        return decision
+
+    trial = physical[selected] if edited else None
+    over_cap = edited and trial["P"] > pressure_allowance
+    accepted = BASELINE
+    if over_cap:
+        decision["reference_outcome"] = "over pressure cap"
+    elif edited and trial["J"] < -resolution:
+        accepted = selected
+        decision["reference_outcome"] = "accepted edit"
+    elif edited:
+        decision["reference_outcome"] = "no resolved improvement"
+
+    full_best = min(row["J"] for row in physical.values() if row["P"] <= pressure_allowance)
+    shortlist_best = min(physical[name]["J"] for name in scored if physical[name]["P"] <= pressure_allowance)
+    final = physical[accepted]["J"]
+    decision.update(verified_incumbent=accepted, verified_improvement=-final,
+                    checked_reference_delta=trial, reference_cap_violation=over_cap,
+                    full_pool_regret=final - full_best, shortlist_loss=shortlist_best - full_best,
+                    decision_loss=final - shortlist_best)
+    return decision
+
+
+def _summarize(cases, views):
     by_role = defaultdict(list)
     for row in cases.values():
         by_role[row["role"] or "unspecified"].append(row)
     summaries = {}
     for role, families in by_role.items():
         summaries[role] = {}
-        for method in METHODS:
-            rows = [family["methods"][method] for family in families]
+        for method in views:
+            rows = [family["methods"][method] if method in family["methods"] else family[method] for family in families]
             measured = [row["decision"] for row in rows if "verified_improvement" in row["decision"]]
-            summaries[role][method] = {
+            summary = {
                 "family_count": len(rows),
                 "reference_family_count": len(measured),
                 "mean_candidate_scores": mean(row["candidate_scores"] for row in rows),
+                "mean_probe_scores": mean(len(row.get("probe_actions", ())) for row in rows),
+                "reference_checks": sum(row["decision"]["reference_checks"] for row in rows),
                 "mean_verified_improvement": mean(row["verified_improvement"] for row in measured) if measured else None,
                 "resolved_improvements": sum(row["verified_incumbent"] != BASELINE for row in measured) if measured else None,
-                "false_feasible_selections": sum(row["raw_constraint_violation"] for row in measured) if measured else None,
+                "selected_over_cap": sum(row["reference_cap_violation"] for row in measured) if measured else None,
+                "false_feasible_selections": (sum(row["reference_cap_violation"] for row in measured)
+                                              if measured and method != REFERENCE_POLL else None),
                 "mean_full_pool_regret": mean(row["full_pool_regret"] for row in measured) if measured else None,
+                "mean_shortlist_loss": mean(row["shortlist_loss"] for row in measured) if measured else None,
+                "mean_decision_loss": mean(row["decision_loss"] for row in measured) if measured else None,
             }
+            if method == FULL_POOL:
+                accuracy = [row["response_accuracy"] for row in rows if row["response_accuracy"] is not None]
+                summary["response_accuracy"] = {
+                    "edits": sum(row["edits"] for row in accuracy),
+                    "resolved_j_edits": sum(row["resolved_j_edits"] for row in accuracy),
+                    "correct_j_sign": sum(row["correct_j_sign"] for row in accuracy),
+                    "resolved_feasible_pairs": sum(row["resolved_feasible_pairs"] for row in accuracy),
+                    "correct_feasible_order": sum(row["correct_feasible_order"] for row in accuracy),
+                    "mean_abs_pressure_error": mean(row["mean_abs_pressure_error"] for row in accuracy),
+                } if accuracy else None
+            summaries[role][method] = summary
     return summaries
+
+
+def _response_accuracy(predicted, physical, *, pressure_allowance, resolution):
+    if physical is None:
+        return None
+    labels = [name for name in predicted if name != BASELINE]
+    resolved = [name for name in labels if abs(physical[name]["J"]) > resolution]
+    feasible = sorted((name for name in labels if physical[name]["P"] <= pressure_allowance),
+                      key=lambda name: physical[name]["J"])
+    resolved_pairs = correct_order = 0
+    for cooler, warmer in combinations(feasible, 2):
+        if physical[warmer]["J"] - physical[cooler]["J"] > resolution:
+            resolved_pairs += 1
+            correct_order += predicted[cooler]["J"] < predicted[warmer]["J"]
+    return {"edits": len(labels), "resolved_j_edits": len(resolved),
+            "correct_j_sign": sum(predicted[name]["J"] * physical[name]["J"] > 0 for name in resolved),
+            "resolved_feasible_pairs": resolved_pairs, "correct_feasible_order": correct_order,
+            "mean_abs_pressure_error": mean(abs(predicted[name]["P"] - physical[name]["P"]) for name in labels)}
 
 
 @torch.inference_mode()
 def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolution, seed=0,
-                        device="cpu", mode="restricted"):
+                        device="cpu", mode="restricted", full_pool=False):
     """Benchmark shortlists on the same explicit position-edit pools and reference labels."""
     if (not isinstance(budget, int) or isinstance(budget, bool) or budget < 1
             or not all(math.isfinite(v) for v in (pressure_allowance, tau, resolution))
@@ -186,7 +274,7 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
     rng = np.random.default_rng(seed)
     result = {}
     families = {case_id: _family_actions(case, rows[case_id]) for case_id, case in cases.items()}
-    for case_id, (configs, edits, physical) in families.items():
+    for case_id, (configs, edits, changed, physical) in families.items():
         labels = sorted(edits)
         order = rng.permutation(labels).tolist()
         started = perf_counter()
@@ -195,39 +283,82 @@ def benchmark_placement(model, panel, *, budget, pressure_allowance, tau, resolu
         absolute = _functionals(anchor)
         material_max = _material_max(anchor)
         anchor_seconds = perf_counter() - started
+        capacity = min(budget, len(labels))
         methods = {}
-        for method in METHODS:
+        reference_settings = {"pressure_allowance": pressure_allowance, "resolution": resolution}
+
+        def run_method(method, capacity):
             started = perf_counter()
-            relevance = None if method == "uniform" else _module_relevance(design, anchor, tau, mode, method)
-            ranked = order if relevance is None else sorted(order, key=lambda label: -(edits[label] @ relevance))
-            chosen = ranked[:budget]
-            proposal_seconds = perf_counter() - started
             predicted = {BASELINE: dict.fromkeys(FUNCTIONALS, 0.0)}
             maxima = {BASELINE: material_max}
             work = defaultdict(int)
-            started = perf_counter()
-            for label in chosen:
-                trial = build_native_design(configs[label], case_id, member_ids=design.member_ids, device=device)
-                score = score_native_design(model, trial, tau=tau, mode=mode)
-                if not torch.equal(anchor["fields"]["temperature/material"]["mask"],
-                                   score["fields"]["temperature/material"]["mask"]):
-                    raise ValueError(f"{case_id}/{label} changed valid material receiver support.")
-                predicted[label] = {name: value - absolute[name] for name, value in _functionals(score).items()}
-                maxima[label] = _material_max(score)
-                for name, value in score["work"].items():
-                    work[name] += value
-            scoring_seconds = perf_counter() - started
-            metrics = _evaluate_shortlist(predicted, physical, pressure_allowance=pressure_allowance,
-                                          resolution=resolution)
-            methods[method] = {"shortlist": chosen, "module_relevance": None if relevance is None else relevance.tolist(),
-                               "candidate_scores": len(chosen), "predicted_deltas": predicted,
-                               "predicted_material_maxima": maxima,
-                               "proposal_seconds": proposal_seconds, "scoring_seconds": scoring_seconds,
-                               "work": dict(work), "decision": metrics}
-        result[case_id] = {"role": cases[case_id].get("role"), "legal_pool_size": len(labels),
-                           "baseline_seconds": anchor_seconds, "baseline_work": anchor["work"],
-                           "baseline_prediction": absolute, "reference_deltas": physical, "methods": methods}
+            relevance = None
+            probes = []
+            estimates = {}
 
+            def score_actions(actions):
+                scoring_started = perf_counter()
+                for label in actions:
+                    trial = build_native_design(configs[label], case_id, member_ids=design.member_ids, device=device)
+                    score = score_native_design(model, trial, tau=tau, mode=mode)
+                    if not torch.equal(anchor["fields"]["temperature/material"]["mask"],
+                                       score["fields"]["temperature/material"]["mask"]):
+                        raise ValueError(f"{case_id}/{label} changed valid material receiver support.")
+                    predicted[label] = {name: value - absolute[name] for name, value in _functionals(score).items()}
+                    maxima[label] = _material_max(score)
+                    for name, value in score["work"].items():
+                        work[name] += value
+                return perf_counter() - scoring_started
+
+            scoring_seconds = 0.0
+            ranked = order
+            if method == FINITE_RESPONSE:
+                probes, covered = _probe_plan(order, changed, capacity)
+                scoring_seconds += score_actions(probes)
+                estimates = {label: {name: sum(predicted[probe][name] for probe in components)
+                                     for name in FUNCTIONALS} for label, components in covered.items()}
+                plausible = [label for label in estimates if estimates[label]["P"] <= pressure_allowance]
+                plausible.sort(key=lambda label: (estimates[label]["J"], estimates[label]["P"]))
+                prioritized = set(plausible)
+                ranked = plausible + [label for label in order if label not in prioritized]
+            elif method in ("proximity", "environment_access"):
+                relevance = _module_relevance(design, anchor, tau, mode, method)
+                ranked = sorted(order, key=lambda label: -(edits[label] @ relevance))
+            followup = [label for label in ranked if label not in predicted][:capacity - len(probes)]
+            scoring_seconds += score_actions(followup)
+            elapsed = perf_counter() - started
+            row = {"shortlist": probes + followup, "module_relevance": None if relevance is None else relevance.tolist(),
+                   "candidate_scores": len(probes) + len(followup), "predicted_deltas": predicted,
+                   "predicted_material_maxima": maxima, "proposal_seconds": elapsed - scoring_seconds,
+                   "scoring_seconds": scoring_seconds, "work": dict(work),
+                   "decision": _evaluate_shortlist(predicted, physical, **reference_settings)}
+            if method == FINITE_RESPONSE:
+                row.update(probe_actions=probes, additive_estimates=estimates,
+                           response_prioritized_actions=[label for label in followup if label in prioritized],
+                           proposal_status="signed probes" if probes else "uniform fallback")
+            return row
+
+        for method in MODEL_POLICIES:
+            methods[method] = run_method(method, capacity)
+        poll = next((label for label in order if len(changed[label]) == 1), None)
+        poll_shortlist = [poll] if poll is not None else []
+        poll_decision = _reference_result(poll, [BASELINE, *poll_shortlist], physical, **reference_settings)
+        poll_decision["model_selected_action"] = None
+        poll_decision["polled_action"] = poll
+        family = {"role": cases[case_id].get("role"), "legal_pool_size": len(labels),
+                  "baseline_seconds": anchor_seconds, "baseline_work": anchor["work"],
+                  "baseline_prediction": absolute, "reference_deltas": physical, "methods": methods,
+                  REFERENCE_POLL: {"shortlist": poll_shortlist, "candidate_scores": 0, "decision": poll_decision}}
+        if full_pool:
+            diagnostic = run_method(FULL_POOL, len(labels))
+            diagnostic["response_accuracy"] = _response_accuracy(diagnostic["predicted_deltas"], physical,
+                                                                 **reference_settings)
+            family[FULL_POOL] = diagnostic
+        result[case_id] = family
+
+    views = (*MODEL_POLICIES, REFERENCE_POLL)
+    if full_pool:
+        views += (FULL_POOL,)
     return {"schema": "thermal_native_placement_benchmark_v1", "seed": seed, "budget": budget,
             "pressure_allowance": pressure_allowance, "j_resolution": resolution, "tau": tau,
-            "mode": mode, "cases": result, "by_role": _summarize(result)}
+            "mode": mode, "cases": result, "by_role": _summarize(result, views)}

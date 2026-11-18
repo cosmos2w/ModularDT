@@ -20,11 +20,14 @@ def test_reference_rejects_false_feasible_and_unresolved_moves():
     assert decision["raw_constraint_violation"]
     assert decision["verified_incumbent"] == "baseline"
     assert decision["full_pool_regret"] == 1.
+    assert decision["shortlist_loss"] == 1.
+    assert decision["decision_loss"] == 0.
 
     reference["edit"] = {"J": -.05, "P": 0.}
     decision = _evaluate_shortlist(prediction, reference, pressure_allowance=.1, resolution=.1)
     assert not decision["raw_constraint_violation"]
     assert decision["verified_incumbent"] == "baseline"
+    assert decision["decision_loss"] == .05
 
     reference["edit"] = {"J": -.5, "P": 0.}
     decision = _evaluate_shortlist(prediction, reference, pressure_allowance=.1, resolution=.1)
@@ -88,3 +91,72 @@ def test_matched_native_shortlists_do_not_observe_reference_labels():
     assert sum(result["cases"]["control"]["methods"]["environment_access"]["module_relevance"]) > 0
     assert result["by_role"]["synthetic"]["uniform"]["reference_family_count"] == 1
     assert blinded["by_role"]["synthetic"]["uniform"]["reference_family_count"] == 0
+    assert result["cases"]["control"]["methods"]["finite_response"]["proposal_status"] == "uniform fallback"
+
+
+def test_signed_probes_count_against_budget_and_reference_stays_blind(monkeypatch):
+    from channelthermal.inverse import placement_benchmark as placement
+    from tools.thermal_placement_benchmark import format_summary
+
+    panel, model = native_fixture()
+    config = panel["cases"][0]["source_config"]
+    panel["actions"] = []
+    responses = {
+        "right": ([(0, 0, .25)], -1., .04),
+        "left": ([(0, 0, -.25)], 2., .02),
+        "down": ([(1, 1, -.25)], -.5, .06),
+        "joint": ([(0, 0, .25), (1, 1, -.25)], -2., .12),
+    }
+    predictions = {}
+    for action, (moves, j, p) in responses.items():
+        centers = deepcopy(config["layout"]["centers"])
+        for slot, axis, shift in moves:
+            centers[slot][axis] += shift
+        predictions[tuple(tuple(center) for center in centers)] = {"J": j, "P": p}
+        panel["actions"].append({"case_id": "control", "action": action, "centers": centers,
+                                 "physical_delta": {"J": j, "P": p}})
+
+    def score_known_responses(model, design, *, tau, mode):
+        scored = score_native(model, design, tau=tau, mode=mode)
+        key = tuple(tuple(center) for center in design.structure["module_centers"][0].tolist())
+        scored["functionals"] = predictions.get(key, {"J": 0., "P": 0.})
+        return scored
+
+    score_native = placement.score_native_design
+    monkeypatch.setattr(placement, "score_native_design", score_known_responses)
+    blind = deepcopy(panel)
+    for action in blind["actions"]:
+        del action["physical_delta"]
+    options = {"budget": 3, "tau": .4, "pressure_allowance": .2, "resolution": .1, "full_pool": True}
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        result = benchmark_placement(model, panel, **options)
+        blind_result = benchmark_placement(model, blind, **options)
+    finally:
+        torch.set_num_threads(threads)
+
+    family = result["cases"]["control"]
+    blind_family = blind_result["cases"]["control"]
+    for arm in family["methods"].values():
+        assert arm["candidate_scores"] == arm["work"]["member_routing_read_mode_restricted"] == 3
+        assert len(set(arm["shortlist"])) == 3
+    signed = family["methods"]["finite_response"]
+    assert set(signed["probe_actions"]) == {"right", "down"}
+    assert signed["additive_estimates"]["joint"]["J"] == -1.5
+    assert signed["predicted_deltas"]["joint"]["J"] == -2.
+    assert signed["response_prioritized_actions"] == ["joint"]
+    assert signed["shortlist"] == blind_family["methods"]["finite_response"]["shortlist"]
+    assert signed["decision"]["verified_incumbent"] == "joint"
+    assert signed["decision"]["reference_checks"] == 1
+    poll = family["reference_poll"]
+    assert poll["shortlist"] == blind_family["reference_poll"]["shortlist"]
+    assert poll["candidate_scores"] == 0
+    assert poll["decision"]["reference_checks"] == 1
+    assert blind_family["reference_poll"]["decision"]["reference_checks"] == 0
+    assert family["full_pool"]["candidate_scores"] == len(responses)
+    assert family["full_pool"]["response_accuracy"]["correct_j_sign"] == len(responses)
+    assert family["full_pool"]["response_accuracy"]["correct_feasible_order"] == 6
+    text = format_summary({"Controlled fixture": {"epoch": None, **result}}, "cpu")
+    assert "Signed finite response | 3 | 2 | 1/1 | 0/1 | 2 | 0 | 0" in text
+    assert "Correct direction on 4/4" in text
