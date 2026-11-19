@@ -1693,8 +1693,6 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         total_axis.set_title("Nominal TRAIN loss sum" if priority_run else "Total TRAIN loss")
         validation_total_axis.set_title("Native-only validation subtotal" if local_response_run else
                                         "Total measurable validation loss")
-        if local_response_run:
-            validation_total_axis.text(0.02, 0.03, "Full validation objective unavailable", transform=validation_total_axis.transAxes, fontsize=7)
         validation_total_axis.set_xlabel("Completed epoch")
         validation_total_axis.set_ylabel("Weighted loss")
         validation_total_axis.grid(alpha=0.25, which="both")
