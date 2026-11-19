@@ -379,14 +379,16 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             after = new.get("engine_config", {}).get("total_epochs")
             schedules = old.get("optimizer_schedule_contract", [])
             native_training = recipe.get("training", {})
-            if (recipe.get("training_profile") in ("native_pair", "field_response")
+            if (recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response")
                     and isinstance(recipe.get("dataset"), dict)
                     and recipe["dataset"].get("name") == "thermal"):
                 profile = recipe["training_profile"]
-                variant = (recipe.get("thermal_native_pair", {}).get("variant") if profile == "native_pair"
-                           else recipe.get("thermal_field_response", {}).get("variant"))
-                allowed_variants = (("field_only", "state_anchors", "functional_contrast") if profile == "native_pair"
-                                    else ("field_anchors", "field_response"))
+                variant_key = {"native_pair": "thermal_native_pair", "field_response": "thermal_field_response",
+                               "local_multisecant_response": "thermal_local_response"}[profile]
+                variant = recipe.get(variant_key, {}).get("variant")
+                allowed_variants = {"native_pair": ("field_only", "state_anchors", "functional_contrast"),
+                                    "field_response": ("field_anchors", "field_response"),
+                                    "local_multisecant_response": ("state_anchors", "uniform_response", "multisecant_response", "soft_inverse_response")}[profile]
                 expected_schedule = {"peak_lr": 3e-4, "warmup_start_lr": 3e-4,
                     "warmup_epochs": 0, "hold_through_epoch": 1000,
                     "total_epochs": 2000, "final_lr": 3e-5}
@@ -5128,7 +5130,7 @@ class TrainingEngine:
             else:
                 saved_identity = source_payload.get("experiment_identity", {})
                 provider_amendment = getattr(provider, "resume_identity_amendment", None)
-                if (allow_horizon_extension and saved_identity.get("recipe", {}).get("training_profile") in ("native_pair", "field_response")
+                if (allow_horizon_extension and saved_identity.get("recipe", {}).get("training_profile") in ("native_pair", "field_response", "local_multisecant_response")
                         and (resume_checkpoint is None or int(source_payload["epoch"]) < 100
                              or not int(source_payload["epoch"]) < int(stop_after) <= self.config.total_epochs)):
                     raise ValueError("Formal extension requires the same run's completed state at or after epoch 100 and a later declared stop.")

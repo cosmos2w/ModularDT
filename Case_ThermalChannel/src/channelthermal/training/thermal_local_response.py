@@ -236,14 +236,34 @@ def sample_thermal_neighborhood_observations(groups, lengths, *, seed, total_pos
 
 
 class ThermalLocalResponseObjective:
-    def __init__(self, provider, *, seed, variant):
+    def __init__(self, provider, *, seed, variant, definitions=None):
         self.provider, self.seed, self.variant = provider, int(seed), variant
         self.scales = provider.model.field_std.detach().reshape(-1)[:5].cpu().double()
         names = ('flow/u', 'flow/v', 'flow/p', 'flow/omega', 'temperature/fluid')
         self.weights = torch.tensor([provider.native_weights[name] for name in names], dtype=torch.float64)
+        self.soft_operators = {}
+        if variant == 'soft_inverse_response':
+            if definitions is None:
+                raise ValueError('Soft inverse response requires the saved input definitions.')
+            from honf_runtime.local_response_contrasts import build_soft_inverse_contrast
+            self.soft_operators = {
+                item['center_id']: build_soft_inverse_contrast(
+                    item['chart'], absolute_floor=item['representation_floor'])
+                for item in definitions['neighborhoods']
+            }
+
+    def contrast(self, neighborhood, *, force_uniform=False, force_multisecant=False):
+        """Select the cached operator without changing the saved episode definition."""
+        from honf_runtime.local_response_contrasts import LocalContrast
+        if self.variant == 'soft_inverse_response' and not force_uniform and not force_multisecant:
+            return self.soft_operators[neighborhood['center_id']]
+        is_uniform = force_uniform or (self.variant != 'multisecant_response' and not force_multisecant)
+        return LocalContrast(torch.as_tensor(neighborhood['uniform_operator' if is_uniform else 'multisecant_operator'], dtype=torch.float64),
+            0 if is_uniform else neighborhood['rank'], torch.as_tensor(neighborhood['singular_values'], dtype=torch.float64),
+            neighborhood['numerical_floor'])
 
     def components(self, model, neighborhood, *, epoch, force_uniform=False, force_multisecant=False):
-        from honf_runtime.local_response_contrasts import (CommonObservations, LocalContrast, neighborhood_field_losses)
+        from honf_runtime.local_response_contrasts import (CommonObservations, neighborhood_field_losses)
         from .thermal_family_objective import _stack_family_batches
         ids = tuple(map(str, neighborhood['scene_ids']))
         provider = self.provider
@@ -278,10 +298,7 @@ class ThermalLocalResponseObjective:
         full, restricted, shared = model.core.decode_paired(prepared.organization, prepared.query_batch)
         predictions = torch.stack([model._extract_native_roles(prepared, view.joint_fields[..., 3:4],
                                      view.joint_fields[..., :3])['pred_field'] for view in (full, restricted)])
-        is_uniform = force_uniform or (self.variant != 'multisecant_response' and not force_multisecant)
-        contrast = LocalContrast(torch.as_tensor(neighborhood['uniform_operator' if is_uniform else 'multisecant_operator'], dtype=torch.float64),
-            0 if is_uniform else neighborhood['rank'], torch.as_tensor(neighborhood['singular_values'], dtype=torch.float64),
-            neighborhood['numerical_floor'])
+        contrast = self.contrast(neighborhood, force_uniform=force_uniform, force_multisecant=force_multisecant)
         obs = CommonObservations(observation.references.to(predictions.device), observation.mask.to(predictions.device),
                                  observation.masses.to(predictions.device))
         if not bool(observation.mask.any()):
@@ -319,7 +336,7 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
 
     spec = recipe.get('thermal_local_response', {})
     variant = spec.get('variant')
-    if variant not in ('state_anchors', 'uniform_response', 'multisecant_response'):
+    if variant not in ('state_anchors', 'uniform_response', 'multisecant_response', 'soft_inverse_response'):
         raise ValueError('Unknown Thermal local-response variant.')
     base = copy.deepcopy(recipe)
     base['training_profile'] = 'native_pair'
@@ -339,7 +356,7 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
     count = {150: 1, 600: 4}.get(len(definitions['case_ids']))
     if count is None:
         raise ValueError('Local response requires declared TRAIN150 or TRAIN600 membership.')
-    objective = ThermalLocalResponseObjective(provider, seed=seed, variant=variant)
+    objective = ThermalLocalResponseObjective(provider, seed=seed, variant=variant, definitions=definitions)
     names = ('absolute',) if variant == 'state_anchors' else ('absolute', 'response')
     provider.auxiliary_loss_names = tuple('local_response/' + name for name in names)
     state = {'calibration': None}
@@ -432,8 +449,16 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
     provider.calibrate_local_response = MethodType(calibrate_local_response, provider)
     previous_identity = provider.identity_payload
     def identity_payload(self):
-        return {**previous_identity(), 'local_response': {'variant': variant, 'input_definitions': path, 'seed': seed,
-                'scales': objective.scales.tolist(), 'weights': objective.weights.tolist()}}
+        local_identity = {'variant': variant, 'input_definitions': path, 'seed': seed,
+                          'scales': objective.scales.tolist(), 'weights': objective.weights.tolist()}
+        if variant == 'soft_inverse_response':
+            local_identity['operator_definition'] = {
+                'weight': 'z=1/(1+(sigma/sigma_max)^2); b=r*z/sum(z); a=(1+b)/2',
+                'operator': 'sqrt(2/d)*(I+U*(diag(sqrt(a))-I)*U.T)*H',
+                'rank': 'absolute representation/factorization floor and condition <= 30; tied blocks intact',
+                'unretained_modes': 'uniform', 'input_chart': 'existing shared neighborhood definition',
+            }
+        return {**previous_identity(), 'local_response': local_identity}
     provider.identity_payload = MethodType(identity_payload, provider)
     old_columns = provider.training_history_columns
     def history_columns(self):

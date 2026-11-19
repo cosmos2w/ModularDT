@@ -80,3 +80,35 @@ def test_seeded_deck_has_no_dropped_tail():
     assert all(len(set(selected[i:i+7])) == 7 for i in range(0, len(selected), 7))
     assert selected == [x['center_id'] for epoch in range(11, 18)
                         for x in scheduled_thermal_neighborhoods(definitions, epoch, 4, 9)]
+
+
+def test_soft_inverse_reuses_saved_neighborhood_and_builds_once(monkeypatch):
+    from types import SimpleNamespace
+    import honf_runtime.local_response_contrasts as contrasts
+    from channelthermal.training.thermal_local_response import ThermalLocalResponseObjective
+
+    chart = [[0., 0.], [1., 0.], [0., .2], [1., .1]]
+    uniform = contrasts.build_uniform_contrast(4)
+    previous = contrasts.build_local_contrast(chart, absolute_floor=1e-9)
+    item = {'center_id': '0100', 'scene_ids': ['0100', '0101', '0102', '0103'],
+            'chart': chart, 'representation_floor': 1e-9, 'numerical_floor': previous.numerical_floor,
+            'singular_values': previous.singular_values.tolist(), 'rank': previous.rank,
+            'uniform_operator': uniform.operator.tolist(), 'multisecant_operator': previous.operator.tolist()}
+    definitions = {'neighborhoods': [item]}
+    saved = copy.deepcopy(definitions)
+    weights = {name: 1. for name in ('flow/u', 'flow/v', 'flow/p', 'flow/omega', 'temperature/fluid')}
+    provider = SimpleNamespace(model=SimpleNamespace(field_std=torch.ones(5)), native_weights=weights)
+    calls = []
+    real_builder = contrasts.build_soft_inverse_contrast
+    def build(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_builder(*args, **kwargs)
+    monkeypatch.setattr(contrasts, 'build_soft_inverse_contrast', build)
+    objective = ThermalLocalResponseObjective(provider, seed=17, variant='soft_inverse_response', definitions=definitions)
+    assert len(calls) == 1 and calls[0][1] == {'absolute_floor': 1e-9}
+    selected = objective.contrast(item)
+    assert objective.contrast(item) is selected and len(calls) == 1
+    torch.testing.assert_close(selected.operator, real_builder(chart, absolute_floor=1e-9).operator)
+    torch.testing.assert_close(objective.contrast(item, force_uniform=True).operator, uniform.operator)
+    torch.testing.assert_close(objective.contrast(item, force_multisecant=True).operator, previous.operator)
+    assert definitions == saved

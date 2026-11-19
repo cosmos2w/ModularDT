@@ -113,6 +113,48 @@ def build_local_contrast(chart: Any, coordinate_resolution: Any = 0.0, *, absolu
     return LocalContrast(operator.detach(), rank, singular.detach(), floor)
 
 
+def build_soft_inverse_contrast(chart: Any, coordinate_resolution: Any = 0.0, *,
+                                absolute_floor: float = 0.0) -> LocalContrast:
+    """Build the bounded soft-inverse alternative from complete input rows.
+
+    The numerical support, geometry and equal-scene contrast are the same as
+    ``build_local_contrast``. On retained modes the inverse-square emphasis is
+    softened by the largest singular value: z=1/(1+(sigma/sigma_max)**2).
+    The fixed half-uniform blend preserves unit mean retained weight and leaves
+    rejected modes uniform. No model predictions or physical labels enter C.
+    """
+    x = torch.as_tensor(chart, dtype=torch.float64, device='cpu').detach()
+    if x.ndim != 2 or x.shape[1] == 0 or not torch.isfinite(x).all():
+        raise ValueError('chart must be a finite two-dimensional scene-by-coordinate array')
+    n, p = x.shape
+    h = _helmert(n)
+    absolute_floor = float(absolute_floor)
+    if not np.isfinite(absolute_floor) or absolute_floor < 0:
+        raise ValueError('absolute_floor must be finite and nonnegative')
+    resolution = torch.as_tensor(coordinate_resolution, dtype=torch.float64, device='cpu').detach()
+    if resolution.ndim > 1 or (resolution.ndim == 1 and resolution.numel() != p):
+        raise ValueError('coordinate_resolution must be scalar or one value per coordinate')
+    if not torch.isfinite(resolution).all() or (resolution < 0).any():
+        raise ValueError('coordinate_resolution must be finite and nonnegative')
+    resolution = resolution.expand(p)
+    g = (h @ (x - x[:1])) / (n - 1) ** 0.5
+    u, singular, _ = torch.linalg.svd(g, full_matrices=False)
+    scale = float(singular[0]) if singular.numel() else 0.0
+    factorization_floor = torch.finfo(torch.float64).eps * max(g.shape) * scale
+    representation_floor = (n / (n - 1)) ** 0.5 * float(torch.linalg.vector_norm(resolution))
+    floor = max(factorization_floor, representation_floor, absolute_floor)
+    rank = _supported_rank(singular, floor, 30.0)
+    transform = torch.eye(n - 1, dtype=torch.float64)
+    if rank:
+        retained = singular[:rank]
+        z = 1.0 / (1.0 + (retained / retained[0]).square())
+        blended = (1.0 + rank * z / z.sum()) / 2.0
+        modes = u[:, :rank]
+        transform = transform + (modes * (blended.sqrt() - 1.0)) @ modes.T
+    operator = (2.0 / (n - 1)) ** 0.5 * transform @ h
+    return LocalContrast(operator.detach(), rank, singular.detach(), floor)
+
+
 def neighborhood_field_losses(predictions: torch.Tensor, observations: CommonObservations,
                               contrast: LocalContrast, scales: Any,
                               channel_weights: Any) -> FieldLosses:

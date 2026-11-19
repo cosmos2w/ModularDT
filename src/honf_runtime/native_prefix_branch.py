@@ -76,7 +76,7 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
                      and recipe.get('thermal_field_response', {}).get('variant') in
                      ('field_anchors', 'field_response'))
                     or (local_profile and recipe.get('thermal_local_response', {}).get('variant') in
-                        ('state_anchors', 'uniform_response', 'multisecant_response')))):
+                        ('state_anchors', 'uniform_response', 'multisecant_response', 'soft_inverse_response')))):
         raise ValueError('Field-response children require the completed native-only epoch-ten prefix.')
     if _native_recipe(parent_recipe) != _native_recipe(recipe):
         raise ValueError('Common-prefix branching cannot change native data, model, objective, sampling or schedule.')

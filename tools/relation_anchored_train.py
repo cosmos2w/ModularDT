@@ -290,9 +290,15 @@ def engine_for(recipe, *, device, execution_horizon=None):
                                     and policy.get("membership") == "full_train600"
                                     and horizon == 100 and policy.get("optimizer_schedule_horizon") == 2000
                                     and tuple(checkpoints) == (100,))
-        if (not (wind_extension or thermal_extension or r16_10_extension or native_pair_extension or field_response_extension)
+        local_response_extension = (thermal and recipe.get("training_profile") == "local_multisecant_response"
+                                    and recipe.get("thermal_local_response", {}).get("variant") in
+                                    ("state_anchors", "uniform_response", "multisecant_response", "soft_inverse_response")
+                                    and policy.get("membership") == "full_train600"
+                                    and horizon == 100 and policy.get("optimizer_schedule_horizon") == 2000
+                                    and tuple(checkpoints) == (100,))
+        if (not (wind_extension or thermal_extension or r16_10_extension or native_pair_extension or field_response_extension or local_response_extension)
                 or type(execution_horizon) is not int or execution_horizon <= horizon
-                or (not (native_pair_extension or field_response_extension) and execution_horizon % 100)):
+                or (not (native_pair_extension or field_response_extension or local_response_extension) and execution_horizon % 100)):
             raise ValueError("Unsupported explicit same-lineage horizon extension.")
         horizon = execution_horizon
         checkpoints = range(100, horizon + 1, 100)
@@ -391,7 +397,7 @@ def main(argv=None):
             and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
         selector = args.checkpoint if args.command == "evaluate" else args.resume
         source_checkpoint = resolve_checkpoint(args.output, selector)
-        if (args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response")
+        if (args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response")
                 and source_checkpoint != resolve_checkpoint(args.output, "latest")):
             raise ValueError("Formal extension requires this run's latest checkpoint.")
         source_payload = load_trusted_checkpoint(source_checkpoint, map_location="cpu")
@@ -405,7 +411,7 @@ def main(argv=None):
                 and source_payload["experiment_identity"]["engine_config"]["total_epochs"] == 2000
                 and int(source_payload["epoch"]) != 2000):
             raise ValueError("R16-10 extension requires a completed epoch 2000 state.")
-        if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response"):
+        if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response"):
             training = recipe.get("training", {})
             completed = int(source_payload["epoch"])
             saved_horizon = source_payload["experiment_identity"]["engine_config"]["total_epochs"]
@@ -438,11 +444,11 @@ def main(argv=None):
         provider.native_pair_calibration_source_checkpoint = str(
             source_checkpoint if source_payload is not None else args.output.expanduser().resolve() / 'checkpoints/latest_model.pt')
     requested_horizon = args.stop_after
-    if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response"):
+    if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response"):
         requested_horizon = max(args.stop_after, saved_horizon)
     engine = (engine_for(recipe, device=args.device, execution_horizon=requested_horizon)
               if args.extend_horizon else engine_for(recipe, device=args.device))
-    if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response"):
+    if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response"):
         # This existing provider runtime limit governs sample generation only;
         # the scientific recipe, seed and optimizer schedule stay unchanged.
         provider._round6_sampling_epoch_limit = engine.config.total_epochs

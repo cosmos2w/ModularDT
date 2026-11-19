@@ -41,7 +41,8 @@ def main(argv=None):
     parser.add_argument('--recipe', type=Path, help='Local-response child recipe, required for calibration')
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--input-definitions', type=Path)
-    parser.add_argument('--variant', choices=('state_anchors', 'uniform_response', 'multisecant_response'))
+    parser.add_argument('--variant', choices=('state_anchors', 'uniform_response', 'multisecant_response',
+                                              'soft_inverse_response'))
     parser.add_argument('--name')
     parser.add_argument('--output-root', type=Path)
     parser.add_argument('--seed', type=int, default=0)
