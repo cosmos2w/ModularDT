@@ -16,14 +16,17 @@ from tests.test_native_prefix_branch import _checkpoint, _equal
 from honf_runtime.run_layout import RunLayout
 
 
-def test_local_response_native_recipe_preserves_native_content():
+@pytest.mark.parametrize('variant', ['multisecant_response', 'targeted_reynolds_response',
+                                    'trace_matched_uniform_response'])
+def test_local_response_native_recipe_preserves_native_content(variant):
     parent = {'training_profile': 'field_response',
               'thermal_field_response': {'variant': 'field_only', 'pairs': [['1', '2']]},
               'training': {'microbatch_cases': 24, 'effective_batch_size': 48},
               'model': {'depth': 3}, 'dataset': {'name': 'thermal'}}
     child = copy.deepcopy(parent)
     child.update(training_profile='local_multisecant_response',
-                 thermal_local_response={'variant': 'multisecant_response', 'definition': 'shared.npz'})
+                 thermal_local_response={'variant': variant, 'definition': 'shared.npz',
+                                         'state_priority': True})
     assert _native_recipe(parent) == _native_recipe(child)
     child['model']['depth'] = 4
     assert _native_recipe(parent) != _native_recipe(child)

@@ -45,7 +45,7 @@ def summarize_changes(rows, scales):
 
 def evaluate_pair_panel(model, provider, *, epoch, split, case_ids, pairs, scales, floors,
                         mode, export_cases, output, case_observer=None,
-                        allow_missing_field_channels=False):
+                        allow_missing_field_channels=False, pair_compatibility=None):
     """Reuse each native prediction for its scalar and common-fluid diagnostics."""
     pairs = tuple(tuple(map(str, pair)) for pair in pairs)
     cases = tuple(map(str, case_ids))
@@ -59,7 +59,9 @@ def evaluate_pair_panel(model, provider, *, epoch, split, case_ids, pairs, scale
         configs = {cid: json.loads(source['cases'][cid]['case_config_json'][()]) for cid in cases}
     for left, right in pairs:
         descriptions = [describe_native_scene(cid, split, configs[cid]) for cid in (left, right)]
-        if descriptions[0].compatibility_key != descriptions[1].compatibility_key:
+        compatible = (descriptions[0].compatibility_key == descriptions[1].compatibility_key
+                      if pair_compatibility is None else pair_compatibility(configs[left], configs[right]))
+        if not compatible:
             raise ValueError('Pair domain, controls, material and module count must be compatible.')
 
     def observe(case_id, prediction, batch):

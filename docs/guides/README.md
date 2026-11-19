@@ -14,6 +14,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | [Wind relation-anchored interface](../../Case_WindFarm/docs/relation_anchored.md) | Three-dimensional coverage, ragged turbine batches and native calibration. |
 | [Thermal port/local integration](Thermal_Port_Local_Integration.md) | One-pass angular ports, frozen local readout and strict checkpoint loading. |
 | [Response pairs from the base dataset](Base_Dataset_Response_Pairs.md) | No-new-solve supervision, the shared adapter target, physical correspondence and fair comparisons. |
+| [Target contrasts and state priority](Targeted_Response_and_State_Priority.md) | Bounded combinations of saved fields, explicit support and optional response-gradient projection. |
 | [State and finite-response training](State_Response_Training.md) | Existing edited-scene provider, shared reductions, TRAIN-only calibration and historical compatibility. |
 | [Thermal finite-response dataset](Thermal_Finite_Response_Dataset.md) | Optional historical edited-scene corpus, source precision, roles and direct reader. |
 | [Physical response evaluation](Case_Response_Evaluation.md) | Fresh design preparation, physical-mask comparisons and resolved response metrics. |

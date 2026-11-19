@@ -180,7 +180,8 @@ def triple_contrast_diagnostics(cache, targets, masks, coordinates, configs, rey
 
 def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pairs,
                                   mode, export_cases=(), output, include_thermal_functionals=False,
-                                  local_contrast_diagnostics=False, recipe=None):
+                                  local_contrast_diagnostics=False, recipe=None,
+                                  case_observer=None, pair_compatibility=None):
     """Reuse the complete physical-cell predictions for field and case measurements."""
     scales = provider.model.field_std.detach().cpu().reshape(-1).double().numpy()[:5]
     weights = np.asarray([provider.native_weights[name] for name in
@@ -190,6 +191,8 @@ def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pa
         configs = {case_id: json.loads(h5['cases'][case_id]['case_config_json'][()]) for case_id in case_ids}
 
     def observe(case_id, prediction, batch):
+        if case_observer is not None:
+            case_observer(case_id, prediction, batch)
         field = prediction.native_main['pred_field'][0].detach().cpu()
         target = batch.targets.field_targets[0].detach().cpu()
         valid = (batch.targets.point_weights[0].bool()
@@ -219,7 +222,7 @@ def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pa
         result = evaluate_pair_panel(model, provider, epoch=epoch, split=split,
             case_ids=case_ids, pairs=pairs, scales=optional.scales, floors=optional.floors,
             mode=mode, export_cases=export_cases, output=output, case_observer=observe,
-            allow_missing_field_channels=True)
+            allow_missing_field_channels=True, pair_compatibility=pair_compatibility)
         for index, name in enumerate(('J', 'P', 'A', 'B')):
             resolved = [row for row in result['pairs'] if not row['near_zero_reference'][index]]
             null = [row for row in result['pairs'] if row['near_zero_reference'][index]]

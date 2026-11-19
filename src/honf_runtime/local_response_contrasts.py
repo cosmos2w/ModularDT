@@ -36,6 +36,13 @@ class LocalContrast:
 
 
 @dataclass(frozen=True)
+class WeightedResponseContrast:
+    """Arbitrary contrast rows and explicit nonnegative response weights."""
+    operator: torch.Tensor
+    row_weights: torch.Tensor
+
+
+@dataclass(frozen=True)
 class FieldLosses:
     absolute: torch.Tensor
     response: torch.Tensor
@@ -175,7 +182,19 @@ def neighborhood_field_losses(predictions: torch.Tensor, observations: CommonObs
     op = contrast.operator.to(device=device, dtype=torch.float64)
     if refs.shape != (n, q, c) or mask.shape != (q, c) or mass.shape != (q, c):
         raise ValueError('incompatible observation shapes')
-    if scale.shape != (c,) or weight.shape != (c,) or op.shape != (n - 1, n):
+    if isinstance(contrast, WeightedResponseContrast):
+        row_weights = torch.as_tensor(contrast.row_weights, device=device, dtype=torch.float64)
+        if op.ndim != 2 or op.shape[1] != n or row_weights.shape != (op.shape[0],):
+            raise ValueError('incompatible weighted response rows')
+        if not torch.isfinite(op).all() or not torch.isfinite(row_weights).all() or (row_weights < 0).any():
+            raise ValueError('response rows and nonnegative weights must be finite')
+        if not torch.allclose(op.sum(dim=1), torch.zeros(op.shape[0], device=device, dtype=torch.float64), atol=1e-9, rtol=0):
+            raise ValueError('response rows must cancel constants')
+    else:
+        row_weights = torch.ones(n - 1, device=device, dtype=torch.float64)
+        if op.shape != (n - 1, n):
+            raise ValueError('incompatible historical contrast')
+    if scale.shape != (c,) or weight.shape != (c,):
         raise ValueError('incompatible contrast or channel definitions')
     if not torch.isfinite(scale).all() or (scale <= 0).any() or not torch.isfinite(weight).all() or (weight < 0).any():
         raise ValueError('scales must be positive and channel weights nonnegative and finite')
@@ -190,7 +209,7 @@ def neighborhood_field_losses(predictions: torch.Tensor, observations: CommonObs
     residual = (pred - ref[None]) / scale
     absolute_by_channel = (residual.square().mean(dim=(0, 1)) * mass).sum(dim=0)
     contrasted = torch.einsum('ds,vsqc->vdqc', op, residual)
-    response_by_channel = (contrasted.square().sum(dim=1).mean(dim=0) * mass).sum(dim=0)
+    response_by_channel = ((contrasted.square() * row_weights[None, :, None, None]).sum(dim=1).mean(dim=0) * mass).sum(dim=0)
     available = mass.sum(dim=0) > 0
     return FieldLosses((absolute_by_channel * weight).sum(),
                        (response_by_channel * weight).sum(), available)

@@ -76,7 +76,8 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
                      and recipe.get('thermal_field_response', {}).get('variant') in
                      ('field_anchors', 'field_response'))
                     or (local_profile and recipe.get('thermal_local_response', {}).get('variant') in
-                        ('state_anchors', 'uniform_response', 'multisecant_response', 'soft_inverse_response')))):
+                        ('state_anchors', 'uniform_response', 'multisecant_response', 'soft_inverse_response',
+                         'targeted_reynolds_response', 'trace_matched_uniform_response')))):
         raise ValueError('Field-response children require the completed native-only epoch-ten prefix.')
     if _native_recipe(parent_recipe) != _native_recipe(recipe):
         raise ValueError('Common-prefix branching cannot change native data, model, objective, sampling or schedule.')
@@ -139,10 +140,12 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
             raise ValueError(f'Common-prefix branching changed {key}.')
     base_columns = ('epoch', 'phase', 'arm', 'temperature', 'case_visits', 'optimizer_updates',
                     'microbatches', 'partial_update_cases', 'train_seconds', 'train_loss_total')
+    from .state_priority import recording_columns_and_definitions
+    provider_columns, provider_definitions = recording_columns_and_definitions(provider)
     columns = (*base_columns, *(f'learning_rates.{name}' for name in source['optimizer_group_names']),
-               *provider.training_history_columns())
+               *provider_columns)
     definitions = training_recording_definitions(columns, dict(provider.loss_metadata()),
-        dict(getattr(provider, 'training_column_definitions', dict)()))
+        provider_definitions)
     parent_definitions = json.loads(parent_layout.read_path('metric_definitions.json', category='configs').read_text())
     parent_loss_order = parent_definitions['training_loss_order']
     if definitions['training_loss_order'][:len(parent_loss_order)] != parent_loss_order:

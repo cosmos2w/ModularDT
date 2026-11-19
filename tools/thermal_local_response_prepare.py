@@ -42,7 +42,10 @@ def main(argv=None):
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--input-definitions', type=Path)
     parser.add_argument('--variant', choices=('state_anchors', 'uniform_response', 'multisecant_response',
-                                              'soft_inverse_response'))
+                                              'soft_inverse_response', 'targeted_reynolds_response',
+                                              'trace_matched_uniform_response'))
+    parser.add_argument('--state-priority', action='store_true')
+    parser.add_argument('--target-definitions', type=Path)
     parser.add_argument('--name')
     parser.add_argument('--output-root', type=Path)
     parser.add_argument('--seed', type=int, default=0)
@@ -72,6 +75,12 @@ def main(argv=None):
         child['training_profile'] = 'local_multisecant_response'
         child['thermal_local_response'] = {'input_definitions': str(args.input_definitions.expanduser().resolve(strict=True)),
                                            'variant': args.variant, 'seed': args.seed}
+        if args.state_priority:
+            child['thermal_local_response']['state_priority'] = True
+        if args.variant in ('targeted_reynolds_response', 'trace_matched_uniform_response'):
+            if args.target_definitions is None:
+                parser.error('target variants require --target-definitions')
+            child['thermal_local_response']['target_definitions'] = str(args.target_definitions.expanduser().resolve(strict=True))
         _atomic_json(args.output, child)
     else:
         if args.recipe is None:

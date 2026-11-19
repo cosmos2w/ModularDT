@@ -93,6 +93,69 @@ def thermal_chart(center, candidate, *, reynolds_range):
     return source, source - represented, cols.tolist(), gap
 
 
+def thermal_reynolds_target(config):
+    """Describe the fixed Re edit and update every saved derived viscosity."""
+    before = copy.deepcopy(config)
+    after = copy.deepcopy(config)
+    re = float(before['flow']['re'])
+    target = re - 10. if re == 200. else re + 10.
+    if not 20. <= re <= 200. or not 20. <= target <= 200.:
+        raise ValueError('The prescribed Re edit must stay within observed TRAIN150 support.')
+    after['flow']['re'] = target
+    nu = (2 * float(after['domain']['module_radius']) * float(after['flow']['u_in'])
+          * float(after['flow'].get('viscosity_scale', 1.0)) / target)
+    if after['flow'].get('nu') is not None:
+        after['flow']['nu'] = nu
+    if after.get('runtime', {}).get('nu') is not None:
+        after['runtime']['nu'] = nu
+    thermal_compatibility_key(before)
+    thermal_compatibility_key(after)
+    return before, after
+
+
+class ThermalResponseTargetAdapter:
+    """Case-owned inputs, legal edit and aligned reference reader."""
+    def __init__(self, reynolds_range):
+        self.reynolds_range = float(reynolds_range)
+
+    def complete_input(self, scene):
+        thermal_compatibility_key(scene)
+        return copy.deepcopy(scene)
+
+    def target(self, scene):
+        return thermal_reynolds_target(scene)
+
+    def chart(self, anchor, scene):
+        return thermal_chart(anchor, scene, reynolds_range=self.reynolds_range)[0]
+
+    def aligned_observations(self, scenes, lengths, **kwargs):
+        return sample_thermal_neighborhood_observations(scenes, lengths, **kwargs)
+
+
+def build_thermal_reynolds_targets(definitions):
+    """Construct original-deck target rows using only stored prescribed inputs."""
+    from honf_runtime.response_targets import solve_bounded_rbf_target
+    adapter = ThermalResponseTargetAdapter(definitions['reynolds_range'])
+    with h5py.File(definitions['data_path'], 'r') as h5:
+        configs = {i: json.loads(h5['cases'][i]['case_config_json'][()]) for i in definitions['case_ids']}
+    result = {}
+    for item in definitions['neighborhoods']:
+        center = configs[item['center_id']]
+        before, after = adapter.target(center)
+        before_chart = adapter.chart(center, before)
+        after_chart, representation, _, _ = thermal_chart(center, after, reynolds_range=adapter.reynolds_range)
+        solved = solve_bounded_rbf_target(item['chart'], before_chart, after_chart,
+            representation_resolution=float(np.linalg.norm(representation)))
+        eligible = solved.success and solved.rho <= .5 and np.linalg.norm(solved.coefficients) > 0
+        coefficients = solved.coefficients if eligible else np.zeros(len(item['scene_ids']))
+        result[item['center_id']] = {'coefficients': coefficients.tolist(), 'rho': solved.rho,
+            'eligible': bool(eligible), 'target_norm_squared': solved.target_norm_squared,
+            'exact_observed': bool(any(np.array_equal(after_chart, np.asarray(row)) for row in item['chart'])),
+            'representation_resolution': solved.resolution, 'solver_success': solved.success,
+            'solver_message': solved.message}
+    return result
+
+
 def build_thermal_input_definitions(data_path, case_ids, *, reynolds_range=None, max_scenes=12):
     """Build deterministic input-only neighborhoods, with exact stored grids checked."""
     from honf_runtime.local_response_contrasts import build_local_contrast, build_uniform_contrast
@@ -236,12 +299,13 @@ def sample_thermal_neighborhood_observations(groups, lengths, *, seed, total_pos
 
 
 class ThermalLocalResponseObjective:
-    def __init__(self, provider, *, seed, variant, definitions=None):
+    def __init__(self, provider, *, seed, variant, definitions=None, target_definitions=None):
         self.provider, self.seed, self.variant = provider, int(seed), variant
         self.scales = provider.model.field_std.detach().reshape(-1)[:5].cpu().double()
         names = ('flow/u', 'flow/v', 'flow/p', 'flow/omega', 'temperature/fluid')
         self.weights = torch.tensor([provider.native_weights[name] for name in names], dtype=torch.float64)
         self.soft_operators = {}
+        self.target_definitions = target_definitions
         if variant == 'soft_inverse_response':
             if definitions is None:
                 raise ValueError('Soft inverse response requires the saved input definitions.')
@@ -254,7 +318,14 @@ class ThermalLocalResponseObjective:
 
     def contrast(self, neighborhood, *, force_uniform=False, force_multisecant=False):
         """Select the cached operator without changing the saved episode definition."""
-        from honf_runtime.local_response_contrasts import LocalContrast
+        from honf_runtime.local_response_contrasts import LocalContrast, WeightedResponseContrast
+        if self.variant in ('targeted_reynolds_response', 'trace_matched_uniform_response') and not force_uniform and not force_multisecant:
+            target = self.target_definitions[neighborhood['center_id']]
+            a = torch.as_tensor(target['coefficients'], dtype=torch.float64)
+            if self.variant == 'targeted_reynolds_response':
+                return WeightedResponseContrast(a[None, :], torch.ones(1, dtype=torch.float64))
+            uniform = torch.as_tensor(neighborhood['uniform_operator'], dtype=torch.float64)
+            return WeightedResponseContrast(uniform, torch.full((uniform.shape[0],), float(a @ a / 2), dtype=torch.float64))
         if self.variant == 'soft_inverse_response' and not force_uniform and not force_multisecant:
             return self.soft_operators[neighborhood['center_id']]
         is_uniform = force_uniform or (self.variant != 'multisecant_response' and not force_multisecant)
@@ -336,7 +407,8 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
 
     spec = recipe.get('thermal_local_response', {})
     variant = spec.get('variant')
-    if variant not in ('state_anchors', 'uniform_response', 'multisecant_response', 'soft_inverse_response'):
+    if variant not in ('state_anchors', 'uniform_response', 'multisecant_response', 'soft_inverse_response',
+                       'targeted_reynolds_response', 'trace_matched_uniform_response'):
         raise ValueError('Unknown Thermal local-response variant.')
     base = copy.deepcopy(recipe)
     base['training_profile'] = 'native_pair'
@@ -356,7 +428,39 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
     count = {150: 1, 600: 4}.get(len(definitions['case_ids']))
     if count is None:
         raise ValueError('Local response requires declared TRAIN150 or TRAIN600 membership.')
-    objective = ThermalLocalResponseObjective(provider, seed=seed, variant=variant, definitions=definitions)
+    targets = None
+    if variant in ('targeted_reynolds_response', 'trace_matched_uniform_response'):
+        target_payload = json.loads(Path(spec['target_definitions']).read_text())
+        if (Path(target_payload.get('input_definitions', '')).resolve() != Path(path).resolve()
+                or target_payload.get('version') != 1):
+            raise ValueError('Target definitions do not match the saved input definitions.')
+        targets = target_payload['targets']
+        rebuilt_targets = build_thermal_reynolds_targets(definitions)
+        if set(targets) != set(rebuilt_targets):
+            raise ValueError('Saved target centers differ from the prescribed source inputs.')
+        for center, rebuilt in rebuilt_targets.items():
+            saved = targets[center]
+            flags = ('eligible', 'exact_observed', 'solver_success')
+            scalars = ('rho', 'target_norm_squared', 'representation_resolution')
+            if (any(saved.get(k) != rebuilt[k] for k in flags)
+                    or any(not math.isclose(float(saved[k]), rebuilt[k], rel_tol=1e-10, abs_tol=1e-12) for k in scalars)
+                    or not np.allclose(saved['coefficients'], rebuilt['coefficients'], rtol=1e-10, atol=1e-12)):
+                raise ValueError(f'Saved target definition for center {center} differs from the source inputs or target rule.')
+        if set(targets) != {item['center_id'] for item in definitions['neighborhoods']}:
+            raise ValueError('Target definitions must cover every original center.')
+        for item in definitions['neighborhoods']:
+            target = targets[item['center_id']]
+            a = np.asarray(target['coefficients'], dtype=np.float64)
+            if (a.shape != (len(item['scene_ids']),) or not np.isfinite(a).all() or abs(a.sum()) > 1e-8
+                    or np.abs(a).sum() > 2 + 1e-8 or bool(target['eligible']) != bool(np.linalg.norm(a) > 0)
+                    or (target['eligible'] and (not target['solver_success'] or target['rho'] > .5))):
+                raise ValueError('Invalid saved target coefficients or eligibility.')
+    objective = ThermalLocalResponseObjective(provider, seed=seed, variant=variant, definitions=definitions,
+                                               target_definitions=targets)
+    if spec.get('state_priority', False):
+        if variant == 'state_anchors':
+            raise ValueError('State priority requires a response term.')
+        provider.state_priority_response_terms = ('local_response/response',)
     names = ('absolute',) if variant == 'state_anchors' else ('absolute', 'response')
     provider.auxiliary_loss_names = tuple('local_response/' + name for name in names)
     state = {'calibration': None}
@@ -451,6 +555,14 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
     def identity_payload(self):
         local_identity = {'variant': variant, 'input_definitions': path, 'seed': seed,
                           'scales': objective.scales.tolist(), 'weights': objective.weights.tolist()}
+        if spec.get('state_priority', False):
+            local_identity['state_priority'] = True
+        if targets is not None:
+            local_identity['target_definitions'] = str(spec['target_definitions'])
+            local_identity['target_definition'] = {'edit': 'Re plus ten, or minus ten at 200; update derived viscosity',
+                'kernel_bandwidth': 0.4914509773167929, 'ridge': .05, 'rho_max': .5,
+                'row_reduction': 'weighted sum; one target row or uniform trace matched',
+                'excluded_centers': 'zero response; retain native and absolute exposure'}
         if variant == 'soft_inverse_response':
             local_identity['operator_definition'] = {
                 'weight': 'z=1/(1+(sigma/sigma_max)^2); b=r*z/sum(z); a=(1+b)/2',
@@ -493,8 +605,13 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
     def loss_metadata(self):
         result = dict(old_metadata())
         for name in names:
+            formula = 'common-fluid weighted fields, equal scenes and views'
+            if name == 'response' and variant in ('targeted_reynolds_response', 'trace_matched_uniform_response'):
+                formula = ('common-fluid weighted channels, equal views; one target contrast row, weight one'
+                           if variant == 'targeted_reynolds_response' else
+                           'common-fluid weighted channels, equal views; uniform rows each weighted by target squared norm / 2')
             result['local_response/' + name] = {'panel': 'physics', 'label': 'local response ' + name,
-                'unit': 'scaled squared error', 'formula': 'common-fluid weighted fields, equal scenes and views',
+                'unit': 'scaled squared error', 'formula': formula,
                 'weight': 'epoch-10 TRAIN calibration and linear ramp'}
         return result
     provider.loss_metadata = MethodType(loss_metadata, provider)

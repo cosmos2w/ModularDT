@@ -950,6 +950,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                               provider_identity.get("state_response", {}).get("enabled", False))
     response_run = legacy_response_run or scratch_family_run or state_response_run
     local_response_run = bool(provider_identity and provider_identity.get('local_response'))
+    priority_run = bool(local_response_run and provider_identity['local_response'].get('state_priority'))
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
                                       "R13-4-Full", "R13-4-Guide"}
@@ -1248,7 +1249,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         masked_count_total += plot_series(
             total_axis, [row["epoch"] for row in train_rows],
             [recorded_sum(row["train_losses"]) for row in train_rows],
-            label=("TRAIN: optimized total" if response_run else "TRAIN: recorded weighted sum"),
+            label=("TRAIN: nominal weighted sum" if priority_run else
+                   "TRAIN: optimized total" if response_run else "TRAIN: recorded weighted sum"),
             color="C0", marker=".")
     if validation_rows:
         masked_count_total += plot_series(
@@ -1688,9 +1690,11 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                          "Weighted loss totals (different reductions)")
     total_axis.set_ylabel("Weighted loss")
     if separate_totals:
-        total_axis.set_title("Total TRAIN loss")
+        total_axis.set_title("Nominal TRAIN loss sum" if priority_run else "Total TRAIN loss")
         validation_total_axis.set_title("Native-only validation subtotal" if local_response_run else
                                         "Total measurable validation loss")
+        if local_response_run:
+            validation_total_axis.text(0.02, 0.03, "Full validation objective unavailable", transform=validation_total_axis.transAxes, fontsize=7)
         validation_total_axis.set_xlabel("Completed epoch")
         validation_total_axis.set_ylabel("Weighted loss")
         validation_total_axis.grid(alpha=0.25, which="both")
@@ -4016,12 +4020,23 @@ class TrainingEngine:
             )
             losses["source_read_auxiliary"] = float(auxiliary_loss.detach())
         auxiliary_terms = getattr(provider, "auxiliary_update_terms", None)
+        priority_names = getattr(provider, "state_priority_response_terms", None)
+        priority_gradients = None
+        priority_parameters = None
+        if priority_names is not None and not callable(auxiliary_terms):
+            raise ValueError("State priority requires auxiliary_update_terms.")
         if callable(auxiliary_terms):
             if type(epoch_update_count) is not int or epoch_update_count < 1:
                 raise ValueError("Epoch-normalized auxiliary fitting requires the epoch update count.")
             auxiliary_names = tuple(provider.auxiliary_loss_names)
             if not auxiliary_names or set(auxiliary_names) & set(losses):
                 raise ValueError("Auxiliary loss names must be nonempty and distinct from native losses.")
+            if priority_names is not None:
+                if (not isinstance(priority_names, tuple) or not priority_names
+                        or not set(priority_names) <= set(auxiliary_names)):
+                    raise ValueError("State priority requires declared response loss names.")
+                priority_parameters = tuple(dict.fromkeys(
+                    p for group in optimizer.param_groups for p in group["params"] if p.requires_grad))
             # Explicit zeros preserve the mean over *all* native updates when
             # auxiliary families are distributed sparsely through the epoch.
             losses.update({name: 0.0 for name in auxiliary_names})
@@ -4029,6 +4044,8 @@ class TrainingEngine:
                     model, epoch=epoch, update_index=update_index,
                     update_count=epoch_update_count):
                 objective = None
+                state_objective = None
+                response_objective = None
                 for name, term in self._ordered_training_terms(terms).items():
                     if name not in auxiliary_names:
                         raise ValueError(f"Undeclared auxiliary loss {name!r}.")
@@ -4038,6 +4055,11 @@ class TrainingEngine:
                         raise ValueError("Auxiliary terms require a scalar numerator and positive denominator.")
                     piece = term.numerator * (float(term.weight) / denominator)
                     objective = piece if objective is None else objective + piece
+                    if priority_names is not None:
+                        if name in priority_names:
+                            response_objective = piece if response_objective is None else response_objective + piece
+                        else:
+                            state_objective = piece if state_objective is None else state_objective + piece
                     losses[name] += float(piece.detach())
                 diagnostic_values = getattr(provider, "auxiliary_diagnostic_values", None)
                 if callable(diagnostic_values):
@@ -4049,7 +4071,21 @@ class TrainingEngine:
                         work[key] = work.get(key, 0.0) + numeric
                 if objective is None or not bool(torch.isfinite(objective.detach())):
                     raise FloatingPointError("Empty or nonfinite auxiliary optimizer objective.")
-                objective.backward()
+                if priority_names is None:
+                    objective.backward()
+                else:
+                    if response_objective is None or state_objective is None:
+                        raise ValueError("State-priority episodes require named state and response terms.")
+                    gradients = torch.autograd.grad(response_objective, priority_parameters,
+                                                    retain_graph=True, allow_unused=True)
+                    if priority_gradients is None:
+                        priority_gradients = [None] * len(priority_parameters)
+                    for index, gradient in enumerate(gradients):
+                        if gradient is not None:
+                            gradient = gradient.detach()
+                            priority_gradients[index] = (gradient.clone() if priority_gradients[index] is None
+                                                         else priority_gradients[index] + gradient)
+                    state_objective.backward()
                 del objective, terms, term, piece
                 for name, value in auxiliary_work.items():
                     numeric = float(value)
@@ -4059,12 +4095,31 @@ class TrainingEngine:
         before_step = getattr(provider, "before_optimizer_step", None)
         if callable(before_step):
             before_step(model, optimizer, losses, work, epoch=epoch, update_index=update_index)
+        priority_state = None
+        priority_before = None
+        if priority_gradients is not None:
+            from .state_priority import combine_state_response
+            priority_state, priority_stats = combine_state_response(priority_parameters, priority_gradients)
+            work.update({f"state_priority_{name}": value for name, value in priority_stats.items()})
+            if epoch in (100, 500, 1000):
+                priority_before = [p.detach().clone() for p in priority_parameters]
+        elif priority_names is not None:
+            work["state_priority_absent_count"] = 1.0
         parameters = [parameter for group in optimizer.param_groups for parameter in group["params"]
                       if parameter.grad is not None]
         norm = torch.nn.utils.clip_grad_norm_(parameters, self.config.gradient_clip)
         if not torch.isfinite(norm) or norm <= 0:
             raise FloatingPointError("Nonfinite or zero actual parameter gradient.")
+        if priority_gradients is not None:
+            work["state_priority_clip_norm_sum"] = float(norm.detach())
+            work["state_priority_clipped_count"] = float(norm > self.config.gradient_clip)
         optimizer.step()
+        if priority_before is not None:
+            work["state_priority_displacement_dot_sum"] = sum(
+                float((gradient.double() * (p.detach() - before).double()).sum())
+                for p, before, gradient in zip(priority_parameters, priority_before, priority_state)
+                if gradient is not None)
+            work["state_priority_displacement_count"] = 1.0
         after_step = getattr(provider, "after_optimizer_step", None)
         if callable(after_step):
             after_step(model, optimizer, norm, epoch=epoch, update_index=update_index)
@@ -5221,16 +5276,15 @@ class TrainingEngine:
             history_columns = getattr(provider, "training_history_columns", None)
             if not callable(history_columns):
                 raise ValueError("CSV recording requires the provider's complete scheduled training_history_columns().")
-            declared = tuple(history_columns())
+            from .state_priority import recording_columns_and_definitions
+            declared, column_definitions = recording_columns_and_definitions(provider)
             base_columns = ("epoch", "phase", "arm", "temperature", "case_visits", "optimizer_updates",
                             "microbatches", "partial_update_cases", "train_seconds", "train_loss_total")
             csv_columns = (*base_columns,
                 *(f"learning_rates.{group['group_name']}" for group in optimizer.param_groups), *declared)
             metadata_reader = getattr(provider, "loss_metadata", None)
-            column_reader = getattr(provider, "training_column_definitions", None)
             incoming_definitions = training_recording_definitions(csv_columns,
-                dict(metadata_reader()) if callable(metadata_reader) else {},
-                dict(column_reader()) if callable(column_reader) else {})
+                dict(metadata_reader()) if callable(metadata_reader) else {}, column_definitions)
             definitions_path = output / "configs" / "metric_definitions.json"
             if not definitions_path.exists():
                 if resume_checkpoint is not None:
@@ -5913,6 +5967,11 @@ class TrainingEngine:
                     "train_losses": _mean_mapping([item["losses"] for item in update_rows]),
                     "work_counts": _sum_mapping([item["work"] for item in update_rows]),
                 }
+                if getattr(provider, "state_priority_response_terms", None) is not None:
+                    for name in ("active_count", "absent_count", "projected_count", "suppressed_count",
+                                 "zero_response_count", "cosine_count", "retained_fraction_count",
+                                 "clipped_count", "displacement_count"):
+                        row["work_counts"].setdefault(f"state_priority_{name}", 0.0)
                 if order_hash is not None:
                     row["case_order_sha256"] = order_hash
                 if epoch_executor is not None:
