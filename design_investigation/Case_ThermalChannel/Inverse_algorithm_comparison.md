@@ -2,7 +2,7 @@
 
 The engineering decision is where to move fixed-load heat sources to lower the material smooth-peak temperature while respecting a pressure-rise limit. Physical evaluations of edited layouts and cheaper estimates of their response have different costs. This investigation compares what can be done with either resource. All methods start at the same layout and can retain it.
 
-A subsequent prospective study tests the frozen response model on 12 fresh geometries. [Unseen-layout results](#prospective-check-on-unseen-geometries-with-pretrained-r)
+A subsequent prospective study tests the frozen response model on 12 fresh geometries. [Unseen-layout results](#prospective-check-on-unseen-geometries-with-pretrained-r) · [Visual search paths](#layout-and-field-changes-along-each-search-path)
 
 ## Reference-only search
 
@@ -123,3 +123,31 @@ The scorer used restricted access, saved normalization and smoothing scale 0.414
 **Organizer.** At the primary pressure cap, the directory shortlist included a resolved feasible edit in all 10 families with an opportunity; proximity covered nine. Checking both directory proposals achieved 0.1799 mean cooling versus 0.1024 for proximity. Both R shortlists focus on one of two movable modules because their relevance scores rank slots and tie the two moves of a selected slot. This design tests module prioritization; a larger move bank with multi-module proposals is needed to test richer organization.
 
 **Inverse decisions.** With one allowed physical check under the primary pressure limit, directory guidance issued five checks and retained one improvement. Proximity issued seven and retained two. Geometry issued 12 and retained three. The mean paired one-check difference for directory minus geometry was −0.0876, with a descriptive 95% family-bootstrap interval of −0.2396 to 0.0000. Under intake protection, R full-pool ranking issued five checks and all five violated a constraint; the bank contained an acceptable improvement in six families. A practical next comparison is a geometry-ranked first proposal followed by a physically verified directory alternative, evaluated on fresh layouts with the same two-check allowance. These results apply to this seeded, small single-slot edit bank and the channel solver. End-to-end acceleration, full-access fallback and hardware performance were unmeasured.
+
+## Layout and field changes along each search path
+
+Family `new2_2` has two fixed-load modules and four legal moves from the same baseline. Read each method from left to right. The header gives the edit physically checked and the layout retained afterward. A later trial can lose to an earlier one. Coordinates for every trial are relative to the original layout; these searches compare alternative placements and do not add the displacement from one trial to the next.
+
+<p align="center"><img src="../../docs/assets/readme/thermal_path_layout.png" alt="Baseline fluid temperature from R and the solver, with center-coordinate zooms showing all four legal moves of the two modules." width="1050"></p>
+
+**Starting layout.** The upper panels share an absolute temperature scale. R’s baseline fluid-temperature RMSE is 0.802 native units. The coordinate zooms show the actual moves: edits `e0` and `e1` move module 0, while `e2` and `e3` move module 1. [PDF master](../../docs/assets/readme/thermal_path_layout.pdf)
+
+Each subsequent column overlays the trial disks on two maps. The upper map shows the frozen R prediction of fluid-temperature change from baseline; the lower map shows the independently solved change. They use one symmetric color scale across every edit and method. The RMSE on the R panel compares those two changes on the fluid cells valid in both layouts and both fields. For direct search and geometry regression, R provides a display-only field. The cooling curve tracks the best verified material smooth-peak decrease so far. The pressure curve tracks the current trial’s pressure change, in thousandths of a native pressure unit.
+
+The first six paths follow the recorded **two-check** policy, which spends both physical checks even when R predicts warming. The separately reported one-check policy can abstain. The final two figures replay the five reference-only rules on these same saved solver endpoints, revealing labels to each rule only after it chooses a trial.
+
+<p align="center"><img src="../../docs/assets/readme/thermal_path_ranked.png" alt="Two checks for direct random, geometry regression and R uniform shortlisting, each showing predicted and solver temperature change, retained cooling and trial pressure change." width="1050"></p>
+
+**Direct random, geometry regression and R uniform shortlisting.** Geometry checks `e2` first and retains 0.8869 cooling through its second trial. Direct random reaches 0.3696 on its first check. R uniform reaches the same value on its second check because its first edit, `e1`, cools by only 0.0115, below the 0.012 acceptance threshold. [PDF master](../../docs/assets/readme/thermal_path_ranked.pdf)
+
+<p align="center"><img src="../../docs/assets/readme/thermal_path_routed.png" alt="Two checks for R proximity, R directory and R full-pool ranking, with trial field changes and verified cooling and pressure curves." width="1050"></p>
+
+**R proximity, directory and full-pool ranking.** The directory checks `e2` first; the full-pool ranking checks it second. Both retain 0.8869 cooling. Proximity checks two moves of module 0 and retains 0.1164. For `e2`, the predicted change in the fluid-temperature field has RMSE 0.3824 native units. The solver measures a pressure rise of 0.000862, within the effective allowance of 0.0099. [PDF master](../../docs/assets/readme/thermal_path_routed.pdf)
+
+<p align="center"><img src="../../docs/assets/readme/thermal_path_direct.png" alt="Four-check shared path for random, largest-displacement and maximin search, showing field changes and a verified cooling increase on the last check." width="1050"></p>
+
+**Reference-only searches on the same bank.** In this retrospective replay, random without replacement, largest displacement and maximin produce the identical order `e3 → e1 → e0 → e2` under the common seeded tie order. All three retain `e3` through three checks and improve from 0.3696 to 0.8869 on check four. [PDF master](../../docs/assets/readme/thermal_path_direct.pdf)
+
+<p align="center"><img src="../../docs/assets/readme/thermal_path_adaptive.png" alt="Four-check paths for local linear response and constrained Bayesian optimization, showing when each tests and retains the best edit." width="1050"></p>
+
+**Adaptive reference-only searches.** Starting from the same `e3` observation, the local linear response rule selects `e2` on check two. Constrained Bayesian optimization checks `e1` next and finds `e2` on check three. Both end at 0.8869 because four checks exhaust the bank. This family illustrates how their choices differ; the 96-family comparison above measures their average behavior. [PDF master](../../docs/assets/readme/thermal_path_adaptive.pdf)
