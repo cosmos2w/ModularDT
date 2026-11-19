@@ -86,3 +86,4 @@ def test_thermal_reynolds_edit_preserves_inputs_and_updates_viscosity():
     assert before == original and old == original
     assert new['flow']['re'] == 110 and new['flow']['nu'] == new['runtime']['nu'] == 2 * .2 / 110
     assert new['layout'] == before['layout']
+    assert new['physical_reference_status'] == 'unavailable_for_input_description'

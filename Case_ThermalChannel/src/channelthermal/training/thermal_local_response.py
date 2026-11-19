@@ -108,6 +108,9 @@ def thermal_reynolds_target(config):
         after['flow']['nu'] = nu
     if after.get('runtime', {}).get('nu') is not None:
         after['runtime']['nu'] = nu
+    # The copied runtime describes the source record's compatibility profile;
+    # it is not evidence that this modified input has been solved.
+    after['physical_reference_status'] = 'unavailable_for_input_description'
     thermal_compatibility_key(before)
     thermal_compatibility_key(after)
     return before, after
