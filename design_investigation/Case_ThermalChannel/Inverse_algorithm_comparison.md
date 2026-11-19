@@ -59,6 +59,10 @@ At a pressure allowance of 0, R's directory-minus-uniform difference at two cand
 
 The geometry-only model gave 0.2638 mean cooling at the looser cap, close to B0's 0.2563. B0 succeeded in more families. At zero rise the geometry model submitted 32 over-cap edits in 78 attempts; R submitted three in 69. A verifier rejected all such edits. The tight-cap result is sensitive to pressure resolution. In total, 137 of 384 stored ΔP values lie within 0.0001 of zero. An engineering deployment would need a pressure uncertainty margin. Training exposure also differs. The ridge model excluded the evaluation family; R had access to its endpoints during response training. Their gap combines differences in information and method.
 
+<p align="center"><img src="../../docs/assets/readme/thermal_inverse_fit_0112_fields.png" alt="Predicted baseline and edited temperature fields, solver reference, signed error, and cooling versus candidate budget for FIT family 0112." width="950"></p>
+
+**A verified placement on a FIT family.** With four candidate evaluations under the pressure cap, epoch-3000 R selected edit `0112_a2` and the solver reference confirmed 0.3481 material cooling. The edited fluid-temperature RMSE was 0.210 native temperature units on the valid fluid mask. The fields show family `0112`; the curves average the two families in the earlier matched replay. [PDF master](../../docs/assets/readme/thermal_inverse_fit_0112_fields.pdf)
+
 ## Combining a ranking with physical search
 
 A screen can also set the order of a direct search. Rank all four estimates by predicted pressure excess, then predicted J, and physically check the first two even if the model expects little cooling. Keep the best verified incumbent. This uses four cheap candidate estimates and two physical checks per family. It tests the value of committing a second check and of allowing the verifier to override model pessimism.
@@ -111,6 +115,10 @@ The scorer used restricted access, saved normalization and smoothing scale 0.414
 | Best possible in the four-edit bank | 0.2651 | 0.1108 | 0.1581 |
 
 **Predictor.** Of 35 edits with resolved absolute ΔJ, R and the geometry regressor each predicted the direction correctly for 17. Mean absolute ΔJ error was 0.2834 for R and 0.2469 for geometry. R had smaller mean absolute ΔP error, 0.000365 versus 0.000599. For family `new2_2`, the directory selected the two edits that physically cooled the material by 0.3696 and 0.8869. R predicted warming for both and abstained. The geometry model selected the 0.8869 edit. A useful next predictor check is whether uncertainty in ΔJ flags sign errors on new layouts.
+
+<p align="center"><img src="../../docs/assets/readme/thermal_inverse_unseen_fields.png" alt="R and solver fluid-temperature fields for unseen edit e2, their signed error, and baseline module relevance for proximity and directory shortlists." width="950"></p>
+
+**A missed cooling edit on an unseen layout.** For `new2_2/e2`, the epoch-3000 R prediction had a fluid-temperature RMSE of 0.4714 native units across 8,047 valid fluid cells. The lower-right panel shows why the directory shortlisted this move of module 1. R then predicted a material smooth-peak increase of 0.0522, while the solver measured a decrease of 0.8869. The geometry-ranked policy submitted the edit and the physical check accepted it. [PDF master](../../docs/assets/readme/thermal_inverse_unseen_fields.pdf)
 
 **Organizer.** At the primary pressure cap, the directory shortlist included a resolved feasible edit in all 10 families with an opportunity; proximity covered nine. Checking both directory proposals achieved 0.1799 mean cooling versus 0.1024 for proximity. Both R shortlists focus on one of two movable modules because their relevance scores rank slots and tie the two moves of a selected slot. This design tests module prioritization; a larger move bank with multi-module proposals is needed to test richer organization.
 
