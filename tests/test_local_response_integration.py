@@ -114,3 +114,30 @@ def test_fresh_process_local_response_resume(tmp_path):
         for left, right in zip(histories[0][1], histories[1][1]):
             assert {k: v for k, v in left.items() if k != 'train_seconds'} == \
                    {k: v for k, v in right.items() if k != 'train_seconds'}
+
+
+def test_local_response_curve_metadata_refreshes_both_locations(tmp_path):
+    from honf_runtime.unified_training import _render_loss_curves
+
+    plots, metrics = tmp_path / 'plots', tmp_path / 'metrics'
+    identity = {'local_response': {'variant': 'multisecant_response'}}
+    terms = {'local_response/response': {'panel': 'physics', 'label': 'Local response',
+                                         'formula': 'saved response definition', 'weight': 'calibrated',
+                                         'unit': 'scaled squared error'}}
+    first = {'epoch': 10, 'phase': 'joint', 'arm': 'R13-8-A-EAnchor',
+             'train_losses': {'flow/u': 1.},
+             'validation_objective': {'terms': {'flow/u': 1.}, 'term_weights': {'flow/u': 1.}}}
+    second = {'epoch': 11, 'phase': 'joint', 'arm': 'R13-8-A-EAnchor',
+              'train_losses': {'flow/u': 0.9, 'local_response/response': 0.2},
+              'validation_objective': {'terms': {'flow/u': 0.8}, 'term_weights': {'flow/u': 0.75}}}
+    _render_loss_curves([first], plots, 'field_score', terms, identity, separate_totals=True)
+    _render_loss_curves([first, second], plots, 'field_score', terms, identity,
+                        metadata_output=metrics, separate_totals=True)
+    plot_meta = json.loads((plots / 'loss_curves_metadata.json').read_text())
+    metric_meta = json.loads((metrics / 'loss_curves_metadata.json').read_text())
+    assert plot_meta == metric_meta
+    assert plot_meta['term_definitions']['local_response/response'] == terms['local_response/response']
+    assert plot_meta['validation_objective_weights_by_epoch']['flow/u'] == {'10': 1.0, '11': 0.75}
+    assert 'local-neighborhood' in plot_meta['panel_definitions']['physics']
+    assert 'No separately fitted' not in plot_meta['panel_definitions']['physics']
+    assert 'native-only subtotal' in plot_meta['panel_definitions']['weighted_loss_totals']

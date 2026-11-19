@@ -1884,6 +1884,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             'TRAIN sums the recorded native and local-response contributions. VALIDATION is a native-only '
             'subtotal on the configured panel; local-response observations are not evaluated there. '
             'Prediction paths and reductions differ.')
+        metadata['panel_definitions']['physics'] = (
+            'Recorded weighted local-neighborhood absolute and response contributions, when active; '
+            'local-response observations are not evaluated in native validation.')
     if response_terms:
         metadata["panel_definitions"]["physics"] = (
             "TRAIN records weighted paired endpoint and finite-response loss contributions, including "
@@ -1981,6 +1984,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     output.mkdir(parents=True, exist_ok=True)
     metadata_output.mkdir(parents=True, exist_ok=True)
     _atomic_json(metadata_output / "loss_curves_metadata.json", metadata)
+    if local_response_run and metadata_output != output:
+        _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"
         temporary = output / f".loss_curves.{os.getpid()}.tmp.{suffix}"
