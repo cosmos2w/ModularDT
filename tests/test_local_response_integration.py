@@ -147,6 +147,22 @@ def test_fresh_process_priority_multiplier_native_prefix_resume(tmp_path):
         run('branch', child_file, directory, source)
         saved_recipe = json.loads(RunLayout(directory).read_path('resolved_config.json').read_text())
         assert saved_recipe['thermal_local_response'] == child['thermal_local_response']
+    changed = copy.deepcopy(child)
+    changed['thermal_local_response']['objective']['response_weight'] = .75
+    assert child['thermal_local_response']['objective']['response_weight'] == .5
+    restored = copy.deepcopy(changed)
+    restored['thermal_local_response']['objective']['response_weight'] = .5
+    assert restored == child
+    changed_file = tmp_path / 'changed_response_weight.json'
+    changed_file.write_text(json.dumps(changed))
+    saved_checkpoint = RunLayout(resumed).read_path('latest_model.pt')
+    saved_history = RunLayout(resumed).read_path('history.csv')
+    before = (saved_checkpoint.read_bytes(), saved_history.read_bytes())
+    rejected = subprocess.run([sys.executable, str(worker), 'fit', str(changed_file), str(resumed), '11'],
+                              env=env, capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert 'Checkpoint identity, engine config, selection or optimizer schedule differs' in rejected.stderr
+    assert (saved_checkpoint.read_bytes(), saved_history.read_bytes()) == before
     run('fit', RunLayout(uninterrupted).read_path('resolved_config.json'), uninterrupted, 12)
     run('fit', RunLayout(resumed).read_path('resolved_config.json'), resumed, 11)
     run('fit', RunLayout(resumed).read_path('resolved_config.json'), resumed, 12)
