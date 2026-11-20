@@ -409,6 +409,11 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
     from .thermal_native_pair_task import build_thermal_native_pair_task
 
     spec = recipe.get('thermal_local_response', {})
+    objective_spec = spec.get('objective', {})
+    if not isinstance(objective_spec, dict) or set(objective_spec) - {'response_weight'}:
+        raise ValueError('Local-response objective accepts only response_weight.')
+    explicit_response_weight = 'response_weight' in objective_spec
+    config = ResponseObjectiveConfig(**objective_spec)
     variant = spec.get('variant')
     if variant not in ('state_anchors', 'uniform_response', 'multisecant_response', 'soft_inverse_response',
                        'targeted_reynolds_response', 'trace_matched_uniform_response'):
@@ -558,6 +563,12 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
     def identity_payload(self):
         local_identity = {'variant': variant, 'input_definitions': path, 'seed': seed,
                           'scales': objective.scales.tolist(), 'weights': objective.weights.tolist()}
+        if explicit_response_weight:
+            local_identity['objective'] = {
+                'response_weight': float(config.response_weight),
+                'source': 'thermal_local_response.objective.response_weight',
+                'interpretation': 'multiplier applied to the response loss after shared calibration',
+            }
         if spec.get('state_priority', False):
             local_identity['state_priority'] = True
         if targets is not None:
@@ -616,9 +627,11 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
             result['local_response/' + name] = {'panel': 'physics', 'label': 'local response ' + name,
                 'unit': 'scaled squared error', 'formula': formula,
                 'weight': 'epoch-10 TRAIN calibration and linear ramp'}
+            if name == 'response' and explicit_response_weight:
+                result['local_response/' + name]['weight'] += (
+                    f'; post-calibration response multiplier {float(config.response_weight)!r}')
         return result
     provider.loss_metadata = MethodType(loss_metadata, provider)
-    config = ResponseObjectiveConfig()
     def auxiliary_update_terms(self, current_model, *, epoch, update_index, update_count):
         ramp = config.ramp(epoch)
         if not ramp:
@@ -630,7 +643,10 @@ def build_thermal_local_response_task(recipe, *, arm=None, device='cpu', resume_
         for item, slot in zip(chosen, slots):
             if int(slot) == update_index:
                 terms, work = objective.components(current_model, item, epoch=epoch)
-                yield ({'local_response/' + name: LossTerm(terms[name], 1., ramp *
-                        state['calibration']['coefficients'][name] * update_count / len(chosen)) for name in names}, work)
+                weights = {name: ramp * state['calibration']['coefficients'][name] * update_count / len(chosen)
+                           for name in names}
+                if 'response' in weights and config.response_weight != 1.0:
+                    weights['response'] *= float(config.response_weight)
+                yield ({'local_response/' + name: LossTerm(terms[name], 1., weights[name]) for name in names}, work)
     provider.auxiliary_update_terms = MethodType(auxiliary_update_terms, provider)
     return model, provider

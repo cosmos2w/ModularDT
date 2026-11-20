@@ -24,6 +24,10 @@ class LocalProvider(OrderedLossProvider):
     def __init__(self, recipe):
         super().__init__(recipe)
         self.variant = recipe['thermal_local_response']['variant']
+        local_config = recipe['thermal_local_response']
+        self.response_weight = local_config.get('objective', {}).get('response_weight', 1.)
+        if local_config.get('state_priority', False):
+            self.state_priority_response_terms = ('local_response/response',)
         self.calibration = None
         self.episodes = []
         self.auxiliary_loss_names = ('local_response/absolute', 'local_response/response')
@@ -65,7 +69,7 @@ class LocalProvider(OrderedLossProvider):
                                          torch.ones((1, 1)))
         losses = neighborhood_field_losses(prediction, observation, contrast, [1.], [1.])
         yield ({'local_response/absolute': LossTerm(losses.absolute, 1, 0.25 * update_count),
-                'local_response/response': LossTerm(losses.response, 1, 0.1 * update_count)}, {})
+                'local_response/response': LossTerm(losses.response, 1, 0.1 * self.response_weight * update_count)}, {})
 
 
 def main():
