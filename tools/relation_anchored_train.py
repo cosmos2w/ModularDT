@@ -292,7 +292,8 @@ def engine_for(recipe, *, device, execution_horizon=None):
                                     and tuple(checkpoints) == (100,))
         local_response_extension = (thermal and recipe.get("training_profile") == "local_multisecant_response"
                                     and recipe.get("thermal_local_response", {}).get("variant") in
-                                    ("state_anchors", "uniform_response", "multisecant_response", "soft_inverse_response")
+                                    ("state_anchors", "uniform_response", "multisecant_response", "soft_inverse_response",
+                                     "trace_matched_uniform_response")
                                     and policy.get("membership") == "full_train600"
                                     and horizon == 100 and policy.get("optimizer_schedule_horizon") == 2000
                                     and tuple(checkpoints) == (100,))

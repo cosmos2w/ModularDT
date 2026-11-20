@@ -388,7 +388,8 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
                 variant = recipe.get(variant_key, {}).get("variant")
                 allowed_variants = {"native_pair": ("field_only", "state_anchors", "functional_contrast"),
                                     "field_response": ("field_anchors", "field_response"),
-                                    "local_multisecant_response": ("state_anchors", "uniform_response", "multisecant_response", "soft_inverse_response")}[profile]
+                                    "local_multisecant_response": ("state_anchors", "uniform_response", "multisecant_response", "soft_inverse_response",
+                                                                   "trace_matched_uniform_response")}[profile]
                 expected_schedule = {"peak_lr": 3e-4, "warmup_start_lr": 3e-4,
                     "warmup_epochs": 0, "hold_through_epoch": 1000,
                     "total_epochs": 2000, "final_lr": 3e-5}
