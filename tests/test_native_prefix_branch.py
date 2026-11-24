@@ -3,6 +3,7 @@ import csv
 import hashlib
 import json
 import os
+from dataclasses import asdict, replace
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from torch import nn
 
 from honf_runtime.run_layout import RunLayout
 
@@ -59,6 +61,95 @@ def test_prefix_rejects_legacy_sampling_explicitly(tmp_path, monkeypatch):
     engine = SimpleNamespace(config=SimpleNamespace(sampling_version='legacy'))
     with pytest.raises(ValueError, match='requires case_epoch_v1'):
         native_prefix_branch.initialize_native_prefix_child(source, tmp_path / 'child', {}, None, None, engine)
+
+
+def test_observation_prefix_writes_initial_curve_metadata_to_metrics(tmp_path):
+    """Branch from a synthetic saved prefix without running a training epoch."""
+    from honf_runtime.native_prefix_branch import initialize_native_prefix_child
+    from honf_runtime.scalar_history import VALIDATION_COLUMNS, append_scalar_rows, training_recording_definitions
+    from honf_runtime.state_priority import recording_columns_and_definitions
+    from honf_runtime.unified_training import (SamplingKey, TrainingEngine, _engine_config_payload,
+                                              _optimizer_spec_payload, _sampling_dataset_id)
+    from tests.field_response_prefix_worker import PrefixProvider
+    from tests.test_unified_training import _config
+
+    parent_recipe = {'training_profile': 'field_response',
+                     'thermal_field_response': {'variant': 'field_only'},
+                     'terms': {'zeta': {'weight': 1., 'unit': 'scaled', 'meaning': 'zeta error'},
+                               'alpha': {'weight': .5, 'unit': 'scaled', 'meaning': 'alpha error'}}}
+    child_recipe = {**parent_recipe, 'training_profile': 'observation_response',
+                    'observation_response': {'variant': 'anchors'}}
+
+    class ObservationProvider(PrefixProvider):
+        def identity_payload(self):
+            return {**super().identity_payload(),
+                    'observation_response': {'validation_objective_complete': True}}
+
+        def training_history_columns(self):
+            return (*super().training_history_columns(), 'train_losses.observation_response/extra_absolute')
+
+        def loss_metadata(self):
+            return {**super().loss_metadata(), 'observation_response/extra_absolute':
+                    {'unit': 'scaled', 'meaning': 'extra observation error'}}
+
+        def validate_observation_calibration(self, calibration, *, source_checkpoint):
+            assert source_checkpoint.name == 'epoch_0010_model.pt'
+            return calibration
+
+        def initialize_observation_response_state(self, native_state, checked):
+            return {**native_state, 'observation_response': {'calibration': checked}}
+
+    settings = replace(_config(), total_epochs=12, training_mode='joint',
+                       sampling_version=SamplingKey.CASE_EPOCH_VERSION)
+    engine = TrainingEngine(settings, device='cpu')
+    model, parent_provider = nn.Linear(1, 1), PrefixProvider(parent_recipe)
+    specs = parent_provider.optimizer_groups(model, 'adaptive_detail', engine.config.stage_for_epoch(11))
+    schedules = [_optimizer_spec_payload(spec) for spec in specs]
+    provider_identity = parent_provider.identity_payload()
+    identity = {'workflow': 'prefix-toy', 'recipe': parent_recipe, 'provider_identity': provider_identity,
+                'engine_config': _engine_config_payload(engine.config), 'selection_policy': asdict(engine.selection),
+                'optimizer_schedule_contract': schedules, 'sampling_dataset_id': _sampling_dataset_id(provider_identity)}
+    if engine.sampler_epoch_contract() is not None:
+        identity['sampler_epoch_mapping'] = dict(engine.sampler_epoch_contract())
+
+    base = ('epoch', 'phase', 'arm', 'temperature', 'case_visits', 'optimizer_updates',
+            'microbatches', 'partial_update_cases', 'train_seconds', 'train_loss_total')
+    columns, overrides = recording_columns_and_definitions(parent_provider)
+    columns = (*base, *(f'learning_rates.{spec.name}' for spec in specs), *columns)
+    definitions = training_recording_definitions(columns, parent_provider.loss_metadata(), overrides)
+    parent = RunLayout(tmp_path / 'parent')
+    definitions_path = parent.write_path('metric_definitions.json', category='configs')
+    definitions_path.parent.mkdir(parents=True)
+    definitions_path.write_text(json.dumps(definitions))
+    rows = [{'epoch': epoch, 'phase': 'joint', 'arm': 'adaptive_detail', 'temperature': 1.,
+             'case_visits': 5, 'optimizer_updates': 2, 'microbatches': 3, 'partial_update_cases': 1,
+             'train_seconds': .1, 'train_loss_total': 1.5, 'learning_rates.predictor': .01,
+             'train_losses.zeta': 1., 'train_losses.alpha': .5, 'work_counts.query_rows': 5}
+            for epoch in range(1, 11)]
+    append_scalar_rows(parent.write_path('history.csv'), columns, rows)
+    append_scalar_rows(parent.write_path('validation.csv'), VALIDATION_COLUMNS,
+                       [{'epoch': 10, 'partition': 'VALIDATION', 'metric': 'validation.field_score', 'value': .5}])
+    source = parent.write_path('epoch_0010_model.pt')
+    source.parent.mkdir(parents=True)
+    torch.save({'epoch': 10, 'experiment_identity': identity, 'model_state_dict': model.state_dict(),
+                'arm': 'adaptive_detail', 'optimizer_group_names': [spec.name for spec in specs],
+                'optimizer_schedule_contract': schedules, 'best_field_score': .5, 'committed_validation_rows': 1,
+                'provider_training_state': {'native': {'completed': 10, 'auxiliary_calls': 0},
+                                            'field_response': {'calibration': None}},
+                'sampler_state': {'completed_epoch': 10, 'next_epoch': 11, 'next_case_cursor': 0,
+                                  'case_visits_this_epoch': 5, 'optimizer_updates_this_epoch': 2}}, source)
+    parent_before = _hashes(parent.run_dir)
+
+    child = tmp_path / 'child'
+    initialize_native_prefix_child(source, child, child_recipe, nn.Linear(1, 1),
+                                   ObservationProvider(child_recipe), engine,
+                                   calibration={'source_epoch': 10})
+    metadata = child / 'metrics/loss_curves_metadata.json'
+    assert json.loads(metadata.read_text())['panel_definitions']['weighted_loss_totals']
+    assert (child / 'plots/training/loss_curves.pdf').is_file()
+    assert (child / 'plots/training/loss_curves.png').is_file()
+    assert not (child / 'plots/training/loss_curves_metadata.json').exists()
+    assert _hashes(parent.run_dir) == parent_before
 
 
 def test_prefix_rejects_mismatched_earlier_visit_count(tmp_path):

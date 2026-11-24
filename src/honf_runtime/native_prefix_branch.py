@@ -210,5 +210,7 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
     if render_curves:
         _render_loss_curves(read_training_history(layout.write_path('history.csv')),
             layout.write_path('loss_curves.png').parent, engine.selection.field_metric,
-            provider_identity=provider_identity, separate_totals=True)
+            provider_identity=provider_identity,
+            metadata_output=layout.write_path('loss_curves_metadata.json').parent,
+            separate_totals=True)
     return receipt
