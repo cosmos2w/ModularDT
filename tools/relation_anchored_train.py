@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -57,23 +58,45 @@ def configure_native_retention(provider, fraction):
     provider.predict_native = predict_native
 
 
+def configure_observation_execution(recipe):
+    """Apply an explicitly saved numerical runtime policy for new profiles."""
+    if recipe.get('training_profile') != 'observation_response':
+        return
+    deterministic = recipe.get('execution_config', {}).get('deterministic_algorithms', False)
+    if type(deterministic) is not bool:
+        raise ValueError('execution_config.deterministic_algorithms must be boolean.')
+    if deterministic:
+        # Set before any allocator limit or model construction initializes CUDA.
+        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+        torch.use_deterministic_algorithms(True)
+
+
 def build(recipe, *, device, response_scales=None, saved_adapter_state=None, saved_normalization_source=None,
           resume_payload=None):
     """Dispatch supported adapters while preserving their saved recipe schemas."""
     configure_r16_5_execution(recipe, device=device)
+    configure_observation_execution(recipe)
     thermal = isinstance(recipe.get("dataset"), dict) and recipe["dataset"].get("name") == "thermal"
     unsupported = ("thermal_finite_response", "thermal_feedback", "local_expert", "local_ports")
     if any(recipe.get(name, {}).get("enabled", False) for name in unsupported):
         raise ValueError("This entry supports native fields and one-pass ports; use the research branch for this recipe.")
-    seed = int(recipe["initialization"]["seed"] if thermal else recipe["seed"])
+    profile = recipe.get("training_profile")
+    if profile == "observation_response":
+        initialization = recipe.get("initialization", {})
+        seed = int(initialization["seed"] if "seed" in initialization else recipe["seed"])
+    else:
+        seed = int(recipe["initialization"]["seed"] if thermal else recipe["seed"])
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    profile = recipe.get("training_profile")
-    if profile is not None and profile not in ("state_response", "native_pair", "field_response", "local_multisecant_response"):
+    if profile is not None and profile not in ("state_response", "native_pair", "field_response", "local_multisecant_response", "observation_response"):
         raise ValueError(f"Unknown training profile {profile!r}.")
+    if profile == "observation_response":
+        from honf_runtime.observation_response_task import build_observation_response_task
+
+        return build_observation_response_task(recipe, device=device, resume_payload=resume_payload)
     if profile == "local_multisecant_response":
         if not thermal:
             raise ValueError("Local multisecant fitting currently requires the Thermal adapter.")
@@ -258,8 +281,10 @@ def prepare_profile_fit(recipe, output, model, engine, *, source_payload, stop_a
 def engine_for(recipe, *, device, execution_horizon=None):
     """Keep the scientific horizon separate from a requested execution stop."""
     thermal = isinstance(recipe.get("dataset"), dict) and recipe["dataset"].get("name") == "thermal"
-    policy = recipe["training"] if thermal else recipe.get("execution", {})
-    horizon = int(policy["local_horizon"] if thermal else recipe["total_epochs"])
+    structured_training = thermal or (recipe.get("training_profile") == "observation_response"
+                                     and "local_horizon" in recipe.get("training", {}))
+    policy = recipe["training"] if structured_training else recipe.get("execution", {})
+    horizon = int(policy["local_horizon"] if structured_training else recipe["total_epochs"])
     checkpoints = policy.get("checkpoint_epochs", range(100, horizon + 1, 100))
     if execution_horizon is not None:
         wind_extension = (recipe.get("dataset") == "wind" and recipe.get("schema") in
@@ -304,9 +329,9 @@ def engine_for(recipe, *, device, execution_horizon=None):
         horizon = execution_horizon
         checkpoints = range(100, horizon + 1, 100)
     config = EngineConfig(
-        seed=int(policy["seed"] if thermal else recipe.get("sampling_seed", recipe["seed"])),
-        microbatch_cases=int(policy["microbatch_cases"] if thermal else recipe["microbatch_size"]),
-        effective_cases=int(policy["effective_batch_size"] if thermal else recipe["effective_batch_size"]),
+        seed=int(policy["seed"] if structured_training else recipe.get("sampling_seed", recipe["seed"])),
+        microbatch_cases=int(policy["microbatch_cases"] if structured_training else recipe["microbatch_size"]),
+        effective_cases=int(policy["effective_batch_size"] if structured_training else recipe["effective_batch_size"]),
         total_epochs=horizon, monitor_every=int(policy.get("monitor_every", 100)),
         monitor_epochs=tuple(policy.get("monitor_epochs", ())),
         checkpoint_epochs=tuple(checkpoints), latest_every=int(policy.get("latest_every", 1)),
@@ -389,12 +414,13 @@ def main(argv=None):
     if args.command == 'fit' and recipe.get('r16_10_posttrain') is not None:
         parser.error('Use tools/thermal_r16_10_posttrain.py for the state-preserving post-training fit.')
     configure_r16_5_execution(recipe, device=args.device)
+    configure_observation_execution(recipe)
     if args.cuda_memory_fraction is not None:
         torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction, device=args.device)
     source_payload = None
     if ((recipe.get("thermal_state_response", {}).get("enabled")
          or recipe.get("r16_10_family") is not None
-         or recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response"))
+         or recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response", "observation_response"))
             and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
         selector = args.checkpoint if args.command == "evaluate" else args.resume
         source_checkpoint = resolve_checkpoint(args.output, selector)
@@ -404,7 +430,7 @@ def main(argv=None):
         source_payload = load_trusted_checkpoint(source_checkpoint, map_location="cpu")
         if source_payload["experiment_identity"]["recipe"] != recipe:
             raise ValueError("The recipe differs from the saved run.")
-        if args.command == "fit" and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response"):
+        if args.command == "fit" and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response", "observation_response"):
             # Resolved JSON sorts mapping keys. Retain the checkpoint's loss
             # reduction and CSV column order after checking the same recipe.
             recipe = copy.deepcopy(source_payload["experiment_identity"]["recipe"])
@@ -423,7 +449,7 @@ def main(argv=None):
                 raise ValueError("Formal extension requires at least a completed formal epoch 100 and a later stop.")
     options = {}
     if source_payload is not None and (recipe.get("r16_10_family") is not None
-                                       or recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response")):
+                                       or recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response", "observation_response")):
         options["resume_payload"] = source_payload
     if (source_payload is not None and recipe.get("training_profile") != "native_pair"
             and recipe.get("thermal_state_response", {}).get("enabled")):
@@ -453,7 +479,10 @@ def main(argv=None):
         # This existing provider runtime limit governs sample generation only;
         # the scientific recipe, seed and optimizer schedule stay unchanged.
         provider._round6_sampling_epoch_limit = engine.config.total_epochs
-    arm = recipe["member_routing"]["arm"] if isinstance(recipe.get("dataset"), dict) else recipe["architecture"]
+    if recipe.get("training_profile") == "observation_response":
+        arm = model.architecture
+    else:
+        arm = recipe["member_routing"]["arm"] if isinstance(recipe.get("dataset"), dict) else recipe["architecture"]
     identity = {"workflow": "relation_anchored_case_training_v1", "recipe": recipe}
     if args.command == "inspect":
         cases, dataset_id = engine.epoch_case_order(provider, 1)
@@ -462,7 +491,7 @@ def main(argv=None):
                   "optimizer_groups": [spec.name for spec in provider.optimizer_groups(model, arm, "joint")]}
     elif args.command == "fit":
         bind_training_budget(provider, recipe, args.output)
-        if recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response"):
+        if recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response", "observation_response"):
             prepare_profile_fit(recipe, args.output, model, engine,
                                 source_payload=source_payload, stop_after=args.stop_after)
         if recipe["dataset"] == "wind":

@@ -922,7 +922,8 @@ def _curve_provider_identity(provider_identity: Mapping[str, Any]) -> Mapping[st
     if (provider_identity.get('thermal_state_response')
             or provider_identity.get('state_response', {}).get('enabled', False)
             or provider_identity.get('recipe', {}).get('r16_10_family')
-            or provider_identity.get('local_response')):
+            or provider_identity.get('local_response')
+            or provider_identity.get('observation_response')):
         return provider_identity
     return None
 
@@ -951,6 +952,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                               provider_identity.get("state_response", {}).get("enabled", False))
     response_run = legacy_response_run or scratch_family_run or state_response_run
     local_response_run = bool(provider_identity and provider_identity.get('local_response'))
+    observation_response_run = bool(provider_identity and provider_identity.get('observation_response'))
+    auxiliary_validation_missing = local_response_run or (
+        observation_response_run and not provider_identity['observation_response'].get('validation_objective_complete', False))
     priority_run = bool(local_response_run and provider_identity['local_response'].get('state_priority'))
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
@@ -1259,14 +1263,14 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             [recorded_sum({"total": objective_at(row)["total"]})
              if "total" in objective_at(row) else recorded_sum(objective_at(row).get("terms"))
              for row in validation_rows],
-            label=("VALIDATION: native-only subtotal" if local_response_run else
+            label=("VALIDATION: native-only subtotal" if auxiliary_validation_missing else
                    "VALIDATION: native total" if response_run else "VALIDATION: recorded total"),
             color="C1", linestyle="--", marker="o")
     else:
         pending = not any(isinstance(row.get("validation"), Mapping) and row["validation"] for row in history)
         validation_total_axis.text(0.02, 0.10, "Validation: first review pending" if pending else
                         "Validation objective losses were not recorded.", transform=validation_total_axis.transAxes, fontsize=8)
-    if local_response_run:
+    if auxiliary_validation_missing:
         validation_total_axis.text(0.02, 0.03, 'Full validation objective unavailable',
                                    transform=validation_total_axis.transAxes, fontsize=8)
 
@@ -1692,7 +1696,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     total_axis.set_ylabel("Weighted loss")
     if separate_totals:
         total_axis.set_title("Nominal TRAIN loss sum" if priority_run else "Total TRAIN loss")
-        validation_total_axis.set_title("Native-only validation subtotal" if local_response_run else
+        validation_total_axis.set_title("Native-only validation subtotal" if auxiliary_validation_missing else
                                         "Total measurable validation loss")
         validation_total_axis.set_xlabel("Completed epoch")
         validation_total_axis.set_ylabel("Weighted loss")
@@ -1890,6 +1894,19 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         metadata['panel_definitions']['physics'] = (
             'Recorded weighted local-neighborhood absolute and response contributions, when active; '
             'local-response observations are not evaluated in native validation.')
+    if observation_response_run:
+        metadata['panel_definitions']['weighted_loss_totals'] = (
+            'TRAIN sums the recorded native and shared observation contributions in saved accumulation order. '
+            + ('VALIDATION is a native-only subtotal; the full auxiliary validation objective is unavailable. '
+               if auxiliary_validation_missing else
+               'VALIDATION includes native fields and all configured shared observation terms on its fixed panel. ')
+            +
+            'Prediction paths and reductions differ.')
+        metadata['panel_definitions']['physics'] = (
+            'Shared extra absolute, observed-scene response and spatial-response contributions on configured '
+            'observation blocks. '
+            + ('Native validation does not measure these auxiliary terms.' if auxiliary_validation_missing else
+               'Auxiliary validation uses the declared paired full/restricted views at fixed observation draws.'))
     if response_terms:
         metadata["panel_definitions"]["physics"] = (
             "TRAIN records weighted paired endpoint and finite-response loss contributions, including "
@@ -1987,7 +2004,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     output.mkdir(parents=True, exist_ok=True)
     metadata_output.mkdir(parents=True, exist_ok=True)
     _atomic_json(metadata_output / "loss_curves_metadata.json", metadata)
-    if local_response_run and metadata_output != output:
+    if auxiliary_validation_missing and metadata_output != output:
         _atomic_json(output / "loss_curves_metadata.json", metadata)
     for suffix in ("pdf", "png"):
         destination = output / f"loss_curves.{suffix}"

@@ -22,6 +22,17 @@ from .unified_training import (_atomic_json, _atomic_torch_save, _engine_config_
 
 def _native_recipe(recipe):
     result = copy.deepcopy(recipe)
+    if result.get('training_profile') == 'observation_response':
+        result['training_profile'] = 'field_response'
+        result.pop('observation_response', None)
+        # The declared organization control changes query priors only. It
+        # inherits the same model tensors and native optimizer state.
+        model = result.get('member_routing', {}).get('model', {})
+        if model.get('within_role_access_prior') == 'measure_only':
+            model.pop('within_role_access_prior')
+        execution = result.get('execution_config', {})
+        if execution.get('deterministic_algorithms') is True:
+            execution.pop('deterministic_algorithms')
     if result.get('training_profile') == 'local_multisecant_response':
         result['training_profile'] = 'field_response'
         result.pop('thermal_local_response', None)
@@ -65,8 +76,13 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
     parent_batch = parent_recipe.get('training', {}).get('microbatch_cases')
     child_batch = recipe.get('training', {}).get('microbatch_cases')
     local_profile = recipe.get('training_profile') == 'local_multisecant_response'
-    if local_profile and parent_batch != child_batch:
-        raise ValueError('Local-response children must preserve the native prefix microbatch.')
+    observation_profile = recipe.get('training_profile') == 'observation_response'
+    if (local_profile or observation_profile) and parent_batch != child_batch:
+        raise ValueError('General-response children must preserve the native prefix microbatch.')
+    if observation_profile:
+        prior = recipe.get('member_routing', {}).get('model', {}).get('within_role_access_prior')
+        if prior not in (None, 'measure_only'):
+            raise ValueError('A native-prefix organization control supports only within-role measure-only priors.')
     if parent_batch != child_batch and not (parent_batch == 24 and child_batch in (6, 12)
             and recipe.get('training', {}).get('effective_batch_size') == 48):
         raise ValueError('Only the declared effective-batch-preserving microbatch changes are supported.')
@@ -77,7 +93,9 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
                      ('field_anchors', 'field_response'))
                     or (local_profile and recipe.get('thermal_local_response', {}).get('variant') in
                         ('state_anchors', 'uniform_response', 'multisecant_response', 'soft_inverse_response',
-                         'targeted_reynolds_response', 'trace_matched_uniform_response')))):
+                         'targeted_reynolds_response', 'trace_matched_uniform_response'))
+                    or (observation_profile and recipe.get('observation_response', {}).get('variant') in
+                        ('anchors', 'contrasts', 'spatial_contrasts')))):
         raise ValueError('Field-response children require the completed native-only epoch-ten prefix.')
     if _native_recipe(parent_recipe) != _native_recipe(recipe):
         raise ValueError('Common-prefix branching cannot change native data, model, objective, sampling or schedule.')
@@ -106,7 +124,10 @@ def initialize_native_prefix_child(source_checkpoint, output, recipe, model, pro
     native_state = copy.deepcopy(source.get('provider_training_state', {}))
     if native_state.get('field_response', {}).get('calibration') is not None:
         raise ValueError('The common prefix must have no auxiliary calibration or fitting.')
-    if local_profile:
+    if observation_profile:
+        checked = provider.validate_observation_calibration(calibration, source_checkpoint=source_path)
+        provider_state = provider.initialize_observation_response_state(native_state, checked)
+    elif local_profile:
         checked = provider.validate_local_calibration(calibration, source_checkpoint=source_path)
         provider_state = provider.initialize_local_response_state(native_state, checked)
     else:

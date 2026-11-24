@@ -373,6 +373,36 @@ def compile_e_access_directory(
     )
 
 
+def _measure_only_access_rows(rows: PackedEAccessRows, scene) -> PackedEAccessRows:
+    """Replace selected within-role proportions while retaining each role's mass."""
+    if not rows.member_index.numel():
+        return rows
+    row_count = rows.batch_size * rows.anchor_count
+    row_lengths = (rows.offsets[:, 1:] - rows.offsets[:, :-1]).reshape(-1)
+    row_index = torch.repeat_interleave(
+        torch.arange(row_count, device=rows.member_index.device),
+        row_lengths.to(device=rows.member_index.device),
+    )
+    batch_index = torch.div(row_index, rows.anchor_count, rounding_mode="floor")
+    group = 2 * row_index + (~rows.is_module).to(torch.long)
+    measure = torch.cat((scene.module_measure, scene.environment_measure), dim=-1)
+    measure = measure.to(dtype=rows.access_weight.dtype)[batch_index, rows.member_index]
+    prior_mass = rows.access_weight.new_zeros(2 * row_count).index_add(0, group, rows.access_weight)
+    measure_mass = measure.new_zeros(2 * row_count).index_add(0, group, measure)
+    if bool(((prior_mass > 0) & (measure_mass <= 0)).any()):
+        raise ValueError("Selected access role has positive prior mass but zero physical measure.")
+    denominator = measure_mass[group]
+    denominator = torch.where(denominator > 0, denominator, torch.ones_like(denominator))
+    prior = prior_mass[group] * (measure / denominator)
+    return replace(rows, access_weight=prior, measure=measure)
+
+
+def _measure_only_access_directory(directory: EAccessDirectory, scene, modes) -> EAccessDirectory:
+    """Apply the control after the original full/restricted supports are selected."""
+    return replace(directory, **{mode: _measure_only_access_rows(getattr(directory, mode), scene)
+                                 for mode in modes})
+
+
 def anchored_row_read(
     raw_scores: Tensor,
     access_prior: Tensor,
@@ -545,6 +575,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                  input_dataset: str = "native_records", query_tile_size: int = 256,
                  retained_mass: float = 0.95, score_calibration: str = "inherited",
                  access_measure: str = "inventory_unit_total",
+                 within_role_access_prior: str = "learned",
                  ee_incidence_aggregation: str = "pre_gate",
                  ee_gate_mode: str = "legacy", ee_initial_tau: float | None = None):
         if locator_mode not in ("e_anchor", "local_e_cover"):
@@ -556,6 +587,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             raise ValueError("score_calibration must be 'inherited' or 'bounded_tanh'.")
         if access_measure not in ("inventory_unit_total", "mean_one", "active_domain"):
             raise ValueError("Unsupported anchored access_measure.")
+        if within_role_access_prior not in ("learned", "measure_only"):
+            raise ValueError("Unsupported within-role access prior.")
         if ee_incidence_aggregation not in ("pre_gate", "post_gate"):
             raise ValueError("Unsupported EE incidence aggregation.")
         if ee_gate_mode not in ("legacy", "relative_quadratic", "relative_sigmoid"):
@@ -567,6 +600,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                 or not math.isfinite(ee_initial_tau) or ee_initial_tau <= 0):
             raise ValueError("Relative EE requires post-gate aggregation and a positive finite initial tau.")
         self.access_measure = access_measure
+        self.within_role_access_prior = within_role_access_prior
         self.ee_incidence_aggregation = ee_incidence_aggregation
         self.ee_gate_mode = ee_gate_mode
         self.ee_initial_tau = ee_initial_tau
@@ -634,6 +668,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         }
         if self.access_measure != "inventory_unit_total":
             config["access_measure"] = self.access_measure
+        if self.within_role_access_prior != "learned":
+            config["within_role_access_prior"] = self.within_role_access_prior
         if self.ee_incidence_aggregation != "pre_gate":
             config["ee_incidence_aggregation"] = self.ee_incidence_aggregation
         if self.ee_gate_mode != "legacy":
@@ -646,8 +682,9 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         config = dict(config)
         required = {"schema", "architecture", "locator_mode", "base_model_config", "input_dataset",
                     "input_capability", "query_tile_size", "retained_mass", "score_calibration"}
-        if (set(config) - {"access_measure", "ee_incidence_aggregation", "ee_gate_mode", "ee_initial_tau"} != required or config.get("schema") != cls.schema
+        if (set(config) - {"access_measure", "within_role_access_prior", "ee_incidence_aggregation", "ee_gate_mode", "ee_initial_tau"} != required or config.get("schema") != cls.schema
                 or config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one", "active_domain")
+                or config.get("within_role_access_prior", "learned") not in ("learned", "measure_only")
                 or config.get("ee_incidence_aggregation", "pre_gate") not in ("pre_gate", "post_gate")):
             raise ValueError("R13-8 anchored routing configuration inventory/schema differs.")
         gate_mode = config.get("ee_gate_mode", "legacy")
@@ -692,6 +729,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                    input_dataset=config["input_dataset"], query_tile_size=config["query_tile_size"],
                    retained_mass=config["retained_mass"], score_calibration=config["score_calibration"],
                    access_measure=config.get("access_measure", "inventory_unit_total"),
+                   within_role_access_prior=config.get("within_role_access_prior", "learned"),
                    ee_incidence_aggregation=config.get("ee_incidence_aggregation", "pre_gate"),
                    ee_gate_mode=config.get("ee_gate_mode", "legacy"),
                    ee_initial_tau=config.get("ee_initial_tau"))
@@ -795,6 +833,10 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             access_measure=("active_domain" if self.access_measure == "active_domain"
                             else "inventory_unit_total"),
         )
+        if self.within_role_access_prior == "measure_only":
+            directory = _measure_only_access_directory(directory, scene, ("full", "restricted"))
+            organization.work_counts["prepared_e_directory_measure_only_entries"] = int(
+                directory.full.member_index.numel() + directory.restricted.member_index.numel())
         organization.e_access_directory = directory
         organization.work_counts.update({
             "prepared_e_directory_compile_pair_rows": int(applied_em.numel() + applied_ee.numel()),
@@ -840,9 +882,9 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         self._validate_anchor_carrier(organization.scene, query)
 
     @staticmethod
-    def _directory_trace(prepared) -> dict[str, Tensor]:
+    def _directory_trace(prepared, directory=None) -> dict[str, Tensor]:
         """Expose compiled access columns separately from their applied source blocks."""
-        directory = prepared.e_access_directory
+        directory = prepared.e_access_directory if directory is None else directory
         result = {
             "e_access_own_e_member_index": directory.own_e_member_index,
             "e_access_applied_EM": prepared.anchored_applied_EM,
@@ -1017,7 +1059,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         return values[batch, slot], {}
 
     def _read_packed(self, prepared, query, qstates, qnorm, packed, union_keys, raw, *, return_trace,
-                     value_cache=None, physical_value_counts=None, intervention=None, projection_cache=None):
+                     value_cache=None, physical_value_counts=None, intervention=None, projection_cache=None,
+                     directory=None):
         """Calibrate and normalize each located row/role, then coalesce values."""
         reads, rid = packed["reads"], packed["read_id"]
         read_count, groups = len(reads), 2 * len(reads)
@@ -1180,7 +1223,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                      "anchored_applied_EM": prepared.anchored_applied_EM,
                      "anchored_applied_EE": prepared.anchored_applied_EE,
                      "context_M": contexts["M"], "context_E": contexts["E"], "joint_fields": fields}
-            trace.update(self._directory_trace(prepared))
+            trace.update(self._directory_trace(prepared, directory))
             if hyperedge_trace is not None:
                 trace.update(hyperedge_trace)
             if getattr(self, "reader_capability", None) == "all_native":
@@ -1208,14 +1251,15 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                 trace[f"candidate_mask_{role}"] = trace[f"member_weights_{role}"] > 0
         return fields, trace, counts
 
-    def _decode_tile(self, prepared, query, read_modes, *, return_trace=False, intervention=None):
+    def _decode_tile(self, prepared, query, read_modes, *, return_trace=False, intervention=None, directory=None):
         controls = {} if intervention is None else dict(intervention)
         if set(controls) - ({"read_mode", "access_intervention", "directory_intervention", "member_role",
-                            "member_id", "source_role", "source_id", "target_role", "target_id", "anchor_id"}
+                            "member_id", "source_role", "source_id", "target_role", "target_id", "anchor_id",
+                            "within_role_access_prior"}
                             | getattr(self, "_extra_read_interventions", set())):
             raise ValueError("Unsupported anchored read intervention.")
         qstates = self._query_states(prepared, query)
-        directory = prepared.e_access_directory
+        directory = prepared.e_access_directory if directory is None else directory
         packed = {mode: self._packed_memberships(prepared, query, getattr(directory, mode), controls)
                   for mode in read_modes}
         union_keys = torch.unique(torch.cat([row["pair_key"] for row in packed.values()]), sorted=True)
@@ -1228,12 +1272,28 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             fields, trace, counts = self._read_packed(prepared, query, qstates, qnorm, packed[mode],
                                                      union_keys, raw, return_trace=return_trace,
                                                      value_cache=value_cache, physical_value_counts=shared,
-                                                     intervention=controls, projection_cache=projection_cache)
+                                                     intervention=controls, projection_cache=projection_cache,
+                                                     directory=directory)
             outputs[mode] = (fields, trace, counts)
         return outputs, shared
 
     def _decode_requests(self, prepared, query, modes, *, intervention=None, return_trace=False):
         self.validate_prepared_state(prepared, query)
+        controls = {} if intervention is None else dict(intervention)
+        prior_override = controls.get("within_role_access_prior")
+        if prior_override not in (None, "measure_only"):
+            raise ValueError("The within-role access intervention must be 'measure_only'.")
+        if prior_override is not None and (
+                controls.get("access_intervention") is not None
+                or controls.get("directory_intervention") is not None):
+            raise ValueError("The fixed-support access intervention cannot change the selected members.")
+        if prior_override is not None and getattr(self, "reader_capability", None) == "all_native":
+            raise ValueError("All-native reads have no selected access rows to intervene on.")
+        directory = prepared.e_access_directory
+        intervention_entries = 0
+        if prior_override == "measure_only" and self.within_role_access_prior == "learned":
+            directory = _measure_only_access_directory(directory, prepared.scene, modes)
+            intervention_entries = sum(getattr(directory, mode).member_index.numel() for mode in modes)
         execution = _decoder_execution.get()
         fraction = 0.0 if execution == "checkpoint" else float(execution)
         tile_count = (query.num_queries + self.query_tile_size - 1) // self.query_tile_size
@@ -1249,7 +1309,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             if tile_index not in retained and self.training and torch.is_grad_enabled() and not return_trace:
                 def execute(coordinates, anchor_weights, tile=tile):
                     local = replace(tile, coordinates=coordinates, anchor_weights=anchor_weights)
-                    result, shared = self._decode_tile(prepared, local, modes, intervention=intervention)
+                    result, shared = self._decode_tile(prepared, local, modes, intervention=controls,
+                                                       directory=directory)
                     tensors = tuple(result[mode][0] for mode in modes)
                     packed_counts = tuple(_pack_work_counts(result[mode][2], count_keys, coordinates) for mode in modes)
                     return tensors + packed_counts + (_pack_work_counts(shared, count_keys, coordinates),)
@@ -1258,7 +1319,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                 local_counts = result[len(modes):2 * len(modes)]
                 local_shared = result[-1]
             else:
-                result, shared = self._decode_tile(prepared, tile, modes, return_trace=return_trace, intervention=intervention)
+                result, shared = self._decode_tile(prepared, tile, modes, return_trace=return_trace,
+                                                   intervention=controls, directory=directory)
                 output_fields = tuple(result[mode][0] for mode in modes)
                 local_counts = tuple(_pack_work_counts(result[mode][2], count_keys, tile.coordinates) for mode in modes)
                 local_shared = _pack_work_counts(shared, count_keys, tile.coordinates)
@@ -1275,7 +1337,10 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         for mode in modes:
             output = torch.cat(fields[mode], 1) if fields[mode] else query.coordinates.new_zeros(query.batch_size, 0, self.output_dim)
             outputs[mode] = InteractionJointOutput(output, traces.get(mode), unpack(counts[mode]))
-        return outputs, unpack(shared_counts)
+        shared = unpack(shared_counts)
+        if intervention_entries:
+            shared["intervention_measure_only_access_entries"] = int(intervention_entries)
+        return outputs, shared
 
     def decode(self, organization, query, controls=None, *, intervention=None, return_trace=False,
                trace_request=None, **kwargs):

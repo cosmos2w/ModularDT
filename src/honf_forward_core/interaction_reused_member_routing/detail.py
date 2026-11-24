@@ -33,6 +33,8 @@ class DetailAnchoredMemberRoutingCore(AnchoredMemberRoutingCore):
             raise ValueError("R14 detail requires local_e_cover.")
         if reader_capability not in ("anchored", "evidence_strength", "all_native"):
             raise ValueError("Unsupported detail reader capability.")
+        if reader_capability == "all_native" and kwargs.get("within_role_access_prior", "learned") != "learned":
+            raise ValueError("All-native reads have no selected access rows for a within-role prior.")
         self.reader_capability = reader_capability
         super().__init__(base_model_config, locator_mode=locator_mode, **kwargs)
         # Do not change any inherited initialization or the caller's RNG state.
@@ -57,6 +59,8 @@ class DetailAnchoredMemberRoutingCore(AnchoredMemberRoutingCore):
         capability = config.pop("reader_capability", "anchored")
         if capability not in ("anchored", "evidence_strength", "all_native"):
             raise ValueError("Unsupported detail reader capability.")
+        if capability == "all_native" and config.get("within_role_access_prior", "learned") != "learned":
+            raise ValueError("All-native reads have no selected access rows for a within-role prior.")
         super().validate_config(config)
         if config["locator_mode"] != "local_e_cover":
             raise ValueError("R14 detail requires local_e_cover.")
@@ -74,6 +78,7 @@ class DetailAnchoredMemberRoutingCore(AnchoredMemberRoutingCore):
                    input_dataset=config["input_dataset"], query_tile_size=config["query_tile_size"],
                    retained_mass=config["retained_mass"], score_calibration=config["score_calibration"],
                    access_measure=config.get("access_measure", "inventory_unit_total"),
+                   within_role_access_prior=config.get("within_role_access_prior", "learned"),
                    ee_incidence_aggregation=config.get("ee_incidence_aggregation", "pre_gate"),
                    ee_gate_mode=config.get("ee_gate_mode", "legacy"),
                    ee_initial_tau=config.get("ee_initial_tau"),

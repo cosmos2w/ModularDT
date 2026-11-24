@@ -91,6 +91,7 @@ class HyperedgeNonlinearReadCore(DetailAnchoredMemberRoutingCore):
                    query_tile_size=config["query_tile_size"], retained_mass=config["retained_mass"],
                    score_calibration=config["score_calibration"],
                    access_measure=config.get("access_measure", "inventory_unit_total"),
+                   within_role_access_prior=config.get("within_role_access_prior", "learned"),
                    ee_incidence_aggregation=config.get("ee_incidence_aggregation", "pre_gate"),
                    ee_gate_mode=config.get("ee_gate_mode", "legacy"),
                    ee_initial_tau=config.get("ee_initial_tau"),

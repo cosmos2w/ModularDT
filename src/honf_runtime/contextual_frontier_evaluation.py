@@ -62,6 +62,8 @@ def _contextual_checkpoint_parts(
             or recipe_model.get("score_calibration") != core_config.get("score_calibration")
             or core_config.get("access_measure", "inventory_unit_total") not in ("inventory_unit_total", "mean_one", "active_domain")
             or recipe_model.get("access_measure", "inventory_unit_total") != core_config.get("access_measure", "inventory_unit_total")
+            or core_config.get("within_role_access_prior", "learned") not in ("learned", "measure_only")
+            or recipe_model.get("within_role_access_prior", "learned") != core_config.get("within_role_access_prior", "learned")
             or core_config.get("ee_incidence_aggregation", "pre_gate") not in ("pre_gate", "post_gate")
             or recipe_model.get("ee_incidence_aggregation", "pre_gate") != core_config.get("ee_incidence_aggregation", "pre_gate")
             or recipe_model.get("ee_gate_mode", "legacy") != core_config.get("ee_gate_mode", "legacy")

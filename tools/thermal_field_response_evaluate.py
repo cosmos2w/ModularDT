@@ -87,7 +87,7 @@ def evaluation_functional_pairs(provider, recipe=None):
     existing = getattr(provider, 'field_response_pairs', None)
     if existing is not None:
         return existing
-    if not recipe or recipe.get('training_profile') != 'local_multisecant_response':
+    if not recipe or recipe.get('training_profile') not in ('local_multisecant_response', 'observation_response'):
         raise ValueError('The evaluation provider has no field-response TRAIN pair definitions.')
     pairs = tuple(tuple(map(str, pair)) for pair in recipe.get('thermal_field_response', {}).get('pairs', ()))
     if not pairs:

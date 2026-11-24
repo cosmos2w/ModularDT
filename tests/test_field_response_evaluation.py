@@ -90,13 +90,14 @@ def test_cached_triple_contrasts_use_common_support_and_fixed_anchor(monkeypatch
     assert result['scene_ids'] == list(ids)
 
 
-def test_local_profile_uses_preserved_train_pairs_for_functional_scales(monkeypatch):
+@pytest.mark.parametrize('profile', ['local_multisecant_response', 'observation_response'])
+def test_local_profile_uses_preserved_train_pairs_for_functional_scales(monkeypatch, profile):
     from tools import thermal_field_response_evaluate as evaluation
     legacy = SimpleNamespace(field_response_pairs=(('0001', '0002'),))
     assert evaluation.evaluation_functional_pairs(legacy) == legacy.field_response_pairs
     provider = SimpleNamespace(training_case_ids=('0001', '0002', '0003'), data_path='original.h5',
                                case_split_by_id={'0001': 'train', '0002': 'train', '0003': 'train'})
-    recipe = {'training_profile': 'local_multisecant_response',
+    recipe = {'training_profile': profile,
               'thermal_field_response': {'pairs': [['0001', '0002']]}}
     assert evaluation.evaluation_functional_pairs(provider, recipe) == (('0001', '0002'),)
     with pytest.raises(ValueError, match='TRAIN pairs'):
