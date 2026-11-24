@@ -104,10 +104,17 @@ def execute_observation_dependencies(binding, model, pair, union):
     import torch
     result = None
     work = {'neural_queries': 0, 'scene_preparations': 0}
-    for case_id in pair:
-        positions = [i for i, dependency in enumerate(union.dependencies) if dependency.scene_id == case_id]
-        if not positions:
-            continue
+    groups = {}
+    for index, dependency in enumerate(union.dependencies):
+        if dependency.scene_id not in pair:
+            raise ValueError('An observation dependency is outside its declared scene pair.')
+        key = (dependency.scene_id, dependency.frame, dependency.time)
+        groups.setdefault(key, []).append(index)
+    # Retain pair order for the ordinary single-frame path. Different frames
+    # or times may require different scene controls or query carriers.
+    ordered = [(key, positions) for case_id in pair
+               for key, positions in groups.items() if key[0] == case_id]
+    for (case_id, _frame, _time), positions in ordered:
         dependencies = tuple(union.dependencies[i] for i in positions)
         scene, query, scale, offset = binding.field_request(model, case_id, dependencies)
         organization = model.core.prepare(scene)
