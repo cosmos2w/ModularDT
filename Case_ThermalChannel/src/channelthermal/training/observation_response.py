@@ -238,8 +238,10 @@ class ThermalObservationBinding:
         result = self.recipe.get('thermal_field_response',{}).get('pairs',())
         if not result:
             from .thermal_field_response import select_thermal_field_pairs
-            _, result, _ = select_thermal_field_pairs(self.provider.data_path, self.provider.training_case_ids,
-                                                       case_split_by_id=self.provider.case_split_by_id)
+            disjoint, extended, _ = select_thermal_field_pairs(
+                self.provider.data_path, self.provider.training_case_ids,
+                case_split_by_id=self.provider.case_split_by_id)
+            result = disjoint if self.recipe.get('observation_response', {}).get('mode') == 'coupled_native' else extended
         return tuple(tuple(map(str,p)) for p in result)
 
     def validation_pairs(self):
@@ -249,6 +251,125 @@ class ThermalObservationBinding:
         return tuple(self.recipe.get('observation_response',{}).get('calibration_case_ids',_TRAIN15))
 
     def native_case_key(self, case_id): return str(case_id)
+
+    def coupled_native_population(self, case_id):
+        """Describe the provider-loaded row population and its native extraction.
+
+        The five native field observations reuse the existing interpolation and
+        curl output. Material and port records have no cross-scene member
+        correspondence and continue to receive their ordinary native losses.
+        """
+        from honf_runtime.coupled_observations import NativeObservationPopulation, ObservationKey
+
+        case_id = str(case_id)
+        cases = {str(case['case_id']): case for case in
+                 (*self.provider.training_cases, *self.provider.validation_cases)}
+        if case_id not in cases:
+            raise ValueError('Coupled observations must be loaded TRAIN or declared validation records.')
+        case = cases[case_id]
+        xy = np.asarray(case['query_xy'])
+        reference = np.asarray(case['field_targets'])
+        weights = np.asarray(case['point_weights'])
+        if xy.ndim != 2 or xy.shape[1] != 2 or reference.shape != (len(xy), 5) or weights.shape != (len(xy),):
+            raise ValueError('The actual native fluid row population is malformed.')
+        model = self.provider.model
+        lengths = np.asarray([np.asarray(case['structure'][name]).reshape(-1)[0]
+                              for name in ('domain_length_x', 'domain_length_y')], dtype=np.float32)
+        coords = torch.as_tensor(xy, dtype=torch.float32).reshape(1, -1, 2)
+        lengths_tensor = torch.as_tensor(lengths).reshape(1, 2)
+        stencil = native_cell_center_stencil(coords, lengths_tensor, nx=model.nx, ny=model.ny)
+        indices = stencil.indices[0].numpy()
+        interpolation_weights = stencil.weights[0].numpy()
+        spacing = lengths_tensor / lengths_tensor.new_tensor([model.nx, model.ny])
+        cell = (coords / spacing[:, None] - .5).round().long()[0].numpy()
+        if not np.allclose(coords.numpy()[0] / spacing.numpy()[0] - .5, cell, rtol=0,
+                           atol=min(8 * np.finfo(np.float32).eps * max(model.nx, model.ny), 1.e-3)):
+            raise ValueError('Native curl observations require the actual cell-centred provider rows.')
+        x, y = cell[:, 0], cell[:, 1]
+        centre = y * model.nx + x
+        neighbours = np.stack((centre, y * model.nx + np.maximum(x-1, 0),
+                               y * model.nx + np.minimum(x+1, model.nx-1),
+                               np.maximum(y-1, 0) * model.nx + x,
+                               np.minimum(y+1, model.ny-1) * model.nx + x), axis=1)
+        dependencies = tuple(((int(centre[i]),), (int(centre[i]),), (int(centre[i]),),
+                              tuple(map(int, neighbours[i])),
+                              tuple(map(int, indices[i][interpolation_weights[i] != 0])))
+                             for i in range(len(xy)))
+        names = ('flow/u', 'flow/v', 'flow/p', 'flow/omega', 'temperature/fluid')
+        units = ('native velocity units', 'native velocity units', 'native pressure units',
+                 'native vorticity units', 'native temperature units')
+        components = tuple(FieldComponent(name, units[i], i, float(model.field_std[i]),
+                                          float(self.provider.native_weights[name])) for i, name in enumerate(names))
+        keys = tuple(ObservationKey(_FRAME, _TIME, tuple(map(float, point)),
+                                    'fixed_physical_frame', 'native_fluid_observation') for point in xy)
+        saved_mask = case.get('module_mask')
+        if saved_mask is None:
+            with h5py.File(self.provider.data_path, 'r') as data:
+                saved_mask = np.asarray(data['cases'][case_id]['module_mask'])
+        solid = np.asarray(saved_mask)
+        if solid.shape != (model.ny, model.nx) or solid.dtype.kind not in 'bui' or not np.isin(solid, (0, 1)).all():
+            raise ValueError('Native fluid response requires the saved scene geometry mask.')
+        valid = ((weights[:, None] > 0) & np.isfinite(reference) & ~solid.reshape(-1)[centre, None].astype(bool)
+                 & stencil.valid[0].numpy()[:, None])
+        mass = np.broadcast_to(weights[:, None], reference.shape).copy()
+        return NativeObservationPopulation(keys, components, reference, mass, valid,
+                                           np.ones_like(valid), dependencies)
+
+    def coupled_native_budget(self, case_id):
+        del case_id
+        return int(self.provider.primary_queries)
+
+    def coupled_native_sampling_law(self, case_id):
+        del case_id
+        return 'uniform_without_replacement'
+
+    def coupled_view_loss_names(self):
+        return (*self.provider.native_weights, 'port/outside_temperature')
+
+    def coupled_validation_batch(self, pair, sample):
+        from honf_runtime.unified_training import TaskBatch
+        from .content_hypergraph_task import (ThermalContentSceneInputs, ThermalContentReceivers,
+                                              ThermalContentTargets, THERMAL_CONTENT_SURFACE_POINTS)
+        from .unified_task import _sample_primary, _structure_only
+        from .content_hypergraph_task import RESPONSE_SURFACE_STRIDE
+
+        lookup = {str(case['case_id']): index for index, case in enumerate(self.provider.validation_cases)}
+        if not set(pair) <= set(lookup):
+            raise ValueError('Coupled validation pairs must use loaded validation records.')
+        indices = tuple(lookup[case] for case in pair)
+        sampled, _ = _sample_primary(self.provider.validation_cases, indices, epoch=0, key=None,
+            training=False, budget={'fluid_queries': self.provider.primary_queries,
+                'material_queries_per_module': 32, 'surface_stride': RESPONSE_SURFACE_STRIDE},
+            device=self.provider.device, sampling_audit=False,
+            validation_sampling_indices=getattr(self.provider, 'validation_sampling_indices', None),
+            fluid_rows_by_case={pair[0]: sample.left_rows, pair[1]: sample.right_rows})
+        batch = TaskBatch(scene_inputs=ThermalContentSceneInputs(_structure_only(sampled['structure']), case_ids=pair),
+            receivers=ThermalContentReceivers(sampled['query_xy'], sampled['module_internal_query_points'],
+                sampled['structure']['heat_powers'], ntheta=THERMAL_CONTENT_SURFACE_POINTS,
+                response_ntheta=THERMAL_CONTENT_SURFACE_POINTS),
+            targets=ThermalContentTargets(case_ids=pair, case_indices=indices, epoch=0,
+                field_targets=sampled['field_targets'], point_weights=sampled['point_weights'],
+                interface_target=sampled['interface_target'],
+                interface_valid_mask=sampled['interface_condition_valid_mask'],
+                material_targets=sampled['module_internal_temperature_points'], response=None),
+            auxiliary={'coupled_native': ((pair, sample),)}, case_keys=pair)
+        return self.provider._with_native_ports(batch)
+
+    def coupled_native_extraction(self, predictions, batch_index, batch):
+        """Expose physical native values and the IDs actually decoded for a scene."""
+        from .joint_member_routing_task import ThermalJointPairPredictions
+
+        del batch
+        views = ((predictions.full, predictions.restricted)
+                 if isinstance(predictions, ThermalJointPairPredictions) else (predictions,))
+        fields = torch.stack([view.native_main['pred_field'][batch_index] for view in views])
+        prepared = views[0].native_prepared
+        if not hasattr(prepared, '_coupled_actual_native_ids'):
+            # Padding repeats the first real ID, so all IDs in a padded row are
+            # actual executed IDs. Transfer once for the entire microbatch.
+            ids = prepared.union.grid_indices.detach().cpu().numpy()
+            prepared._coupled_actual_native_ids = tuple(tuple(map(int, row)) for row in ids)
+        return fields, prepared._coupled_actual_native_ids[batch_index]
 
     def validate_pair(self, pair):
         allowed = set(map(str,self.provider.training_case_ids)) | set(map(str,self.provider.validation_case_ids))
@@ -343,7 +464,10 @@ def build_observation_capability(recipe, *, device, resume_payload=None):
     base = copy.deepcopy(recipe)
     base['training_profile'] = 'native_pair'
     base['thermal_native_pair'] = {'variant':'field_only','prediction_batching':'paired'}
+    if recipe.get('observation_response', {}).get('mode') == 'coupled_native':
+        base['coupled_native_runtime'] = True
     base.pop('observation_response',None)
     model, provider = build_thermal_native_pair_task(base,device=device,resume_payload=resume_payload,
-                                                      _field_response_base=True)
+        _field_response_base=True,
+        _fresh_coupled_base=recipe.get('observation_response', {}).get('mode') == 'coupled_native')
     return model,provider,ThermalObservationBinding(provider,recipe)

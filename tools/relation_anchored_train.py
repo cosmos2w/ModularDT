@@ -489,7 +489,20 @@ def main(argv=None):
         result = {"provider": dict(provider.identity_payload()), "sampling_dataset_id": dataset_id,
                   "train_cases": len(cases), "parameters": sum(p.numel() for p in model.parameters()),
                   "optimizer_groups": [spec.name for spec in provider.optimizer_groups(model, arm, "joint")]}
+        if hasattr(provider, 'coupled_native_cache_usage'):
+            result['coupled_native_metadata_cache'] = copy.deepcopy(provider.coupled_native_cache_usage)
     elif args.command == "fit":
+        fit_options = {}
+        if (source_payload is None and recipe.get('training_profile') == 'observation_response'
+                and recipe.get('observation_response', {}).get('mode') == 'coupled_native'
+                and recipe.get('observation_response', {}).get('enabled', True) is True):
+            from honf_runtime.coupled_initialization import apply_epoch_zero
+
+            initial_path = recipe['observation_response'].get('epoch_zero_checkpoint')
+            if not initial_path:
+                raise ValueError('Fresh coupled training requires the shared epoch_zero_checkpoint.')
+            initial = load_trusted_checkpoint(Path(initial_path).expanduser(), map_location='cpu')
+            fit_options['optimizer_seed'] = apply_epoch_zero(model, provider, engine, initial)
         bind_training_budget(provider, recipe, args.output)
         if recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response", "observation_response"):
             prepare_profile_fit(recipe, args.output, model, engine,
@@ -497,7 +510,6 @@ def main(argv=None):
         if recipe["dataset"] == "wind":
             print(json.dumps({"event": "wind_preparation_complete", "preparation": provider.preparation_summary()},
                              sort_keys=True, default=str, allow_nan=False), flush=True)
-        fit_options = {}
         compact = args.compact_history
         if compact is None:
             compact = recipe.get("training", {}).get("compact_history")

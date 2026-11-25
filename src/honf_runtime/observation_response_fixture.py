@@ -93,15 +93,21 @@ class AnalyticJointModel(nn.Module):
             anchor_weights=torch.ones((*q.shape[:2],1), dtype=q.dtype, device=q.device))
         return scene, query
 
-    def predict(self, case_id, coordinates):
+    def predict(self, case_id, coordinates, *, read_mode=None):
         scene, query = self.field_request(case_id, coordinates)
         organization = self.core.prepare(scene)
-        full, restricted, shared = self.core.decode_paired(organization, query)
+        if read_mode is None:
+            full, restricted, shared = self.core.decode_paired(organization, query)
+            fields = torch.stack((full.joint_fields[0], restricted.joint_fields[0]))
+        else:
+            with self.core.read_execution(read_mode):
+                output = self.core.decode(organization, query)
+            fields, shared = output.joint_fields, output.work_counts
         work = {'neural_queries': int(query.coordinates.shape[1]), 'scene_preparations': 1}
         for key, value in shared.items():
             if isinstance(value, (int, float)):
                 work[f'paired_{key}'] = int(value)
-        return torch.stack((full.joint_fields[0], restricted.joint_fields[0])), work
+        return fields, work
 
 
 class AnalyticNativeProvider:
@@ -125,13 +131,15 @@ class AnalyticNativeProvider:
         return _TRAIN
 
     def make_batch(self, case_keys, key):
-        del key
         keys = tuple(map(str, case_keys))
+        sampler = getattr(self, 'sample_coupled_native_rows', None)
+        overrides, carrier = sampler(keys, key) if callable(sampler) else ({}, None)
         self.training_samples += len(keys)
-        rows = [torch.as_tensor(_reference(c, _coordinates(c), self.width), device=self.device, dtype=torch.float32)
-                for c in keys]
-        return TaskBatch(scene_inputs=keys, receivers=tuple(_coordinates(c) for c in keys), targets=tuple(rows),
-                         case_keys=keys)
+        coordinates = tuple(_coordinates(c)[overrides[c]] if c in overrides else _coordinates(c) for c in keys)
+        rows = [torch.as_tensor(_reference(c, q, self.width), device=self.device, dtype=torch.float32)
+                for c, q in zip(keys, coordinates)]
+        return TaskBatch(scene_inputs=keys, receivers=coordinates, targets=tuple(rows),
+                         auxiliary={'coupled_native': carrier} if carrier is not None else {}, case_keys=keys)
 
     def make_scene(self, scene_inputs):
         return scene_inputs
@@ -140,7 +148,8 @@ class AnalyticNativeProvider:
         del phase, epoch, temperature
         if model is not self.model or execution_mode != model.architecture:
             raise ValueError('Fixture requires its own joint predictor.')
-        predicted = [model.predict(case, q)[0] for case, q in zip(scene, receivers)]
+        selected = getattr(self, 'coupled_native_reader_mode', None) if model.training else None
+        predicted = [model.predict(case, q, read_mode=selected)[0] for case, q in zip(scene, receivers)]
         return tuple(predicted), None
 
     def loss_denominators(self, batches, phase, arm):
@@ -167,7 +176,7 @@ class AnalyticNativeProvider:
 
     def validation_metrics(self, predictions, targets, auxiliary_state):
         del auxiliary_state
-        return {'squared_error': sum(float((p[1] - t).square().sum()) for p, t in zip(predictions, targets)),
+        return {'squared_error': sum(float((p[-1] - t).square().sum()) for p, t in zip(predictions, targets)),
                 'count': sum(t.numel() for t in targets)}
 
     def reduce_native_metrics(self, rows):
@@ -217,6 +226,40 @@ class AnalyticObservationBinding:
     def validation_pairs(self): return (tuple(_VALIDATION),)
     def calibration_case_ids(self): return _TRAIN
     def native_case_key(self, case_id): return case_id
+
+    def coupled_native_population(self, case_id):
+        from .coupled_observations import NativeObservationPopulation, ObservationKey
+
+        xy = _coordinates(case_id)
+        width = self.provider.width
+        components = tuple(FieldComponent(f'field_{i}', 'fixture units', i, 1., 1.) for i in range(width))
+        keys = tuple(ObservationKey('fixture_frame', 0, tuple(p), 'fixed_frame', 'direct') for p in xy)
+        dependencies = tuple(tuple((tuple(p),) for _ in components) for p in xy)
+        shape = (len(xy), width)
+        return NativeObservationPopulation(keys, components, _reference(case_id, xy, width),
+                                           np.ones(shape), np.ones(shape, dtype=bool),
+                                           np.ones(shape, dtype=bool), dependencies)
+
+    def coupled_native_budget(self, case_id):
+        return len(_coordinates(case_id))
+
+    def coupled_native_sampling_law(self, case_id):
+        del case_id
+        return 'uniform_without_replacement'
+
+    def coupled_view_loss_names(self):
+        return ('native',)
+
+    def coupled_validation_batch(self, pair, sample):
+        coordinates = (_coordinates(pair[0])[sample.left_rows], _coordinates(pair[1])[sample.right_rows])
+        targets = tuple(torch.as_tensor(_reference(case, q, self.provider.width),
+                                        device=self.provider.device, dtype=torch.float32)
+                        for case, q in zip(pair, coordinates))
+        return TaskBatch(scene_inputs=pair, receivers=coordinates, targets=targets,
+                         auxiliary={'coupled_native': ((pair, sample),)}, case_keys=pair)
+
+    def coupled_native_extraction(self, predictions, batch_index, batch):
+        return predictions[batch_index], tuple(map(tuple, batch.receivers[batch_index]))
 
     def validate_pair(self, pair):
         if not (set(pair) <= set(_TRAIN) or set(pair) <= set(_VALIDATION)):

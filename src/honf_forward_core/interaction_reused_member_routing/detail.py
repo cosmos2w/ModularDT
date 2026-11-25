@@ -106,6 +106,13 @@ class DetailAnchoredMemberRoutingCore(AnchoredMemberRoutingCore):
                 "original": ids[b[rid], member], "is_module": is_module,
                 "pair_key": ((b[rid] * query.num_queries + q[rid]) * total + member)}
 
+    def _supports_checkpoint_integer_plan(self, intervention):
+        # The all-native reader builds a different prior from the scene measure.
+        return (self.reader_capability != "all_native"
+                and self._packed_memberships.__func__ is DetailAnchoredMemberRoutingCore._packed_memberships
+                and intervention.get("access_intervention") is None
+                and intervention.get("directory_intervention") is None)
+
     def decode_paired(self, organization, query, *, intervention=None, return_trace=False, trace_request=None):
         if self.reader_capability != "all_native":
             return super().decode_paired(organization, query, intervention=intervention,

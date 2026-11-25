@@ -148,8 +148,25 @@ def execute_observation_dependencies(binding, model, pair, union):
     return result, work
 
 
-def build_observation_response_task(recipe, *, device, resume_payload=None):
+def build_observation_response_task(recipe, *, device, resume_payload=None, _coupled_bootstrap=False):
     """Construct a native task with the shared generic observation objective."""
+    enabled = recipe.get('observation_response', {}).get('enabled', True)
+    if type(enabled) is not bool:
+        raise ValueError('observation_response.enabled must be a boolean.')
+    if (enabled and recipe.get('observation_response', {}).get('mode') == 'coupled_native'
+            and not _coupled_bootstrap):
+        # Keep the established independent observation evaluator available,
+        # while disabling its auxiliary fitting path in the new attachment.
+        base = copy.deepcopy(recipe)
+        base['observation_response']['variant'] = 'anchors'
+        base['observation_response']['pairs_per_epoch'] = 1
+        base['observation_response']['seeds_per_pair'] = min(
+            int(base['observation_response'].get('anchor_count', 128)), 128)
+        base['observation_response'].pop('calibration', None)
+        model, provider = build_observation_response_task(
+            base, device=device, resume_payload=resume_payload, _coupled_bootstrap=True)
+        from .coupled_response_task import attach_coupled_native_task
+        return attach_coupled_native_task(recipe, model, provider, provider.observation_binding)
     dataset = recipe.get('dataset')
     inferred = dataset.get('name') if isinstance(dataset, Mapping) else dataset
     name = recipe.get('observation_response', {}).get('adapter', inferred)
@@ -164,9 +181,6 @@ def build_observation_response_task(recipe, *, device, resume_payload=None):
         name = factory_path
     else:
         factory = _factory(name)
-    enabled = recipe.get('observation_response', {}).get('enabled', True)
-    if type(enabled) is not bool:
-        raise ValueError('observation_response.enabled must be a boolean.')
     model, provider, binding = factory(recipe, device=device, resume_payload=resume_payload)
     if not enabled:
         return model, provider

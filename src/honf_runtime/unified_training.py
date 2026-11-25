@@ -1254,7 +1254,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         masked_count_total += plot_series(
             total_axis, [row["epoch"] for row in train_rows],
             [recorded_sum(row["train_losses"]) for row in train_rows],
-            label=("TRAIN: nominal weighted sum" if priority_run else
+            label=("TRAIN: sampled-reader objective estimate" if observation_response_run and
+                   provider_identity['observation_response'].get('variant') == 'sampled_reader_response' else
+                   "TRAIN: nominal weighted sum" if priority_run else
                    "TRAIN: optimized total" if response_run else "TRAIN: recorded weighted sum"),
             color="C0", marker=".")
     if validation_rows:
@@ -1263,7 +1265,12 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             [recorded_sum({"total": objective_at(row)["total"]})
              if "total" in objective_at(row) else recorded_sum(objective_at(row).get("terms"))
              for row in validation_rows],
-            label=("VALIDATION: native-only subtotal" if auxiliary_validation_missing else
+            label=("VALIDATION: dual-reader native subtotal" if observation_response_run and
+                   provider_identity['observation_response'].get('mode') == 'coupled_native' and
+                   auxiliary_validation_missing else
+                   "VALIDATION: dual-reader objective" if observation_response_run and
+                   provider_identity['observation_response'].get('mode') == 'coupled_native' else
+                   "VALIDATION: native-only subtotal" if auxiliary_validation_missing else
                    "VALIDATION: native total" if response_run else "VALIDATION: recorded total"),
             color="C1", linestyle="--", marker="o")
     else:
@@ -1271,7 +1278,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         validation_total_axis.text(0.02, 0.10, "Validation: first review pending" if pending else
                         "Validation objective losses were not recorded.", transform=validation_total_axis.transAxes, fontsize=8)
     if auxiliary_validation_missing:
-        validation_total_axis.text(0.02, 0.03, 'Full validation objective unavailable',
+        validation_total_axis.text(0.02, 0.03, 'Response validation unavailable' if observation_response_run and
+                                   provider_identity['observation_response'].get('mode') == 'coupled_native' else
+                                   'Full validation objective unavailable',
                                    transform=validation_total_axis.transAxes, fontsize=8)
 
     # Keep a separate shared-name subtotal only when it differs in coverage.
@@ -1696,7 +1705,10 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     total_axis.set_ylabel("Weighted loss")
     if separate_totals:
         total_axis.set_title("Nominal TRAIN loss sum" if priority_run else "Total TRAIN loss")
-        validation_total_axis.set_title("Native-only validation subtotal" if auxiliary_validation_missing else
+        validation_total_axis.set_title("Dual-reader native validation subtotal" if auxiliary_validation_missing and
+                                        observation_response_run and
+                                        provider_identity['observation_response'].get('mode') == 'coupled_native' else
+                                        "Native-only validation subtotal" if auxiliary_validation_missing else
                                         "Total measurable validation loss")
         validation_total_axis.set_xlabel("Completed epoch")
         validation_total_axis.set_ylabel("Weighted loss")
@@ -1907,6 +1919,18 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
             'observation blocks. '
             + ('Native validation does not measure these auxiliary terms.' if auxiliary_validation_missing else
                'Auxiliary validation uses the declared paired full/restricted views at fixed observation draws.'))
+        if provider_identity['observation_response'].get('mode') == 'coupled_native':
+            metadata['panel_definitions']['weighted_loss_totals'] = (
+                'TRAIN records native terms and, when enabled, the response loss calculated from the same native '
+                'predictions. A sampled-reader TRAIN value is a probability-weighted estimate. '
+                + ('VALIDATION is a dual-reader native subtotal; the response validation measurement is unavailable. '
+                   if auxiliary_validation_missing else
+                   'VALIDATION averages both readers on the fixed exposed panel; its native and response reductions are distinct.'))
+            metadata['panel_definitions']['physics'] = (
+                'The response contribution uses matched physical observations and their existing native '
+                'prediction and extraction dependencies. Validation uses both readers and declared physical masks.'
+                if provider_identity['observation_response'].get('variant') != 'native_control' else
+                'The coupled native control has no fitted response contribution.')
     if response_terms:
         metadata["panel_definitions"]["physics"] = (
             "TRAIN records weighted paired endpoint and finite-response loss contributions, including "
@@ -3738,6 +3762,26 @@ class TrainingEngine:
         work: dict[str, float] = {}
         sampling_records: list[str] = []
         optimizer.zero_grad(set_to_none=True)
+        # A native-reuse attachment chooses its execution policy once for the
+        # whole effective batch. It cannot postpone response backward until
+        # after the native microbatch graphs have been released.
+        native_reuse = getattr(provider, "native_microbatch_terms", None)
+        native_begin = getattr(provider, "begin_native_update", None)
+        if callable(native_reuse):
+            if epoch_update_count is None:
+                epoch_update_count = len(self.epoch_update_slices(
+                    len(provider.epoch_cases(self.sampler_epoch(epoch), self.config.seed))))
+            if not callable(native_begin) or epoch_update_count < 1:
+                raise ValueError("Native graph reuse requires an effective-batch execution policy.")
+            begin_work = native_begin(epoch=epoch, update_index=update_index,
+                                      update_count=epoch_update_count)
+            if not isinstance(begin_work, Mapping):
+                raise TypeError("Native execution policy must return scalar work counts.")
+            work.update({str(name): float(value) for name, value in begin_work.items()})
+            for name in getattr(provider, "native_reuse_loss_names", ()):
+                if name in losses:
+                    raise ValueError("Native reuse and native loss names must be distinct.")
+                losses[name] = 0.0
         native_core = getattr(model, "core", model)
         from .joint_native_objective import JointMacroObjective
         joint_objective = JointMacroObjective(
@@ -3905,6 +3949,27 @@ class TrainingEngine:
                 piece = term.numerator * (effective_weight / planned[name])
                 objective = piece if objective is None else objective + piece
                 losses[name] += float(term.numerator.detach()) / planned[name] * effective_weight
+            if callable(native_reuse):
+                reuse_terms, reuse_work = native_reuse(
+                    batch, predictions, auxiliary_state, epoch=epoch,
+                    update_index=update_index, update_count=epoch_update_count)
+                if not isinstance(reuse_terms, Mapping) or not isinstance(reuse_work, Mapping):
+                    raise TypeError("Native reuse must return loss terms and scalar work mappings.")
+                for name, term in self._ordered_training_terms(reuse_terms).items():
+                    if name not in getattr(provider, "native_reuse_loss_names", ()):
+                        raise ValueError(f"Undeclared native-reuse loss {name!r}.")
+                    denominator = _denominator(term.denominator)
+                    if (denominator <= 0 or not math.isfinite(float(term.weight))
+                            or not torch.is_tensor(term.numerator) or term.numerator.numel() != 1):
+                        raise ValueError("Native-reuse losses require finite weights and scalar numerators.")
+                    piece = term.numerator * (float(term.weight) / denominator)
+                    objective = piece if objective is None else objective + piece
+                    losses[name] += float(piece.detach())
+                for name, value in reuse_work.items():
+                    numeric = float(value)
+                    if not math.isfinite(numeric):
+                        raise ValueError(f"Native-reuse work {name!r} is nonfinite.")
+                    work[str(name)] = work.get(str(name), 0.0) + numeric
             native_work_counts = provider.work_counts(batch, predictions, auxiliary_state)
             if joint_objective.capable:
                 dense = bool(joint_objective.state.get("dense_router_step", False))
@@ -4182,6 +4247,7 @@ class TrainingEngine:
         previous_mode = model.training
         rng_state = capture_rng_state()
         records: list[Mapping[str, Any]] = []
+        reader_records: dict[str, list[Mapping[str, Any]]] = {}
         loss_totals: dict[str, dict[str, float]] = {}
         loss_batch_counts: dict[str, int] = {}
         batch_count = 0
@@ -4214,6 +4280,10 @@ class TrainingEngine:
                         if callable(objective_predictor):
                             loss_predictions, loss_auxiliary = objective_predictor(
                                 model, batch, arm=arm, epoch=epoch)
+                        view_records = getattr(provider, "validation_reader_records", None)
+                        if callable(view_records):
+                            for view_name, view_record in view_records(loss_predictions, batch, loss_auxiliary).items():
+                                reader_records.setdefault(str(view_name), []).append(view_record)
                         terms = validation_loss_fn(
                             loss_predictions, batch.targets, loss_auxiliary, batch=batch, arm=arm)
                     finally:
@@ -4250,6 +4320,10 @@ class TrainingEngine:
             if any(count != batch_count for count in loss_batch_counts.values()):
                 raise ValueError("Each validation objective term must be present in every validation batch.")
             result = dict(provider.reduce_native_metrics(records))
+            for view_name, view_rows in reader_records.items():
+                if len(view_rows) != batch_count:
+                    raise ValueError("Every validation batch must provide each declared reader view.")
+                result[f"reader_{view_name}"] = dict(provider.reduce_native_metrics(view_rows))
             auxiliary_validation = getattr(provider, "validation_auxiliary_terms", None)
             if callable(auxiliary_validation):
                 state_reader = getattr(provider, "training_state_dict", None)
@@ -5841,7 +5915,8 @@ class TrainingEngine:
                             update_index=update_index, update_cases=update_cases,
                             sampling_dataset_id=sampling_dataset_id)
                         update_kwargs = {}
-                        if callable(getattr(provider, "auxiliary_update_terms", None)):
+                        if (callable(getattr(provider, "auxiliary_update_terms", None))
+                                or callable(getattr(provider, "native_microbatch_terms", None))):
                             update_kwargs["epoch_update_count"] = update_count
                         if source_read_manager is not None:
                             update_kwargs.update({

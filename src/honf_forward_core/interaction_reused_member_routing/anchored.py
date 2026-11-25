@@ -24,6 +24,19 @@ from .primitives import build_joint_member_measure, prior_weighted_scores, read_
 
 
 _decoder_execution = ContextVar("anchored_decoder_execution", default="checkpoint")
+_checkpoint_integer_plans = ContextVar("anchored_checkpoint_integer_plans", default=False)
+
+
+@contextmanager
+def anchored_checkpoint_integer_plans(enabled: bool):
+    """Select checkpoint index reuse for controlled executor comparisons."""
+    if type(enabled) is not bool:
+        raise ValueError("Checkpoint integer-plan selection must be boolean.")
+    token = _checkpoint_integer_plans.set(enabled)
+    try:
+        yield
+    finally:
+        _checkpoint_integer_plans.reset(token)
 
 
 @contextmanager
@@ -563,6 +576,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         "query_anchor_value_reduction_pairs_M", "query_anchor_value_reduction_pairs_E",
         "query_M_member_query_affine_rows", "query_E_member_query_affine_rows",
         "query_joint_field_head_rows",
+        "query_full_reader_head_rows", "query_restricted_reader_head_rows",
         "mediated_source_eligible_alternatives", "mediated_conditioned_anchor_M_rows",
         "mediated_conditioned_positive_ME_edges", "mediated_expanded_ME_edge_rows",
         "mediated_source_prefix_sort_entries", "mediated_E_prefix_sort_entries",
@@ -1019,6 +1033,12 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                 "entries": entries, "members": members, "prior": prior, "original": original,
                 "is_module": is_module, "pair_key": pair_key}
 
+    def _supports_checkpoint_integer_plan(self, intervention):
+        """Only the standard directory expansion has the replay contract below."""
+        return (self._packed_memberships.__func__ is AnchoredMemberRoutingCore._packed_memberships
+                and intervention.get("access_intervention") is None
+                and intervention.get("directory_intervention") is None)
+
     def _raw_union_scores(self, prepared, query, qstates, keys, *, query_terms=None):
         """Evaluate the unchanged factored scorer exactly once per union pair."""
         total = prepared.scene.num_modules + prepared.scene.num_environment_tokens
@@ -1065,7 +1085,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         reads, rid = packed["reads"], packed["read_id"]
         read_count, groups = len(reads), 2 * len(reads)
         group = rid * 2 + (~packed["is_module"]).to(torch.long)
-        union_index = torch.searchsorted(union_keys, packed["pair_key"])
+        union_index = (packed["union_index"] if "union_index" in packed else
+                       torch.searchsorted(union_keys, packed["pair_key"]))
         scores, prior = raw[union_index], packed["prior"]
         tiny = torch.finfo(scores.dtype).tiny
         mass = self._segment_sum(prior, group, groups)
@@ -1251,7 +1272,8 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                 trace[f"candidate_mask_{role}"] = trace[f"member_weights_{role}"] > 0
         return fields, trace, counts
 
-    def _decode_tile(self, prepared, query, read_modes, *, return_trace=False, intervention=None, directory=None):
+    def _decode_tile(self, prepared, query, read_modes, *, return_trace=False, intervention=None, directory=None,
+                     integer_plan=None):
         controls = {} if intervention is None else dict(intervention)
         if set(controls) - ({"read_mode", "access_intervention", "directory_intervention", "member_role",
                             "member_id", "source_role", "source_id", "target_role", "target_id", "anchor_id",
@@ -1260,9 +1282,32 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
             raise ValueError("Unsupported anchored read intervention.")
         qstates = self._query_states(prepared, query)
         directory = prepared.e_access_directory if directory is None else directory
-        packed = {mode: self._packed_memberships(prepared, query, getattr(directory, mode), controls)
-                  for mode in read_modes}
-        union_keys = torch.unique(torch.cat([row["pair_key"] for row in packed.values()]), sorted=True)
+        if integer_plan:
+            packed = {}
+            for mode in read_modes:
+                row = dict(integer_plan["memberships"][mode])
+                b, q, k = row["reads"].unbind(-1)
+                # Both floating inputs stay live during checkpoint recomputation.
+                row["prior"] = getattr(directory, mode).access_weight[row["entries"]]
+                row["weights"] = query.anchor_weights[b, q, k]
+                packed[mode] = row
+            union_keys = integer_plan["union_keys"]
+        else:
+            packed = {mode: self._packed_memberships(prepared, query, getattr(directory, mode), controls)
+                      for mode in read_modes}
+            union_keys = torch.unique(torch.cat([row["pair_key"] for row in packed.values()]), sorted=True)
+            if integer_plan is not None:
+                integer_plan["memberships"] = {}
+                for mode, row in packed.items():
+                    # Do not cache floating priors, anchor weights, scores, values,
+                    # or their exact-positive selections across the replay.
+                    indexes = {name: row[name].detach() for name in
+                               ("reads", "anchors", "read_id", "entries", "members", "original",
+                                "is_module", "pair_key")}
+                    indexes["union_index"] = torch.searchsorted(union_keys, row["pair_key"])
+                    row["union_index"] = indexes["union_index"]
+                    integer_plan["memberships"][mode] = indexes
+                integer_plan["union_keys"] = union_keys.detach()
         raw, qnorm, shared = self._raw_union_scores(prepared, query, qstates, union_keys)
         outputs = {}
         share_values = len(read_modes) > 1 and getattr(self, "_share_paired_selected_values", False)
@@ -1274,6 +1319,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
                                                      value_cache=value_cache, physical_value_counts=shared,
                                                      intervention=controls, projection_cache=projection_cache,
                                                      directory=directory)
+            counts[f"query_{mode}_reader_head_rows"] = query.batch_size * query.num_queries
             outputs[mode] = (fields, trace, counts)
         return outputs, shared
 
@@ -1307,10 +1353,24 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
         for tile_index, start in enumerate(range(0, query.num_queries, self.query_tile_size)):
             tile = slice_query_v1(query, start, min(start + self.query_tile_size, query.num_queries))
             if tile_index not in retained and self.training and torch.is_grad_enabled() and not return_trace:
-                def execute(coordinates, anchor_weights, tile=tile):
+                integer_plan = ({} if _checkpoint_integer_plans.get()
+                                and self._supports_checkpoint_integer_plan(controls) else None)
+                plan_versions = (tuple(_tensor_version(value) for value in
+                                       (tile.anchor_indices, tile.anchor_weights)
+                                       + (() if tile.query_mask is None else (tile.query_mask,))),
+                                 self._directory_versions(directory)) if integer_plan is not None else None
+                def execute(coordinates, anchor_weights, tile=tile, integer_plan=integer_plan,
+                            plan_versions=plan_versions):
+                    if integer_plan:
+                        current_versions = (tuple(_tensor_version(value) for value in
+                                                  (tile.anchor_indices, tile.anchor_weights)
+                                                  + (() if tile.query_mask is None else (tile.query_mask,))),
+                                            self._directory_versions(directory))
+                        if current_versions != plan_versions:
+                            raise ValueError("Checkpoint membership changed before replay; rebuild the prediction.")
                     local = replace(tile, coordinates=coordinates, anchor_weights=anchor_weights)
                     result, shared = self._decode_tile(prepared, local, modes, intervention=controls,
-                                                       directory=directory)
+                                                       directory=directory, integer_plan=integer_plan)
                     tensors = tuple(result[mode][0] for mode in modes)
                     packed_counts = tuple(_pack_work_counts(result[mode][2], count_keys, coordinates) for mode in modes)
                     return tensors + packed_counts + (_pack_work_counts(shared, count_keys, coordinates),)
@@ -1371,6 +1431,7 @@ class AnchoredMemberRoutingCore(InteractionReusedMemberRoutingCore):
 __all__ = [
     "AnchoredMemberRoutingCore",
     "anchored_decoder_execution",
+    "anchored_checkpoint_integer_plans",
     "retained_decoder_tile_indices",
     "AnchoredRoleRead",
     "EAccessDirectory",

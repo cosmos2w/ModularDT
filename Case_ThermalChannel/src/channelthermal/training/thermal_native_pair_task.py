@@ -453,7 +453,7 @@ class ThermalNativePairObjective:
 
 
 def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_payload=None,
-                                   _field_response_base=False):
+                                   _field_response_base=False, _fresh_coupled_base=False):
     """Build fresh native-only, matched-anchor or matched-contrast training."""
     import copy
     from types import MethodType
@@ -478,10 +478,17 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
         clean['thermal_joint_response']['paired'] = {}
     model, provider = build_thermal_joint_response_task(clean, arm=arm, device=device, resume_payload=resume_payload)
     provider.native_pair_prediction_batching = prediction_batching
-    if int(clean.get('training', {}).get('optimizer_schedule_horizon', 0)) != 2000:
+    if (not _fresh_coupled_base
+            and int(clean.get('training', {}).get('optimizer_schedule_horizon', 0)) != 2000):
         raise ValueError('R17-3 native pair training requires its 2000-epoch optimizer schedule.')
     def native_pair_schedule(self):
         lr = float(self.recipe['optimizer']['lr'])
+        if _fresh_coupled_base:
+            horizon = int(self.recipe['training']['optimizer_schedule_horizon'])
+            if horizon < int(self.recipe['training']['local_horizon']):
+                raise ValueError('The fresh coupled schedule must hold through the declared fit horizon.')
+            return {'peak_lr': lr, 'warmup_start_lr': lr, 'warmup_epochs': 0,
+                    'hold_through_epoch': horizon, 'total_epochs': horizon + 1, 'final_lr': lr}
         final_lr = float(self.recipe['optimizer'].get('final_lr', 3e-5))
         return {'peak_lr': lr, 'warmup_start_lr': lr, 'warmup_epochs': 0,
                 'hold_through_epoch': 1000, 'total_epochs': 2000, 'final_lr': final_lr}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calibrate shared observation losses at an unchanged native epoch-ten state."""
+"""Prepare shared epoch-zero coupled training or historical epoch-ten calibration."""
 from __future__ import annotations
 
 import argparse
@@ -37,11 +37,41 @@ def state_equal(left, right):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', type=Path, required=True)
+    parser.add_argument('--source', type=Path)
     parser.add_argument('--recipe', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--device', default='cpu')
+    parser.add_argument('--fresh-epoch-zero', action='store_true')
     args = parser.parse_args(argv)
+    if args.fresh_epoch_zero:
+        if args.source is not None:
+            raise ValueError('A fresh epoch-zero state cannot consume a source checkpoint.')
+        recipe = json.loads(args.recipe.read_text())
+        if (recipe.get('training_profile') != 'observation_response'
+                or recipe.get('observation_response', {}).get('mode') != 'coupled_native'):
+            raise ValueError('Fresh preparation requires an explicit coupled native recipe.')
+        if args.output.exists():
+            raise FileExistsError('Preserve and reuse the existing shared epoch-zero state.')
+        if 'storage' in recipe:
+            _ensure_workspace_storage_bindings()
+            storage = verify_storage(recipe, output=args.output, estimated_bytes=1024**3,
+                                     peak_temporary_bytes=1024**3)
+        else:
+            storage = {}
+        from relation_anchored_train import engine_for
+        from honf_runtime.coupled_initialization import prepare_epoch_zero
+        from honf_runtime.unified_training import _atomic_torch_save
+
+        model, provider = build(recipe, device=args.device)
+        engine = engine_for(recipe, device=args.device)
+        payload = prepare_epoch_zero(model, provider, engine)
+        _atomic_torch_save(args.output, payload)
+        print(json.dumps({'output': str(args.output.resolve()), 'epoch': 0, 'optimizer_updates': 0,
+                          'coefficient': payload['calibration']['coefficient'],
+                          'free_bytes_before': storage.get('free_bytes_before')}))
+        return 0
+    if args.source is None:
+        raise ValueError('Historical observation calibration requires --source.')
     source_path = args.source.expanduser().resolve(strict=True)
     source = load_trusted_checkpoint(source_path, map_location='cpu')
     parent = source['experiment_identity']['recipe']

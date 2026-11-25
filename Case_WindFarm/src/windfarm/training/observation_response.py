@@ -128,6 +128,10 @@ class WindObservationBinding:
                 'measure': 'first-scene centre-box quadrature at the selected positions',
                 'extraction': 'identical per-scene linear native-centre interpolation for references and predictions'}
 
+    def coupled_native_capability(self):
+        return {'available': False,
+                'reason': 'The maintained Wind binding does not yet expose its native sampling law, row budget and complete per-row execution dependencies; ordinary native training remains available.'}
+
     def block_names(self):
         return ('wind_velocity_common_volume',)
 

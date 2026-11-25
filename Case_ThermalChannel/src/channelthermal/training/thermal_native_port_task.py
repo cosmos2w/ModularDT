@@ -245,10 +245,23 @@ class ThermalNativePortTask(ThermalR138AnchoredMemberRoutingTask):
                 temperature[..., None], prepared.stencils['outside']).reshape(
                     prepared.source_present.shape[0], *prepared.role_shapes['outside'])
             return ThermalContentPredictions(prepared, native, work=output.work_counts)
-        if model.training:
+        selected_reader = getattr(self, "coupled_native_reader_mode", None) if model.training else None
+        if selected_reader is not None and selected_reader not in ('full', 'restricted'):
+            raise ValueError('The selected native reader must be full or restricted.')
+        if model.training and selected_reader is None:
             full, restricted, shared = model.core.decode_paired(prepared.organization, prepared.query_batch)
             work = {f'paired_{k}': int(v) for k, v in shared.items()}
+            if hasattr(self, 'coupled_native_reader_mode'):
+                for view, output in (('full', full), ('restricted', restricted)):
+                    work.update({f'paired_{view}_{k}': int(v) for k, v in output.work_counts.items()})
             pred = ThermalJointPairPredictions(convert(full), convert(restricted), work)
+        elif model.training:
+            with model.core.read_execution(selected_reader):
+                output = model.core.decode(prepared.organization, prepared.query_batch)
+            pred = convert(output)
+            work = {f'single_{selected_reader}_{k}': int(v) for k, v in output.work_counts.items()}
+            work[f'member_routing_read_mode_{selected_reader}'] = 1
+            pred.work = work
         else:
             mode = resolve_read_mode(model.core)
             with model.core.read_execution(mode):
@@ -256,6 +269,12 @@ class ThermalNativePortTask(ThermalR138AnchoredMemberRoutingTask):
             pred = convert(output)
             work = {f'member_routing_read_mode_{mode}': 1, **{str(k): int(v) for k, v in counts.items()}}
             pred.work = work
+        if hasattr(self, 'coupled_native_reader_mode'):
+            work.update(native_fluid_queries=int(prepared.fluid_xy.shape[0] * prepared.fluid_xy.shape[1]),
+                        native_union_rows=int(prepared.union.unique_counts.sum()),
+                        native_local_pairs=int(prepared.query_batch.local_weights.numel()))
+            work.update({f'core_prepare_primary_{name}': int(value)
+                         for name, value in prepared.organization.work_counts.items()})
         return pred, {'work': work}
 
     def _native_terms(self, predictions, targets, auxiliary_measure=None):

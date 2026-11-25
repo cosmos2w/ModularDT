@@ -522,6 +522,7 @@ def _sample_primary(
     device: torch.device,
     validation_sampling_indices: Mapping[str, int] | None = None,
     sampling_audit: bool = True,
+    fluid_rows_by_case: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[Mapping[str, Any], str | None]:
     """Sample the maintained native roles from one provider-owned RNG key."""
     from channelthermal.data.collation import ChannelThermalBatchCollator
@@ -537,10 +538,10 @@ def _sample_primary(
             if key.epoch != int(epoch):
                 raise ValueError("Thermal sample epoch differs from its engine-owned SamplingKey.")
             if key.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
-                fluid = key.native_indices(
-                    len(original["query_xy"]), int(budget["fluid_queries"]),
-                    case_id, "fluid", "primary_native_queries", replace=False,
-                )
+                fluid = (fluid_rows_by_case[case_id] if fluid_rows_by_case is not None
+                         and case_id in fluid_rows_by_case else key.native_indices(
+                             len(original["query_xy"]), int(budget["fluid_queries"]),
+                             case_id, "fluid", "primary_native_queries", replace=False))
                 material = key.native_indices(
                     len(original["module_internal_query_points"]),
                     int(budget["material_queries_per_module"]),
@@ -561,6 +562,13 @@ def _sample_primary(
                 len(original["module_internal_query_points"]),
                 int(budget["material_queries_per_module"]), replace=False,
             )
+        if fluid_rows_by_case is not None and case_id in fluid_rows_by_case:
+            fluid = np.asarray(fluid_rows_by_case[case_id])
+            if (fluid.ndim != 1 or not np.issubdtype(fluid.dtype, np.integer)
+                    or len(fluid) != int(budget["fluid_queries"])
+                    or len(np.unique(fluid)) != len(fluid)
+                    or np.any(fluid < 0) or np.any(fluid >= len(original["query_xy"]))):
+                raise ValueError("Provided native rows must be a distinct in-range panel of the native budget.")
         surface_stride = int(budget.get("surface_stride", RESPONSE_SURFACE_STRIDE))
         samples.append({
             "structure": original["structure"],

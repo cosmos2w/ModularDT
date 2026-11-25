@@ -482,6 +482,10 @@ class ThermalContentHypergraphTask:
             "material_queries_per_module": 32,
             "surface_stride": RESPONSE_SURFACE_STRIDE,
         }
+        coupled_rows = coupled_carrier = None
+        coupled_sampler = getattr(self, "sample_coupled_native_rows", None)
+        if callable(coupled_sampler):
+            coupled_rows, coupled_carrier = coupled_sampler(tuple(map(str, case_keys)), key)
         sampled, sample_hash = _sample_primary(
             self.training_cases,
             indices,
@@ -491,6 +495,7 @@ class ThermalContentHypergraphTask:
             budget=budget,
             device=self.device,
             sampling_audit=getattr(self, "sampling_audit", True),
+            fluid_rows_by_case=coupled_rows,
         )
         structure = _structure_only(sampled["structure"])
         case_ids = tuple(str(self.training_cases[index]["case_id"]) for index in indices)
@@ -544,6 +549,7 @@ class ThermalContentHypergraphTask:
             auxiliary={
                 "query_sampling_sha256": sample_hash,
                 "response_family_id": None if response is None else response.family_id,
+                **({"coupled_native": coupled_carrier} if coupled_carrier is not None else {}),
             },
             case_keys=case_ids,
         )
@@ -793,6 +799,7 @@ class ThermalContentHypergraphTask:
                     "surface_stride": RESPONSE_SURFACE_STRIDE,
                 },
                 device=self.device,
+                validation_sampling_indices=getattr(self, 'validation_sampling_indices', None),
                 sampling_audit=getattr(self, "sampling_audit", True),
             )
             indices = tuple(case_indices)

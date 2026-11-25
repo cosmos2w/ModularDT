@@ -104,3 +104,22 @@ def test_observation_curve_labels_match_recorded_validation_scope(tmp_path, monk
     definition = metadata_json["panel_definitions"]["weighted_loss_totals"]
     assert ("native-only subtotal" in definition) != validation_complete
     assert ("all configured shared observation terms" in definition) == validation_complete
+
+
+@pytest.mark.parametrize("validation_complete", [False, True])
+def test_coupled_curve_distinguishes_unavailable_response_validation(tmp_path, monkeypatch, validation_complete):
+    history = [{"epoch": 1, "arm": "R14-Detail-LocalECover", "phase": "joint",
+                "train_losses": {"flow/u": 1.},
+                "validation_objective": {"terms": {"flow/u": .5}, "total": .5}}]
+    identity = {"observation_response": {"mode": "coupled_native", "variant": "observed_response",
+                                           "validation_objective_complete": validation_complete}}
+    captured = _capture_figures(monkeypatch, tmp_path)
+    _render_loss_curves(history, tmp_path, "field_score", provider_identity=identity, separate_totals=True)
+    for figure in captured:
+        title = "Total measurable validation loss" if validation_complete else "Dual-reader native validation subtotal"
+        panel = figure["titles"].index(title)
+        assert figure["labels"][panel] == ["VALIDATION: dual-reader objective" if validation_complete
+                                            else "VALIDATION: dual-reader native subtotal"]
+        assert ("Response validation unavailable" in figure["texts"][panel]) != validation_complete
+    definition = json.loads((tmp_path / "loss_curves_metadata.json").read_text())["panel_definitions"]["weighted_loss_totals"]
+    assert ("response validation measurement is unavailable" in definition) != validation_complete

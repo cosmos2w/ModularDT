@@ -130,9 +130,15 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
             raise ValueError("Epoch outside the absolute master schedule.")
         self.model.core.set_organization_clock(key.epoch, key.update_index)
         indices = tuple(self._train_index_by_id[str(v)] for v in case_keys)
+        coupled_rows = coupled_carrier = None
+        coupled_sampler = getattr(self, 'sample_coupled_native_rows', None)
+        if callable(coupled_sampler):
+            coupled_rows, coupled_carrier = coupled_sampler(tuple(map(str, case_keys)), key)
         sampled, sampling = _sample_primary(self.training_cases, indices, epoch=key.epoch, key=key,
             training=True, budget={"fluid_queries": self.primary_queries,
-                "material_queries_per_module": 32, "surface_stride": 4}, device=self.device)
+                "material_queries_per_module": 32, "surface_stride": 4}, device=self.device,
+            fluid_rows_by_case=coupled_rows,
+            sampling_audit=(getattr(self, 'sampling_audit', True) if callable(coupled_sampler) else True))
         case_ids = tuple(str(v) for v in case_keys)
         self.training_samples += len(indices)
         return TaskBatch(
@@ -142,7 +148,9 @@ class ThermalContextualJointTask(ThermalContentHypergraphTask):
             targets=ThermalContentTargets(case_ids, indices, key.epoch, sampled["field_targets"],
                 sampled["point_weights"], sampled["interface_target"],
                 sampled["interface_condition_valid_mask"], sampled["module_internal_temperature_points"]),
-            auxiliary={"query_sampling_sha256": sampling}, case_keys=case_ids)
+            auxiliary={"query_sampling_sha256": sampling,
+                       **({'coupled_native': coupled_carrier} if coupled_carrier is not None else {})},
+            case_keys=case_ids)
 
     def make_scene(self, scene_inputs):
         return scene_inputs

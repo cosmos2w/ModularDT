@@ -198,8 +198,11 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
         catalog_source, catalog = read_case_catalog(data_path)
         train_ids, validation_ids = _training_membership(recipe, catalog, manifest)
         validation_split = "test"
+    validation_sampling_indices = None
     if recipe.get("training_profile") == "state_response":
         validation_ids = _response_validation_population(recipe, catalog, validation_ids)
+        if recipe.get('coupled_native_runtime') is True:
+            validation_sampling_indices = {case_id: index for index, case_id in enumerate(validation_ids)}
         validation_ids = _response_validation_ids(recipe, validation_ids)
     if saved_adapter_state is None:
         normalizer = fit_global_normalizer(data_path, train_ids)
@@ -250,6 +253,8 @@ def _build_thermal_member_routing_task(config, *, arm=None, device="cpu", task_t
             "dataset_copy_created": False, "persistent_cache_created": False,
         },
     )
+    if validation_sampling_indices is not None:
+        provider.validation_sampling_indices = validation_sampling_indices
     if catalog_train:
         provider.protocol = "catalog_train"
     return model, provider
