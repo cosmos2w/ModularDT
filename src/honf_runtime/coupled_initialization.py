@@ -31,11 +31,17 @@ def common_contract(model, provider, engine):
         raise ValueError('A common epoch-zero state requires the explicit coupled native profile.')
     observation.pop('variant', None)
     observation.pop('validation_objective_complete', None)
+    # The multiplier changes the later objective, not the common initial state
+    # or the measured, unscaled epoch-zero calibration shared by all arms.
+    observation.pop('response_weight', None)
     # The provider embeds its source recipe for provenance. A descriptive run
     # name does not change the initialized model, native objective or samples.
     source_recipe = identity.get('recipe')
     if isinstance(source_recipe, dict):
         source_recipe.pop('name', None)
+        source_observation = source_recipe.get('observation_response')
+        if isinstance(source_observation, dict):
+            source_observation.pop('response_weight', None)
     config = engine.config
     return {'provider': identity,
             'optimizer_groups': [_optimizer_spec_payload(spec) for spec in

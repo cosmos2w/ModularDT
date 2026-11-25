@@ -14,6 +14,7 @@ import weakref
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
+from numbers import Real
 from types import MethodType
 
 import numpy as np
@@ -82,6 +83,15 @@ def attach_coupled_native_task(recipe, model, provider, binding):
     variant = spec.get('variant')
     if variant not in ('native_control', 'observed_response', 'sampled_reader_response'):
         raise ValueError('Choose native_control, observed_response or sampled_reader_response.')
+    response_weight = spec.get('response_weight', 1.0)
+    if isinstance(response_weight, bool) or not isinstance(response_weight, Real):
+        raise ValueError('observation_response.response_weight must be a finite positive number.')
+    try:
+        response_weight = float(response_weight)
+    except OverflowError:
+        raise ValueError('observation_response.response_weight must be a finite positive number.') from None
+    if not math.isfinite(response_weight) or response_weight <= 0:
+        raise ValueError('observation_response.response_weight must be a finite positive number.')
     capability = getattr(binding, 'coupled_native_capability', None)
     if callable(capability):
         report = capability()
@@ -219,6 +229,16 @@ def attach_coupled_native_task(recipe, model, provider, binding):
 
     def identity_payload(self):
         result = dict(old_identity())
+        # Some bindings retain their source recipe as part of the native
+        # identity. Treat an explicit default exactly like an omitted default.
+        source_recipe = result.get('recipe')
+        if response_weight == 1.0 and isinstance(source_recipe, dict):
+            source_observation = source_recipe.get('observation_response')
+            if (isinstance(source_observation, dict)
+                    and source_observation.get('response_weight') == 1.0):
+                source_recipe = copy.deepcopy(source_recipe)
+                source_recipe['observation_response'].pop('response_weight')
+                result['recipe'] = source_recipe
         result['observation_response'] = {
             'schema': 'coupled_native_observation_response_v1', 'mode': 'coupled_native', 'variant': variant,
             'pairs': [list(p) for p in pairs], 'eligible_pairs': [list(p) for p in eligible_pairs],
@@ -232,6 +252,8 @@ def attach_coupled_native_task(recipe, model, provider, binding):
             'calibration_epoch': 0, 'response_ramp': 'min(epoch/50,1)',
             'validation_objective_complete': variant == 'native_control' or bool(eligible_validation_pairs),
         }
+        if response_weight != 1.0:
+            result['observation_response']['response_weight'] = response_weight
         return result
 
     def training_state_dict(self):
@@ -358,6 +380,8 @@ def attach_coupled_native_task(recipe, model, provider, binding):
         mode = self.coupled_native_reader_mode
         reader_weight = (1. if mode is None else .5 / (probability if mode == 'full' else 1. - probability))
         weight = coefficient * min(float(epoch) / 50., 1.) * update_count / len(eligible_pairs) * reader_weight
+        if response_weight != 1.0:
+            weight *= response_weight
         return {'coupled_native/response': LossTerm(torch.stack(values).sum(), 1., weight)}, work
 
     def validation_objective_predictions(self, current_model, batch, *, arm, epoch):
@@ -430,8 +454,10 @@ def attach_coupled_native_task(recipe, model, provider, binding):
             self.coupled_native_reader_mode = previous
         if not values:
             return {}
-        return {'coupled_native/response': LossTerm(torch.stack(values).sum(), len(values),
-                float(calibration['coefficient']) * min(float(epoch) / 50., 1.))}
+        weight = float(calibration['coefficient']) * min(float(epoch) / 50., 1.)
+        if response_weight != 1.0:
+            weight *= response_weight
+        return {'coupled_native/response': LossTerm(torch.stack(values).sum(), len(values), weight)}
 
     def loss_metadata(self):
         result = {name: value for name, value in old_metadata().items()
@@ -448,6 +474,12 @@ def attach_coupled_native_task(recipe, model, provider, binding):
                 'unit': 'weighted dimensionless squared error',
                 'formula': 'fixed-measure inverse-probability mean of paired native residual differences',
                 'weight': 'epoch-zero TRAIN gradient calibration, epochs 1–50 ramp, equal-pair and reader weights'}
+            if response_weight != 1.0:
+                result['coupled_native/response']['weight'] += (
+                    f'; post-calibration response multiplier {response_weight!r}')
+                result['coupled_native/response']['meaning'] = (
+                    'Weighted coupled native response contribution, including the calibrated coefficient, '
+                    f'epoch ramp, equal-pair and reader weights, and response_weight={response_weight!r}.')
         return result
 
     decode_keys = tuple(dict.fromkeys(getattr(getattr(model, 'core', model), '_additional_decode_count_keys', ())))
