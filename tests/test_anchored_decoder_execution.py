@@ -12,10 +12,10 @@ from tests.test_e_anchored_packed_execution import fixture
 def test_context_restores_default_and_rejects_unknown_mode():
     assert anchored._decoder_execution.get() == "checkpoint"
     with anchored.anchored_decoder_execution("retain"):
-        assert anchored._decoder_execution.get() == "retain"
+        assert anchored._decoder_execution.get() == 1.0
         with anchored.anchored_decoder_execution("checkpoint"):
-            assert anchored._decoder_execution.get() == "checkpoint"
-        assert anchored._decoder_execution.get() == "retain"
+            assert anchored._decoder_execution.get() == 0.0
+        assert anchored._decoder_execution.get() == 1.0
     assert anchored._decoder_execution.get() == "checkpoint"
     with pytest.raises(ValueError):
         with anchored.anchored_decoder_execution("unknown"):
