@@ -19,7 +19,9 @@ import torch
 
 from honf_runtime.compat import load_trusted_checkpoint
 from honf_runtime.run_layout import resolve_checkpoint
-from honf_runtime.unified_training import EngineConfig, SamplingKey, SelectionPolicy, TrainingEngine
+from honf_runtime.unified_training import (
+    EngineConfig, SamplingKey, SelectionPolicy, TrainingEngine, _extend_observation_checkpoints,
+)
 
 
 def provider_identity_matches_for_inference(recipe, saved, current):
@@ -322,12 +324,16 @@ def engine_for(recipe, *, device, execution_horizon=None):
                                     and policy.get("membership") == "full_train600"
                                     and horizon == 100 and policy.get("optimizer_schedule_horizon") == 2000
                                     and tuple(checkpoints) == (100,))
-        if (not (wind_extension or thermal_extension or r16_10_extension or native_pair_extension or field_response_extension or local_response_extension)
+        observation_extension = recipe.get("training_profile") == "observation_response"
+        if (not (wind_extension or thermal_extension or r16_10_extension or native_pair_extension or field_response_extension or local_response_extension or observation_extension)
                 or type(execution_horizon) is not int or execution_horizon <= horizon
-                or (not (native_pair_extension or field_response_extension or local_response_extension) and execution_horizon % 100)):
+                or (not (native_pair_extension or field_response_extension or local_response_extension or observation_extension) and execution_horizon % 100)):
             raise ValueError("Unsupported explicit same-lineage horizon extension.")
+        if observation_extension:
+            checkpoints = _extend_observation_checkpoints(tuple(checkpoints), horizon, execution_horizon)
+        else:
+            checkpoints = range(100, execution_horizon + 1, 100)
         horizon = execution_horizon
-        checkpoints = range(100, horizon + 1, 100)
     config = EngineConfig(
         seed=int(policy["seed"] if structured_training else recipe.get("sampling_seed", recipe["seed"])),
         microbatch_cases=int(policy["microbatch_cases"] if structured_training else recipe["microbatch_size"]),
@@ -424,9 +430,9 @@ def main(argv=None):
             and (args.command == "evaluate" or (args.command == "fit" and args.resume))):
         selector = args.checkpoint if args.command == "evaluate" else args.resume
         source_checkpoint = resolve_checkpoint(args.output, selector)
-        if (args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response")
+        if (args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response", "observation_response")
                 and source_checkpoint != resolve_checkpoint(args.output, "latest")):
-            raise ValueError("Formal extension requires this run's latest checkpoint.")
+            raise ValueError("Explicit horizon extension requires this run's latest checkpoint.")
         source_payload = load_trusted_checkpoint(source_checkpoint, map_location="cpu")
         if source_payload["experiment_identity"]["recipe"] != recipe:
             raise ValueError("The recipe differs from the saved run.")
@@ -447,6 +453,14 @@ def main(argv=None):
                     or type(saved_horizon) is not int or not 100 <= completed <= saved_horizon
                     or not completed < args.stop_after):
                 raise ValueError("Formal extension requires at least a completed formal epoch 100 and a later stop.")
+        if args.command == "fit" and recipe.get("training_profile") == "observation_response":
+            completed = int(source_payload["epoch"])
+            saved_horizon = source_payload["experiment_identity"]["engine_config"]["total_epochs"]
+            if (type(saved_horizon) is not int or not 1 <= completed <= saved_horizon
+                    or not completed < args.stop_after):
+                raise ValueError("Observation-response resume requires a completed same-run state and a later stop.")
+            if not args.extend_horizon and args.stop_after > saved_horizon:
+                raise ValueError("A stop beyond the saved execution horizon requires --extend-horizon.")
     options = {}
     if source_payload is not None and (recipe.get("r16_10_family") is not None
                                        or recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response", "observation_response")):
@@ -471,11 +485,18 @@ def main(argv=None):
         provider.native_pair_calibration_source_checkpoint = str(
             source_checkpoint if source_payload is not None else args.output.expanduser().resolve() / 'checkpoints/latest_model.pt')
     requested_horizon = args.stop_after
-    if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response"):
+    if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response", "observation_response"):
         requested_horizon = max(args.stop_after, saved_horizon)
-    engine = (engine_for(recipe, device=args.device, execution_horizon=requested_horizon)
-              if args.extend_horizon else engine_for(recipe, device=args.device))
-    if args.extend_horizon and recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response"):
+    engine = engine_for(recipe, device=args.device)
+    observation_resume = (args.command == "fit" and source_payload is not None
+                          and recipe.get("training_profile") == "observation_response")
+    if args.extend_horizon or (observation_resume and saved_horizon > engine.config.total_epochs):
+        if observation_resume and not args.extend_horizon:
+            requested_horizon = saved_horizon
+        engine = engine_for(recipe, device=args.device, execution_horizon=requested_horizon)
+    if (args.extend_horizon or observation_resume) and (recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response")
+            or (recipe.get("training_profile") == "observation_response"
+                and isinstance(recipe.get("dataset"), dict) and recipe["dataset"].get("name") == "thermal")):
         # This existing provider runtime limit governs sample generation only;
         # the scientific recipe, seed and optimizer schedule stay unchanged.
         provider._round6_sampling_epoch_limit = engine.config.total_epochs

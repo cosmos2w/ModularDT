@@ -331,6 +331,16 @@ def _engine_config_payload(config: EngineConfig) -> dict[str, Any]:
     return payload
 
 
+def _extend_observation_checkpoints(previous: Sequence[int], before: int, after: int) -> list[int]:
+    """Preserve declared milestones and add future 100-epoch milestones."""
+    if (type(before) is not int or type(after) is not int or before < 1 or after <= before
+            or not isinstance(previous, (tuple, list))
+            or any(type(epoch) is not int or not 1 <= epoch <= before for epoch in previous)
+            or list(previous) != sorted(set(previous))):
+        raise ValueError("Invalid observation-response horizon or checkpoint milestones.")
+    return list(previous) + list(range((before // 100 + 1) * 100, after + 1, 100))
+
+
 def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, Any],
                                *, allow_microbatch_change: bool = False,
                                allow_horizon_extension: bool = False,
@@ -379,6 +389,24 @@ def _resume_identity_amendment(saved: Mapping[str, Any], current: Mapping[str, A
             after = new.get("engine_config", {}).get("total_epochs")
             schedules = old.get("optimizer_schedule_contract", [])
             native_training = recipe.get("training", {})
+            if recipe.get("training_profile") == "observation_response":
+                try:
+                    checkpoints = _extend_observation_checkpoints(
+                        old.get("engine_config", {}).get("checkpoint_epochs"), before, after)
+                except (TypeError, ValueError):
+                    raise ValueError(message) from None
+                if (allow_microbatch_change or allow_query_tile_change
+                        or new.get("engine_config", {}).get("checkpoint_epochs") != checkpoints):
+                    raise ValueError(message)
+                amended = copy.deepcopy(old)
+                amended["engine_config"]["total_epochs"] = after
+                amended["engine_config"]["checkpoint_epochs"] = checkpoints
+                if amended != new:
+                    raise ValueError(message)
+                return {"kind": "explicit_observation_response_horizon_extension",
+                        "previous_horizon": before, "execution_horizon": after,
+                        "optimizer_schedule_unchanged": True,
+                        "trajectory_note": "Only the execution horizon and future checkpoint milestones change; the saved recipe, optimizer schedule, data, sampling and objective remain unchanged."}
             if (recipe.get("training_profile") in ("native_pair", "field_response", "local_multisecant_response")
                     and isinstance(recipe.get("dataset"), dict)
                     and recipe["dataset"].get("name") == "thermal"):
@@ -1750,8 +1778,15 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 ha="left", va="bottom", fontsize=8, transform=visible_axes[0].transAxes,
             )
         rows = math.ceil(len(visible_axes) / 2)
-        grid = figure.add_gridspec(rows, 2)
-        figure.set_size_inches(14, max(4.6, 3.7 * rows))
+        height = max(4.6, 3.7 * rows)
+        figure.set_size_inches(14, height)
+        # These axes were created on several provisional grids. Give their
+        # final shared grid fixed physical margins and row spacing rather than
+        # asking constrained layout to resolve the reassigned axes on save.
+        figure.set_layout_engine(None)
+        grid = figure.add_gridspec(rows, 2, left=0.065, right=0.985,
+                                   bottom=0.62 / height, top=1.0 - 0.68 / height,
+                                   wspace=0.22, hspace=0.4)
         for index, axis in enumerate(visible_axes):
             axis.set_subplotspec(grid[index // 2, index % 2])
             if epochs:
@@ -5560,13 +5595,15 @@ class TrainingEngine:
             if (amendment.get("kind") not in ("explicit_spatial_group_full_state_continuation",
                                                 "native_pair_train150_schedule_correction",
                                                 "explicit_native_pair_formal_horizon_extension",
-                                                "explicit_field_response_formal_horizon_extension")
+                                                "explicit_field_response_formal_horizon_extension",
+                                                "explicit_observation_response_horizon_extension")
                     and relation_guided_transfer is None
                     and joint_member_routing_transfer is None):
                 amendment["source_checkpoint_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
             resume_amendments.append(amendment)
             amendment_name = ('native_pair_horizon_extension' if amendment.get('kind') == 'explicit_native_pair_formal_horizon_extension' else
                               'field_response_horizon_extension' if amendment.get('kind') == 'explicit_field_response_formal_horizon_extension' else
+                              'observation_response_horizon_extension' if amendment.get('kind') == 'explicit_observation_response_horizon_extension' else
                               'native_pair_schedule_amendment' if amendment.get('kind') == 'native_pair_train150_schedule_correction' else
                               'joint_member_routing_transfer' if joint_member_routing_transfer is not None else
                               'relation_guided_transfer' if relation_guided_transfer is not None else
@@ -5589,7 +5626,7 @@ class TrainingEngine:
                               'mathematical_route_amendment' if mathematical_route_branch is not None
                               else 'microbatch_amendment')
             _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json",
-                category='logs' if (amendment.get('kind') in ('native_pair_train150_schedule_correction', 'explicit_native_pair_formal_horizon_extension', 'explicit_field_response_formal_horizon_extension') or relation_guided_transfer is not None or joint_member_routing_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
+                category='logs' if (amendment.get('kind') in ('native_pair_train150_schedule_correction', 'explicit_native_pair_formal_horizon_extension', 'explicit_field_response_formal_horizon_extension', 'explicit_observation_response_horizon_extension') or relation_guided_transfer is not None or joint_member_routing_transfer is not None or identity_is_joint_native or identity_is_moment_hyperedge or joint_core_revision is not None or diagnostic_age_branch is not None
                                     or architecture_child_initialization is not None
                                     or identity_is_native_budgeted
                                     or identity_is_native_retrieval

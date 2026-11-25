@@ -34,6 +34,16 @@ Fresh coupled comparisons start from one actual saved epoch-zero state per membe
 
 An optional finite positive `observation_response.response_weight` multiplies the calibrated coupled response contribution in TRAIN and dual-reader validation; its default is `1.0`. It leaves the shared epoch-zero calibration, native losses, observations and reader probabilities unchanged. A nondefault value is saved in the run's scientific identity and loss definition, so it cannot be changed during ordinary resume. The independent observation evaluation remains a separate unweighted measurement.
 
+## Extending a saved observation-response lineage
+
+An authorized continuation beyond a saved execution horizon uses the same run and its saved recipe, for example:
+
+```bash
+python tools/relation_anchored_train.py fit --recipe <run>/configs/resolved_config.json --output <run> --device <runtime-device> --resume latest --extend-horizon --stop-after 1000
+```
+
+The option extends only the execution horizon and adds future 100-epoch checkpoint milestones. It retains existing milestones, the original recipe's `local_horizon`, saved optimizer schedule, model and optimizer state, provider and sampling state, objective, recording definitions, and histories. The native provider's execution-only sampling bound is extended where required. Later ordinary resumes within the saved execution horizon do not need `--extend-horizon`; a further increase does. Scientific identity changes, including a different response weight, are rejected. GPU selection remains a runtime choice. This mechanism does not authorize a continuation by itself.
+
 ## Maintained CPU example
 
 For the coupled native path, run `CUDA_VISIBLE_DEVICES='' python tools/example_coupled_native_recovery.py --output-root /data2/YOUR_USER/ModularDT/coupled_native_example` from the repository root. This seven-field software fixture prepares a common actual epoch-zero state, fits one uninterrupted two-epoch lineage and one resumed lineage, reloads a saved configuration with reordered JSON keys in a fresh process, and compares model/optimizer/RNG/sampler/provider/selector state, ordered losses and columns, and dual-reader validation. It charges four tiny fixture epochs. It tests software recovery rather than physical learning quality.
