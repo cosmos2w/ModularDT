@@ -9,11 +9,11 @@ from pathlib import Path
 
 try:
     from .thermal_native_pair_evaluate import evaluate_pair_panel
-    from .thermal_state_response_native_evaluate import evaluate_native_panel
+    from .thermal_state_response_native_evaluate import evaluate_native_panel, near_object_errors
     from .thermal_state_response_evaluate import restore_model
 except ImportError:
     from thermal_native_pair_evaluate import evaluate_pair_panel
-    from thermal_state_response_native_evaluate import evaluate_native_panel
+    from thermal_state_response_native_evaluate import evaluate_native_panel, near_object_errors
     from thermal_state_response_evaluate import restore_model
 
 import h5py
@@ -198,20 +198,7 @@ def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pa
         valid = (batch.targets.point_weights[0].bool()
                  & prediction.native_prepared.stencils['fluid'].valid[0]).cpu()
         xy = batch.receivers.fluid_xy[0].cpu().double().numpy()
-        config = configs[case_id]
-        domain = config['domain']
-        centers = np.asarray(config['layout']['centers'])
-        distance = np.linalg.norm(xy[:, None] - centers[None], axis=-1).min(1) - domain['module_radius']
-        width = 2 * max(domain['lx'] / domain['nx'], domain['ly'] / domain['ny'])
-        near = (distance >= 0) & (distance <= width) & valid.numpy()
-        protected[case_id] = {}
-        for i, name in enumerate(CHANNELS):
-            mask = near & torch.isfinite(target[:, i]).numpy()
-            if mask.any():
-                error = field[mask, i].double().numpy() - target[mask, i].double().numpy()
-                protected[case_id][name] = {'rmse': float(np.sqrt(np.mean(error**2))),
-                    'absolute_error_p95': float(np.quantile(np.abs(error), .95)),
-                    'valid_positions': int(mask.sum()), 'unit': UNITS[i]}
+        protected[case_id] = near_object_errors(prediction, batch, configs[case_id])
         cache[case_id] = field
         targets[case_id], masks[case_id], coordinates[case_id] = target, valid, xy
 

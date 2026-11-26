@@ -19,6 +19,31 @@ from honf_runtime.contextual_frontier_evaluation import (
 )
 
 
+def near_object_errors(prediction, batch, config):
+    """Physical fluid errors at valid cell centres within two cell widths of a module."""
+    names = ('u', 'v', 'p', 'omega', 'temperature')
+    units = ('dataset velocity', 'dataset velocity', 'dataset pressure',
+             'dataset vorticity', 'dataset temperature')
+    field = prediction.native_main['pred_field'][0].detach().cpu()
+    target = batch.targets.field_targets[0].detach().cpu()
+    valid = (batch.targets.point_weights[0].bool()
+             & prediction.native_prepared.stencils['fluid'].valid[0]).cpu().numpy()
+    xy = batch.receivers.fluid_xy[0].cpu().double().numpy()
+    domain, centers = config['domain'], np.asarray(config['layout']['centers'])
+    distance = np.linalg.norm(xy[:, None] - centers[None], axis=-1).min(1) - domain['module_radius']
+    width = 2 * max(domain['lx'] / domain['nx'], domain['ly'] / domain['ny'])
+    near = (distance >= 0) & (distance <= width) & valid
+    result = {}
+    for index, name in enumerate(names):
+        mask = near & torch.isfinite(target[:, index]).numpy()
+        if mask.any():
+            error = field[mask, index].double().numpy() - target[mask, index].double().numpy()
+            result[name] = {'rmse': float(np.sqrt(np.mean(error**2))),
+                            'absolute_error_p95': float(np.quantile(np.abs(error), .95)),
+                            'valid_positions': int(mask.sum()), 'unit': units[index]}
+    return result
+
+
 def evaluate_native_panel(model, provider, *, epoch, split, case_ids, mode, export_cases, output,
                           case_observer=None):
     """Use the maintained native receiver builder, metrics and reductions."""
