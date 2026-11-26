@@ -90,6 +90,11 @@ def main(argv=None):
         'cudnn_allow_tf32': torch.backends.cudnn.allow_tf32,
         'process_seconds_before_json_write': time.perf_counter() - started,
     }
+    if device.type == 'cuda':
+        result['execution'].update(
+            peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
+            peak_reserved_bytes=torch.cuda.max_memory_reserved(device),
+        )
     _atomic_json(args.output, result)
     print(json.dumps({'output': str(args.output), 'epoch': int(saved['epoch']), 'cases': len(cases)}))
     return 0

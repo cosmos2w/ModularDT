@@ -93,7 +93,7 @@ The observation-response builder records nonzero applied retention in its provid
 
 ## Existing checkpoints
 
-Ordinary loading and resume restore the saved tile value. Editing a fresh-run recipe does not change an existing lineage's saved configuration. The current Thermal CLI has no query-tile override argument.
+Ordinary loading and resume restore the saved tile value. Editing a fresh-run recipe does not change an existing lineage's saved configuration. The Thermal training CLI has no query-tile override argument. The separate `thermal_native_checkpoint_evaluate.py` inference tool accepts `--query-tile-size` for its evaluation copy and records the applied value; it does not change the checkpoint or training configuration.
 
 For the maintained detail-preserving training workflow, a runner can reconstruct the model/provider from a copy of the saved recipe with only the tile changed, then call `TrainingEngine.fit(..., resume_checkpoint=..., allow_query_tile_change=True)`. The opt-in checks consistent changes in the experiment recipe, provider recipe and adapter core, and requires all other identity fields to match. It restores the saved model, optimizer, RNG, sampler and history; subsequent checkpoints record the new tile. Use an epoch-boundary clean stop before changing the active run. The maintained identity layout is required; a custom dataset runner with a different checkpoint format needs its own explicit resume validation.
 
