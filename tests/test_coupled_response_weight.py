@@ -177,13 +177,15 @@ def test_common_zero_excludes_only_weight_but_resume_retains_it():
 
 def test_saved_config_reload_accepts_key_reordering_and_rejects_weight_change(tmp_path, monkeypatch):
     config, _, _ = _build(.5)
-    saved = {'epoch': 1, 'experiment_identity': {'recipe': copy.deepcopy(config)}}
+    saved = {'epoch': 1, 'experiment_identity': {'recipe': copy.deepcopy(config),
+                                                 'engine_config': {'total_epochs': 2}}}
     monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: tmp_path / 'latest_model.pt')
     monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: saved)
     monkeypatch.setattr(cli, 'build', lambda *args, **kwargs: (SimpleNamespace(architecture='fixture'), object()))
     monkeypatch.setattr(cli, 'prepare_profile_fit', lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, 'engine_for', lambda *args, **kwargs:
-                        SimpleNamespace(fit=lambda *args, **kwargs: {'completed_epoch': 1}))
+                        SimpleNamespace(config=SimpleNamespace(total_epochs=2),
+                                        fit=lambda *args, **kwargs: {'completed_epoch': 1}))
     path = tmp_path / 'saved_recipe.json'
     def reverse(value):
         if isinstance(value, dict):

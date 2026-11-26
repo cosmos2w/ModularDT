@@ -24,8 +24,23 @@ def _same(left, right):
     return left == right
 
 
+def _initial_provider_identity(provider_identity):
+    """Exclude native activation storage from the shared initial-state contract."""
+    identity = copy.deepcopy(dict(provider_identity))
+    identity.pop('native_retention_execution', None)
+    recipe = identity.get('recipe')
+    if isinstance(recipe, dict):
+        execution = recipe.get('execution_config')
+        if isinstance(execution, dict):
+            execution.pop('native_retention_fraction', None)
+            # An absent and an empty execution mapping both request defaults.
+            if not execution:
+                recipe.pop('execution_config')
+    return identity
+
+
 def common_contract(model, provider, engine):
-    identity = copy.deepcopy(dict(provider.identity_payload()))
+    identity = _initial_provider_identity(provider.identity_payload())
     observation = identity.get('observation_response')
     if not isinstance(observation, dict) or observation.get('mode') != 'coupled_native':
         raise ValueError('A common epoch-zero state requires the explicit coupled native profile.')
@@ -90,7 +105,10 @@ def apply_epoch_zero(model, provider, engine, payload):
             or payload.get('selector_epoch') != 0 or payload.get('sampler_state', {}).get('next_epoch') != 1
             or any(payload.get('organization_clocks', {}).values())):
         raise ValueError('The coupled initialization is not a genuine zero-epoch state.')
-    if not _same(payload.get('contract'), common_contract(model, provider, engine)):
+    saved_contract = copy.deepcopy(payload.get('contract'))
+    if isinstance(saved_contract, dict) and isinstance(saved_contract.get('provider'), Mapping):
+        saved_contract['provider'] = _initial_provider_identity(saved_contract['provider'])
+    if not _same(saved_contract, common_contract(model, provider, engine)):
         raise ValueError('Epoch-zero native cohort, model, objective, sampling or optimizer contract differs.')
     model.load_state_dict(payload['model_state_dict'], strict=True)
     provider.load_training_state_dict(payload['provider_training_state'])

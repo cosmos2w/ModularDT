@@ -60,6 +60,29 @@ def configure_native_retention(provider, fraction):
     provider.predict_native = predict_native
 
 
+def configure_observation_native_retention(model, provider, fraction):
+    """Record and apply an explicit native-tile policy for observation runs."""
+    from honf_forward_core.interaction_reused_member_routing.anchored import (
+        AnchoredMemberRoutingCore, anchored_decoder_execution,
+    )
+
+    with anchored_decoder_execution(fraction):
+        pass
+    if fraction == 0:
+        return
+    if not isinstance(getattr(model, "core", model), AnchoredMemberRoutingCore):
+        raise ValueError("Native retention requires an anchored observation-response core.")
+    identity = provider.identity_payload
+    execution = {"schema": "anchored_native_tile_retention_v1",
+                 "fraction": float(fraction), "scope": "native_prediction"}
+
+    def identity_payload():
+        return {**identity(), "native_retention_execution": dict(execution)}
+
+    configure_native_retention(provider, fraction)
+    provider.identity_payload = identity_payload
+
+
 def configure_observation_execution(recipe):
     """Apply an explicitly saved numerical runtime policy for new profiles."""
     if recipe.get('training_profile') != 'observation_response':
@@ -98,7 +121,10 @@ def build(recipe, *, device, response_scales=None, saved_adapter_state=None, sav
     if profile == "observation_response":
         from honf_runtime.observation_response_task import build_observation_response_task
 
-        return build_observation_response_task(recipe, device=device, resume_payload=resume_payload)
+        model, provider = build_observation_response_task(recipe, device=device, resume_payload=resume_payload)
+        configure_observation_native_retention(
+            model, provider, recipe.get("execution_config", {}).get("native_retention_fraction", 0.0))
+        return model, provider
     if profile == "local_multisecant_response":
         if not thermal:
             raise ValueError("Local multisecant fitting currently requires the Thermal adapter.")
@@ -378,7 +404,7 @@ def main(argv=None):
     parser.add_argument("--cuda-memory-fraction", type=float,
                         help="Optional process-local CUDA allocator limit; does not change training populations")
     parser.add_argument("--native-retention-fraction", type=float,
-                        help="Native decoder tile fraction to retain for a new field-response run")
+                        help="Native decoder tile fraction to retain for field-response or observation-response fits")
     parser.add_argument("--native-pair-calibration-input", type=Path,
                         help="Read the matched native-TRAIN calibration published by the anchor run")
     parser.add_argument("--native-pair-calibration-output", type=Path,
@@ -398,8 +424,8 @@ def main(argv=None):
             and not args.resume):
         parser.error('Local-response fitting requires a previously initialized native-prefix child and --resume.')
     if args.native_retention_fraction is not None:
-        if args.command != 'fit' or recipe.get('training_profile') != 'field_response':
-            parser.error('--native-retention-fraction requires a field-response fit')
+        if args.command != 'fit' or recipe.get('training_profile') not in ('field_response', 'observation_response'):
+            parser.error('--native-retention-fraction requires a field-response or observation-response fit')
         from honf_forward_core.interaction_reused_member_routing.anchored import anchored_decoder_execution
         with anchored_decoder_execution(args.native_retention_fraction):
             pass
