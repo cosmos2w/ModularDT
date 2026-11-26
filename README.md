@@ -169,7 +169,7 @@ The [organization plotting tool](tools/plot_honf_organization.py) reads saved ev
 
 ## Runtime and physical-field example
 
-`query_tile_size` limits required physical positions processed together per scene. Native observation rows, extraction-dependency positions and dense decoder slots are separate counts; tiling preserves their budgets and original-member access. R17-11 selected **tile 512 with checkpointing: 44.5% lower median complete-epoch replay latency** than tile 128, with actual validation headroom. Numerical trajectory differences are documented. At tile 128, 25% native activation retention separately saved 6.4% with bitwise agreement on checked states; that combination at tile 512 remains unmeasured. The [query-tiling guide](docs/guides/Query_Tiling.md) gives measurements, general tuning practice and explicit configuration for future runs.
+Before training on a new dataset, benchmark query-tile size (physical query positions processed together per scene) and activation checkpointing to balance complete-epoch time and GPU memory, including validation headroom. For the tested ThermalChannel workload on an RTX 6000 Ada, `query_tile_size=512` with checkpointing gave the fastest measured epochs with sufficient validation memory. Tune these execution settings for each dataset and device while preserving native observation budgets and original-member access. See the [query-tiling guide](docs/guides/Query_Tiling.md) for configuration and measurements.
 
 <p align="center"><img src="docs/assets/readme/relation_anchored_fields.png" alt="Physical speed and temperature references, predictions and signed errors with plotted-mask RMSE and relative L2" width="1100"></p>
 
