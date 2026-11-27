@@ -983,7 +983,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     observation_response_run = bool(provider_identity and provider_identity.get('observation_response'))
     auxiliary_validation_missing = local_response_run or (
         observation_response_run and not provider_identity['observation_response'].get('validation_objective_complete', False))
-    priority_run = bool(local_response_run and provider_identity['local_response'].get('state_priority'))
+    priority_run = bool((local_response_run and provider_identity['local_response'].get('state_priority'))
+                        or (observation_response_run and
+                            provider_identity['observation_response'].get('response_gradient_composition')))
     member_routing_run = any(
         str(row.get("arm", "")) in {"R13-3-Full", "R13-3-Route", "R13-3-Relative",
                                       "R13-4-Full", "R13-4-Guide"}
@@ -1282,9 +1284,9 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         masked_count_total += plot_series(
             total_axis, [row["epoch"] for row in train_rows],
             [recorded_sum(row["train_losses"]) for row in train_rows],
-            label=("TRAIN: sampled-reader objective estimate" if observation_response_run and
+            label=("TRAIN: nominal weighted sum" if priority_run else
+                   "TRAIN: sampled-reader objective estimate" if observation_response_run and
                    provider_identity['observation_response'].get('variant') == 'sampled_reader_response' else
-                   "TRAIN: nominal weighted sum" if priority_run else
                    "TRAIN: optimized total" if response_run else "TRAIN: recorded weighted sum"),
             color="C0", marker=".")
     if validation_rows:
@@ -1961,10 +1963,16 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
                 + ('VALIDATION is a dual-reader native subtotal; the response validation measurement is unavailable. '
                    if auxiliary_validation_missing else
                    'VALIDATION averages both readers on the fixed exposed panel; its native and response reductions are distinct.'))
+            if priority_run:
+                metadata['panel_definitions']['weighted_loss_totals'] += (
+                    ' The TRAIN sum is nominal monitoring only: the response gradient is projected and '
+                    'capped before the optimizer update, so that update is not the gradient of this sum.')
             metadata['panel_definitions']['physics'] = (
                 'The response contribution uses matched physical observations and their existing native '
                 'prediction and extraction dependencies. Validation uses both readers and declared physical masks.'
-                if provider_identity['observation_response'].get('variant') != 'native_control' else
+                if provider_identity['observation_response'].get('response_update_scope',
+                    'disabled' if provider_identity['observation_response'].get('variant') == 'native_control'
+                    else 'enabled') != 'disabled' else
                 'The coupled native control has no fitted response contribution.')
     if response_terms:
         metadata["panel_definitions"]["physics"] = (
@@ -3802,6 +3810,24 @@ class TrainingEngine:
         # after the native microbatch graphs have been released.
         native_reuse = getattr(provider, "native_microbatch_terms", None)
         native_begin = getattr(provider, "begin_native_update", None)
+        native_priority = getattr(provider, "native_priority_composition", None)
+        native_priority_parameters = native_priority_selected = native_priority_gradients = None
+        if native_priority is not None:
+            if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+                raise ValueError("Native-priority gradient composition does not yet support distributed training.")
+            native_priority_parameters = tuple(dict.fromkeys(
+                p for group in optimizer.param_groups for p in group["params"] if p.requires_grad))
+            model_parameters = tuple(p for p in model.parameters() if p.requires_grad)
+            if {id(p) for p in native_priority_parameters} != {id(p) for p in model_parameters}:
+                raise ValueError("Native-priority training requires every trainable model parameter in the optimizer.")
+            if native_priority['scope'] == 'all_parameters':
+                native_priority_selected = native_priority_parameters
+            else:
+                selected_ids = {id(p) for p in native_priority['organization_parameters']}
+                native_priority_selected = tuple(p for p in native_priority_parameters if id(p) in selected_ids)
+                if {id(p) for p in native_priority_selected} != selected_ids:
+                    raise ValueError("Organization parameter ownership differs from the optimizer inventory.")
+            native_priority_gradients = [None] * len(native_priority_selected)
         if callable(native_reuse):
             if epoch_update_count is None:
                 epoch_update_count = len(self.epoch_update_slices(
@@ -3868,6 +3894,8 @@ class TrainingEngine:
             if budgeted_expected_denominator <= 0:
                 raise ValueError("Round8 work objective requires the complete macro's case and response request count.")
         source_read_manager = getattr(provider, "source_read_auxiliary_manager", None)
+        if native_priority is not None and source_read_manager is not None:
+            raise ValueError("Native-priority response composition cannot be combined with source-read auxiliary updates.")
         if source_read_manager is not None:
             if (source_read_ordinary_update_index is None or source_read_primary_fine_rows is None
                     or type(source_read_ordinary_update_index) is not int
@@ -3984,6 +4012,7 @@ class TrainingEngine:
                 piece = term.numerator * (effective_weight / planned[name])
                 objective = piece if objective is None else objective + piece
                 losses[name] += float(term.numerator.detach()) / planned[name] * effective_weight
+            native_response_objective = None
             if callable(native_reuse):
                 reuse_terms, reuse_work = native_reuse(
                     batch, predictions, auxiliary_state, epoch=epoch,
@@ -3998,7 +4027,11 @@ class TrainingEngine:
                             or not torch.is_tensor(term.numerator) or term.numerator.numel() != 1):
                         raise ValueError("Native-reuse losses require finite weights and scalar numerators.")
                     piece = term.numerator * (float(term.weight) / denominator)
-                    objective = piece if objective is None else objective + piece
+                    if native_priority is None:
+                        objective = piece if objective is None else objective + piece
+                    else:
+                        native_response_objective = (piece if native_response_objective is None
+                                                     else native_response_objective + piece)
                     losses[name] += float(piece.detach())
                 for name, value in reuse_work.items():
                     numeric = float(value)
@@ -4030,6 +4063,17 @@ class TrainingEngine:
                 raise ValueError("A microbatch produced no differentiable native objective terms.")
             if not bool(torch.isfinite(objective.detach())):
                 raise FloatingPointError("Nonfinite optimizer objective.")
+            if native_response_objective is not None:
+                if not bool(torch.isfinite(native_response_objective.detach())):
+                    raise FloatingPointError("Nonfinite native response objective.")
+                response_gradients = torch.autograd.grad(native_response_objective, native_priority_selected,
+                    retain_graph=True, allow_unused=True)
+                for index, gradient in enumerate(response_gradients):
+                    if gradient is not None:
+                        if native_priority_gradients[index] is None:
+                            native_priority_gradients[index] = gradient.detach().clone()
+                        else:
+                            native_priority_gradients[index].add_(gradient.detach())
             objective.backward()
         for name, expected in planned.items():
             actual = observed.get(name, 0.0)
@@ -4137,6 +4181,8 @@ class TrainingEngine:
             losses["source_read_auxiliary"] = float(auxiliary_loss.detach())
         auxiliary_terms = getattr(provider, "auxiliary_update_terms", None)
         priority_names = getattr(provider, "state_priority_response_terms", None)
+        if native_priority is not None and (callable(auxiliary_terms) or priority_names is not None):
+            raise ValueError("Native-priority response composition cannot be combined with other auxiliary updates.")
         priority_gradients = None
         priority_parameters = None
         if priority_names is not None and not callable(auxiliary_terms):
@@ -4221,6 +4267,11 @@ class TrainingEngine:
                 priority_before = [p.detach().clone() for p in priority_parameters]
         elif priority_names is not None:
             work["state_priority_absent_count"] = 1.0
+        if native_priority is not None:
+            from .native_priority_composer import compose_native_priority
+            native_priority_stats = compose_native_priority(native_priority_parameters, native_priority_selected,
+                native_priority_gradients, native_priority['maximum_native_norm_ratio'])
+            work.update({f"native_priority_{name}": value for name, value in native_priority_stats.items()})
         parameters = [parameter for group in optimizer.param_groups for parameter in group["params"]
                       if parameter.grad is not None]
         norm = torch.nn.utils.clip_grad_norm_(parameters, self.config.gradient_clip)
@@ -4229,6 +4280,9 @@ class TrainingEngine:
         if priority_gradients is not None:
             work["state_priority_clip_norm_sum"] = float(norm.detach())
             work["state_priority_clipped_count"] = float(norm > self.config.gradient_clip)
+        if native_priority is not None:
+            work["native_priority_clip_factor_sum"] = min(
+                1.0, self.config.gradient_clip / (float(norm.detach()) + 1.e-6))
         optimizer.step()
         if priority_before is not None:
             work["state_priority_displacement_dot_sum"] = sum(

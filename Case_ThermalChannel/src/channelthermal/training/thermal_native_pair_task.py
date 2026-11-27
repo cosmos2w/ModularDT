@@ -22,6 +22,27 @@ NATIVE_LOSS_ORDER = ('flow/u', 'flow/v', 'flow/p', 'flow/omega', 'temperature/fl
                      'temperature/surface', 'temperature/material', 'q_proxy')
 
 
+def fresh_coupled_schedule(recipe):
+    """Resolve an opt-in historical absolute-epoch schedule for fresh coupling.
+
+    Existing coupled runs retain their constant-rate schedule. The saved R17-4
+    formal schedule can be selected explicitly without using its old weights.
+    """
+    optimizer, training = recipe['optimizer'], recipe['training']
+    lr = float(optimizer['lr'])
+    horizon = int(training['optimizer_schedule_horizon'])
+    if optimizer.get('schedule') == 'hold1000_cosine2000':
+        if horizon != 2000:
+            raise ValueError('The hold1000_cosine2000 schedule requires a 2000-epoch horizon.')
+        return {'peak_lr': lr, 'warmup_start_lr': lr, 'warmup_epochs': 0,
+                'hold_through_epoch': 1000, 'total_epochs': horizon,
+                'final_lr': float(optimizer.get('final_lr', 3e-5))}
+    if horizon < int(training['local_horizon']):
+        raise ValueError('The fresh coupled schedule must hold through the declared fit horizon.')
+    return {'peak_lr': lr, 'warmup_start_lr': lr, 'warmup_epochs': 0,
+            'hold_through_epoch': horizon, 'total_epochs': horizon + 1, 'final_lr': lr}
+
+
 def native_calibration_record(provider, calibration, *, pairs, seed, scales, floors, source=None):
     """Compact, source-specific definition of one native TRAIN calibration."""
     from pathlib import Path
@@ -484,11 +505,7 @@ def build_thermal_native_pair_task(recipe, *, arm=None, device='cpu', resume_pay
     def native_pair_schedule(self):
         lr = float(self.recipe['optimizer']['lr'])
         if _fresh_coupled_base:
-            horizon = int(self.recipe['training']['optimizer_schedule_horizon'])
-            if horizon < int(self.recipe['training']['local_horizon']):
-                raise ValueError('The fresh coupled schedule must hold through the declared fit horizon.')
-            return {'peak_lr': lr, 'warmup_start_lr': lr, 'warmup_epochs': 0,
-                    'hold_through_epoch': horizon, 'total_epochs': horizon + 1, 'final_lr': lr}
+            return fresh_coupled_schedule(self.recipe)
         final_lr = float(self.recipe['optimizer'].get('final_lr', 3e-5))
         return {'peak_lr': lr, 'warmup_start_lr': lr, 'warmup_epochs': 0,
                 'hold_through_epoch': 1000, 'total_epochs': 2000, 'final_lr': final_lr}

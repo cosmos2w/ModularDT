@@ -1,0 +1,66 @@
+# Thermal organization-focused response training
+
+This guide describes the R17-12 comparison and the reusable preparation and recovery commands. It does not authorize additional training. Each model predicts all native physical fields from the same original case inputs and native observation rows. The response arms additionally compare predicted and observed changes between existing paired training scenes. They differ in whether that response gradient can update all trainable parameters or only the parameters that govern relationships and access. Native field losses update the complete model in every arm. Both response arms use the same all-parameter epoch-zero calibration and gradient-composition rule.
+
+`observation_response.reader_policy` selects `dual` or `sampled_equal_probability` independently of `response_update_scope`, which selects `disabled`, `all_parameters` or `organization_parameters`. The two enabled scopes require `response_gradient_composition: {"kind": "native_priority_projection", "maximum_native_norm_ratio": 0.1}`. Omitting these options preserves the historical variant's execution and ordinary summed-gradient behavior. An explicitly disabled response keeps the matched pair-aware native samples without extracting a response loss or constructing its gradient graph.
+
+Ownership follows the actual module and parameter identities, and the resolved names are saved once in the provider definition. Relationship-exclusive query/key projections, geometry scores, applied-gate calibrations, member scores and typed read strengths belong to organization. A tensor also used to form values belongs to content/shared, including tied parameters, the joint query encoder, and contextual key normalization: that normalization feeds both the key and value projections. Native losses continue updating both sets.
+
+For each effective batch, the engine accumulates the complete native gradient and the response gradient on its selected parameter set separately. It removes the response component opposing the native gradient on that same set, then caps the remaining response norm at 0.1 times the complete native gradient norm. A zero complete native norm or zero projected response gives no correction. Missing gradients remain missing when the correction is zero, preserving AdamW's inactive-parameter behavior. The normal global clip and optimizer advance run once after composition. The recorded TRAIN total is a nominal weighted loss sum; the projected update is not its gradient, and this local projection does not guarantee an improving AdamW displacement or held-out field error. Recorded projection/cap fractions divide their counts by `native_priority_updates`; cosine averages use their explicitly defined count.
+
+The three fresh TRAIN150 recipes target 1,000 epochs apiece, with reviews at 100, 500 and 1,000. A fresh TRAIN600 native reference and one candidate target 500 apiece, with reviews at 100 and 500. Nominate the organization-focused candidate unless the completed TRAIN150 evidence gives a clear reason to select all-parameter response instead. Stop at the declared final age; any later extension requires separate authorization. An epoch visits the declared training membership once. Qualification epochs are additional work.
+
+## Constructing matched recipes
+
+`tools/thermal_coupled_campaign_prepare.py` derives recipes from a saved R17-11 coupled-native template and the saved formal R17-4 schedule source. Select the template from the intended cohort. The preparer keeps the template's dataset, native membership, case pairs, calibration cases, query budgets and normalization; it writes only small JSON files and does not prepare the model or copy data. Provide a verified DATA2 round output directory and its declared byte limits. Examples use descriptive placeholders chosen by the operator:
+
+```bash
+python tools/thermal_coupled_campaign_prepare.py --template TRAIN150_TEMPLATE.json --schedule-source R17_4_FORMAL_RECIPE.json --cohort train150 --output-root ROUND_OUTPUT --recipe-dir ROUND_OUTPUT/recipes --initial-state ROUND_OUTPUT/qualification/Common_Train150_Epoch_Zero_R17_12.pt --round-name R17_12 --max-output-bytes OUTPUT_BUDGET --peak-temporary-bytes TEMPORARY_BUDGET --minimum-free-bytes FREE_HEADROOM
+python tools/thermal_coupled_campaign_prepare.py --template TRAIN600_TEMPLATE.json --schedule-source R17_4_FORMAL_RECIPE.json --cohort train600 --output-root ROUND_OUTPUT --recipe-dir ROUND_OUTPUT/recipes --initial-state ROUND_OUTPUT/qualification/Common_Train600_Epoch_Zero_R17_12.pt --round-name R17_12 --max-output-bytes OUTPUT_BUDGET --peak-temporary-bytes TEMPORARY_BUDGET --minimum-free-bytes FREE_HEADROOM
+```
+
+The defaults produce a native reference, all-parameter response and organization-focused response for TRAIN150, plus a native reference and organization-focused response for TRAIN600. If the completed comparison supports the alternative, use `--candidate-scope all_parameters` when constructing the formal pair in a fresh recipe directory. The source schedule has learning rate 0.0003 through epoch 1,000, cosine decay to 0.00003 at epoch 2,000, and 0.00003 thereafter. The clock is absolute: 500- or 1,000-epoch stops do not shorten it. The independent sampled-reader policy draws full and restricted access with equal probability once per effective batch; both members of a pair use that reader. Scheduled validation uses both readers. Query tile 512 uses FP32 and checkpointed execution; default activation-retention fraction is zero. GPU choice belongs only to the runtime invocation.
+
+Prepare one actual zero-epoch model, empty optimizer state, RNG and response calibration for each cohort. Use an enabled response recipe as the calibration carrier; calibration always measures all parameters, even when the carrier's later updates are organization-focused. All arms in that cohort load the same file, including the native reference. The calibration compares raw native and response gradients over the declared input-only training panel, without an optimizer advance. Do not reuse a TRAIN150 initial state or its normalization for TRAIN600.
+
+```bash
+python tools/observation_response_prepare.py --recipe TRAIN150_ALL_PARAMETER_RECIPE.json --fresh-epoch-zero --output COMMON_TRAIN150_STATE.pt --device RUNTIME_DEVICE
+python tools/observation_response_prepare.py --recipe TRAIN600_RESPONSE_RECIPE.json --fresh-epoch-zero --output COMMON_TRAIN600_STATE.pt --device RUNTIME_DEVICE
+```
+
+## Qualification and execution
+
+After the shared state exists, the following check runs two uninterrupted epochs and a separate two-epoch interrupted/resumed lineage. It reloads the saved configuration in a fresh process and compares the model, optimizer, RNG, sampler, provider, schedule, recording columns, losses, validation, next draws and loss-curve files. Charge all four epochs to technical qualification. Choose a new empty output under the declared round storage root.
+
+```bash
+python tools/verify_coupled_native_recovery.py --recipe ORGANIZATION_RESPONSE_RECIPE.json --output-root ROUND_OUTPUT/qualification/Organization_Focused_Recovery --device RUNTIME_DEVICE
+```
+
+For any one of the saved recipes, start and continue the same lineage as follows. Change the next stop only within the authorized horizon; use the saved configuration for every resume. Launch independent model processes only on devices available under the current runtime policy. Review startup timing once, then use sparse read-only monitoring. Keep the existing complete histories, ten-epoch curve cadence, validation and checkpoint milestones.
+
+```bash
+python tools/relation_anchored_train.py fit --recipe RECIPE.json --output RUN_DIRECTORY --stop-after 100 --device RUNTIME_DEVICE
+python tools/relation_anchored_train.py fit --recipe RUN_DIRECTORY/configs/resolved_config.json --output RUN_DIRECTORY --resume latest --stop-after 500 --device RUNTIME_DEVICE
+python tools/relation_anchored_train.py fit --recipe RUN_DIRECTORY/configs/resolved_config.json --output RUN_DIRECTORY --resume latest --stop-after 1000 --device RUNTIME_DEVICE
+```
+
+The last command applies only to the declared TRAIN150 horizon. For a future explicitly authorized stop beyond a saved horizon, use the same saved recipe and latest checkpoint with `--extend-horizon --stop-after AUTHORIZED_TOTAL_EPOCHS`. This extends the run without stretching or restarting the saved optimizer schedule; the command itself is not authorization.
+
+## Matched physical evaluation
+
+At TRAIN150 reviews use the saved input-selected TRAIN15 panel in `diagnostics/generated/r17_11_efficient_coupled_response/panels/native_panels.json` and the maintained assessment9. Run each command for both `restricted` and `full` reader values, writing separate outputs. The field evaluator also computes natural-scene differences and optional J/P and field-change diagnostics on the same physical positions. Assessment9 is historically exposed development evidence, not independent TEST data.
+
+```bash
+python tools/thermal_field_response_evaluate.py --recipe RUN_DIRECTORY/configs/resolved_config.json --run RUN_DIRECTORY --checkpoint CHECKPOINT --panels diagnostics/generated/r17_11_efficient_coupled_response/panels/native_panels.json --stage development --split train --read-mode READER --thermal-functionals --local-contrast-diagnostics --device RUNTIME_DEVICE --output TRAIN15_RESULT.json
+python tools/thermal_field_response_evaluate.py --recipe RUN_DIRECTORY/configs/resolved_config.json --run RUN_DIRECTORY --checkpoint CHECKPOINT --assessment9 --stage development --split validation --read-mode READER --thermal-functionals --local-contrast-diagnostics --device RUNTIME_DEVICE --output ASSESSMENT9_RESULT.json
+```
+
+At the final formal review, the specifically authorized original held-out coverage uses the maintained 89-case native evaluator once per model for both readers. It excludes the overlapping case 0273 and preserves all per-field means, tails and near-object results. It does not evaluate every TRAIN600 case or create new blind test evidence.
+
+```bash
+python tools/thermal_native_checkpoint_evaluate.py --checkpoint FORMAL_EPOCH_500_MODEL.pt --all-original-held-out --read-mode both --near-object-errors --query-tile-size 1024 --device RUNTIME_DEVICE --output ORIGINAL_HELDOUT89_RESULT.json
+```
+
+The previously exposed 80-edit/19-family corpus and candidate boards remain separate from training. Reuse the historical family roles (`fit`, `original_withheld`, `historical_new_withheld`, `native_seen`, `fresh_layout`), saved physical scenes and original TRAIN-only scales. `tools/thermal_r16_10_evaluate.py` supplies `family_board`, while `channelthermal.training.native_checkpoint.build_native_checkpoint_inference` restores the new checkpoint without a response-training binding. Use the preserved historical recipe only to locate the existing physical corpus and record raw model choices before joining physical outcomes. The ordinary historical `--board` CLI has older model and age restrictions, so a local evaluation driver must call those maintained functions for these new runs; do not edit a historical checkpoint or claim those old CLI restrictions already support R17-12. No physical solves are needed.
+
+Report predictor, relation/use, physical response, cost and inverse-choice outcomes separately. A changed access pattern or a faster query-only replay is not evidence of physical causality or complete training speed. Measure complete new-run cost and account for two gradient calculations; compare complete work and memory on the same device.

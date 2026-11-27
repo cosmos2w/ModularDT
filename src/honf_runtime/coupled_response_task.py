@@ -83,6 +83,32 @@ def attach_coupled_native_task(recipe, model, provider, binding):
     variant = spec.get('variant')
     if variant not in ('native_control', 'observed_response', 'sampled_reader_response'):
         raise ValueError('Choose native_control, observed_response or sampled_reader_response.')
+    reader_policy = spec.get('reader_policy',
+        'sampled_equal_probability' if variant == 'sampled_reader_response' else 'dual')
+    if reader_policy not in ('dual', 'sampled_equal_probability'):
+        raise ValueError('reader_policy must be dual or sampled_equal_probability.')
+    explicit_scope = 'response_update_scope' in spec
+    scope = spec.get('response_update_scope', 'disabled' if variant == 'native_control' else 'legacy_sum')
+    if scope not in ('disabled', 'all_parameters', 'organization_parameters', 'legacy_sum'):
+        raise ValueError('Invalid response_update_scope.')
+    if scope == 'legacy_sum' and explicit_scope:
+        raise ValueError('legacy_sum is reserved for existing recipes that omit response_update_scope.')
+    composition = spec.get('response_gradient_composition')
+    if scope in ('all_parameters', 'organization_parameters'):
+        if not isinstance(composition, Mapping) or set(composition) != {'kind', 'maximum_native_norm_ratio'}:
+            raise ValueError('Response updates require a native-priority composition and norm ratio.')
+        ratio = composition['maximum_native_norm_ratio']
+        if (composition['kind'] != 'native_priority_projection' or isinstance(ratio, bool)
+                or not isinstance(ratio, Real) or not math.isfinite(float(ratio)) or ratio <= 0):
+            raise ValueError('Invalid native-priority composition or norm ratio.')
+        composition = {'kind': 'native_priority_projection', 'maximum_native_norm_ratio': float(ratio)}
+    elif composition is not None:
+        raise ValueError('Response gradient composition requires an enabled response update scope.')
+    response_enabled = scope != 'disabled'
+    ownership = None
+    if explicit_scope:
+        from .organization_parameters import partition_organization_parameters
+        ownership = partition_organization_parameters(model)
     response_weight = spec.get('response_weight', 1.0)
     if isinstance(response_weight, bool) or not isinstance(response_weight, Real):
         raise ValueError('observation_response.response_weight must be a finite positive number.')
@@ -115,6 +141,9 @@ def attach_coupled_native_task(recipe, model, provider, binding):
     probability = float(spec.get('full_reader_probability', .5))
     if not 1 <= anchors <= 128 or pair_seed < 0 or reader_seed < 0 or not 0 < probability < 1:
         raise ValueError('Coupled anchors/seeds and reader probabilities are invalid.')
+    if ('reader_policy' in spec and reader_policy == 'sampled_equal_probability'
+            and probability != .5):
+        raise ValueError('sampled_equal_probability requires full_reader_probability 0.5.')
     if getattr(provider, 'sampling_version', SamplingKey.CASE_EPOCH_VERSION) != SamplingKey.CASE_EPOCH_VERSION:
         raise ValueError('Coupled panels require independent case_epoch_v1 query namespaces.')
     for pair in pairs:
@@ -221,7 +250,11 @@ def attach_coupled_native_task(recipe, model, provider, binding):
              'last_reader': None, 'last_epoch': 0, 'last_update': None}
     cache_report = {'builds': cache_usage['builds'], 'seconds': cache_usage['build_seconds']}
     provider.coupled_native_reader_mode = None
-    provider.native_reuse_loss_names = (() if variant == 'native_control' else ('coupled_native/response',))
+    provider.native_reuse_loss_names = (('coupled_native/response',) if response_enabled else ())
+    provider.native_priority_composition = (None if composition is None else {
+        'scope': scope, 'maximum_native_norm_ratio': composition['maximum_native_norm_ratio'],
+        'organization_parameters': ownership.organization_parameters,
+    })
     provider.auxiliary_loss_names = ()
     provider.auxiliary_update_terms = None
     provider.validation_auxiliary_terms = None
@@ -250,8 +283,15 @@ def attach_coupled_native_task(recipe, model, provider, binding):
             'sampling': 'uniform native row panel without replacement; coupled iid anchors and independent completion/order',
             'binding': binding.identity_payload(), 'reader_weights': {'full': .5, 'restricted': .5},
             'calibration_epoch': 0, 'response_ramp': 'min(epoch/50,1)',
-            'validation_objective_complete': variant == 'native_control' or bool(eligible_validation_pairs),
+            'validation_objective_complete': not response_enabled or bool(eligible_validation_pairs),
         }
+        if 'reader_policy' in spec:
+            result['observation_response']['reader_policy'] = reader_policy
+        if explicit_scope:
+            result['observation_response']['response_update_scope'] = scope
+            result['observation_response']['parameter_ownership'] = ownership.metadata()
+        if composition is not None:
+            result['observation_response']['response_gradient_composition'] = dict(composition)
         if response_weight != 1.0:
             result['observation_response']['response_weight'] = response_weight
         return result
@@ -305,7 +345,7 @@ def attach_coupled_native_task(recipe, model, provider, binding):
 
     def begin_native_update(self, *, epoch, update_index, update_count):
         del update_count
-        if variant == 'sampled_reader_response':
+        if reader_policy == 'sampled_equal_probability':
             key = SamplingKey(reader_seed, int(epoch), 0, 0, 'joint', 'reader',
                               sampling_version=SamplingKey.CASE_EPOCH_VERSION,
                               dataset_id=self.sampling_dataset_id)
@@ -353,7 +393,13 @@ def attach_coupled_native_task(recipe, model, provider, binding):
                 'coupled_common_probability_sum': 0., 'coupled_eligible_mass_sum': 0.,
                 'coupled_inverse_weight_sum': 0., 'coupled_inverse_weight_count': 0.}
         values = []
-        if variant == 'native_control':
+        if scope == 'disabled' and explicit_scope:
+            # Keep the same pair-aware native panels without extracting or
+            # constructing an unused physical-response objective.
+            work['coupled_pair_presentations'] = len((batch.auxiliary or {}).get('coupled_native', ()))
+            state['pair_presentations'] += int(work['coupled_pair_presentations'])
+            return {}, work
+        if not response_enabled:
             with torch.no_grad():
                 observed = estimates(batch, predictions)
         else:
@@ -369,7 +415,7 @@ def attach_coupled_native_task(recipe, model, provider, binding):
             if pair in eligible_pairs and estimate.loss is not None:
                 values.append(estimate.loss)
         state['pair_presentations'] += int(work['coupled_pair_presentations'])
-        if variant == 'native_control' or not values:
+        if not response_enabled or not values:
             return {}, work
         calibration = state['calibration']
         if not isinstance(calibration, Mapping):
@@ -467,9 +513,9 @@ def attach_coupled_native_task(recipe, model, provider, binding):
                 result[name] = dict(result[name])
                 result[name]['formula'] = (str(result[name].get('formula', 'Native objective.')) +
                     (' TRAIN executes one probability-weighted sampled reader per effective batch; '
-                     'validation executes and averages both readers.' if variant == 'sampled_reader_response'
+                     'validation executes and averages both readers.' if reader_policy == 'sampled_equal_probability'
                      else ' TRAIN and validation average full and restricted readers.'))
-        if variant != 'native_control':
+        if response_enabled:
             result['coupled_native/response'] = {'panel': 'physics', 'label': 'coupled native observed response',
                 'unit': 'weighted dimensionless squared error',
                 'formula': 'fixed-measure inverse-probability mean of paired native residual differences',
@@ -480,6 +526,10 @@ def attach_coupled_native_task(recipe, model, provider, binding):
                 result['coupled_native/response']['meaning'] = (
                     'Weighted coupled native response contribution, including the calibrated coefficient, '
                     f'epoch ramp, equal-pair and reader weights, and response_weight={response_weight!r}.')
+            if composition is not None:
+                result['coupled_native/response']['meaning'] = (
+                    'Nominal weighted response loss; its accumulated gradient is projected and capped '
+                    'before combining with the native gradient.')
         return result
 
     decode_keys = tuple(dict.fromkeys(getattr(getattr(model, 'core', model), '_additional_decode_count_keys', ())))
@@ -501,6 +551,9 @@ def attach_coupled_native_task(recipe, model, provider, binding):
                   'coupled_plan_builds', 'coupled_plan_build_seconds', 'native_fluid_queries',
                   'native_union_rows', 'native_local_pairs', *execution_work_names,
                   *(f'core_prepare_primary_{name}' for name in preparation_names))
+    if composition is not None:
+        from .native_priority_composer import STAT_DEFINITIONS
+        work_names += tuple(f'native_priority_{name}' for name in STAT_DEFINITIONS)
     def training_history_columns(self):
         native = tuple(c for c in old_columns() if not c.startswith(('train_losses.observation_response/',
             'work_counts.observation_response_', 'train_losses.native_pair/', 'work_counts.native_pair_',
@@ -515,6 +568,14 @@ def attach_coupled_native_task(recipe, model, provider, binding):
             result['work_counts.' + name] = {'dtype': 'float', 'unit': ('s' if name.endswith('_seconds') else
                 'count' if not name.endswith('_sum') else '1'),
                 'meaning': 'Epoch sum of ' + name.replace('_', ' ')}
+        if composition is not None:
+            for name, (unit, meaning) in STAT_DEFINITIONS.items():
+                result['work_counts.native_priority_' + name] = {
+                    'dtype': 'float', 'unit': unit, 'meaning': meaning}
+            result['train_loss_total'] = {
+                'dtype': 'float', 'unit': 'weighted objective units',
+                'meaning': 'Nominal sum of recorded weighted TRAIN losses; the projected and capped '
+                           'parameter update is not the gradient of this sum.'}
         return result
 
     def set_coupled_calibration(self, record):
@@ -591,7 +652,7 @@ def attach_coupled_native_task(recipe, model, provider, binding):
                    training_history_columns, training_column_definitions, set_coupled_calibration,
                    calibrate_coupled_native):
         setattr(provider, method.__name__, MethodType(method, provider))
-    if variant != 'native_control':
+    if response_enabled:
         provider.validation_auxiliary_terms = MethodType(validation_auxiliary_terms, provider)
     provider.coupled_native_plan = get_plan
     provider.coupled_native_cache_usage = cache_usage

@@ -286,10 +286,10 @@ def test_selected_prediction_and_gradients_are_independent_of_companions(state, 
 
 def test_checkpoint_plan_scope_restores_after_exception():
     from honf_forward_core.interaction_reused_member_routing.anchored import _checkpoint_integer_plans
-    assert _checkpoint_integer_plans.get() is True
-    with pytest.raises(RuntimeError), anchored_checkpoint_integer_plans(False):
-        assert _checkpoint_integer_plans.get() is False
+    previous = _checkpoint_integer_plans.get()
+    with pytest.raises(RuntimeError), anchored_checkpoint_integer_plans(not previous):
+        assert _checkpoint_integer_plans.get() is not previous
         raise RuntimeError("stop")
-    assert _checkpoint_integer_plans.get() is True
+    assert _checkpoint_integer_plans.get() is previous
     with pytest.raises(ValueError), anchored_checkpoint_integer_plans("false"):
         pass

@@ -25,6 +25,14 @@ from honf_runtime.coupled_initialization import _same
 from honf_runtime.storage_policy import _ensure_workspace_storage_bindings, verify_storage
 
 
+def _sampled_reader_recipe(response):
+    """Accept both the legacy variant and the independent reader policy."""
+    return (response.get('mode') == 'coupled_native'
+            and (response.get('reader_policy') == 'sampled_equal_probability'
+                 or (response.get('reader_policy') is None
+                     and response.get('variant') == 'sampled_reader_response')))
+
+
 def _reverse_keys(value):
     if isinstance(value, dict):
         return {key: _reverse_keys(value[key]) for key in reversed(list(value))}
@@ -239,8 +247,7 @@ def main(argv=None):
         resumed = root / 'Interrupted_Sampled_Reader_Recovery'
         saved_path = resumed / 'configs/resolved_config.json'
         recipe = json.loads(saved_path.read_text(encoding='utf-8'))
-        if (recipe.get('observation_response', {}).get('mode') != 'coupled_native'
-                or recipe['observation_response'].get('variant') != 'sampled_reader_response'):
+        if not _sampled_reader_recipe(recipe.get('observation_response', {})):
             raise ValueError('The saved interrupted recipe must be sampled-reader coupled native.')
         _ensure_workspace_storage_bindings()
         verify_storage(recipe, output=root, estimated_bytes=1024**3, peak_temporary_bytes=1024**3)
@@ -265,7 +272,7 @@ def main(argv=None):
         raise FileExistsError('Choose a new empty recovery root; existing artifacts are protected.')
     recipe = json.loads(args.recipe.read_text(encoding='utf-8'))
     response = recipe.get('observation_response', {})
-    if response.get('mode') != 'coupled_native' or response.get('variant') != 'sampled_reader_response':
+    if not _sampled_reader_recipe(response):
         raise ValueError('Recovery qualification requires a sampled-reader coupled native recipe.')
     if int(recipe['training']['local_horizon']) < 2:
         raise ValueError('The saved scientific training horizon must include at least two epochs.')

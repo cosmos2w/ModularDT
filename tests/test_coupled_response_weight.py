@@ -175,6 +175,39 @@ def test_common_zero_excludes_only_weight_but_resume_retains_it():
         resolve_training_recording(before, after)
 
 
+def test_common_zero_shares_update_scope_but_keeps_reader_policy():
+    config, model, provider = _build()
+    engine = cli.engine_for(config, device='cpu')
+    identity = copy.deepcopy(provider.identity_payload())
+    identity['observation_response'].update(reader_policy='sampled_equal_probability',
+        full_reader_probability=.5, response_update_scope='all_parameters',
+        response_gradient_composition={'kind': 'native_priority_projection', 'maximum_native_norm_ratio': .1})
+    identity['recipe'] = {'name': 'all response', 'observation_response': {
+        'mode': 'coupled_native', 'variant': 'observed_response',
+        'reader_policy': 'sampled_equal_probability', 'full_reader_probability': .5,
+        'response_update_scope': 'all_parameters', 'response_gradient_composition': {
+            'kind': 'native_priority_projection', 'maximum_native_norm_ratio': .1}}}
+    provider.identity_payload = lambda: copy.deepcopy(identity)
+    original = copy.deepcopy(identity)
+    contract = common_contract(model, provider, engine)
+    for scope in ('disabled', 'organization_parameters'):
+        changed = copy.deepcopy(identity)
+        changed['observation_response']['response_update_scope'] = scope
+        changed['recipe']['name'] = scope
+        changed['recipe']['observation_response'].update(
+            variant='native_control' if scope == 'disabled' else 'observed_response',
+            response_update_scope=scope)
+        if scope == 'disabled':
+            changed['observation_response'].pop('response_gradient_composition')
+            changed['recipe']['observation_response'].pop('response_gradient_composition')
+        provider.identity_payload = lambda changed=changed: copy.deepcopy(changed)
+        assert _same(contract, common_contract(model, provider, engine))
+    changed['observation_response']['reader_policy'] = 'dual_reader'
+    provider.identity_payload = lambda: copy.deepcopy(changed)
+    assert not _same(contract, common_contract(model, provider, engine))
+    assert identity == original
+
+
 def test_saved_config_reload_accepts_key_reordering_and_rejects_weight_change(tmp_path, monkeypatch):
     config, _, _ = _build(.5)
     saved = {'epoch': 1, 'experiment_identity': {'recipe': copy.deepcopy(config),
