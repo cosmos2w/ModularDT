@@ -1004,6 +1004,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     joint_validation_label = "exposed VAL89" if canonical_val89_joint else "exposed DEV"
     if scratch_family_run:
         joint_validation_label = "sampled VAL9/89"
+    elif observation_response_run:
+        joint_validation_label = "checkpoint selector panel"
     elif state_response_run:
         joint_validation_label = "configured validation panel"
     budgeted_native_run = any(isinstance(row.get("native_budgeted_routing_state"), Mapping) for row in history)
@@ -1848,7 +1850,8 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
         "validation_scope": "exposed held-out validation with hard inference; not an independent TEST result",
     }
     if joint_run:
-        validation_label = "exposed canonical VAL89" if canonical_val89_joint else "fixed exposed DEV"
+        validation_label = ("checkpoint selector panel" if observation_response_run else
+                            "exposed canonical VAL89" if canonical_val89_joint else "fixed exposed DEV")
         metadata["validation_scope"] = f"{validation_label} joint inference; not an independent TEST result"
         metadata["prediction_path_comparison"] = (
             f"TRAIN and {validation_label} execute the same joint model. TRAIN averages macro-update means across updates; "
