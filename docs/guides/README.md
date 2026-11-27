@@ -5,6 +5,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | Guide | Purpose |
 | --- | --- |
 | [Global organization visualization](Global_Hypergraph_Organization_Visualization.md) | Actual relation provenance, three standard views and saved-evidence plotting. |
+| [Organization response diagnostics](Organization_Response_Diagnostics.md) | Exact finite access/message allocation and matched stage/member interventions on saved physical edits. |
 | [Run artifacts and monitoring](Run_Artifacts_and_Monitoring.md) | Shared CSV/small-JSON recording target, resumable state, loss panels and historical formats. |
 | [Query tiling](Query_Tiling.md) | Decoder speed/memory tradeoffs, testing on your own inputs and explicit resume scope. |
 | [Thermal development protocol](Thermal_Model_Development_Protocol.md) | Input-only membership, TRAIN-only normalization and fair epoch budgets. |
@@ -15,6 +16,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | [Thermal port/local integration](Thermal_Port_Local_Integration.md) | One-pass angular ports, frozen local readout and strict checkpoint loading. |
 | [Response pairs from the base dataset](Base_Dataset_Response_Pairs.md) | No-new-solve supervision, the shared adapter target, physical correspondence and fair comparisons. |
 | [General observation and response training](General_Observation_Response_Training.md) | Native prediction reuse, sampled reader execution, observation blocks and fresh-process recovery examples. |
+| [Thermal organization-focused response](Thermal_Organization_Focused_Response.md) | Matched fresh initialization, update-scope recipes, absolute schedules and exposed-panel evaluation. |
 | [Target contrasts and state priority](Targeted_Response_and_State_Priority.md) | Bounded combinations of saved fields, explicit support and optional response-gradient projection. |
 | [State and finite-response training](State_Response_Training.md) | Existing edited-scene provider, shared reductions, TRAIN-only calibration and historical compatibility. |
 | [Thermal finite-response dataset](Thermal_Finite_Response_Dataset.md) | Optional historical edited-scene corpus, source precision, roles and direct reader. |
