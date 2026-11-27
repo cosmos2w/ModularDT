@@ -352,10 +352,10 @@ def family_board(model, provider, recipe, role, input_path, output, *, selected_
                 if request['model_selected_action'] != saved['selected_action']:
                     raise ValueError('Physical join changed the saved model-only selection')
                 if expected_actions is not None:
-                    objective = request['objective']
+                    objective, chosen = request['objective'], request['model_selected_action']
                     raw_feasible = not request['raw_constraint_violation']
                     selected_delta = request['selected_physical_delta'][objective]
-                    raw_regret = (selected_delta - true_delta[request['physical_best_action']][objective]
+                    raw_regret = (physical[chosen][objective] - physical[request['physical_best_action']][objective]
                                   if raw_feasible else None)
                     request.update(raw_physically_feasible=raw_feasible,
                         raw_physically_improving=selected_delta < 0.,

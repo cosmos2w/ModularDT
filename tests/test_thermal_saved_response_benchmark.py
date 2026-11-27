@@ -238,8 +238,8 @@ def test_family_board_raw_decisions_use_physical_changes_before_fallback(
             assert request['physically_improving'] is True
             assert request['numerically_resolved_improvement'] is resolved
             absolute_state_regret = physical['selected_edit']['J'] - physical['better_edit']['J']
-            assert request['raw_feasible_regret'] == pytest.approx(absolute_state_regret)
-            assert request['raw_feasible_normalized_regret'] == pytest.approx(absolute_state_regret / 2.)
+            assert request['raw_feasible_regret'] == absolute_state_regret
+            assert request['raw_feasible_normalized_regret'] == absolute_state_regret / 2.
         pressure_request = next(item for item in board['views'][reader]['decisions']
                                 if item['objective'] == 'P' and item['multiplier'] == .5)
         assert pressure_request['selected_physical_delta']['P'] == pytest.approx(selected_p_change)
