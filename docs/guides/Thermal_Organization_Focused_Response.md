@@ -40,6 +40,8 @@ python tools/verify_coupled_native_recovery.py --recipe ORGANIZATION_RESPONSE_RE
 
 For any one of the saved recipes, start and continue the same lineage as follows. Change the next stop only within the authorized horizon; use the saved configuration for every resume. Launch independent model processes only on devices available under the current runtime policy. Review startup timing once, then use sparse read-only monitoring. Keep the existing complete histories, ten-epoch curve cadence, validation and checkpoint milestones.
 
+For formal TRAIN600 runs, the physical run directory must be a direct child of `storage.output_root`, for example `ROUND_OUTPUT/Native_State_Reference_Train600_R17_12`. A convenient `RUN_DIRECTORY` symlink may point to that directory. A nested physical path such as `ROUND_OUTPUT/runs/NAME` does not satisfy the formal-alias policy when the configured root is `ROUND_OUTPUT`; keep the physical payload at the declared root and preserve the usual formal alias under `Trained_Results/ThermalChannel/HONF_Forward_Runs/`.
+
 ```bash
 python tools/relation_anchored_train.py fit --recipe RECIPE.json --output RUN_DIRECTORY --stop-after 100 --device RUNTIME_DEVICE
 python tools/relation_anchored_train.py fit --recipe RUN_DIRECTORY/configs/resolved_config.json --output RUN_DIRECTORY --resume latest --stop-after 500 --device RUNTIME_DEVICE
