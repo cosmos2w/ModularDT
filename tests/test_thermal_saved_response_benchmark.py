@@ -62,9 +62,10 @@ def test_explicit_fit_panel_does_not_filter_by_current_native_membership(tmp_pat
         old.family_board_inputs(recipe, 'fit', ('0101',), selected_families=('0102', '0102'))
 
 
-def test_physical_change_reports_zero_reference_direction_and_new_fluid():
-    baseline = (np.array([2., 8., 3.]), np.array([1., 7., 5.]), np.array([1, 1, 0]))
-    edited = (np.array([5., 9., 10.]), np.array([3., 8., 8.]), np.array([1, 1, 1]))
+@pytest.mark.parametrize('dtype', [np.float32, np.float64])
+def test_physical_change_reports_zero_reference_direction_and_new_fluid(dtype):
+    baseline = (np.array([2., 8., 3.], dtype=dtype), np.array([1., 7., 5.], dtype=dtype), np.array([1, 1, 0]))
+    edited = (np.array([5., 9., 10.], dtype=dtype), np.array([3., 8., 8.], dtype=dtype), np.array([1, 1, 1]))
     measured = old.physical_response_error(baseline, edited, detailed=True, newly_valid_state=True)
     assert measured['rmse'] == pytest.approx(np.sqrt(.5))
     assert measured['zero_change_reference_rmse'] == pytest.approx(np.sqrt(2.5))
@@ -72,6 +73,9 @@ def test_physical_change_reports_zero_reference_direction_and_new_fluid():
     assert measured['magnitude_ratio'] == pytest.approx(np.sqrt(10 / 5))
     assert measured['direction_cosine'] == pytest.approx(7 / np.sqrt(50))
     assert measured['newly_valid_edited_state'] == {'count': 1, 'rmse': 2.}
+    assert type(measured['reference_resolved']) is bool
+    assert type(measured['prediction_resolved']) is bool
+    assert json.loads(json.dumps(measured, allow_nan=False)) == measured
     zero = old.physical_response_error(baseline, baseline, detailed=True)
     assert zero['relative_to_zero_change_rmse'] is None and zero['direction_cosine'] is None
     assert old.physical_response_error(baseline, edited) == {'rmse': pytest.approx(np.sqrt(.5)), 'count': 2}
