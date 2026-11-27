@@ -55,12 +55,35 @@ python tools/thermal_field_response_evaluate.py --recipe RUN_DIRECTORY/configs/r
 python tools/thermal_field_response_evaluate.py --recipe RUN_DIRECTORY/configs/resolved_config.json --run RUN_DIRECTORY --checkpoint CHECKPOINT --assessment9 --stage development --split validation --read-mode READER --thermal-functionals --local-contrast-diagnostics --device RUNTIME_DEVICE --output ASSESSMENT9_RESULT.json
 ```
 
+## Occasional loss-family gradient audit
+
+At a declared review, run the following once for each saved checkpoint. It uses the same input-selected TRAIN15 scenes and native sampling epoch 1 for both readers, retains the checkpoint's actual pair identities and common initial response calibration, sets the organization clock to the checkpoint epoch with update index zero, and writes a new compact JSON record. Replace the checkpoint, output and runtime device with the chosen review values.
+
+```bash
+python tools/thermal_loss_family_gradient_audit.py --checkpoint RUN_DIRECTORY/checkpoints/epoch_0100_model.pt --panels diagnostics/generated/r17_11_efficient_coupled_response/panels/native_panels.json --device RUNTIME_DEVICE --output ROUND_OUTPUT/evidence/MODEL_GRADIENT_AUDIT_EPOCH_0100.json
+```
+
+The record gives raw weighted loss-family gradient norms and cosines for all parameters and for the resolved organization and content/shared subsets. Native reductions use the actual ordered loss weights and denominators on all 15 scenes; response averages only configured eligible pairs wholly inside the panel and uses the saved calibration and checkpoint-epoch ramp. Both pair members use the same reader. For the present TRAIN150 pairing the panel contains five complete pairs; the TRAIN600 pairing contains one, which limits its response comparison. An outside-panel pair member can affect the existing native sampling plan but is not decoded. The native-reference response is a diagnostic calculation only: the audit performs no fitting or optimizer update. These fixed-panel gradients are not the actual 48-case update, and precede projection, clipping and AdamW. It records restoration, preparation and gradient time plus forward-work and gradient-call counts; the forward counters do not include checkpoint recomputation during gradients. The provider and sampler recovery state, model state and random streams are restored; any temporary metadata warmed during this standalone process is discarded when it exits.
+
 At the final formal review, the specifically authorized original held-out coverage uses the maintained 89-case native evaluator once per model for both readers. It excludes the overlapping case 0273 and preserves all per-field means, tails and near-object results. It does not evaluate every TRAIN600 case or create new blind test evidence.
 
 ```bash
 python tools/thermal_native_checkpoint_evaluate.py --checkpoint FORMAL_EPOCH_500_MODEL.pt --all-original-held-out --read-mode both --near-object-errors --query-tile-size 1024 --device RUNTIME_DEVICE --output ORIGINAL_HELDOUT89_RESULT.json
 ```
 
-The previously exposed 80-edit/19-family corpus and candidate boards remain separate from training. Reuse the historical family roles (`fit`, `original_withheld`, `historical_new_withheld`, `native_seen`, `fresh_layout`), saved physical scenes and original TRAIN-only scales. `tools/thermal_r16_10_evaluate.py` supplies `family_board`, while `channelthermal.training.native_checkpoint.build_native_checkpoint_inference` restores the new checkpoint without a response-training binding. Use the preserved historical recipe only to locate the existing physical corpus and record raw model choices before joining physical outcomes. The ordinary historical `--board` CLI has older model and age restrictions, so a local evaluation driver must call those maintained functions for these new runs; do not edit a historical checkpoint or claim those old CLI restrictions already support R17-12. No physical solves are needed.
+The previously exposed 80-edit/19-family corpus and saved seven-candidate inverse request remain separate from training. `tools/thermal_saved_response_benchmark.py` restores a saved native checkpoint and uses the same fixed historical family/action identities for every model. It checks their saved physical source paths, records each baseline's current native-training membership separately, and persists both readers' model choices before the physical outcome join. The fixed historical scales and response roles (`fit`, `original_withheld`, `historical_new_withheld`, `native_seen`, `fresh_layout`) are preserved. Field results include the zero-change reference error, predicted and reference change magnitudes, resolved direction and ratio, and separate newly valid fluid-state errors. No physical solves or new labels are needed.
+
+Prepare the panel once from the existing R17-4 reference board files, their source recipe and scale records, and the original saved strict-request protocol. Each placeholder is a path to the named existing artifact; all output belongs under the declared round storage budget.
+
+```bash
+python tools/thermal_saved_response_benchmark.py prepare --reference-boards REFERENCE_BOARD_DIRECTORY --historical-recipe HISTORICAL_CORPUS_RECIPE.json --training-inputs HISTORICAL_TRAIN600_SCALES.json --strict-protocol HISTORICAL_STRICT_PROTOCOL.json --strict-scales-identity HISTORICAL_STRICT_SCALE_IDENTITY.json --historical-new-manifest HISTORICAL_NEW_ACTIONS.json --native-seen-manifest NATIVE_SEEN_CORPUS.json --fresh-layout-manifest FRESH_LAYOUT_CORPUS.json --output ROUND_OUTPUT/evidence/fixed_saved_response_panel_complete.json
+python tools/thermal_saved_response_benchmark.py evaluate --panel ROUND_OUTPUT/evidence/fixed_saved_response_panel_complete.json --checkpoint RUN_DIRECTORY/checkpoints/epoch_1000_model.pt --output-dir ROUND_OUTPUT/evidence/MODEL_RESPONSE_REVIEW --device RUNTIME_DEVICE
+```
+
+For an intermediate review of the original and historical-new withheld roles, retain their exact three families and 16 edits using the following narrower invocation. The final formal checkpoint is `epoch_0500_model.pt`; the TRAIN150 final checkpoint is `epoch_1000_model.pt`. A complete evaluation includes all five roles and the strict request.
+
+```bash
+python tools/thermal_saved_response_benchmark.py evaluate --panel ROUND_OUTPUT/evidence/fixed_saved_response_panel_complete.json --checkpoint RUN_DIRECTORY/checkpoints/epoch_0500_model.pt --output-dir ROUND_OUTPUT/evidence/MODEL_WITHHELD_REVIEW --role original_withheld --role historical_new_withheld --skip-strict-request --device RUNTIME_DEVICE
+```
 
 Report predictor, relation/use, physical response, cost and inverse-choice outcomes separately. A changed access pattern or a faster query-only replay is not evidence of physical causality or complete training speed. Measure complete new-run cost and account for two gradient calculations; compare complete work and memory on the same device.
