@@ -141,6 +141,113 @@ def test_fixed_actions_reject_drift_before_prediction_files(tmp_path, monkeypatc
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize(
+    ('selected_j_change', 'selected_p_change', 'violation', 'resolved'),
+    [(-.2, -.4, False, True), (-.02, -.4, False, False), (-.2, .8, True, True)],
+    ids=('feasible_improvement', 'feasible_unresolved', 'infeasible_improvement'),
+)
+def test_family_board_raw_decisions_use_physical_changes_before_fallback(
+        tmp_path, monkeypatch, selected_j_change, selected_p_change, violation, resolved):
+    from channelthermal import native_design, native_functionals, physical_response
+    from channelthermal.training import thermal_response_raw
+
+    config = {'layout': {'centers': [[0, 0]], 'heat_powers': [1.]},
+              'domain': {'lx': 1.}, 'flow': {'re': 1.}}
+    actions = [{'action': 'selected_edit', 'centers': [[1, 0]], 'raw_path': 'selected_edit'},
+               {'action': 'better_edit', 'centers': [[2, 0]], 'raw_path': 'better_edit'}]
+    case = {'family': '0052', 'config': config, 'baseline_path': 'baseline',
+            'module_count': 1, 'actions': actions}
+    monkeypatch.setattr(old, 'family_board_inputs', lambda *args, **kwargs: ([case], 1))
+    metadata = write(tmp_path / 'metadata.json', {'sensitivity': {'J': .01, 'P': .01},
+        'research_scales': {'J': 1., 'P': 1.}, 'response_scales': {'J': 2., 'P': 2.}})
+    output = tmp_path / 'board.json'
+
+    def design(config, *args, **kwargs):
+        return SimpleNamespace(action=int(config['layout']['centers'][0][0]),
+            fluid_xy_source=np.array([[0., 0.]]), module_id_grid=np.array([[0]]),
+            fluid_valid=np.array([True]), surface_valid=np.array([True]),
+            outside_valid=np.array([True]), material_valid=np.array([[True]]), domain_length_x=1.)
+
+    predicted = {0: {'J': 20., 'P': 3.}, 1: {'J': 19.8, 'P': 2.9},
+                 2: {'J': 19.9, 'P': 3.}}
+    field_names = ('flow/u', 'flow/v', 'flow/p', 'flow/omega', 'temperature/fluid',
+                   'temperature/surface', 'q_proxy', 'temperature/material')
+    def score(_model, design, **kwargs):
+        fields = {}
+        for name in field_names:
+            shape = (1, 1, 1) if name == 'temperature/material' else (1, 1)
+            fields[name] = {'prediction': torch.zeros(shape), 'mask': torch.ones(shape, dtype=torch.bool)}
+        return {'fields': fields, 'functionals': predicted[design.action], 'work': {}}
+
+    physical = {'baseline': {'J': 10., 'P': 2.},
+                'selected_edit': {'J': 10. + selected_j_change, 'P': 2. + selected_p_change},
+                'better_edit': {'J': 9.6, 'P': 1.8}}
+    assert physical['selected_edit']['J'] > 0 and physical['selected_edit']['P'] > 0
+    def raw_endpoint(name):
+        manifest = json.loads((tmp_path / 'board_prediction_manifest.json').read_text())
+        assert len(manifest['states']) == 6
+        assert all(Path(state['path']).is_file() for state in manifest['states'])
+        selected = [item for item in manifest['model_choices']
+                    if item['objective'] == 'J' and item['multiplier'] == .5]
+        assert len(selected) == 2 and all(item['selected_action'] == 'selected_edit' for item in selected)
+        raw_config = copy.deepcopy(config)
+        if name != 'baseline':
+            raw_config['layout']['centers'] = next(item['centers'] for item in actions if item['action'] == name)
+        field = np.zeros((1, 5), dtype=np.float64)
+        field[0, 2] = physical[name]['P']
+        return {'config': raw_config, 'module_id_grid': np.array([[0]]), 'field': field,
+                'interface_target': np.zeros((1, 2)), 'material': np.array([[physical[name]['J']]]),
+                'material_mask': np.array([True]), 'outside_valid': np.array([True])}
+
+    monkeypatch.setattr(native_design, 'build_native_design', design)
+    monkeypatch.setattr(native_design, 'score_native_design', score)
+    monkeypatch.setattr(thermal_response_raw, 'load_raw_endpoint', raw_endpoint)
+    monkeypatch.setattr(native_functionals, 'native_design_functionals',
+                        lambda material, _material_mask, pressure, *_args: (material.reshape(-1)[0], pressure.reshape(-1)[0]))
+    monkeypatch.setattr(physical_response, 'summarize_actions', lambda *args, **kwargs: {})
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(()))
+            self.core = SimpleNamespace(query_tile_size=0)
+
+    board = old.family_board(Model(), SimpleNamespace(training_case_ids=[]), {}, 'original_withheld',
+                             metadata, output, selected_families=('0052',),
+                             expected_actions={'0052': ['selected_edit', 'better_edit']})
+    for reader in ('restricted', 'full'):
+        request = next(item for item in board['views'][reader]['decisions']
+                       if item['objective'] == 'J' and item['multiplier'] == .5)
+        assert request['model_selected_action'] == 'selected_edit'
+        assert request['selected_physical_delta']['J'] == pytest.approx(selected_j_change)
+        assert request['selected_physical_delta']['P'] == pytest.approx(selected_p_change)
+        assert request['raw_constraint_violation'] is violation
+        assert request['raw_physically_feasible'] is not violation
+        assert request['raw_physically_improving'] is True
+        assert request['raw_numerically_resolved_improvement'] is resolved
+        assert request['offline_truth_based_fallback_used'] is violation
+        if violation:
+            assert request['accepted_action'] == 'baseline'
+            assert request['physically_improving'] is False
+            assert request['numerically_resolved_improvement'] is False
+            assert request['raw_feasible_regret'] is None
+            assert request['raw_feasible_normalized_regret'] is None
+            assert request['regret'] == pytest.approx(.4)
+        else:
+            assert request['accepted_action'] == 'selected_edit'
+            assert request['physically_improving'] is True
+            assert request['numerically_resolved_improvement'] is resolved
+            absolute_state_regret = physical['selected_edit']['J'] - physical['better_edit']['J']
+            assert request['raw_feasible_regret'] == pytest.approx(absolute_state_regret)
+            assert request['raw_feasible_normalized_regret'] == pytest.approx(absolute_state_regret / 2.)
+        pressure_request = next(item for item in board['views'][reader]['decisions']
+                                if item['objective'] == 'P' and item['multiplier'] == .5)
+        assert pressure_request['selected_physical_delta']['P'] == pytest.approx(selected_p_change)
+        assert pressure_request['raw_physically_improving'] is (selected_p_change < 0.)
+        assert pressure_request['raw_numerically_resolved_improvement'] is (selected_p_change < -.04)
+        assert pressure_request['raw_feasible_regret'] == pytest.approx(1. if violation else 0.)
+
+
 def test_strict_choice_is_persisted_before_physical_join(tmp_path, monkeypatch):
     from channelthermal import native_design
     panel, _, _, manifest = make_fixed_reference(tmp_path, monkeypatch)
