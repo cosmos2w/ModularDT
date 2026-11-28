@@ -40,6 +40,14 @@ Source indices, weights, extraction maps and actual basis/frame capability are s
 
 `tools/verify_coupled_native_recovery.py --recipe RECIPE --output-root EMPTY_ROOT --device DEVICE` checks uninterrupted training against a real checkpoint interruption and fresh-process saved-config reload/resume. It checks tensors, optimizer, RNG, sampler/provider, reader state, finite source maps/calibration, recorded values/order and curve artifacts. Timing and disposable cache-build counters are explicitly excluded from numerical equality. Use this qualification within an authorized experiment and its epoch/storage budget.
 
+## Checkpoint gradient audit
+
+`python tools/finite_observation_gradient_audit.py --checkpoint CHECKPOINT --panels MATCHED_PANELS --stage development --device DEVICE --output AUDIT_JSON` measures the saved checkpoint on the declared pair-complete TRAIN150 review panel; use `--stage formal` for TRAIN600. The panels contain 16 of 150 or 60 of 600 cases, respectively. The native sampling stream is fixed to epoch 1 for matched reviews, while the organization clock and finite-loss ramp use the checkpoint's actual epoch. Full and restricted readers are measured separately.
+
+For each physical family, the raw contrast gradient is the unweighted gradient of its scene-summary error, averaged over the fixed eligible-pair count. Its weighted contribution additionally applies that family's configured weight divided by the sum of all configured weights, including weights of absent families. Norms are reported for all trainable parameters, exclusive organization parameters, and the remaining content and output parameters. The reported total contrast norm comes from the sum of weighted gradient vectors; it is not the sum of family norms.
+
+The audit also reports native, anchor and total contrast gradients, the saved epoch-zero coefficients, and their checkpoint-epoch ramp. Enabled terms have effective scaled norms; disabled terms remain prospective measurements, with a prospective scale only when the checkpoint contains the saved calibration. Other training losses, including legacy response objectives, are excluded from the combined native-plus-finite norm. The audit does not recalibrate, update an optimizer or change the model, provider state, random generators or clocks. These panel gradients describe training-signal reach, not a fixed-control physical response or a learning result.
+
 ## Cost and evaluation boundaries
 
 Record real and padded query slots, dependencies, preparation reuse, original-member score/value work, complete process time and peak memory. Fewer VJPs or shared preparation alone does not establish a measured speedup. Keep activation checkpointing and configured query tiling, and compare complete epochs on the same device. The probe metadata cache is immutable and bounded independently of any inherited native-plan cache.

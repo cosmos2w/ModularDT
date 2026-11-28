@@ -164,13 +164,15 @@ def test_complete_source_support_is_a_separate_review_only_request(binding):
 
 
 def test_review_observer_reduces_full_existing_fields_without_new_prediction(binding):
+    from dataclasses import asdict
     from finite_observation_evaluate import ThermalFiniteObservationObserver, verify_saved_thermal_observation_identity
 
     cases = ('first_scene', 'second_scene')
     model = binding.provider.model
     model.field_mean = torch.zeros(5)
     saved = {'experiment_identity': {'provider_identity': {
-        'finite_observations': {'family_weights': binding.finite_observation_family_weights()},
+        'finite_observations': {'family_weights': binding.finite_observation_family_weights(),
+                                'frame': asdict(binding.finite_observation_frame())},
         'adapter_state': {'normalization_stats': {'field_mean_by_channel': model.field_mean.tolist(),
             'field_std_by_channel': model.field_std.tolist(),
             'internal_temperature_std': model.internal_temperature_std.tolist(),

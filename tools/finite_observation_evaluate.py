@@ -360,6 +360,10 @@ def verify_saved_thermal_observation_identity(binding, saved):
         saved_weights = finite.get('family_weights')
         if not isinstance(saved_weights, dict) or actual_weights != saved_weights:
             raise ValueError('Thermal observation family weights differ from the saved finite identity.')
+        frame = binding.finite_observation_frame()
+        actual_frame = None if frame is None else _number(asdict(frame))
+        if 'frame' not in finite or _number(finite['frame']) != actual_frame:
+            raise ValueError('Thermal observation frame differs from the saved finite identity.')
     stats = identity.get('adapter_state', {}).get('normalization_stats', {})
     model = binding.provider.model
     definitions = (
@@ -388,7 +392,7 @@ def verify_saved_thermal_observation_identity(binding, saved):
               'temperature/fluid': field[4], 'temperature/material': normalized['internal_temperature_std'][0],
               'temperature/surface': surface[0], 'q_proxy': surface[1],
               'port/outside_temperature': field[4]}
-    return {'family_weights': 'matched saved finite identity' if finite else 'no finite identity in checkpoint',
+    return {'family_weights_and_frame': 'matched saved finite identity' if finite else 'no finite identity in checkpoint',
             'source_scales_and_field_offsets': 'matched saved native adapter normalization',
             'family_scales': scales, 'selected_row_and_extraction_identity': 'not compared'}
 

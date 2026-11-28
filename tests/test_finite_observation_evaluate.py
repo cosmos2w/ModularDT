@@ -97,14 +97,16 @@ def _saved_normalization_example():
         interface_target_std=torch.tensor(stats['interface_targets_std']))
     saved = {'experiment_identity': {'provider_identity': {
         'adapter_state': {'normalization_stats': stats},
-        'finite_observations': {'family_weights': {'flow/u': 1., 'port/outside_temperature': .05}}}}}
+        'finite_observations': {'family_weights': {'flow/u': 1., 'port/outside_temperature': .05},
+                                'frame': {'identity': 'test_frame', 'lower': [0., 0.], 'upper': [1., 1.]}}}}}
     return model, saved
 
 
 def test_saved_identity_checks_weights_normalization_and_emitted_family_scale():
     model, saved = _saved_normalization_example()
     binding = SimpleNamespace(provider=SimpleNamespace(model=model),
-        finite_observation_family_weights=lambda: {'flow/u': 1., 'port/outside_temperature': .05})
+        finite_observation_family_weights=lambda: {'flow/u': 1., 'port/outside_temperature': .05},
+        finite_observation_frame=lambda: AffineFrame('test_frame', (0., 0.), (1., 1.)))
     checked = review.verify_saved_thermal_observation_identity(binding, saved)
     assert checked['family_scales']['temperature/material'] == 6.
     assert checked['family_scales']['q_proxy'] == 8.
@@ -113,6 +115,11 @@ def test_saved_identity_checks_weights_normalization_and_emitted_family_scale():
     with pytest.raises(ValueError, match='family weights'):
         review.verify_saved_thermal_observation_identity(binding, saved)
     saved['experiment_identity']['provider_identity']['finite_observations']['family_weights']['flow/u'] = 1.
+    saved_frame = saved['experiment_identity']['provider_identity']['finite_observations']['frame']
+    saved_frame['upper'] = [2., 1.]
+    with pytest.raises(ValueError, match='frame'):
+        review.verify_saved_thermal_observation_identity(binding, saved)
+    saved_frame['upper'] = [1., 1.]
     model.field_mean[0] += 1.
     with pytest.raises(ValueError, match='field_mean'):
         review.verify_saved_thermal_observation_identity(binding, saved)
@@ -126,6 +133,7 @@ def test_saved_identity_checks_weights_normalization_and_emitted_family_scale():
 
 def test_cli_reuses_one_existing_review_per_reader_and_preserves_declared_panel(monkeypatch, tmp_path):
     import channelthermal.training.native_checkpoint as checkpoint_module
+    from channelthermal.training.observation_response import ThermalObservationBinding
     import honf_runtime.compat as compat
     import thermal_field_response_evaluate as native_review
 
@@ -146,6 +154,8 @@ def test_cli_reuses_one_existing_review_per_reader_and_preserves_declared_panel(
     monkeypatch.setattr(review, '_verify_review_storage', lambda output: {'free_bytes_before': 1})
     monkeypatch.setattr(compat, 'load_trusted_checkpoint', lambda *args, **kwargs: saved)
     monkeypatch.setattr(checkpoint_module, 'build_native_checkpoint_inference', lambda *args, **kwargs: (model, provider))
+    monkeypatch.setattr(ThermalObservationBinding, 'finite_observation_frame',
+                        lambda self: AffineFrame('test_frame', (0., 0.), (1., 1.)))
     class Observer:
         def __init__(self, binding, actual_model, actual_cases, actual_pairs, **kwargs):
             assert actual_model is model and actual_cases == chosen and actual_pairs == pairs
