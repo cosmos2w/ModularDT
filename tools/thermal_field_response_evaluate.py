@@ -181,7 +181,8 @@ def triple_contrast_diagnostics(cache, targets, masks, coordinates, configs, rey
 def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pairs,
                                   mode, export_cases=(), output, include_thermal_functionals=False,
                                   local_contrast_diagnostics=False, recipe=None,
-                                  case_observer=None, pair_compatibility=None):
+                                  case_observer=None, pair_compatibility=None,
+                                  include_triple_contrasts=True):
     """Reuse the complete physical-cell predictions for field and case measurements."""
     scales = provider.model.field_std.detach().cpu().reshape(-1).double().numpy()[:5]
     weights = np.asarray([provider.native_weights[name] for name in
@@ -244,7 +245,7 @@ def evaluate_field_response_panel(model, provider, *, epoch, split, case_ids, pa
         result = {'native': native, 'pairs': rows, 'thermal_functionals': {'available': False, 'reason': 'Not requested.'}}
     if local_contrast_diagnostics:
         result['field_change_diagnostics'] = field_change_diagnostics(cache, targets, masks, coordinates, pairs)
-        if set(ASSESSMENT9_TRIPLE) <= set(case_ids):
+        if include_triple_contrasts and set(ASSESSMENT9_TRIPLE) <= set(case_ids):
             with h5py.File(provider.data_path, 'r') as h5:
                 training_re = [float(json.loads(h5['cases'][case]['case_config_json'][()])['flow']['re'])
                                for case in provider.training_case_ids]

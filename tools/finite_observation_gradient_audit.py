@@ -3,7 +3,9 @@
 
 The reduction is the training objective on a declared pair-complete TRAIN
 panel. Each reader is measured separately using its sampled native objective;
-the fixed finite rows and their sparse physical extractions are unchanged.
+the fixed finite rows and their sparse physical extractions are unchanged. The
+CLI reconstructs ordinary native sampling: its fixed draws have the same
+native marginal, but do not replay pair-coupled training draws.
 """
 from __future__ import annotations
 
@@ -30,6 +32,11 @@ from honf_runtime.gradient_diagnostics import preserved_state
 from honf_runtime.loss_family_gradient_audit import _restore_rng, _rng_state
 from honf_runtime.organization_parameters import partition_organization_parameters
 from honf_runtime.unified_training import SamplingKey, _atomic_json
+
+NATIVE_SAMPLING_DESCRIPTION = (
+    'Ordinary native case_epoch_v1 source-row draws from the reconstructed native provider; '
+    'the marginal and objective match native training, but these are not literal pair-coupled training draws.'
+)
 
 
 @contextmanager
@@ -97,7 +104,8 @@ def _norm(values, indices):
 def audit_finite_observation_gradients(model, provider, binding, *, panel_case_ids, panel_pairs,
                                        epoch, variant, calibration=None, basis='coordinate',
                                        probe_count=64, probe_seed=130013, sampling_epoch=1,
-                                       read_modes=('full', 'restricted'), expected_family_scales=None):
+                                       read_modes=('full', 'restricted'), expected_family_scales=None,
+                                       native_sampling_description='Fixed case_epoch_v1 draws from the supplied provider.'):
     """Measure gradients of the exact panel-reduced native and finite scalars.
 
     Per-family contrast is *unweighted*, divided by the complete eligible-pair
@@ -285,7 +293,8 @@ def audit_finite_observation_gradients(model, provider, binding, *, panel_case_i
                            'native_term_weights': term_weights, 'finite_dependency_work': work,
                            'native_prediction_calls': len(pairs), 'gradient_vector_products': gradient_calls}
     return {'schema': 'finite_observation_gradient_audit_v1', 'checkpoint_epoch': epoch,
-        'native_sampling_epoch': sampling_epoch, 'panel_case_ids': list(cases),
+        'native_sampling_epoch': sampling_epoch, 'native_sampling_description': native_sampling_description,
+        'panel_case_ids': list(cases),
         'panel_pairs': [list(pair) for pair in pairs], 'eligible_pair_count': len(eligible),
         'pair_support': [{'pair': list(pair), 'eligible_families': list(eligibility[pair].eligible_families),
                           'missing_families': list(eligibility[pair].missing_families)} for pair in pairs],
@@ -347,7 +356,8 @@ def main(argv=None):
     probe_seed = finite.get('probe_seed', 130013) if finite else 130013
     result = audit_finite_observation_gradients(model, provider, binding, panel_case_ids=cases, panel_pairs=pairs,
         epoch=epoch, variant=variant, calibration=calibration, basis=basis, probe_count=probe_count,
-        probe_seed=probe_seed, expected_family_scales=identity['family_scales'])
+        probe_seed=probe_seed, expected_family_scales=identity['family_scales'],
+        native_sampling_description=NATIVE_SAMPLING_DESCRIPTION)
     device = next(model.parameters()).device
     result['provenance'] = {'checkpoint': str(args.checkpoint.resolve()), 'panels': str(args.panels.resolve()),
         'panel_stage': args.stage, 'training_membership_count': membership_count, 'device': str(device),

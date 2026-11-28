@@ -152,6 +152,7 @@ def test_cli_uses_declared_panel_checkpoint_epoch_and_saved_calibration(monkeypa
         assert kwargs['panel_case_ids'] == cases and kwargs['panel_pairs'] == pairs
         assert kwargs['epoch'] == 1000 and kwargs['calibration'] is calibration
         assert kwargs['variant'] == 'contrasts' and kwargs['probe_count'] == 64
+        assert 'not literal pair-coupled training draws' in kwargs['native_sampling_description']
         return {'reader_results': {'full': {}, 'restricted': {}}}
     monkeypatch.setattr(audit, 'audit_finite_observation_gradients', measure)
     written = {}

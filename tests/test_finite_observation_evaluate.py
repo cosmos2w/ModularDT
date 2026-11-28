@@ -168,6 +168,8 @@ def test_cli_reuses_one_existing_review_per_reader_and_preserves_declared_panel(
     def evaluate(model_arg, provider_arg, **kwargs):
         assert model_arg is model and provider_arg is provider and callable(kwargs['case_observer'])
         assert kwargs['include_thermal_functionals'] is True
+        assert kwargs['local_contrast_diagnostics'] is True
+        assert kwargs['include_triple_contrasts'] is False
         assert kwargs['case_ids'] == chosen and kwargs['pairs'] == pairs
         calls.append(kwargs['mode'])
         return {'field_summary': True}

@@ -499,8 +499,8 @@ def main(argv=None):
         destination = args.output.with_name(f'{args.output.stem}_{mode}{args.output.suffix}')
         native = evaluate_field_response_panel(model, provider, epoch=int(saved['epoch']), split=split,
             case_ids=cases, pairs=pairs, mode=mode, export_cases=exports, output=destination,
-            include_thermal_functionals=True, local_contrast_diagnostics=False, recipe=evaluation_recipe,
-            case_observer=observer)
+            include_thermal_functionals=True, local_contrast_diagnostics=True, recipe=evaluation_recipe,
+            case_observer=observer, include_triple_contrasts=False)
         views[mode] = {'native_and_natural_response': native, 'finite_observations': observer.finish()}
     result = {'schema': 'thermal_finite_observation_review_v1', 'checkpoint': str(args.checkpoint.resolve()),
         'epoch': int(saved['epoch']), 'dataset_path': str(provider.data_path), 'case_ids': list(cases),
