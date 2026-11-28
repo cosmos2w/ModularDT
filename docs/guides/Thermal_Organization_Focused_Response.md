@@ -91,3 +91,11 @@ python tools/thermal_saved_response_benchmark.py evaluate --panel ROUND_OUTPUT/e
 ```
 
 Report predictor, relation/use, physical response, cost and inverse-choice outcomes separately. A changed access pattern or a faster query-only replay is not evidence of physical causality or complete training speed. Measure complete new-run cost and account for two gradient calculations; compare complete work and memory on the same device.
+
+## Completed R17-12 disposition
+
+The three matched TRAIN150 lineages completed 1000 epochs each, and the selected fresh native/organization-focused TRAIN600 pair completed 500 each. Both formal runs stopped there. The new reader/scope/composition and diagnostic interfaces remain opt-in; this completed campaign is not standing authorization for another run or extension.
+
+The focused update scope was not adopted as a general improvement. On the 89 historically exposed original cases, restricted material-temperature mean RMSE increased from 0.894475 to 1.224541, with higher error on 84 cases; full reading retained the regression. Pressure/proxy means and the worst thermal cases improved, but specific thermal responses remained mixed, both raw strict inverse choices failed physically, and complete successful formal fitting cost increased from 5.889 to 6.900 device-hours. The separately recorded zero-epoch native startup failure remains charged to campaign cost. These results support closing focused adoption and recommending no extension of this tested pair rather than automatically launching a rescue configuration.
+
+Retain the new native lineage as matched comparison evidence, and retain the achieved R17-4 epoch-3000 operating field reference; the different training ages do not establish an equal-budget comparison or justify promoting either new checkpoint. Saved configurations, histories, latest/best states and declared milestones remain resumable. A later continuation must name the authorized lineage and total epoch horizon explicitly and use the saved-configuration commands above; no beyond-500 continuation was executed. The integrated local report and numerical evidence belong to the existing R17-12 report and DATA2 round locations, outside Git.
