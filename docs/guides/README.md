@@ -16,6 +16,7 @@ The [project README](../../README.md) introduces the six model families, equatio
 | [Thermal port/local integration](Thermal_Port_Local_Integration.md) | One-pass angular ports, frozen local readout and strict checkpoint loading. |
 | [Response pairs from the base dataset](Base_Dataset_Response_Pairs.md) | No-new-solve supervision, the shared adapter target, physical correspondence and fair comparisons. |
 | [General observation and response training](General_Observation_Response_Training.md) | Native prediction reuse, sampled reader execution, observation blocks and fresh-process recovery examples. |
+| [Finite-observation state and response](Finite_Observation_State_Response.md) | Independent source supports, point anchors, scene-summary contrasts and one-backward native training. |
 | [Thermal organization-focused response](Thermal_Organization_Focused_Response.md) | Matched fresh initialization, update-scope recipes, absolute schedules and exposed-panel evaluation. |
 | [Target contrasts and state priority](Targeted_Response_and_State_Priority.md) | Bounded combinations of saved fields, explicit support and optional response-gradient projection. |
 | [State and finite-response training](State_Response_Training.md) | Existing edited-scene provider, shared reductions, TRAIN-only calibration and historical compatibility. |

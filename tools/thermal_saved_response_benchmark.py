@@ -21,7 +21,7 @@ for directory in (PROJECT / 'src', PROJECT / 'Case_ThermalChannel/src', PROJECT 
 from honf_runtime.compat import load_trusted_checkpoint
 from honf_runtime.unified_training import _atomic_json
 from channelthermal.training.native_checkpoint import build_native_checkpoint_inference, original_heldout_case_ids
-from channelthermal.saved_response_evaluation import family_board, family_board_inputs
+from channelthermal.saved_response_evaluation import family_board, family_board_inputs, select_saved_actions
 
 ROLES = ('fit', 'original_withheld', 'historical_new_withheld', 'native_seen', 'fresh_layout')
 
@@ -117,6 +117,37 @@ def native_exposure(panel, training_case_ids):
             'families': rows}
 
 
+def select_panel(panel, selections):
+    """Select saved input identities without reading model or physical outcomes."""
+    if set(selections) != set(ROLES):
+        raise ValueError('Declare a family/action selection for every historical role.')
+    result = copy.deepcopy(panel)
+    if panel.get('schema') != 'thermal_fixed_saved_response_panel_v1':
+        raise ValueError('Expected a saved response panel.')
+    for role in ROLES:
+        chosen = selections[role]
+        families = panel['roles'][role]['families']
+        source = {item['family']: item for item in families}
+        if not chosen or not set(chosen) <= set(source):
+            raise ValueError(f'The {role} selection must contain known saved families.')
+        selected = []
+        for family, actions in chosen.items():
+            item = source[family]
+            if (not actions or len(set(actions)) != len(actions)
+                    or not set(actions) <= set(item['actions'])):
+                raise ValueError(f'The {role}/{family} selection contains unknown or repeated actions.')
+            selected.append({**item, 'actions': list(actions),
+                             'action_raw_paths': {action: item['action_raw_paths'][action] for action in actions}})
+        result['roles'][role]['families'] = selected
+    result['family_count'] = sum(len(role['families']) for role in result['roles'].values())
+    result['edit_count'] = sum(len(family['actions']) for role in result['roles'].values()
+                               for family in role['families'])
+    result['action_subset'] = True
+    result['description'] = ('Explicit input-selected saved edits; each keeps its original baseline and historical role. '
+                             'The separate strict request keeps its complete candidate board.')
+    return result
+
+
 def strict_request(model, checkpoint, epoch, panel, output, *, device):
     """Evaluate the saved seven-candidate request and persist choices before truth."""
     import torch
@@ -206,10 +237,15 @@ def strict_request(model, checkpoint, epoch, panel, output, *, device):
 def evaluate(panel_path, checkpoint, output_dir, *, device, roles=None, include_strict=True):
     panel_path, checkpoint = Path(panel_path).resolve(strict=True), Path(checkpoint).resolve(strict=True)
     panel = _read(panel_path)
+    subset = panel.get('action_subset') is True
+    families = [family for role in panel.get('roles', {}).values() for family in role.get('families', ())]
     if (panel.get('schema') != 'thermal_fixed_saved_response_panel_v1'
-            or panel.get('family_count') != 19 or panel.get('edit_count') != 80
-            or set(panel.get('roles', {})) != set(ROLES)):
-        raise ValueError('Expected a fixed 80-edit/19-family response panel.')
+            or set(panel.get('roles', {})) != set(ROLES)
+            or panel.get('family_count') != len(families)
+            or panel.get('edit_count') != sum(len(family['actions']) for family in families)
+            or len({family['family'] for family in families}) != len(families)
+            or (not subset and (len(families) != 19 or panel['edit_count'] != 80))):
+        raise ValueError('Expected a valid fixed saved response panel.')
     requested = tuple(ROLES if roles is None else roles)
     if not requested or len(set(requested)) != len(requested) or not set(requested) <= set(ROLES):
         raise ValueError('Select unique saved response roles.')
@@ -219,6 +255,8 @@ def evaluate(panel_path, checkpoint, output_dir, *, device, roles=None, include_
         families = panel['roles'][role]['families']
         cases, _ = family_board_inputs(historical, role, (),
             selected_families=tuple(item['family'] for item in families), source_paths=panel['source_paths'])
+        if subset:
+            cases = select_saved_actions(cases, {item['family']: item['actions'] for item in families})
         actual = [{'family': case['family'], 'source': case['source'], 'baseline_path': case['baseline_path'],
                    'actions': [item['action'] for item in case['actions']],
                    'action_raw_paths': {item['action']: item['raw_path'] for item in case['actions']}}
@@ -240,7 +278,8 @@ def evaluate(panel_path, checkpoint, output_dir, *, device, roles=None, include_
         expected = {item['family']: item['actions'] for item in families}
         destination = output / f'{role}.json'
         board = family_board(model, provider, historical, role, panel['training_inputs'], destination,
-                             selected_families=ids, expected_actions=expected, source_paths=panel['source_paths'])
+                             selected_families=ids, expected_actions=expected, source_paths=panel['source_paths'],
+                             allow_action_subset=subset)
         board.update(checkpoint=str(checkpoint), epoch=int(saved['epoch']), fixed_panel=str(panel_path),
                      historical_population_count=panel['roles'][role]['historical_population_count'],
                      exposure_record=str(output / 'native_exposure.json'))
@@ -255,7 +294,8 @@ def evaluate(panel_path, checkpoint, output_dir, *, device, roles=None, include_
     evaluated_edits = sum(len(family['actions']) for role in requested for family in panel['roles'][role]['families'])
     _write_new(output / 'evaluation_summary.json', {'checkpoint': str(checkpoint), 'epoch': int(saved['epoch']),
         'panel': str(panel_path), 'roles': list(requested), 'family_count': evaluated_families,
-        'edit_count': evaluated_edits, 'fixed_panel_family_count': 19, 'fixed_panel_edit_count': 80,
+        'edit_count': evaluated_edits, 'fixed_panel_family_count': panel['family_count'],
+        'fixed_panel_edit_count': panel['edit_count'], 'action_subset': subset,
         'readers': ['restricted', 'full'],
         'strict_request': panel['strict_request']['request_id'] if include_strict else None, 'new_physical_solves': 0})
 
@@ -273,6 +313,11 @@ def main(argv=None):
     prepare.add_argument('--native-seen-manifest', type=Path, required=True)
     prepare.add_argument('--fresh-layout-manifest', type=Path, required=True)
     prepare.add_argument('--output', type=Path, required=True)
+    select = subparsers.add_parser('select', help='Select explicit saved family/action identities')
+    select.add_argument('--panel', type=Path, required=True)
+    select.add_argument('--selection', type=Path, required=True,
+                        help='JSON mapping historical role to family IDs and lists of saved actions')
+    select.add_argument('--output', type=Path, required=True)
     run = subparsers.add_parser('evaluate', help='Evaluate one checkpoint on both readers')
     run.add_argument('--panel', type=Path, required=True)
     run.add_argument('--checkpoint', type=Path, required=True)
@@ -286,6 +331,11 @@ def main(argv=None):
             args.strict_protocol, args.strict_scales_identity, source_paths={
                 'historical_new_withheld': args.historical_new_manifest, 'native_seen': args.native_seen_manifest,
                 'fresh_layout': args.fresh_layout_manifest})
+        _write_new(args.output, panel)
+        print(json.dumps({'output': str(args.output), 'families': panel['family_count'],
+                          'edits': panel['edit_count']}))
+    elif args.command == 'select':
+        panel = select_panel(_read(args.panel), _read(args.selection))
         _write_new(args.output, panel)
         print(json.dumps({'output': str(args.output), 'families': panel['family_count'],
                           'edits': panel['edit_count']}))

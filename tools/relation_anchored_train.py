@@ -541,11 +541,13 @@ def main(argv=None):
     elif args.command == "fit":
         fit_options = {}
         if (source_payload is None and recipe.get('training_profile') == 'observation_response'
-                and recipe.get('observation_response', {}).get('mode') == 'coupled_native'
+                and (recipe.get('observation_response', {}).get('mode') == 'coupled_native'
+                     or 'finite_observations' in recipe)
                 and recipe.get('observation_response', {}).get('enabled', True) is True):
             from honf_runtime.coupled_initialization import apply_epoch_zero
 
-            initial_path = recipe['observation_response'].get('epoch_zero_checkpoint')
+            initial_path = (recipe.get('finite_observations', {}).get('epoch_zero_checkpoint')
+                            or recipe['observation_response'].get('epoch_zero_checkpoint'))
             if not initial_path:
                 raise ValueError('Fresh coupled training requires the shared epoch_zero_checkpoint.')
             initial = load_trusted_checkpoint(Path(initial_path).expanduser(), map_location='cpu')
@@ -554,6 +556,13 @@ def main(argv=None):
         if recipe.get("training_profile") in ("state_response", "native_pair", "field_response", "local_multisecant_response", "observation_response"):
             prepare_profile_fit(recipe, args.output, model, engine,
                                 source_payload=source_payload, stop_after=args.stop_after)
+        write_observations = getattr(provider, 'write_finite_observation_definitions', None)
+        if callable(write_observations):
+            if source_payload is not None:
+                # Definitions are checked before fit restores its checkpoint.
+                # Use the saved coefficients/provider state for that check.
+                provider.load_training_state_dict(source_payload['provider_training_state'])
+            write_observations(args.output)
         if recipe["dataset"] == "wind":
             print(json.dumps({"event": "wind_preparation_complete", "preparation": provider.preparation_summary()},
                              sort_keys=True, default=str, allow_nan=False), flush=True)

@@ -59,6 +59,30 @@ def wind_recipe():
             "effective_batch_size": 24, "total_epochs": 100}
 
 
+def test_finite_resume_restores_coefficients_before_definition_check(tmp_path, monkeypatch):
+    recipe = {'dataset': 'analytic_fixture', 'seed': 7, 'architecture': 'relation_anchored',
+              'training_profile': 'observation_response', 'finite_observations': {'variant': 'contrasts'}}
+    path = tmp_path / 'recipe.json'
+    path.write_text(json.dumps(recipe))
+    state = {'finite_observations': {'calibration': {'coefficients': {'anchor': .2, 'contrast': .3}}}}
+    saved = {'epoch': 1, 'provider_training_state': state,
+             'experiment_identity': {'recipe': recipe, 'engine_config': {'total_epochs': 2}}}
+    events = []
+    provider = SimpleNamespace(load_training_state_dict=lambda actual: events.append(('restore', actual)),
+                               write_finite_observation_definitions=lambda output: events.append(('definitions', output)))
+    model = SimpleNamespace(architecture='relation_anchored')
+    def fit(*args, **kwargs):
+        assert events[0] == ('restore', state) and events[1][0] == 'definitions'
+        return {'completed_epoch': 2}
+    monkeypatch.setattr(cli, 'resolve_checkpoint', lambda *args: tmp_path / 'latest.pt')
+    monkeypatch.setattr(cli, 'load_trusted_checkpoint', lambda *args, **kwargs: saved)
+    monkeypatch.setattr(cli, 'build', lambda *args, **kwargs: (model, provider))
+    monkeypatch.setattr(cli, 'engine_for', lambda *args, **kwargs: SimpleNamespace(config=SimpleNamespace(total_epochs=2), fit=fit))
+    monkeypatch.setattr(cli, 'prepare_profile_fit', lambda *args, **kwargs: None)
+    assert cli.main(['fit', '--recipe', str(path), '--output', str(tmp_path / 'run'),
+                     '--resume', 'latest', '--stop-after', '2']) == 0
+
+
 def test_horizon_and_sampling_do_not_depend_on_physical_packing():
     class Cases:
         def identity_payload(self):

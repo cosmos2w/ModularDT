@@ -48,8 +48,9 @@ def main(argv=None):
             raise ValueError('A fresh epoch-zero state cannot consume a source checkpoint.')
         recipe = json.loads(args.recipe.read_text())
         if (recipe.get('training_profile') != 'observation_response'
-                or recipe.get('observation_response', {}).get('mode') != 'coupled_native'):
-            raise ValueError('Fresh preparation requires an explicit coupled native recipe.')
+                or (recipe.get('observation_response', {}).get('mode') != 'coupled_native'
+                    and 'finite_observations' not in recipe)):
+            raise ValueError('Fresh preparation requires a coupled native or finite-observation recipe.')
         if args.output.exists():
             raise FileExistsError('Preserve and reuse the existing shared epoch-zero state.')
         if 'storage' in recipe:
@@ -67,7 +68,9 @@ def main(argv=None):
         payload = prepare_epoch_zero(model, provider, engine)
         _atomic_torch_save(args.output, payload)
         print(json.dumps({'output': str(args.output.resolve()), 'epoch': 0, 'optimizer_updates': 0,
-                          'coefficient': payload['calibration']['coefficient'],
+                          'coefficient': (payload['calibration']['coefficient']
+                                          if payload['calibration'] is not None else None),
+                          'finite_coefficients': payload.get('finite_calibration', {}).get('coefficients'),
                           'free_bytes_before': storage.get('free_bytes_before')}))
         return 0
     if args.source is None:

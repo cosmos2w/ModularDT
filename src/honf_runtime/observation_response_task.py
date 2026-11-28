@@ -150,6 +150,19 @@ def execute_observation_dependencies(binding, model, pair, union):
 
 def build_observation_response_task(recipe, *, device, resume_payload=None, _coupled_bootstrap=False):
     """Construct a native task with the shared generic observation objective."""
+    if 'finite_observations' in recipe:
+        # Independent scene rows need neither matched-row native capability
+        # nor a uniform native sampling law.
+        base = copy.deepcopy(recipe)
+        finite = base.pop('finite_observations')
+        sampling = finite.get('native_sampling', 'native')
+        if sampling not in ('native', 'coupled_native'):
+            raise ValueError('finite_observations.native_sampling must be native or coupled_native.')
+        if sampling == 'native':
+            base.setdefault('observation_response', {})['enabled'] = False
+        model, provider = build_observation_response_task(base, device=device, resume_payload=resume_payload)
+        from .finite_observation_task import attach_finite_observation_task
+        return attach_finite_observation_task(recipe, model, provider, getattr(provider, 'observation_binding', None))
     enabled = recipe.get('observation_response', {}).get('enabled', True)
     if type(enabled) is not bool:
         raise ValueError('observation_response.enabled must be a boolean.')
@@ -182,6 +195,8 @@ def build_observation_response_task(recipe, *, device, resume_payload=None, _cou
     else:
         factory = _factory(name)
     model, provider, binding = factory(recipe, device=device, resume_payload=resume_payload)
+    if binding is not None:
+        provider.observation_binding = binding
     if not enabled:
         return model, provider
     if binding is None:

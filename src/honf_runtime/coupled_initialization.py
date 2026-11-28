@@ -28,8 +28,13 @@ def _initial_provider_identity(provider_identity):
     """Exclude native activation storage from the shared initial-state contract."""
     identity = copy.deepcopy(dict(provider_identity))
     identity.pop('native_retention_execution', None)
+    identity.pop('finite_observations', None)
+    observation = identity.get('observation_response')
+    if isinstance(observation, dict):
+        observation.pop('parameter_ownership', None)
     recipe = identity.get('recipe')
     if isinstance(recipe, dict):
+        recipe.pop('finite_observations', None)
         execution = recipe.get('execution_config')
         if isinstance(execution, dict):
             execution.pop('native_retention_fraction', None)
@@ -42,14 +47,17 @@ def _initial_provider_identity(provider_identity):
 def common_contract(model, provider, engine):
     identity = _initial_provider_identity(provider.identity_payload())
     observation = identity.get('observation_response')
-    if not isinstance(observation, dict) or observation.get('mode') != 'coupled_native':
-        raise ValueError('A common epoch-zero state requires the explicit coupled native profile.')
-    observation.pop('variant', None)
-    observation.pop('validation_objective_complete', None)
+    finite = hasattr(provider, 'finite_observation_spec')
+    if not finite and (not isinstance(observation, dict) or observation.get('mode') != 'coupled_native'):
+        raise ValueError('A common epoch-zero state requires a coupled native or finite-observation profile.')
+    if isinstance(observation, dict):
+        observation.pop('variant', None)
+        observation.pop('validation_objective_complete', None)
     # The multiplier changes the later objective, not the common initial state
     # or the measured, unscaled epoch-zero calibration shared by all arms.
-    for key in ('response_weight', 'response_update_scope', 'response_gradient_composition'):
-        observation.pop(key, None)
+    if isinstance(observation, dict):
+        for key in ('response_weight', 'response_update_scope', 'response_gradient_composition'):
+            observation.pop(key, None)
     # The provider embeds its source recipe for provenance. A descriptive run
     # name does not change the initialized model, native objective or samples.
     source_recipe = identity.get('recipe')
@@ -82,28 +90,41 @@ def prepare_epoch_zero(model, provider, engine):
     model_before = copy.deepcopy(model.state_dict())
     provider_before = copy.deepcopy(provider.training_state_dict())
     rng_before = capture_rng_state()
-    calibration = provider.calibrate_coupled_native(model)
+    finite = callable(getattr(provider, 'calibrate_finite_observations', None))
+    calibrate_native = getattr(provider, 'calibrate_coupled_native', None)
+    calibration = calibrate_native(model) if callable(calibrate_native) else None
+    finite_calibration = provider.calibrate_finite_observations(model) if finite else None
     if (not _same(model_before, model.state_dict()) or not _same(provider_before, provider.training_state_dict())
             or not _same(rng_before, capture_rng_state()) or not _same(optimizer_state, named_optimizer_state(model, optimizer))
             or any(int(getattr(core, name, 0)) != value for name, value in clocks.items())):
         raise RuntimeError('Epoch-zero calibration changed initialized model, optimizer, provider, RNG or clocks.')
-    provider.set_coupled_calibration(calibration)
-    return {'schema': 'coupled_native_epoch_zero_v1', 'epoch': 0, 'contract': contract,
+    if calibration is not None:
+        provider.set_coupled_calibration(calibration)
+    if finite:
+        provider.set_finite_observation_calibration(finite_calibration)
+    observation = contract['provider'].get('observation_response', {})
+    result = {'schema': 'native_observation_epoch_zero_v2' if finite else 'coupled_native_epoch_zero_v1',
+            'epoch': 0, 'contract': contract,
             'model_state_dict': _cpu_tree(model.state_dict()), 'optimizer_state_by_name': optimizer_state,
             'provider_training_state': provider.training_state_dict(), 'rng_state': rng_before,
             'sampler_state': {'completed_epoch': 0, 'next_epoch': 1, 'next_case_cursor': 0,
                               'query_seed': engine.config.seed,
-                              'pair_seed': contract['provider']['observation_response']['pair_seed'],
-                              'reader_seed': contract['provider']['observation_response']['reader_seed'],
+                              'pair_seed': observation.get('pair_seed', 0),
+                              'reader_seed': observation.get('reader_seed', 170011),
                               'stream_keying': 'independent named deterministic case/epoch streams'},
             'organization_clocks': clocks, 'scheduler_epoch': 0, 'selector_epoch': 0,
             'calibration': calibration,
             'metadata_cache_at_preparation': copy.deepcopy(getattr(provider, 'coupled_native_cache_usage', {}))}
+    if finite:
+        result['provider_training_state'] = provider.native_epoch_zero_state()
+        result['finite_calibration'] = finite_calibration
+    return result
 
 
 def apply_epoch_zero(model, provider, engine, payload):
     """Load the same saved tensors and recovery state into one fresh comparison."""
-    if (not isinstance(payload, Mapping) or payload.get('schema') != 'coupled_native_epoch_zero_v1'
+    if (not isinstance(payload, Mapping) or payload.get('schema') not in
+            ('coupled_native_epoch_zero_v1', 'native_observation_epoch_zero_v2')
             or payload.get('epoch') != 0 or payload.get('scheduler_epoch') != 0
             or payload.get('selector_epoch') != 0 or payload.get('sampler_state', {}).get('next_epoch') != 1
             or any(payload.get('organization_clocks', {}).values())):
@@ -114,8 +135,14 @@ def apply_epoch_zero(model, provider, engine, payload):
     if not _same(saved_contract, common_contract(model, provider, engine)):
         raise ValueError('Epoch-zero native cohort, model, objective, sampling or optimizer contract differs.')
     model.load_state_dict(payload['model_state_dict'], strict=True)
-    provider.load_training_state_dict(payload['provider_training_state'])
-    provider.set_coupled_calibration(payload['calibration'])
+    finite = callable(getattr(provider, 'set_finite_observation_calibration', None))
+    if payload['schema'] == 'native_observation_epoch_zero_v2' and finite:
+        provider.load_native_epoch_zero_state(payload['provider_training_state'])
+        provider.set_finite_observation_calibration(payload['finite_calibration'])
+    else:
+        provider.load_training_state_dict(payload['provider_training_state'])
+    if payload['calibration'] is not None:
+        provider.set_coupled_calibration(payload['calibration'])
     core = getattr(model, 'core', model)
     for name, value in payload['organization_clocks'].items():
         setattr(core, name, int(value))

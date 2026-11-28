@@ -205,8 +205,40 @@ def physical_response_error(baseline, edited, *, detailed=False, newly_valid_sta
     return result
 
 
+def physical_absolute_error(observation):
+    """Measure one physical state on that state's valid reference/prediction mask."""
+    prediction, reference, mask = map(np.asarray, observation)
+    if prediction.shape != reference.shape or prediction.shape != mask.shape:
+        raise ValueError('Physical state receiver identity differs')
+    mask = mask.astype(bool)
+    if not mask.any():
+        raise ValueError('Empty physical state mask')
+    error = prediction[mask].astype(np.float64) - reference[mask].astype(np.float64)
+    if not np.isfinite(error).all():
+        raise ValueError('Non-finite error on valid physical positions')
+    return {'rmse': float(np.sqrt(np.mean(error ** 2))), 'mae': float(np.mean(np.abs(error))),
+            'count': int(mask.sum())}
+
+
+def select_saved_actions(cases, expected_actions):
+    """Keep the declared saved actions, retaining their complete baseline cases."""
+    expected = {str(family): list(map(str, actions)) for family, actions in expected_actions.items()}
+    if set(expected) != {case['family'] for case in cases}:
+        raise ValueError('The resolved family/action identities differ from the fixed evaluation panel.')
+    selected = []
+    for case in cases:
+        actions = expected[case['family']]
+        available = {item['action']: item for item in case['actions']}
+        if (not actions or len(set(actions)) != len(actions) or len(available) != len(case['actions'])
+                or not set(actions) <= set(available)):
+            raise ValueError('The resolved family/action identities differ from the fixed evaluation panel.')
+        selected.append({**case, 'actions': [available[action] for action in actions]})
+    return selected
+
+
 def family_board(model, provider, recipe, role, input_path, output, *, selected_families=None,
-                 physical_only=False, expected_actions=None, source_paths=None):
+                 physical_only=False, expected_actions=None, source_paths=None,
+                 allow_action_subset=False):
     """Save direct-joint predictions before opening raw endpoints and scoring."""
     import copy
     import torch
@@ -219,9 +251,14 @@ def family_board(model, provider, recipe, role, input_path, output, *, selected_
     cases, population = family_board_inputs(recipe, role, provider.training_case_ids,
         selected_families=selected_families, source_paths=source_paths)
     if expected_actions is not None:
+        if allow_action_subset:
+            cases = select_saved_actions(cases, expected_actions)
         actual = {case['family']: [item['action'] for item in case['actions']] for case in cases}
         if actual != dict(expected_actions):
             raise ValueError('The resolved family/action identities differ from the fixed evaluation panel.')
+    elif allow_action_subset:
+        raise ValueError('A saved action subset requires explicitly declared family/action identities.')
+    response_only = physical_only or allow_action_subset
     if physical_only:
         sensitivity = {'J': 0.0013635576450248266, 'P': 1.3318313563104311e-08}
         research, scales = {}, {}
@@ -273,7 +310,7 @@ def family_board(model, provider, recipe, role, input_path, output, *, selected_
         for mode in ('restricted', 'full'):
             base = predicted[(family, 'baseline', mode)]['functionals']
             deltas = {a: {k: predicted[(family,a,mode)]['functionals'][k] - base[k] for k in ('J','P')} for a in actions}
-            for objective, constraint in (() if physical_only else (('J','P'), ('P','J'))):
+            for objective, constraint in (() if response_only else (('J','P'), ('P','J'))):
                 for multiplier in (0., .5, 1., 1.5, 2.):
                     cap = multiplier * float(research[constraint])
                     selected = min((a for a in actions if deltas[a][constraint] <= cap),
@@ -332,6 +369,9 @@ def family_board(model, provider, recipe, role, input_path, output, *, selected_
                     field_errors[name] = physical_response_error(observations['baseline'][name], observations[action][name],
                                                                  detailed=expected_actions is not None,
                                                                  newly_valid_state=name in field_names[:5])
+                    if expected_actions is not None:
+                        field_errors[name]['baseline_state'] = physical_absolute_error(observations['baseline'][name])
+                        field_errors[name]['edited_state'] = physical_absolute_error(observations[action][name])
                 functions = {k: {'prediction': pred_delta[action][k], 'physical': true_delta[action][k],
                     'absolute_error': abs(pred_delta[action][k]-true_delta[action][k]),
                     'resolved': abs(true_delta[action][k]) > sensitivity[k],
@@ -345,7 +385,7 @@ def family_board(model, provider, recipe, role, input_path, output, *, selected_
                              'work': {'baseline': predicted[(family,'baseline',mode)]['work'],
                                       'edited': predicted[(family,action,mode)]['work']}})
             actions = ['baseline'] + [item['action'] for item in case['actions']]
-            computed = [] if physical_only else _research_decisions(pred_delta,true_delta,actions,sensitivity,research,scales)
+            computed = [] if response_only else _research_decisions(pred_delta,true_delta,actions,sensitivity,research,scales)
             for request in computed:
                 saved = next(x for x in model_choices if x['family'] == family and x['mode'] == mode
                              and x['objective'] == request['objective'] and x['multiplier'] == request['multiplier'])
@@ -386,7 +426,7 @@ def family_board(model, provider, recipe, role, input_path, output, *, selected_
             'false_rejected_actions':sum(len(x['false_rejected_actions']) for x in shortlist),
             'near_null_false_rejections':sum(len(x['near_null_false_rejected_actions']) for x in shortlist),
             'mean_normalized_regret':float(np.mean([x['normalized_regret'] for x in shortlist])) if shortlist else None}
-        if physical_only:
+        if response_only:
             decision_summary = None
         field_summary = {}
         for name in (field_names[:5] if physical_only else field_names):
@@ -421,8 +461,11 @@ def family_board(model, provider, recipe, role, input_path, output, *, selected_
             'RMSE uses the historical stored-precision subtraction; direction and magnitudes use float64 '
             'differences on common valid physical receivers. The zero-change reference is the reference-change RMS. '
             'Newly valid fluid positions report edited-state RMSE separately. '
+            'Absolute state errors use each state\'s own valid physical receivers. '
             'Surface and material observations retain their attached receiver positions.')
         result['decision_interpretation'] = (
+            'The saved edit subset is for response measurement; its partial action lists are not decision boards.'
+            if allow_action_subset else
             'Accepted-action fallback uses physical outcomes after prediction and does not certify deployed safety. '
             'Model-only selections and raw constraint violations are recorded separately.')
     return result

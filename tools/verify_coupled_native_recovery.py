@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a coupled recipe with uninterrupted and fresh-process recovery.
+"""Check an observation recipe with uninterrupted and fresh-process recovery.
 
 Runs two epochs uninterrupted and the same two epochs with an intentional
 process interruption immediately after the first committed checkpoint. The
@@ -8,6 +8,7 @@ recipe's scientific horizon and optimizer schedule are left unchanged.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import csv
 import json
 import os
@@ -31,6 +32,16 @@ def _sampled_reader_recipe(response):
             and (response.get('reader_policy') == 'sampled_equal_probability'
                  or (response.get('reader_policy') is None
                      and response.get('variant') == 'sampled_reader_response')))
+
+
+def _supported_recipe(recipe):
+    return (_sampled_reader_recipe(recipe.get('observation_response', {}))
+            or isinstance(recipe.get('finite_observations'), dict))
+
+
+def _recipe_horizon(recipe):
+    training = recipe.get('training', {})
+    return int(training['local_horizon'] if 'local_horizon' in training else recipe['total_epochs'])
 
 
 def _reverse_keys(value):
@@ -122,6 +133,82 @@ def _prepare_interrupted(root):
         reordered.write_text(json.dumps(reversed_saved, indent=2) + '\n', encoding='utf-8')
 
 
+def _finite_definitions(run):
+    """Read a run's saved objective and the referenced finite source definitions."""
+    path = run / 'configs/finite_observation_objective.json'
+    pointer = json.loads(path.read_text(encoding='utf-8'))
+    if pointer.get('schema') != 'finite_observation_run_definition_v1':
+        raise AssertionError(f'Invalid saved finite objective definition: {path}')
+    source = Path(pointer['source_definitions']).expanduser()
+    if not source.is_absolute():
+        source = path.parent / source
+    definition = json.loads(source.read_text(encoding='utf-8'))
+    if definition.get('schema') != 'finite_observation_source_definitions_v1':
+        raise AssertionError(f'Invalid saved finite source definition: {source}')
+    return pointer, definition
+
+
+def _check_finite_artifacts(runs, checkpoints):
+    """Check all saved rows, extraction maps, objective settings and calibration."""
+    from honf_runtime.finite_observation_task import _json_value
+
+    artifacts = [_finite_definitions(run) for run in runs]
+    comparable = [{key: value for key, value in pointer.items()
+                   if key not in ('source_definitions', 'metadata_bytes')}
+                  for pointer, _ in artifacts]
+    if not _same(comparable[0], comparable[1]):
+        raise AssertionError('Saved finite objectives or calibration coefficients changed on resume.')
+    if not _same(artifacts[0][1], artifacts[1][1]):
+        raise AssertionError('Saved finite probe IDs, measures or extraction definitions changed on resume.')
+    for (pointer, _), checkpoint in zip(artifacts, checkpoints):
+        state = checkpoint['provider_training_state']['finite_observations']
+        if state.get('schema') != 'finite_observation_training_state_v1':
+            raise AssertionError('Missing finite-observation provider recovery state.')
+        if not _same(pointer['calibration'], _json_value(state['calibration'])):
+            raise AssertionError('Saved finite calibration differs from the checkpoint provider state.')
+        identity = checkpoint['experiment_identity']['provider_identity']['finite_observations']
+        if not _same(pointer['objective'], _json_value(identity)):
+            raise AssertionError('Saved finite objective differs from the checkpoint provider identity.')
+    return {'finite_objective_and_calibration_equal': True,
+            'finite_source_definitions_equal': True,
+            'finite_provider_and_reader_state_equal': True}
+
+
+def _check_rebuilt_finite_scenes(provider, definition):
+    """Compare every saved scene's compact source rows to the rebuilt provider."""
+    import numpy as np
+    from honf_runtime.finite_observation_task import _json_value
+
+    frame_fn = getattr(provider.observation_binding, 'finite_observation_frame', None)
+    frame = frame_fn() if callable(frame_fn) else None
+    basis = provider.finite_observation_spec.get('basis', 'coordinate')
+    actual = []
+    for scene in provider.finite_observation_scenes.values():
+        families = []
+        for family in scene.families:
+            actual_frame = frame if frame is not None and frame.identity == family.frame else None
+            actual_basis = basis if actual_frame is not None and basis != 'constant' else 'constant'
+            out_of_frame = 0
+            if actual_frame is not None and actual_basis != 'constant':
+                coordinates = np.asarray(family.coordinates, dtype=np.float64)
+                out_of_frame = int(np.count_nonzero(((coordinates < np.asarray(actual_frame.lower)) |
+                                                    (coordinates > np.asarray(actual_frame.upper))).any(axis=1)))
+            families.append({'name': family.name, 'component': asdict(family.component),
+                'support': family.support, 'frame': family.frame, 'time': family.time,
+                'extraction_id': family.extraction_id, 'native_weight': family.native_weight,
+                'row_ids': family.row_ids, 'coordinates': family.coordinates, 'measures': family.measures,
+                'actual_basis': actual_basis, 'frame_definition': None if actual_frame is None else asdict(actual_frame),
+                'out_of_frame_count': out_of_frame,
+                'reference': 'existing adapter source arrays indexed by these row_ids; no duplicate field arrays',
+                'extraction': asdict(family.extraction)})
+        actual.append({'scene_id': scene.scene_id, 'families': families})
+    actual = _json_value(actual)
+    if actual != definition['scenes']:
+        raise AssertionError('Rebuilt finite probe IDs, measures or extraction definitions differ from the saved source.')
+    return {'scene_count': len(actual), 'family_count': sum(len(scene['families']) for scene in actual),
+            'saved_and_rebuilt_definitions_equal': True}
+
+
 def _sample_worker(run, destination):
     """Record the next named native and reader draws without model inference."""
     sys.path.insert(0, str(PROJECT / 'tools'))
@@ -132,22 +219,49 @@ def _sample_worker(run, destination):
     recipe = checkpoint['experiment_identity']['recipe']
     model, provider = build(recipe, device='cpu', resume_payload=checkpoint)
     provider.load_training_state_dict(checkpoint['provider_training_state'])
-    pair = provider.coupled_native_pairs[0]
+    pairs = getattr(provider, 'coupled_native_pairs', None)
+    if pairs is None:
+        pairs = provider.finite_observation_pairs
+    pair = pairs[0]
     epoch = int(checkpoint['sampler_state']['next_epoch'])
-    key = SamplingKey(recipe['training']['seed'], epoch, 0, 0, 'joint', 'reader',
+    key = SamplingKey(provider.seed, epoch, 0, 0, 'joint', 'reader',
         sampling_version=SamplingKey.CASE_EPOCH_VERSION, dataset_id=provider.sampling_dataset_id)
-    rows, carriers = provider.sample_coupled_native_rows(pair, key)
-    if len(carriers) != 1 or set(rows) != set(pair):
-        raise AssertionError('Expected one coupled sample for the next paired native draw.')
-    sample = carriers[0][1]
-    fields = ('left_rows', 'right_rows', 'left_anchor_rows', 'right_anchor_rows',
-              'left_anchor_positions', 'right_anchor_positions', 'common', 'common_row_probability')
-    result = {'epoch': epoch, 'pair': list(pair),
-              'sample': {name: getattr(sample, name).tolist() for name in fields},
-              'reader_draws': []}
+    result = {'epoch': epoch, 'pair': list(pair), 'reader_draws': []}
+    if 'finite_observations' in recipe:
+        pointer, definition = _finite_definitions(run)
+        result['finite_definitions'] = _check_rebuilt_finite_scenes(provider, definition)
+        result['finite_calibration_coefficients'] = pointer['calibration']['coefficients']
+        result['finite_state_before_draws'] = {
+            key: value for key, value in provider.training_state_dict()['finite_observations'].items()
+            if key != 'calibration'}
+        result['finite_reader_draws'] = []
+    sampler = getattr(provider, 'sample_coupled_native_rows', None)
+    if callable(sampler):
+        rows, carriers = sampler(pair, key)
+        if len(carriers) != 1 or set(rows) != set(pair):
+            raise AssertionError('Expected one coupled sample for the next paired native draw.')
+        sample = carriers[0][1]
+        fields = ('left_rows', 'right_rows', 'left_anchor_rows', 'right_anchor_rows',
+                  'left_anchor_positions', 'right_anchor_positions', 'common', 'common_row_probability')
+        result['sample'] = {name: getattr(sample, name).tolist() for name in fields}
+        result['native_sampling'] = 'coupled_native_rows'
+    else:
+        from honf_runtime.finite_observation_task import _json_value
+        batch = provider.make_batch(pair, key)
+        result['sample'] = _json_value(batch.receivers)
+        result['native_sampling'] = 'native_make_batch_receivers'
     for index in range(4):
         provider.begin_native_update(epoch=epoch, update_index=index, update_count=4)
-        result['reader_draws'].append(provider.coupled_native_reader_mode)
+        mode = getattr(provider, 'coupled_native_reader_mode', None)
+        if mode is None:
+            mode = getattr(provider, 'finite_observation_reader_mode', None)
+        result['reader_draws'].append(mode)
+        if 'finite_observations' in recipe:
+            result['finite_reader_draws'].append(provider.finite_observation_reader_mode)
+    if 'finite_observations' in recipe:
+        result['finite_state_after_draws'] = {
+            key: value for key, value in provider.training_state_dict()['finite_observations'].items()
+            if key != 'calibration'}
     destination.write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
 
 
@@ -178,6 +292,15 @@ def _check_runs(uninterrupted, resumed, interrupted_checkpoint):
     if [row['epoch'] for row in left_rows] != ['1', '2'] or [row['epoch'] for row in right_rows] != ['1', '2']:
         raise AssertionError('Both lineages must contain precisely two completed epoch rows.')
     volatile = {'train_seconds', 'work_counts.coupled_plan_build_seconds', 'work_counts.coupled_plan_builds'}
+    recipes = [checkpoint['experiment_identity']['recipe'] for checkpoint in (left, right)]
+    finite = ['finite_observations' in recipe for recipe in recipes]
+    if finite[0] != finite[1]:
+        raise AssertionError('Finite-observation attachment changed on resume.')
+    finite_results = {}
+    if finite[0]:
+        volatile.update({'work_counts.finite_observations_planning_seconds',
+                         'work_counts.finite_observations_prediction_seconds'})
+        finite_results = _check_finite_artifacts((uninterrupted, resumed), (left, right))
     for before, after in zip(left_rows, right_rows):
         if list(before) != columns or list(after) != columns:
             raise AssertionError('Saved CSV header differs from the ordered recording definitions.')
@@ -193,7 +316,7 @@ def _check_runs(uninterrupted, resumed, interrupted_checkpoint):
     return {'completed_epochs_per_lineage': 2, 'charged_training_epochs': 4,
             'checkpoint_state_equal': list(keys), 'interrupted_epoch_one_checkpoint_preserved': True,
             'recorded_columns_and_losses_equal': True, 'validation_equal': True,
-            'elapsed_and_cache_work_excluded': sorted(volatile)}
+            'elapsed_and_cache_work_excluded': sorted(volatile), **finite_results}
 
 
 def _run(command, *, log, env, expected=0):
@@ -217,10 +340,17 @@ def _finish(root, recipe, env, *, interruption):
     resumed_draws = json.loads((root / 'resumed_next_draws.json').read_text(encoding='utf-8'))
     if original_draws != resumed_draws:
         raise AssertionError('Next native pair, query, completion, ordering or reader streams differ.')
+    sampler = original_draws.get('native_sampling')
+    coverage = ('First supported pair native and anchor rows' if sampler == 'coupled_native_rows'
+                else 'First eligible pair native make_batch receiver rows')
+    if 'finite_observations' in recipe:
+        coverage += ', all rebuilt finite source definitions and four reader draws.'
+    else:
+        coverage += ' and four reader draws.'
     receipt.update(reordered_saved_config_reloaded=True, next_native_and_reader_draws_equal=True,
-                   next_draw_coverage='First supported pair native panel and anchor draws, plus four reader draws.',
-                   interruption=interruption, scientific_horizon=recipe['training']['local_horizon'],
-                   optimizer_schedule_horizon=recipe['training'].get('optimizer_schedule_horizon'))
+                   next_draw_coverage=coverage,
+                   interruption=interruption, scientific_horizon=_recipe_horizon(recipe),
+                   optimizer_schedule_horizon=recipe.get('training', {}).get('optimizer_schedule_horizon'))
     (root / 'recovery_receipt.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(receipt, indent=2))
 
@@ -247,8 +377,8 @@ def main(argv=None):
         resumed = root / 'Interrupted_Sampled_Reader_Recovery'
         saved_path = resumed / 'configs/resolved_config.json'
         recipe = json.loads(saved_path.read_text(encoding='utf-8'))
-        if not _sampled_reader_recipe(recipe.get('observation_response', {})):
-            raise ValueError('The saved interrupted recipe must be sampled-reader coupled native.')
+        if not _supported_recipe(recipe):
+            raise ValueError('The saved interrupted recipe must have sampled coupled readers or finite observations.')
         _ensure_workspace_storage_bindings()
         verify_storage(recipe, output=root, estimated_bytes=1024**3, peak_temporary_bytes=1024**3)
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
@@ -258,9 +388,9 @@ def main(argv=None):
         launcher = PROJECT / 'tools/relation_anchored_train.py'
         _run([sys.executable, str(launcher), 'fit', '--recipe', str(root / 'reordered_saved_recipe.json'),
               '--output', str(resumed), '--resume', 'latest', '--stop-after', '2', '--device', args.device],
-             log=root / 'resumed_after_publication_failure.log', env=env)
-        _finish(root, recipe, env, interruption='Publication completed; the original curve helper then failed. '
-                'Its failure log and committed epoch-one checkpoint are preserved.')
+             log=root / 'resumed_after_repair.log', env=env)
+        _finish(root, recipe, env, interruption='Fresh-process continuation of an existing committed epoch-one '
+                'interruption; prior attempt logs and the committed checkpoint are preserved.')
         return
     if args.recipe is None:
         parser.error('--recipe is required')
@@ -271,10 +401,9 @@ def main(argv=None):
     if root.exists() and any(root.iterdir()):
         raise FileExistsError('Choose a new empty recovery root; existing artifacts are protected.')
     recipe = json.loads(args.recipe.read_text(encoding='utf-8'))
-    response = recipe.get('observation_response', {})
-    if not _sampled_reader_recipe(response):
-        raise ValueError('Recovery qualification requires a sampled-reader coupled native recipe.')
-    if int(recipe['training']['local_horizon']) < 2:
+    if not _supported_recipe(recipe):
+        raise ValueError('Recovery qualification requires sampled coupled readers or finite observations.')
+    if _recipe_horizon(recipe) < 2:
         raise ValueError('The saved scientific training horizon must include at least two epochs.')
     _ensure_workspace_storage_bindings()
     verify_storage(recipe, output=root, estimated_bytes=1024**3, peak_temporary_bytes=1024**3)

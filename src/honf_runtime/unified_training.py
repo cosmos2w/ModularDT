@@ -2283,10 +2283,11 @@ def _atomic_torch_save(path: Path, payload: Mapping[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _atomic_json(path: Path, payload: Any) -> None:
+def _atomic_json(path: Path, payload: Any, *, indent: int | None = 2) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(payload, indent=indent, sort_keys=True, allow_nan=False,
+                                    separators=(',', ':') if indent is None else None) + "\n", encoding="utf-8")
     os.replace(temporary, path)
 
 

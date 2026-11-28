@@ -79,6 +79,9 @@ def test_physical_change_reports_zero_reference_direction_and_new_fluid(dtype):
     zero = old.physical_response_error(baseline, baseline, detailed=True)
     assert zero['relative_to_zero_change_rmse'] is None and zero['direction_cosine'] is None
     assert old.physical_response_error(baseline, edited) == {'rmse': pytest.approx(np.sqrt(.5)), 'count': 2}
+    state = old.physical_absolute_error(edited)
+    assert state == {'rmse': pytest.approx(np.sqrt(3.)), 'mae': pytest.approx(5. / 3.), 'count': 3}
+    assert old.physical_absolute_error(baseline) == {'rmse': 1., 'mae': 1., 'count': 2}
 
 
 def make_fixed_reference(tmp_path, monkeypatch):
@@ -139,6 +142,50 @@ def test_fixed_actions_reject_drift_before_prediction_files(tmp_path, monkeypatc
         old.family_board(None, SimpleNamespace(training_case_ids=[]), {}, 'fit', None, tmp_path / 'result.json',
                          selected_families=('case',), expected_actions={'case': ['expected']})
     assert not list(tmp_path.iterdir())
+
+
+def test_saved_action_subset_keeps_baselines_and_has_no_partial_decision_boards(tmp_path, monkeypatch):
+    panel, roles, actions, _ = make_fixed_reference(tmp_path, monkeypatch)
+    selections = {role: {families[0]: [actions[families[0]][1]]}
+                  for role, families in roles.items()}
+    subset = benchmark.select_panel(panel, selections)
+    assert (subset['family_count'], subset['edit_count']) == (5, 5)
+    assert subset['strict_request'] == panel['strict_request']
+    family = subset['roles']['fit']['families'][0]
+    assert family['baseline_path'] == roles['fit'][0] + '_baseline'
+    assert family['actions'] == selections['fit'][roles['fit'][0]]
+    assert list(family['action_raw_paths']) == family['actions']
+    assert panel['edit_count'] == 80
+    with pytest.raises(ValueError, match='unknown or repeated'):
+        invalid = copy.deepcopy(selections)
+        invalid['fit'][roles['fit'][0]] *= 2
+        benchmark.select_panel(panel, invalid)
+
+    cases = [{'family': 'case', 'baseline_path': 'baseline',
+              'actions': [{'action': 'first'}, {'action': 'second'}]}]
+    assert old.select_saved_actions(cases, {'case': ['second']}) == [
+        {'family': 'case', 'baseline_path': 'baseline', 'actions': [{'action': 'second'}]}]
+    assert len(cases[0]['actions']) == 2
+    with pytest.raises(ValueError, match='family/action'):
+        old.select_saved_actions(cases, {'case': ['missing']})
+
+    panel_path = write(tmp_path / 'subset.json', subset)
+    checkpoint = tmp_path / 'subset.pt'
+    checkpoint.touch()
+    monkeypatch.setattr(benchmark, 'load_trusted_checkpoint', lambda *a, **k: {'epoch': 500})
+    monkeypatch.setattr(benchmark, 'original_heldout_case_ids', lambda saved: ('heldout',))
+    monkeypatch.setattr(benchmark, 'build_native_checkpoint_inference', lambda *a, **k:
+                        (None, SimpleNamespace(training_case_ids=('fit_0',))))
+    calls = []
+    monkeypatch.setattr(benchmark, 'family_board', lambda *args, **kwargs:
+                        (calls.append(kwargs) or {}))
+    monkeypatch.setattr(benchmark, 'strict_request', lambda *args, **kwargs: {})
+    benchmark.evaluate(panel_path, checkpoint, tmp_path / 'subset', device='cpu')
+    assert len(calls) == 5 and all(call['allow_action_subset'] for call in calls)
+    assert calls[0]['expected_actions'] == selections['fit']
+    summary = json.loads((tmp_path / 'subset/evaluation_summary.json').read_text())
+    assert (summary['family_count'], summary['edit_count']) == (5, 5)
+    assert summary['fixed_panel_edit_count'] == 5 and summary['strict_request'] == 'fixed'
 
 
 @pytest.mark.parametrize(
@@ -246,6 +293,25 @@ def test_family_board_raw_decisions_use_physical_changes_before_fallback(
         assert pressure_request['raw_physically_improving'] is (selected_p_change < 0.)
         assert pressure_request['raw_numerically_resolved_improvement'] is (selected_p_change < -.04)
         assert pressure_request['raw_feasible_regret'] == pytest.approx(1. if violation else 0.)
+
+    raw_names = []
+    def subset_raw_endpoint(name):
+        manifest = json.loads((tmp_path / 'subset_prediction_manifest.json').read_text())
+        assert len(manifest['states']) == 4 and manifest['model_choices'] == []
+        raw_names.append(name)
+        return raw_endpoint(name)
+    monkeypatch.setattr(thermal_response_raw, 'load_raw_endpoint', subset_raw_endpoint)
+    subset = old.family_board(Model(), SimpleNamespace(training_case_ids=[]), {}, 'original_withheld',
+                              metadata, tmp_path / 'subset.json', selected_families=('0052',),
+                              expected_actions={'0052': ['selected_edit']}, allow_action_subset=True)
+    assert raw_names == ['baseline', 'selected_edit', 'baseline', 'selected_edit']
+    for reader in ('restricted', 'full'):
+        assert [row['action'] for row in subset['views'][reader]['actions']] == ['selected_edit']
+        assert 'temperature/material' in subset['views'][reader]['actions'][0]['field_response']
+        assert subset['views'][reader]['actions'][0]['field_response']['flow/p']['baseline_state']['count'] == 1
+        assert subset['views'][reader]['actions'][0]['field_response']['flow/p']['edited_state']['count'] == 1
+        assert subset['views'][reader]['decisions'] == []
+        assert subset['views'][reader]['decision_summary'] is None
 
 
 def test_strict_choice_is_persisted_before_physical_join(tmp_path, monkeypatch):

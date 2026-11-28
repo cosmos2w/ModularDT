@@ -114,15 +114,26 @@ class AnalyticNativeProvider:
     def __init__(self, recipe, model, device):
         self.recipe, self.model, self.device = copy.deepcopy(recipe), model, torch.device(device)
         self.width = int(recipe.get('fixture', {}).get('output_dim', 7))
+        fixture = recipe.get('fixture', {})
+        self.native_sampling_law = fixture.get('native_sampling_law', 'all_rows')
+        self.native_draw_count = fixture.get('native_draw_count', 7)
+        if self.native_sampling_law not in ('all_rows', 'weighted_with_replacement'):
+            raise ValueError('Fixture native sampling must use all_rows or weighted_with_replacement.')
+        if type(self.native_draw_count) is not int or self.native_draw_count < 1:
+            raise ValueError('Fixture native draw count must be a positive integer.')
         self.seed = int(recipe.get('sampling_seed', recipe['seed']))
         self.sampling_version = SamplingKey.CASE_EPOCH_VERSION
         self.sampling_dataset_id = _sampling_dataset_id(self.identity_payload())
         self.training_samples = self.validation_samples = 0
 
     def identity_payload(self):
-        return {'dataset': 'analytic_fixture', 'training_case_ids': list(_TRAIN),
-                'validation_case_ids': list(_VALIDATION), 'output_dim': self.width,
-                'model': self.model.core.get_config(), 'reference': 'coupled_analytic_fixture_v1'}
+        result = {'dataset': 'analytic_fixture', 'training_case_ids': list(_TRAIN),
+                  'validation_case_ids': list(_VALIDATION), 'output_dim': self.width,
+                  'model': self.model.core.get_config(), 'reference': 'coupled_analytic_fixture_v1'}
+        if self.native_sampling_law != 'all_rows':
+            result['native_sampling_law'] = self.native_sampling_law
+            result['native_draw_count'] = self.native_draw_count
+        return result
 
     def epoch_cases(self, epoch, seed):
         del epoch
@@ -135,7 +146,19 @@ class AnalyticNativeProvider:
         sampler = getattr(self, 'sample_coupled_native_rows', None)
         overrides, carrier = sampler(keys, key) if callable(sampler) else ({}, None)
         self.training_samples += len(keys)
-        coordinates = tuple(_coordinates(c)[overrides[c]] if c in overrides else _coordinates(c) for c in keys)
+        coordinates = []
+        for case in keys:
+            source = _coordinates(case)
+            if case in overrides:
+                source = source[overrides[case]]
+            elif self.native_sampling_law == 'weighted_with_replacement':
+                probabilities = np.arange(1, len(source) + 1, dtype=np.float64)
+                probabilities /= probabilities.sum()
+                selected = key.numpy_rng('fixture_native_weighted_rows', case).choice(
+                    len(source), self.native_draw_count, replace=True, p=probabilities)
+                source = source[selected]
+            coordinates.append(source)
+        coordinates = tuple(coordinates)
         rows = [torch.as_tensor(_reference(c, q, self.width), device=self.device, dtype=torch.float32)
                 for c, q in zip(keys, coordinates)]
         return TaskBatch(scene_inputs=keys, receivers=coordinates, targets=tuple(rows),
@@ -148,7 +171,9 @@ class AnalyticNativeProvider:
         del phase, epoch, temperature
         if model is not self.model or execution_mode != model.architecture:
             raise ValueError('Fixture requires its own joint predictor.')
-        selected = getattr(self, 'coupled_native_reader_mode', None) if model.training else None
+        selected = getattr(self, 'finite_observation_reader_mode', None) if model.training else None
+        if selected is None and model.training:
+            selected = getattr(self, 'coupled_native_reader_mode', None)
         predicted = [model.predict(case, q, read_mode=selected)[0] for case, q in zip(scene, receivers)]
         return tuple(predicted), None
 
@@ -227,6 +252,57 @@ class AnalyticObservationBinding:
     def calibration_case_ids(self): return _TRAIN
     def native_case_key(self, case_id): return case_id
 
+    def finite_observation_family_weights(self):
+        return {f'field_{index}': float(index + 1) for index in range(self.provider.width)}
+
+    def finite_observation_frame(self):
+        from .finite_observations import AffineFrame
+
+        return AffineFrame('analytic_fixture_xyz', (0., 0., 0.), (1., 1., 1.))
+
+    def finite_observation_unsupported(self):
+        return {}
+
+    def finite_observation_scene(self, case_id, *, count=64, seed=0):
+        """Select per-scene source rows without any cross-scene member mapping."""
+        from .finite_observations import FiniteObservationFamily, FiniteObservationScene, select_source_rows
+
+        case_id = str(case_id)
+        if case_id not in (*_TRAIN, *_VALIDATION):
+            raise ValueError('Finite fixture observations require a declared training or validation scene.')
+        if type(count) is not int or not 1 <= count <= 64 or type(seed) is not int or seed < 0:
+            raise ValueError('Finite fixture observations need 1–64 source rows and a nonnegative seed.')
+        number = _number(case_id)
+        families = []
+        for index in range(self.provider.width):
+            # The last configured family is absent from alternate scenes, so
+            # fixed weights are exercised without inventing a missing target.
+            if index == self.provider.width - 1 and number % 2:
+                continue
+            population = index % 2
+            coordinates = _coordinates(case_id, 4 + number % 3 + population).copy()
+            coordinates += np.array((number * .002, population * .005, number * .001))
+            # Distinct original rows can occupy the same position and have
+            # different physical measures; neither is deduplicated here.
+            coordinates[1] = coordinates[0]
+            chosen = select_source_rows(np.ones(len(coordinates), dtype=bool), count=count,
+                                        seed=seed + 1009 * number + 7919 * population)
+            selected = coordinates[chosen]
+            ids = tuple(f'{case_id}:population_{population}:source_row_{row}' for row in chosen)
+            dependencies = tuple(QueryDependency(case_id, 'analytic_fixture_xyz', 'steady', row_id, tuple(point))
+                                 for row_id, point in zip(ids, selected))
+            row_indices = np.arange(len(chosen), dtype=np.int64)
+            extraction = LinearExtraction(dependencies, row_indices, row_indices,
+                np.zeros(len(chosen), dtype=np.int64), np.full(len(chosen), index, dtype=np.int64),
+                np.ones(len(chosen), dtype=np.float64))
+            component = FieldComponent(f'field_{index}', 'fixture units', index, 1. + .1 * index)
+            families.append(FiniteObservationFamily(name=component.name, component=component,
+                support=f'fixture_support_{population}', frame='analytic_fixture_xyz', time='steady',
+                extraction_id=f'fixture_direct_field_{index}', native_weight=float(index + 1), row_ids=ids,
+                coordinates=selected, measures=.5 + .25 * chosen + .1 * index,
+                references=_reference(case_id, selected, self.provider.width)[:, index], extraction=extraction))
+        return FiniteObservationScene(case_id, families)
+
     def coupled_native_population(self, case_id):
         from .coupled_observations import NativeObservationPopulation, ObservationKey
 
@@ -245,7 +321,8 @@ class AnalyticObservationBinding:
 
     def coupled_native_sampling_law(self, case_id):
         del case_id
-        return 'uniform_without_replacement'
+        return ('uniform_without_replacement' if self.provider.native_sampling_law == 'all_rows'
+                else self.provider.native_sampling_law)
 
     def coupled_view_loss_names(self):
         return ('native',)
@@ -317,6 +394,26 @@ class AnalyticObservationBinding:
         return scene, query, 1., 0.
 
 
+class AnalyticFiniteOnlyBinding:
+    """The same finite source with no matched-row coupling capability."""
+
+    __init__ = AnalyticObservationBinding.__init__
+    training_pairs = AnalyticObservationBinding.training_pairs
+    validation_pairs = AnalyticObservationBinding.validation_pairs
+    calibration_case_ids = AnalyticObservationBinding.calibration_case_ids
+    native_case_key = AnalyticObservationBinding.native_case_key
+    finite_observation_family_weights = AnalyticObservationBinding.finite_observation_family_weights
+    finite_observation_frame = AnalyticObservationBinding.finite_observation_frame
+    finite_observation_unsupported = AnalyticObservationBinding.finite_observation_unsupported
+    finite_observation_scene = AnalyticObservationBinding.finite_observation_scene
+    validate_pair = AnalyticObservationBinding.validate_pair
+    field_request = AnalyticObservationBinding.field_request
+
+    def identity_payload(self):
+        return {'schema': 'analytic_finite_observations_v1', 'output_dim': self.provider.width,
+                'coordinates': 'three-dimensional ragged source coordinates', 'units': 'fixture units'}
+
+
 def build_observation_capability(recipe, *, device, resume_payload=None):
     del resume_payload
     width = int(recipe.get('fixture', {}).get('output_dim', 7))
@@ -324,4 +421,8 @@ def build_observation_capability(recipe, *, device, resume_payload=None):
         raise ValueError('The maintained coupled fixture declares output_dim 2 or 7.')
     model = AnalyticJointModel(width, int(recipe['seed'])).to(device)
     provider = AnalyticNativeProvider(recipe, model, device)
-    return model, provider, AnalyticObservationBinding(provider)
+    finite_only = recipe.get('fixture', {}).get('finite_only_binding', False)
+    if type(finite_only) is not bool:
+        raise ValueError('fixture.finite_only_binding must be a boolean.')
+    binding = AnalyticFiniteOnlyBinding(provider) if finite_only else AnalyticObservationBinding(provider)
+    return model, provider, binding
